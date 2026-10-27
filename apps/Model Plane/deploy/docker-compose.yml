@@ -295,19 +295,21 @@ services:
       # a restart drops it and the turn is then refused typed (`plan_grant_unavailable`).
       MODEL_GATEWAY_PLAN_EXECUTE_ENABLED: ${MODEL_GATEWAY_PLAN_EXECUTE_ENABLED:-false}
       # WS04-S1: cancel, queue and probe routed to the replica that owns a stream, over NATS request/reply.
-      # Off by default; only the literal `true` turns it on. Deploy order: the nats.conf ACL (mp.v1.runctl.>)
-      # first, then the gateways, then this switch. A boot self-test that finds the ACL missing leaves the bus
-      # degraded and behaving as off, never the gateway down. Roll back with off plus a restart.
-      MODEL_GATEWAY_RUN_CONTROL_BUS: ${MODEL_GATEWAY_RUN_CONTROL_BUS:-false}
+      # On by default since the WS04-S9 two-replica live proof (2026-10-27, docs/compliance/evidence/
+      # live-proof-ws04-replica-run-control-2026-10-27.txt); only the literal `true` turns it on. Deploy order: the
+      # nats.conf ACL (mp.v1.runctl.>) first, then the gateways. A boot self-test that finds the ACL missing leaves
+      # the bus degraded and behaving as off, never the gateway down. Roll back with false plus a restart.
+      MODEL_GATEWAY_RUN_CONTROL_BUS: ${MODEL_GATEWAY_RUN_CONTROL_BUS:-true}
       MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS: ${MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS:-750}
       # WS04-S6: durable send receipts (client_message_id on a send, dedupe in session-core, ids on the queued_input
-      # delivery event). Off by default; only the literal `true` turns it on. Deploy order: session-core (migration
-      # 0052) first, then model-gateway, then the BFF and frontend, then this switch. Roll back with off plus a restart.
-      MODEL_GATEWAY_SEND_RECEIPTS: ${MODEL_GATEWAY_SEND_RECEIPTS:-false}
+      # delivery event). On by default since the WS04-S9 proof; only the literal `true` turns it on. Deploy order:
+      # session-core (migration 0052) first, then model-gateway, then the BFF and frontend. Roll back with false plus a
+      # restart.
+      MODEL_GATEWAY_SEND_RECEIPTS: ${MODEL_GATEWAY_SEND_RECEIPTS:-true}
       # WS04-S5: a mirror in Redis/Dragonfly that holds ids only (run_id, skill ids, 24 h), so a turn streamed on one
-      # replica can be rated on another. Off by default; only the literal `true` turns it on. Dragonfly eviction
-      # degrades to today's behaviour.
-      MODEL_GATEWAY_SHARED_TURN_RECORD: ${MODEL_GATEWAY_SHARED_TURN_RECORD:-false}
+      # replica can be rated on another. On by default since the WS04-S9 proof; only the literal `true` turns it on.
+      # Dragonfly eviction degrades to the single-replica behaviour.
+      MODEL_GATEWAY_SHARED_TURN_RECORD: ${MODEL_GATEWAY_SHARED_TURN_RECORD:-true}
       # WS04-S7: a shared idempotency claim in Redis that holds ids only. Off by default; only the literal `true`
       # turns it on, and it stays off until its own two-replica duplicate-send proof.
       MODEL_GATEWAY_SHARED_IDEMPOTENCY: ${MODEL_GATEWAY_SHARED_IDEMPOTENCY:-false}
@@ -331,9 +333,10 @@ services:
       # literal `true` turns it on. Roll out in this order: inference-core adapter flags on first, then this switch. With
       # this on and the adapter flags off, a deep request sends budget 0 and a level nothing renders (no thinking).
       MODEL_GATEWAY_EFFORT_LADDER: ${MODEL_GATEWAY_EFFORT_LADDER:-false}
-      # WS04-S4: read the plan grant from session-core so a Do run started on another replica carries the rung. Off by default; only
-      # the literal `true` turns it on. Deploy session-core first so migration 0050 has applied; off keeps the in-memory grants.
-      MODEL_GATEWAY_DURABLE_PLAN_GRANT: ${MODEL_GATEWAY_DURABLE_PLAN_GRANT:-false}
+      # WS04-S4: read the plan grant from session-core so a Do run started on another replica carries the rung. On by default
+      # since the WS04-S9 proof; only the literal `true` turns it on. Deploy session-core first so migration 0050 has applied;
+      # false keeps the in-memory grants (kept as the rollback path).
+      MODEL_GATEWAY_DURABLE_PLAN_GRANT: ${MODEL_GATEWAY_DURABLE_PLAN_GRANT:-true}
       # Kill-switches for the review-latency levers. Empty keeps a lever ON;
       # 0/off/false/no/disabled turns it off at the next restart, no rebuild.
       MODEL_GATEWAY_SOLE_NOTE_PREFETCH: ${MODEL_GATEWAY_SOLE_NOTE_PREFETCH:-}

@@ -236,6 +236,17 @@ still require clock-driven release evidence.
   missing accepted rollback artifact correctly prevent creation of a
   production artifact.
 
+## Live proofs — 2026-10-27 (Wave 1 depth, local stack)
+
+Run on the local Docker stack with images built from clean snapshots of branch `model-plane`; every model turn on
+the owner's direct Anthropic API key with `claude-sonnet-5-5`. Live-verified in the sense above, not release evidence.
+
+| Area | State | Evidence |
+|---|---|---|
+| Claude 5.5 adapter (D1-791): current ids, retired-id mapping, adaptive effort, auto tool_choice, prompt cache | Live-verified | `docs/compliance/evidence/live-proof-wave1-depth-2026-10-27.txt` part 3 |
+| Replica-safe run control (WS04-S9, criterion C4): Stop and queue via the other replica, plan approved on A and Do run on B under the durable grant, rating across replicas, `kill -9` of the owner (Stop 404, durable cancel, `resend_as_new_turn`), NATS down 503 `run_control_unavailable`, `gateway_active_streams` back to 0 | Live-verified with two replicas; the four switches now default on, `MODEL_GATEWAY_SHARED_IDEMPOTENCY` stays off | `docs/compliance/evidence/live-proof-ws04-replica-run-control-2026-10-27.txt` |
+| Agentic (plan and Do) runs on Claude (D1-797): dotted tool names mapped to the Messages API alphabet | Live-verified in the WS04-S9 run (case 3) | same file |
+
 ## Critical blocked behavior
 
 ### Live local protocol; no immutable rollback

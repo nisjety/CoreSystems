@@ -368,7 +368,10 @@ wait "$P" 2>/dev/null || true
 show_model "$WORK/case3-do.sse"
 expect "$(frame_count "$WORK/case3-do.sse" error)" 0 "case 3: the Do run on B raised no error frame"
 expect "$(psql_one "SELECT granted_rung || '|' || granted_plan_id FROM threads WHERE id='$THREAD_ID'")" "workspace_write|$PLAN_ID" "case 3: the grant is on the thread row in session-core"
-expect "$(psql_one "SELECT count(*) FROM events WHERE run_id='$RUN_ID' AND event_type='RUN_PLAN_MODE_EXITED'")" 1 "case 3: one RUN_PLAN_MODE_EXITED event for the approved run"
+# The exit is durable on the run row: approval moves runs.mode from plan to execute. RUN_PLAN_MODE_EXITED itself is a
+# bus envelope (mp.v1.run.<id>.event, coordinator.rs exit_plan_mode); no service writes it to session-core's events
+# table, so it is not looked for there (D1-801).
+expect "$(psql_one "SELECT mode FROM runs WHERE id='$RUN_ID'")" "execute" "case 3: the approved run left plan mode on its durable run row"
 # B logs the grant read when the Do run starts. Match that line by its thread id and rung, from the time this case started.
 GRANT_LINE="$(docker logs --since "$CASE3_START" "$B_CTR" 2>&1 | grep -F 'plan grant read from session-core for the run start' | grep -F "$THREAD_ID" | grep -F 'workspace_write' | head -1 || true)"
 if [ -z "$GRANT_LINE" ]; then
