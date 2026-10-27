@@ -7,7 +7,9 @@
 // domains/spaces/*.ts, so every fragment id still needs its dispatcher arm in
 // handlers.rs (the body of the dispatcher lives in dispatchers_spaces/<ws>.rs).
 import { baseSpaceActions } from './base'
+import { ws03SpaceActions } from './ws03'
 
 export const spaceActions = [
   ...baseSpaceActions,
+  ...ws03SpaceActions,
 ] as const

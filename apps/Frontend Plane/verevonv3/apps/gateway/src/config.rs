@@ -160,6 +160,10 @@ pub(crate) struct SpaceFeatureFlags {
     /// or query) of each CSP report, for a host inventory. Forced off when `APP_ENV` is
     /// production (see `dev_only_flag`); the counters never carry a URL either way.
     pub(crate) csp_report_log_hosts: bool,
+    /// `SPACE_POLICY_ADMIN_API` (WS03-S4): the three org-admin Space effect-policy routes and
+    /// the console that reads them. Off answers 404 `space_policy_admin_disabled`. A rollout
+    /// control, never an authorization input; Control's role check and write switch decide.
+    pub(crate) policy_admin_api: bool,
 }
 
 impl SpaceFeatureFlags {
@@ -168,6 +172,7 @@ impl SpaceFeatureFlags {
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
             client_policy: crate::client_contract::ClientPolicy::from_env(),
             csp_report_log_hosts: dev_only_flag("CSP_REPORT_LOG_HOSTS"),
+            policy_admin_api: space_flag("SPACE_POLICY_ADMIN_API"),
         }
     }
 }

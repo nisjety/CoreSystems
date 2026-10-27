@@ -919,7 +919,7 @@ fn ticket_remap(input: &Value, pairs: &[(&str, &str)]) -> serde_json::Map<String
     out
 }
 
-fn ticket_string<'a>(input: &'a Value, key: &str) -> &'a str {
+pub(super) fn ticket_string<'a>(input: &'a Value, key: &str) -> &'a str {
     input
         .get(key)
         .and_then(Value::as_str)
@@ -949,7 +949,7 @@ fn ticket_classification_body(input: &Value) -> serde_json::Map<String, Value> {
     body
 }
 
-fn ticket_bad_request(message: &str) -> Response {
+pub(super) fn ticket_bad_request(message: &str) -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(error("invalid_input", message)),
@@ -2257,7 +2257,7 @@ pub(super) async fn dispatch_ticket_update_macro(
 // create/bind-then-confirm-membership sequence, and per-field length limits
 // enforced nowhere else. Reusing the exact function is the only way to
 // guarantee none of that is bypassed.
-fn owner_json_response_to_envelope(
+pub(super) fn owner_json_response_to_envelope(
     action_id: &str,
     user: &AuthenticatedUser,
     status: StatusCode,

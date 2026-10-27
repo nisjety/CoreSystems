@@ -14,6 +14,7 @@ services:
             ALLOW_DEV_AUTH_BYPASS: "0"
             ALLOW_INSECURE_DEV_DEFAULTS: "0"
             SPACE_DENIALS_TYPED: "false"
+            SPACE_POLICY_ADMIN_API: "false"
             MODEL_GATEWAY_DEV_BEARER: ""
             VEREVON_PUBLIC_ORIGIN: ${VEREVON_PUBLIC_ORIGIN:?VEREVON_PUBLIC_ORIGIN is required in production}
 

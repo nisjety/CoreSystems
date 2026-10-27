@@ -201,6 +201,9 @@ services:
       # WS03-S5: map Control's typed Space denials to the browser envelope. Off restores pass-through.
       # A rollout control only; it never decides who may do anything.
       SPACE_DENIALS_TYPED: ${SPACE_DENIALS_TYPED:-true}
+      # WS03-S4: the three org-admin Space policy routes (404 when off). A rollout control only;
+      # Control's role check and its SPACE_POLICY_ADMIN_WRITES switch decide who may change what.
+      SPACE_POLICY_ADMIN_API: ${SPACE_POLICY_ADMIN_API:-true}
     ports:
       - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:3185:3185"
     networks:

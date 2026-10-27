@@ -7,6 +7,7 @@ pub(crate) mod quotas;
 mod roles;
 pub(crate) mod settings;
 mod shared;
+pub(crate) mod space_policy;
 pub(crate) mod switch;
 
 use axum::{
@@ -62,6 +63,20 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/orgs/{id}/model-entitlement/explain",
             get(model_entitlement::explain_model_entitlement),
+        )
+        // WS03-S4: org-admin Space effect-policy console routes (Control owns the row).
+        // Behind `SpaceFeatureFlags::policy_admin_api`; off answers 404.
+        .route(
+            "/api/v1/orgs/{id}/space-policy",
+            get(space_policy::get_space_policy),
+        )
+        .route(
+            "/api/v1/orgs/{id}/space-policy/entitlements",
+            put(space_policy::put_space_policy_entitlements),
+        )
+        .route(
+            "/api/v1/orgs/{id}/space-policy/events",
+            get(space_policy::list_space_policy_events),
         )
         // Members
         .route("/api/v1/orgs/{id}/members", get(members::list_members))

@@ -173,6 +173,8 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'spaces.create_room': exempt('no_owner_executor', 'external_write'),
   'spaces.add_member': exempt('no_owner_executor', 'external_write'),
   'spaces.remove_member': exempt('no_owner_executor', 'external_write'),
+  'spaces.set_effect_entitlements': exempt('human_identity_or_security', 'external_write'),
+  'spaces.apply_effect_preset': exempt('human_identity_or_security', 'external_write'),
   'social.create_draft': exempt('no_owner_executor', 'external_write'),
   'social.schedule_post': exempt('no_owner_executor', 'external_write'),
   'social.publish_post': exempt('irreversible_destructive', 'destructive'),
