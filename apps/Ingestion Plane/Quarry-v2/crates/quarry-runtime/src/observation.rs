@@ -983,7 +983,7 @@ impl ObservationRunner {
                 let host = challenge::host_of(&ctx.current_url).unwrap_or_default();
                 let fingerprint = ctx.page_hash.clone();
                 ctx.block_episodes
-                    .observe(&host, request.zdr, classified, &fingerprint)
+                    .observe_after(&request.action, &host, request.zdr, classified, &fingerprint)
             }
         };
         if let Some(signal) = challenge.as_mut() {
