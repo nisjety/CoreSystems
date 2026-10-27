@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -123,7 +124,6 @@ func TestLoadAcceptsBase64EncryptionKey(t *testing.T) {
 	t.Setenv("INTERNAL_API_KEY", "dev")
 	t.Setenv("DATABASE_URL", "postgres://example")
 	t.Setenv("INTEGRATION_WEBHOOK_HOTPATH_URL", "http://integration-webhook-normalizer:3036/")
-	t.Setenv("SCIM_ORG_BEARER_TOKENS", "org-1:token-1, org-2:token-2")
 	t.Setenv("INTEGRATION_TOKEN_LEASE_CONSUMERS", "finspo-core, data-plane-v2, finspo-core")
 	t.Setenv("FINSPO_API_KEY", "finspo-key")
 	t.Setenv("FINSPO_API_KEY_HEADER", "X-Finspo-Key")
@@ -154,9 +154,6 @@ func TestLoadAcceptsBase64EncryptionKey(t *testing.T) {
 	}
 	if cfg.WebhookHotPathURL != "http://integration-webhook-normalizer:3036" {
 		t.Fatalf("WebhookHotPathURL = %q, want trimmed hot path URL", cfg.WebhookHotPathURL)
-	}
-	if cfg.SCIMBearerTokens["org-1"] != "token-1" || cfg.SCIMBearerTokens["org-2"] != "token-2" {
-		t.Fatalf("SCIMBearerTokens = %#v, want parsed org token map", cfg.SCIMBearerTokens)
 	}
 	if len(cfg.TokenLeaseConsumers) != 2 || cfg.TokenLeaseConsumers[0] != "finspo-core" || cfg.TokenLeaseConsumers[1] != "data-plane-v2" {
 		t.Fatalf("TokenLeaseConsumers = %#v, want deduped consumers", cfg.TokenLeaseConsumers)
@@ -440,5 +437,15 @@ func TestLoadReadsOptionalDiscordBotToken(t *testing.T) {
 	}
 	if err := workerCfg.ValidateEmailWorkerRuntime(); err != nil {
 		t.Fatalf("ValidateEmailWorkerRuntime() error = %v, want DISCORD_BOT_TOKEN to stay optional", err)
+	}
+}
+
+// WS05-S2: SCIM provisioning is not implemented, so no static SCIM bearer token is configurable.
+func TestConfigHasNoSCIMBearerTokenFields(t *testing.T) {
+	typ := reflect.TypeOf(Config{})
+	for i := 0; i < typ.NumField(); i++ {
+		if name := typ.Field(i).Name; strings.Contains(strings.ToUpper(name), "SCIM") {
+			t.Fatalf("Config.%s: SCIM provisioning is not implemented, no SCIM token may be configurable", name)
+		}
 	}
 }
