@@ -205,6 +205,24 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Kunne ikke kontrollere hvilke leverandører som har registrert ZDR-godkjenning, så Zero Data Retention kan ikke slås på akkurat nå. Prøv igjen om litt, eller fortsett uten og slå det på senere.',
     en: 'We could not check which providers have a recorded ZDR attestation, so Zero Data Retention cannot be turned on right now. Try again shortly, or carry on without it and turn it on later.',
   },
+
+  // ---- Space room codes (P-SPA1) ----------------------------------------
+  // Each Space workstream adds its codes ONLY under its own banner, keys sorted
+  // within the banner, so two workstreams never edit the same lines. Copy for a
+  // zero-retention or model-entitlement refusal does not go here: it comes from
+  // the catalogue modules above.
+
+  // WS01 human posts and threads
+
+  // WS02 realtime stream
+
+  // WS03 policy and denials
+
+  // WS04 membership and room administration
+
+  // WS05 org security
+
+  // WS07 resilience and content hardening
 }
 
 /**

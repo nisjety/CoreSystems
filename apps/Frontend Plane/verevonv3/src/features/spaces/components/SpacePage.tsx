@@ -47,7 +47,8 @@ import {
   readStoredAuxPaneWidth,
 } from './sidepane/SpaceAuxPane'
 import { SpaceThreadPanel } from './sidepane/SpaceThreadPanel'
-import { readSpaceThreadParam, spaceThreadPaneEnabled } from '../lib/space-thread-deep-link'
+import { spaceThreadPaneEnabled } from '../lib/space-thread-deep-link'
+import { resolveOpenSpacePane } from '../lib/space-pane-registry'
 import { publishSpaceThreads, publishSpaceUnread, retractSpaceThreads } from '../lib/space-live-work'
 import { unreadThreadIds } from '../lib/space-unread'
 import { hereSentence, readPresence, typingSentence } from '../lib/space-presence'
@@ -106,9 +107,10 @@ export default function SpacePage() {
   // asks Control, so a pasted or stale link can only land on a named state.
   const [searchParams, setSearchParams] = useSearchParams()
   const threadPaneEnabled = spaceThreadPaneEnabled()
-  const selectedThreadId = createMemo(() =>
-    threadPaneEnabled ? readSpaceThreadParam(searchParams.thread_id) : null,
-  )
+  const selectedThreadId = createMemo(() => {
+    const pane = resolveOpenSpacePane(searchParams)
+    return pane?.id === 'thread' ? pane.value : null
+  })
   const [auxPaneWidth, setAuxPaneWidth] = createSignal(readStoredAuxPaneWidth())
   const openThread = (threadId: string) => setSearchParams({ thread_id: threadId })
   const closeThread = () => setSearchParams({ thread_id: undefined }, { replace: true })

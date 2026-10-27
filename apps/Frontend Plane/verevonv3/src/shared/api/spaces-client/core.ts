@@ -1,4 +1,4 @@
-import { requestJson } from './http'
+import { requestJson } from '../http'
 
 export type SpaceMembership = {
   space_ref: string

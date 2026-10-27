@@ -9,9 +9,29 @@ const gatewayDirectory = path.resolve(scriptsDirectory, '..');
 const verevonDirectory = path.resolve(gatewayDirectory, '..', '..');
 const registryPath = path.join(verevonDirectory, 'src/shared/actions/action-registry.ts');
 const handlerPath = path.join(gatewayDirectory, 'src/domains/actions/handlers.rs');
+// Space action contracts live in per-workstream fragments (P-SPA1); their ids
+// belong to the registry set exactly like the ones in action-registry.ts.
+const spaceFragmentsDirectory = path.join(verevonDirectory, 'src/shared/actions/domains/spaces');
 
 function actionRegistryIds(source) {
   return new Set([...source.matchAll(/\bid:\s*'([^']+)'/g)].map((match) => match[1]));
+}
+
+function spaceFragmentSources(directory) {
+  if (!fs.existsSync(directory)) return [];
+  return fs
+    .readdirSync(directory)
+    .filter((name) => name.endsWith('.ts') && !name.endsWith('.test.ts'))
+    .sort()
+    .map((name) => fs.readFileSync(path.join(directory, name), 'utf8'));
+}
+
+function allRegistryIds(registrySource, fragmentSources) {
+  const ids = actionRegistryIds(registrySource);
+  for (const source of fragmentSources) {
+    for (const id of actionRegistryIds(source)) ids.add(id);
+  }
+  return ids;
 }
 
 function handlerActionIds(source) {
@@ -26,7 +46,7 @@ function handlerActionIds(source) {
 test('every registered action has exactly one live gateway dispatcher contract', () => {
   const registrySource = fs.readFileSync(registryPath, 'utf8');
   const handlerSource = fs.readFileSync(handlerPath, 'utf8');
-  const registryIds = actionRegistryIds(registrySource);
+  const registryIds = allRegistryIds(registrySource, spaceFragmentSources(spaceFragmentsDirectory));
   const dispatcherIds = handlerActionIds(handlerSource);
 
   assert.ok(registryIds.size > 0, 'the registry must contain action contracts');
@@ -40,4 +60,19 @@ test('every registered action has exactly one live gateway dispatcher contract',
       `${actionId} must reach a named owner dispatcher`,
     );
   }
+});
+
+test('an action id present only in a Space fragment is part of the registry set', () => {
+  const registrySource = "export const actionRegistry = [{ id: 'tickets.create' }]";
+  const fragmentSource = "export const fragment = [{ id: 'spaces.fragment_only_probe' }]";
+
+  assert.equal(actionRegistryIds(registrySource).has('spaces.fragment_only_probe'), false);
+  const ids = allRegistryIds(registrySource, [fragmentSource]);
+  assert.equal(ids.has('spaces.fragment_only_probe'), true);
+  assert.equal(ids.has('tickets.create'), true);
+});
+
+test('the live Space fragments are discovered and carry the moved base actions', () => {
+  const ids = allRegistryIds('', spaceFragmentSources(spaceFragmentsDirectory));
+  assert.ok(ids.has('spaces.create_room'), 'base fragment ids must be read from domains/spaces');
 });

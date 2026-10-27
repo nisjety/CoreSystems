@@ -3,6 +3,12 @@ import type { JSX } from '@solidjs/web'
 
 import { useI18n } from '@/shared/i18n'
 import { RegionBoundary } from '@/shared/ui/resilience/RegionBoundary'
+import {
+  DEFAULT_SPACE_TAB,
+  spaceTabFromHash,
+  visibleSpaceTabs,
+  type SpaceTabId,
+} from '../lib/space-tab-registry'
 
 /**
  * The Space cockpit shell: the six tabs the adoption plan specifies
@@ -41,88 +47,7 @@ import { RegionBoundary } from '@/shared/ui/resilience/RegionBoundary'
  * param and nothing else here changes.
  */
 
-export type SpaceTabId = 'chat' | 'arbeid' | 'kunnskap' | 'aktivitet' | 'agent' | 'medlemmer'
-
-interface SpaceTabDefinition {
-  readonly id: SpaceTabId
-  readonly labelNo: string
-  readonly labelEn: string
-  /** What this tab answers, per the plan's six questions. */
-  readonly purposeNo: string
-  readonly purposeEn: string
-  /**
-   * Which plane must publish a Space projection before this tab can show
-   * anything. Named in the unavailable state so the gap is attributable rather
-   * than mysterious. Plane names are not translated — they are the system's
-   * own proper nouns, same as everywhere else this codebase names a plane.
-   */
-  readonly owner: string
-}
-
-const SPACE_TABS: readonly SpaceTabDefinition[] = [
-  {
-    id: 'chat',
-    labelNo: 'Samtaler',
-    labelEn: 'Chat',
-    purposeNo: 'Alle tråder i rommet.',
-    purposeEn: 'All threads in the Space.',
-    owner: 'Model Plane',
-  },
-  {
-    id: 'arbeid',
-    labelNo: 'Arbeid',
-    labelEn: 'Work',
-    purposeNo: 'Arbeid i kø eller under kjøring, planer, overvåkinger og gjenforsøk.',
-    purposeEn: 'Work queued or running, plans, monitors, and retries.',
-    owner: 'Model Plane',
-  },
-  {
-    id: 'kunnskap',
-    labelNo: 'Kunnskap',
-    labelEn: 'Knowledge',
-    purposeNo: 'Dokumenter, kilder, filer og minne som gjelder her.',
-    purposeEn: 'Documents, sources, files, and memory relevant here.',
-    owner: 'Data Plane',
-  },
-  {
-    id: 'aktivitet',
-    labelNo: 'Aktivitet',
-    labelEn: 'Activity',
-    purposeNo: 'Hva som har skjedd, hva det kostet, og beviset for det.',
-    purposeEn: 'What happened, what it cost, and the proof of it.',
-    owner: 'Model Plane',
-  },
-  {
-    id: 'agent',
-    labelNo: 'Agent',
-    labelEn: 'Agent',
-    purposeNo: 'Aktiv modell, ferdigheter og hvilke handlinger som er tillatt her.',
-    purposeEn: 'The active model, its skills, and which actions are permitted here.',
-    owner: 'Model Plane',
-  },
-  {
-    id: 'medlemmer',
-    labelNo: 'Medlemmer',
-    labelEn: 'Members',
-    purposeNo: 'Hvem som ser og styrer rommet, og med hvilken rolle.',
-    purposeEn: 'Who can see and manage the Space, and with what role.',
-    owner: 'Control Plane',
-  },
-]
-
-const TAB_IDS = new Set<string>(SPACE_TABS.map((tab) => tab.id))
-const DEFAULT_TAB: SpaceTabId = 'chat'
-const LEGACY_HASH_ALIASES: Readonly<Record<string, SpaceTabId>> = {
-  members: 'medlemmer',
-  work: 'arbeid',
-  activity: 'aktivitet',
-}
-
-function tabFromHash(hash: string): SpaceTabId {
-  const value = hash.replace(/^#/, '').trim().toLowerCase()
-  if (TAB_IDS.has(value)) return value as SpaceTabId
-  return LEGACY_HASH_ALIASES[value] ?? DEFAULT_TAB
-}
+export type { SpaceTabId }
 
 export interface SpaceCockpitProps {
   /**
@@ -136,7 +61,7 @@ export interface SpaceCockpitProps {
 
 export function SpaceCockpit(props: SpaceCockpitProps) {
   const i18n = useI18n()
-  const [active, setActive] = createSignal<SpaceTabId>(props.initialTab ?? DEFAULT_TAB)
+  const [active, setActive] = createSignal<SpaceTabId>(props.initialTab ?? DEFAULT_SPACE_TAB)
   // One evaluation of the caller's tabs object per change — see the note on
   // `content` below for why reading `props.tabs` per tab is not free.
   const tabs = createMemo(() => props.tabs ?? {})
@@ -148,8 +73,8 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
       if (typeof window === 'undefined') return undefined
       // Adopt an incoming deep link, but never override an explicit initialTab
       // with the default when the hash carries nothing meaningful.
-      if (window.location.hash) setActive(tabFromHash(window.location.hash))
-      const onHashChange = () => setActive(tabFromHash(window.location.hash))
+      if (window.location.hash) setActive(spaceTabFromHash(window.location.hash))
+      const onHashChange = () => setActive(spaceTabFromHash(window.location.hash))
       window.addEventListener('hashchange', onHashChange)
       return () => window.removeEventListener('hashchange', onHashChange)
     },
@@ -169,7 +94,7 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
    * separate buttons.
    */
   const onKeyDown = (event: KeyboardEvent) => {
-    const order = SPACE_TABS.map((tab) => tab.id)
+    const order = visibleSpaceTabs().map((tab) => tab.id)
     const index = order.indexOf(active())
     if (index < 0) return
     const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0
@@ -187,7 +112,7 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
         aria-label={i18n.tr('Romvisninger', 'Space views')}
         onKeyDown={onKeyDown}
       >
-        <For each={SPACE_TABS}>
+        <For each={visibleSpaceTabs()}>
           {(tab) => (
             <button
               type="button"
@@ -206,7 +131,7 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
         </For>
       </div>
 
-      <For each={SPACE_TABS}>
+      <For each={visibleSpaceTabs()}>
         {(tab) => {
           // Memoized, and reading the memoized `tabs` object rather than
           // `props.tabs` directly.
