@@ -139,3 +139,38 @@ fn cell_text(cell: &Handle) -> String {
     let text = EXCESS_NEWLINES.replace_all(&text, "\n\n");
     text.trim().replace('\n', "<br/>")
 }
+
+#[cfg(test)]
+mod table_size_tests {
+    use super::html_to_markdown;
+
+    /// D1-026: a table-heavy page with a wide cell in each column, on different rows. html2md
+    /// padded every column to its widest cell, so each of the 1,500 rows paid for all three wide
+    /// cells (a 1 MB reference page became 30.9 MB of markdown). Compact rows keep the output
+    /// close to the input.
+    #[test]
+    fn wide_cells_in_several_columns_do_not_pad_the_other_rows() {
+        let wide = |c: char| c.to_string().repeat(4_000);
+        let mut html = String::from("<table><tr><th>a</th><th>b</th><th>c</th></tr>");
+        for i in 0..1_500 {
+            let a = if i == 100 { wide('x') } else { format!("a{i}") };
+            let b = if i == 700 { wide('y') } else { format!("b{i}") };
+            let c = if i == 1_300 { wide('z') } else { format!("c{i}") };
+            html.push_str(&format!("<tr><td>{a}</td><td>{b}</td><td>{c}</td></tr>"));
+        }
+        html.push_str("</table>");
+        let md = html_to_markdown(&html);
+        assert!(
+            md.len() <= html.len() * 2,
+            "{} bytes of html became {} bytes of markdown",
+            html.len(),
+            md.len()
+        );
+        for (cell, row) in [(wide('x'), 100), (wide('y'), 700), (wide('z'), 1_300)] {
+            assert!(md.contains(&cell), "the wide cell of row {row} is kept whole");
+        }
+        for i in [0, 699, 1_499] {
+            assert!(md.contains(&format!("| a{i} | b{i} | c{i} |")), "row {i} lost");
+        }
+    }
+}
