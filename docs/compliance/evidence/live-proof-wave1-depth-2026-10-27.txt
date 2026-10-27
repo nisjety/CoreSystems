@@ -1,0 +1,83 @@
+Live proof: Wave 1 depth fixes on the developer stack (migrations 024 and 0025, the redeploy of the Wave 1 services)
+Date: 2026-10-27 (UTC, from about 00:40). Branch `model-plane`, every image built from d67c5a43f.
+Verification level: LIVE-VERIFIED on a developer stack. Not production. No secrets, tokens or payload content below.
+Status: PART 1 (this file). The transcript paging proof (WS09-S8) and the audit chain-on proof (D1-297) need a
+signed-in session and follow in part 2.
+
+SAFETY NET (before anything changed)
+  pg_dump of the affected dev databases to C:/dev/backups/live-proof-2026-10-27 (outside both checkouts):
+    session_core (model-plane-postgres-1, shared by session-core and capability-core) 22 MB,
+    org_core (controlplane-postgres) 84 KB, controlplane (audit-core's database) 12 MB.
+  Every image that was replaced is tagged :rollback-20261027 (session-core, model-gateway, capability-core,
+  inference-core, execution-core, control-plane-org-core, control-plane-audit-core, the BFF gateway).
+  The swapped containers keep their predecessors as <name>-rollback-20261027 (org-core, audit-core, BFF).
+
+WHAT WAS DEPLOYED, AND HOW
+  The stack ran images from 2026-10-01 (audit-core), 2026-10-06 (org-core) and 2026-10-21/22 (Model Plane).
+  A read-only research workflow (four topics, each checked by a skeptic agent) first established the coupling
+  and the migration risks; the pre-checks then confirmed: all 49 applied session-core migrations' sqlx checksums
+  equal the worktree files' bytes (no CRLF trap), no idle-in-transaction session on session_core (0055 is a
+  CREATE INDEX CONCURRENTLY), org-core's credential registry carries org:retention:read:any and none of the
+  scopes HEAD restricts.
+  - session-core, model-gateway: built with compose.sh from the worktree and recreated with
+    recreate-with-live-env.sh (the live env files read-only, NATS passwords carried from the running NATS server).
+    Both healthy at d67c5a43f. session-core applied migrations 0049 0050 0051 0052 0055 0056 0057 0058 0064 0067 0068
+    at boot ("migrations applied").
+  - org-core and audit-core: built with docker build from the worktree and swapped onto their running containers
+    with a replay of each container's own resolved config (read-only root, tmpfs, cap_drop ALL,
+    no-new-privileges, memory/CPU limits, networks and aliases, env); the swap reported no config difference and
+    no missing env name. The Control Plane runner was not used: the worktree has none of its per-service .env
+    files, and running the live checkout's runner could write its secrets ledger.
+  - BFF gateway (verevon-gateway-rs): built from the worktree (it carries WS09-S8) and swapped the same way.
+  - capability-core: NOT replaced. capability-core HEAD mints its session-core token with the scope
+    session:memory-controls:read in one request, and auth-core's live principal registry does not hold that
+    scope (it occurs 0 times), so the new service could not call session-core at all (learning review, skill
+    upserts, schedule-prepare for scheduled runs). Its HEAD migrations were applied instead by a one-off
+    container from the HEAD image that runs only the image's own migration loop (docker-entrypoint.sh, command
+    `true`) against the live database: exit 0. The running capability-core stayed healthy on its old image.
+  - inference-core and execution-core stay on their running images (built, not deployed): the proofs do not
+    need them, and model-gateway HEAD against the older inference-core only logs a WARN.
+
+PROOF: org-core migration 024 (D1-751), live database org_core
+  Applied at boot: 021_org_model_entitlements, 022_siem_destinations, 023_org_browser_sites,
+  024_org_core_app_least_privilege. Effective privileges of org_core_app (SELECT INSERT UPDATE DELETE):
+    org_browser_site_history        t t f f   (append-only)
+    org_browser_site_policy         t t t f
+    org_browser_site_rules          t t f t
+    org_model_policies              t t f t
+    org_model_policy_history        t t f f   (append-only)
+    org_model_policy_revisions      t t t f
+    organization_siem_audit_outbox  t t f f
+    siem_destinations               t t t t
+    user_browser_site_prefs         t t t t
+  Behaviour, in a transaction rolled back, as SET LOCAL ROLE org_core_app:
+    UPDATE org_model_policy_history ...  -> ERROR: permission denied for table org_model_policy_history
+    DELETE FROM org_browser_site_history ... -> ERROR: permission denied for table org_browser_site_history
+
+PROOF: capability-core migrations 0017-0025, live database session_core (D1-754, D1-757)
+  Before: tool_policies, skill_bundles*, agent_action_admissions and org_agent_policy* did not exist (the
+  running image predates WS05-S5). After the one-off run all seven tables exist.
+  0021 (D1-754): skill_bundle_files has the column is_binary (the reserved word binary would not parse).
+  0025 (D1-757): tool_policies_allow_digest_present_check
+    CHECK ((decision <> 'allow') OR (pinned_digest IS NOT NULL) OR (revoked_at IS NOT NULL)), validated.
+  Behaviour, in a transaction rolled back:
+    an active allow with no digest -> ERROR: new row for relation "tool_policies" violates check constraint
+      "tool_policies_allow_digest_present_check"
+    an allow with a 64-hex digest -> accepted; nothing is left after the rollback.
+
+OBSERVATIONS (not caused by these changes unless stated)
+  - session-core logged "nats: authorization violation" three times at boot; every consumer then reported
+    ready (tools.completions consumer, orchestration bridge, GDPR erasure consumer, Space membership consumer).
+    Not traced to a component; re-check in part 2 that tool_action audit events reach audit-core.
+  - session_audit_outbox holds 4992 terminal rows from 2026-09-04..2026-10-01 with "no stream found for given
+    subject" (from before the stream existed); later rows were published.
+  - audit-core: the application extra bus loops on "stream not found"; the old image did the same. The primary
+    and model buses are connected and ready. Chain switch AUDIT_CHAIN_ENABLED is unset (off) in part 1;
+    migrations 007-010 applied at boot (append-only guard trigger on audit_events, chain heads, checkpoints,
+    verifier state, export cursors). 109624 audit rows, none older than 365 days, so a rollback to the old
+    image would not trip the guard trigger in its retention sweep.
+  - session-core HEAD polls org-core's agent-policy route and gets 403 (its org-core credential lacks
+    org:agent-policy:read:any): a WARN per org; ORG_POLICY_FAIL_CLOSED is off, so memory behaviour is unchanged.
+  - Rollback is not image-only any more: session-core's old image cannot boot over migrations 0049-0068 (strict
+    migrator; 0058 drops the (org_id, name) unique index the old upsert uses). Rolling back means restoring the
+    session_core dump and the :rollback-20261027 image.
