@@ -216,6 +216,11 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
   // WS01 human posts and threads
 
   // WS02 realtime stream
+  rate_limited: { no: 'For mange forespørsler akkurat nå. Rommet oppdateres litt saktere en liten stund.', en: 'Too many requests right now. The room will refresh a little more slowly for a moment.' },
+  space_stream_capacity: { no: 'Live-oppdateringer er midlertidig full. Rommet oppdateres hvert par sekunder.', en: 'Live updates are temporarily at capacity. The room is refreshing every few seconds.' },
+  space_stream_disabled: { no: 'Live-oppdateringer er ikke slått på. Rommet oppdateres hvert par sekunder.', en: 'Live updates are not turned on. The room is refreshing every few seconds.' },
+  space_stream_forbidden: { no: 'Live-oppdateringer er ikke tilgjengelige for deg i dette rommet.', en: 'Live updates are not available to you in this room.' },
+  space_stream_unavailable: { no: 'Live-oppdateringer er midlertidig utilgjengelige. Rommet oppdateres hvert par sekunder.', en: 'Live updates are temporarily unavailable. The room is refreshing every few seconds.' },
 
   // WS03 policy and denials
 

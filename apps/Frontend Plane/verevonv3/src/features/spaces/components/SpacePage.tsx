@@ -64,6 +64,8 @@ import { resolveOpenSpacePane } from '../lib/space-pane-registry'
 import { publishSpaceThreads, publishSpaceUnread, retractSpaceThreads } from '../lib/space-live-work'
 import { unreadThreadIds } from '../lib/space-unread'
 import { hereSentence, readPresence, typingSentence } from '../lib/space-presence'
+import { createSpaceStreamController, type SpaceStreamController, type SpaceStreamState } from '../lib/space-stream'
+import { SpaceLiveIndicator } from './SpaceLiveIndicator'
 import { SpaceActivityPanel } from './SpaceActivityPanel'
 import { SpaceKnowledgePanel } from './SpaceKnowledgePanel'
 import { SpaceWorkPanel } from './SpaceWorkPanel'
@@ -96,14 +98,20 @@ function canGrantSpaceMembership(role: string): boolean {
 // the cockpit between navigations.
 const SPACE_CONTEXT_RECHECK_MS = 30_000
 
-// How often an open room re-reads its own conversation projection.
+// How often an open room re-reads its own conversation projection WHILE THE
+// LIVE STREAM IS NOT LIVE (WS02-S5).
 //
 // A room where another member's message appears half a minute late does not
 // read as a room, so this is deliberately much shorter than the authority
-// recheck above — it is a cheap projection read, not an authorization. It is
-// not a substitute for the durable delivery projection either: when that
-// lands, this becomes the fallback rather than the mechanism.
+// recheck above — it is a cheap projection read, not an authorization. The
+// event stream is the mechanism now; this is the fallback when the stream is
+// disabled, revoked, degraded or not yet connected.
 const SPACE_TIMELINE_POLL_MS = 6_000
+
+// Presence is its own beat, decoupled from the listing: with the stream live
+// the listing no longer refetches every 6 s, and presence expires at 30 s
+// server-side, so a visible tab keeps its own heartbeat at today's cadence.
+const SPACE_PRESENCE_BEAT_MS = 6_000
 
 /**
  * The Space is a workroom, not a second application shell. It composes the
@@ -257,23 +265,51 @@ export default function SpacePage() {
       if (currentSpaceRef === ref) setPresence(undefined)
     }
   }
-  // Rides the listing the room already polls, so presence costs one small
-  // request per beat and no second timer. Only while the tab is visible: a
-  // background tab is not somebody being in the room.
+  // Keyed on ROOM ENTRY (a confirmed membership for this room), not on the
+  // listing: the listing now refetches on stream events, and a beat (and an
+  // `offline` on cleanup) per refetch would be wrong. Its own 6 s timer, only
+  // while the tab is visible: a background tab is not somebody being in the
+  // room, and its beat stops so the server expires it.
   createEffect(
     () => {
       const ref = spaceRef()
       currentSpaceRef = ref || undefined
-      return { ref, loaded: !threads.error && threads() !== undefined }
+      return ref && !context.error && context() !== undefined ? ref : ''
     },
-    ({ ref, loaded }) => {
-      if (!ref || !loaded) return undefined
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return undefined
-      void beat(ref, 'online')
+    (ref) => {
+      if (!ref) return undefined
+      let timer: number | undefined
+      const stop = () => {
+        if (timer !== undefined) {
+          window.clearInterval(timer)
+          timer = undefined
+        }
+      }
+      const start = () => {
+        if (timer !== undefined) return
+        timer = window.setInterval(() => void beat(ref, 'online'), SPACE_PRESENCE_BEAT_MS)
+      }
+      const onVisibilityChange = () => {
+        if (document.visibilityState === 'visible') {
+          void beat(ref, 'online')
+          start()
+        } else {
+          stop()
+        }
+      }
+      if (typeof document !== 'undefined') {
+        if (document.visibilityState === 'visible') {
+          void beat(ref, 'online')
+          start()
+        }
+        document.addEventListener('visibilitychange', onVisibilityChange)
+      }
       // Leaving the room says so, so the others do not wait out the expiry.
       // Best-effort by construction: a closed tab never gets here, which is
       // exactly why the server expires a heartbeat that stops coming.
       return () => {
+        stop()
+        if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibilityChange)
         setPresence(undefined)
         void recordSpacePresence(ref, 'offline').catch(() => undefined)
       }
@@ -311,16 +347,47 @@ export default function SpacePage() {
     }
   }
 
-  // Keep the room live while it is actually being looked at.
+  // The live event stream (WS02-S5). A transport only: every meaningful frame
+  // becomes one coalesced `refetchThreads()`, so the listing stays the single
+  // source of truth. Started once membership for this room is confirmed and
+  // stopped (fail-closed) when the authority recheck fails. When the state is
+  // not `live` the fallback poll below carries the room exactly as before.
+  const [streamState, setStreamState] = createSignal<SpaceStreamState>('idle')
+  let streamController: SpaceStreamController | undefined
+  createEffect(
+    () => (spaceRef() && !context.error && context() !== undefined ? spaceRef() : ''),
+    (ref) => {
+      if (!ref) return undefined
+      const controller: SpaceStreamController = createSpaceStreamController({
+        spaceRef: ref,
+        onChange: () => {
+          void Promise.resolve(refetchThreads()).catch(() => undefined)
+        },
+        onState: (next) => {
+          if (streamController === controller) setStreamState(next)
+        },
+      })
+      streamController = controller
+      controller.start()
+      return () => {
+        controller.stop()
+        if (streamController === controller) streamController = undefined
+        setStreamState('idle')
+      }
+    },
+  )
+
+  // Keep the room fresh while it is actually being looked at.
   //
   // Gated on visibility for two reasons, and the second is the load-bearing
   // one: a background tab polling forever is waste, but a tab that resumes
   // after an hour showing an hour-old room is a lie. Refetching on
   // `visibilitychange` means the first thing a returning reader sees is
-  // current, not stale.
+  // current, not stale. The interval itself runs only while the stream is NOT
+  // live; the visibility refetch always runs.
   createEffect(
-    () => undefined,
-    () => {
+    () => streamState() === 'live',
+    (live) => {
       if (typeof document === 'undefined') return undefined
       let timer: number | undefined
       const stop = () => {
@@ -330,7 +397,7 @@ export default function SpacePage() {
         }
       }
       const start = () => {
-        if (timer !== undefined) return
+        if (live || timer !== undefined) return
         timer = window.setInterval(() => {
           // The authority recheck below owns membership. This only refreshes
           // the projection, and a failure is already rendered as "temporarily
@@ -364,7 +431,12 @@ export default function SpacePage() {
           .then((current) => {
             // A failed authority check leaves the page fail-closed. Only refresh
             // the derived thread projection after a new current context resolves.
-            if (current) void refetchThreads()
+            if (current) {
+              void refetchThreads()
+              // One new stream attempt for a stream that ended forbidden or
+              // revoked; a failed recheck never gets here and stays closed.
+              streamController?.rearm()
+            }
           })
           // Solid 1's `refetch()` settled to `undefined` on failure and reported
           // the error only through `context.error`; the compat shim rethrows so
@@ -421,6 +493,10 @@ export default function SpacePage() {
                         </>
                       )}
                     </Show>
+                    <Show when={streamState() === 'live' || streamState() === 'degraded'}>
+                      <span aria-hidden="true">·</span>
+                    </Show>
+                    <SpaceLiveIndicator state={streamState} />
                   </div>
                 </div>
               </header>
