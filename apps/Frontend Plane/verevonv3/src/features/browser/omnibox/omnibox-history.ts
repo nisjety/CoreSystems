@@ -138,8 +138,9 @@ export function removeOmniboxEntry(key: string | null, url: string): OmniboxHist
   return next
 }
 
-// Bumped by every change made here, so each reader follows the record.
-const [revision, setRevision] = createSignal(0)
+// Bumped by every change made here, so each reader follows the record. It is internal state, so
+// `ownedWrite` lets a visit be recorded from inside an owned scope (a root or a computation).
+const [revision, setRevision] = createSignal(0, { ownedWrite: true })
 
 // Read when a visit or removal happens, not when a component was created: the
 // person or workspace may have changed since.
