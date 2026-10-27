@@ -489,6 +489,9 @@ type threadAppendDecisionRequest struct {
 	ThreadID       string `json:"thread_id"`
 	ContentDigest  string `json:"content_digest"`
 	IdempotencyKey string `json:"idempotency_key"`
+	// PostKind is optional: "" or "turn" keeps the v1 decision, "post" issues
+	// the v2 decision a human post needs. Any other value is a 400.
+	PostKind string `json:"post_kind"`
 }
 
 // issuePersonalThreadDecision is a gateway-only, delegated issuance surface.
@@ -588,6 +591,10 @@ func (s *Server) issueThreadAppendDecision(c *gin.Context) {
 		&request.SpaceRef, &request.ThreadID, &request.ContentDigest, &request.IdempotencyKey) {
 		return
 	}
+	if !spaces.ValidThreadAppendPostKind(request.PostKind) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "post_kind must be turn or post"})
+		return
+	}
 	evidence, _, ok := s.resolveThreadWriteEvidence(c, request.SpaceRef,
 		s.spaceRepo.ResolvePersonalThreadDecisionEvidence, s.spaceRepo.ResolveSharedThreadDecisionEvidence,
 		"current recipient audience authority required")
@@ -600,7 +607,7 @@ func (s *Server) issueThreadAppendDecision(c *gin.Context) {
 	}
 	decision, err := spaces.IssueThreadAppendDecision(evidence, spaces.ThreadAppendDecisionRequest{
 		DecisionRef: decisionRef, ThreadID: request.ThreadID, ContentDigest: request.ContentDigest,
-		IdempotencyKey: request.IdempotencyKey, Nonce: nonce,
+		IdempotencyKey: request.IdempotencyKey, Nonce: nonce, PostKind: request.PostKind,
 	}, time.Now().UTC())
 	if err != nil {
 		writeSpaceIssuerDenial(c, err, "Space thread append is not authorized")

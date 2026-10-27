@@ -21,6 +21,18 @@ const (
 	personalDecisionLifetime     = 2 * time.Minute
 )
 
+const (
+	// threadAppendSchemaV2 binds post_kind into the effect digest. Only a v2
+	// decision can authorize a human post; v1 keeps authorizing a turn.
+	threadAppendSchemaV2 = "sha256:thread-append-v2"
+
+	// ThreadAppendPostKindTurn is the conversation turn every caller has always
+	// written; "" means the same. ThreadAppendPostKindPost is a human message to
+	// the room and is issued under the v2 schema.
+	ThreadAppendPostKindTurn = "turn"
+	ThreadAppendPostKindPost = "post"
+)
+
 // PrivacyPolicySnapshot is the Control-owned policy material resolved before a
 // decision is issued. It is deliberately complete: issuing with an unknown
 // policy would turn a cache miss or deployment gap into an implicit allow.
@@ -328,9 +340,29 @@ type ThreadAppendDecisionRequest struct {
 	ContentDigest  string
 	IdempotencyKey string
 	Nonce          string
+	// PostKind is "", "turn" (schema v1, unchanged) or "post" (schema v2).
+	PostKind string
+}
+
+// ValidThreadAppendPostKind reports whether kind is a post kind Control issues
+// a thread-append decision for. The empty string is the historical turn.
+func ValidThreadAppendPostKind(kind string) bool {
+	switch strings.TrimSpace(kind) {
+	case "", ThreadAppendPostKindTurn, ThreadAppendPostKindPost:
+		return true
+	}
+	return false
+}
+
+// usesPostSchema reports whether the request is issued under the v2 schema.
+func (r ThreadAppendDecisionRequest) usesPostSchema() bool {
+	return strings.TrimSpace(r.PostKind) == ThreadAppendPostKindPost
 }
 
 func (r ThreadAppendDecisionRequest) Validate() error {
+	if !ValidThreadAppendPostKind(r.PostKind) {
+		return fmt.Errorf("thread append post kind is invalid")
+	}
 	for label, value := range map[string]string{
 		"decision_ref": r.DecisionRef, "thread_id": r.ThreadID,
 		"content_digest": r.ContentDigest, "idempotency_key": r.IdempotencyKey, "nonce": r.Nonce,
@@ -346,16 +378,26 @@ func (r ThreadAppendDecisionRequest) Validate() error {
 }
 
 func threadAppendPayloadDigest(evidence PersonalThreadDecisionEvidence, request ThreadAppendDecisionRequest) string {
+	schema, header := threadAppendSchema, "model.thread.append\x00v1\x00"
+	if request.usesPostSchema() {
+		schema, header = threadAppendSchemaV2, "model.thread.append\x00v2\x00"
+	}
 	hash := sha256.New()
-	hash.Write([]byte("model.thread.append\x00v1\x00"))
-	for _, field := range []struct{ name, value string }{
+	hash.Write([]byte(header))
+	fields := []struct{ name, value string }{
 		{"org_id", evidence.Membership.OrgID}, {"user_id", evidence.Membership.SubjectID},
 		{"thread_id", request.ThreadID}, {"space_id", evidence.Membership.SpaceRef},
 		{"space_decision_ref", request.DecisionRef}, {"recipient_audience_ref", evidence.RecipientAudienceRef},
 		{"recipient_audience_hash", evidence.RecipientAudienceHash}, {"privacy_policy_ref", evidence.Privacy.PolicyRef},
 		{"resource_authorization_ref", evidence.ResourceAuthorizationRef}, {"content_digest", request.ContentDigest},
-		{"action_schema_hash", threadAppendSchema}, {"idempotency_key", request.IdempotencyKey},
-	} {
+		{"action_schema_hash", schema}, {"idempotency_key", request.IdempotencyKey},
+	}
+	if request.usesPostSchema() {
+		// The v2 field sits after idempotency_key and before the revisions; the
+		// v1 encoding above is byte for byte what it was.
+		fields = append(fields, struct{ name, value string }{"post_kind", ThreadAppendPostKindPost})
+	}
+	for _, field := range fields {
 		hash.Write([]byte(field.name))
 		hash.Write([]byte{0})
 		var length [8]byte
@@ -384,8 +426,12 @@ func IssueThreadAppendDecision(evidence PersonalThreadDecisionEvidence, request 
 	if err := request.Validate(); err != nil || now.IsZero() {
 		return Decision{}, fmt.Errorf("thread append decision request is invalid")
 	}
+	schema := threadAppendSchema
+	if request.usesPostSchema() {
+		schema = threadAppendSchemaV2
+	}
 	return newEvidenceDecision(
-		evidence, request.DecisionRef, personalThreadCreateAudience, threadAppendAction, threadAppendSchema,
+		evidence, request.DecisionRef, personalThreadCreateAudience, threadAppendAction, schema,
 		threadAppendPayloadDigest(evidence, request), request.IdempotencyKey, request.Nonce,
 		[]string{"thread:append"}, evidence.Privacy.ZeroDataRetention, now,
 	), nil

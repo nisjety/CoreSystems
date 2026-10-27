@@ -97,6 +97,9 @@ const CONTROL_SPACE_DECISION_AUDIENCE: &str = "model-plane";
 const CONTROL_THREAD_CREATE_ACTION: &str = "model.thread.create";
 const CONTROL_THREAD_APPEND_ACTION: &str = "model.thread.append";
 const CONTROL_THREAD_APPEND_SCHEMA: &str = "sha256:thread-append-v1";
+/// v2 binds `post_kind` into the effect digest (Control `threadAppendSchemaV2`). Only a
+/// v2 decision can authorize a `post`; a v1 decision keeps authorizing a `turn` only.
+const CONTROL_THREAD_APPEND_SCHEMA_V2: &str = "sha256:thread-append-v2";
 const CONTROL_THREAD_READ_ACTION: &str = "model.thread.read";
 const CONTROL_THREAD_READ_SCHEMA: &str = "sha256:thread-read-v1";
 const CONTROL_SCHEDULED_RUN_AUDIENCE: &str = "model-plane-capability-core";
@@ -2478,9 +2481,47 @@ fn thread_append_payload_digest(
     org_id: &str,
     user_id: &str,
 ) -> String {
+    thread_append_payload_digest_for(req, org_id, user_id, None)
+}
+
+/// The request's post kind as the digest binds it: `""` is the historical turn.
+fn append_post_kind(req: &pb::AppendMessageRequest) -> &str {
+    match req.post_kind.trim() {
+        "" => "turn",
+        other => other,
+    }
+}
+
+/// v2 of the canonical digest shared with Control's `threadAppendPayloadDigest`: the v1
+/// encoding under header `model.thread.append\0v2\0` plus one `post_kind` field after
+/// `idempotency_key` and before the revisions.
+fn thread_append_payload_digest_v2(
+    req: &pb::AppendMessageRequest,
+    org_id: &str,
+    user_id: &str,
+) -> String {
+    thread_append_payload_digest_for(req, org_id, user_id, Some(append_post_kind(req)))
+}
+
+fn thread_append_payload_digest_for(
+    req: &pb::AppendMessageRequest,
+    org_id: &str,
+    user_id: &str,
+    post_kind: Option<&str>,
+) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"model.thread.append\0v1\0");
+    digest.update(if post_kind.is_some() {
+        b"model.thread.append\0v2\0".as_slice()
+    } else {
+        b"model.thread.append\0v1\0".as_slice()
+    });
     let content_digest = thread_append_content_digest(&req.content);
+    let mut write_field = |name: &str, value: &str| {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    };
     for (name, value) in [
         ("org_id", org_id),
         ("user_id", user_id),
@@ -2504,10 +2545,10 @@ fn thread_append_payload_digest(
         ("action_schema_hash", req.action_schema_hash.as_str()),
         ("idempotency_key", req.idempotency_key.as_str()),
     ] {
-        digest.update(name.as_bytes());
-        digest.update([0]);
-        digest.update((value.len() as u64).to_be_bytes());
-        digest.update(value.as_bytes());
+        write_field(name, value);
+    }
+    if let Some(kind) = post_kind {
+        write_field("post_kind", kind);
     }
     digest.update(b"authority_revision\0");
     digest.update(req.authority_revision.to_be_bytes());
@@ -2931,16 +2972,35 @@ fn verify_append_space_decision_with_key(
     .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
     let claims: ControlSpaceDecisionClaims = serde_json::from_slice(&payload)
         .map_err(|_| Status::permission_denied("invalid Control Space decision claims"))?;
+    // v1 decisions authorize a turn only (the post kind is forced `turn`); a post needs a v2
+    // decision whose digest commits to `post_kind`.
+    let schema_v2 = req.action_schema_hash == CONTROL_THREAD_APPEND_SCHEMA_V2;
+    if !schema_v2 && append_post_kind(req) != "turn" {
+        return Err(Status::permission_denied(
+            "a v1 Control Space decision cannot authorize a post",
+        ));
+    }
+    let (expected_schema, expected_digest) = if schema_v2 {
+        (
+            CONTROL_THREAD_APPEND_SCHEMA_V2,
+            thread_append_payload_digest_v2(req, org_id, user_id),
+        )
+    } else {
+        (
+            CONTROL_THREAD_APPEND_SCHEMA,
+            thread_append_payload_digest(req, org_id, user_id),
+        )
+    };
     let matches_request = claims.decision_ref == req.space_decision_ref
         && claims.org_id == org_id
         && claims.subject_id == user_id
         && claims.space_ref == req.space_id
         && claims.service_audience == CONTROL_SPACE_DECISION_AUDIENCE
         && claims.action_id == CONTROL_THREAD_APPEND_ACTION
-        && claims.action_schema_hash == CONTROL_THREAD_APPEND_SCHEMA
+        && claims.action_schema_hash == expected_schema
         && claims.action_schema_hash == req.action_schema_hash
         && claims.payload_digest == req.payload_digest
-        && claims.payload_digest == thread_append_payload_digest(req, org_id, user_id)
+        && claims.payload_digest == expected_digest
         && claims.idempotency_key == req.idempotency_key
         && claims.recipient_audience_ref == req.recipient_audience_ref
         && claims.recipient_audience_revision == req.recipient_audience_revision
