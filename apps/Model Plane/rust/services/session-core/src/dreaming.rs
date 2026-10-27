@@ -3087,4 +3087,78 @@ mod tests {
             .unwrap();
         assert!(!saved.is_empty(), "the same save lands once the thread inherits again");
     }
+
+    /// WS01-S1: a human post, and anything another member wrote, is not the thread owner's
+    /// words, so neither the pending read nor the preceding-context read ever hands it to the
+    /// extractor.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn dreaming_pending_messages_skip_posts_and_member_rows() {
+        let pool = disposable_pool().await;
+        let org = format!("dream-posts-{}", new_ulid());
+        let thread = seed_thread(&pool, &org, "user-a").await;
+        let rows: [(&str, &str, Option<&str>, &str, &str); 6] = [
+            ("m1", "user", None, "turn", "Husk at jeg heter Kari."),
+            ("m2", "user", Some("user-a"), "post", "owner post text"),
+            ("m3", "user", Some("user-b"), "turn", "member turn text"),
+            ("m4", "user", Some("user-b"), "post", "member post text"),
+            ("m5", "assistant", None, "turn", "assistant answer"),
+            ("m6", "user", None, "turn", "later question"),
+        ];
+        let mut ids = std::collections::BTreeMap::new();
+        for (name, role, author, kind, content) in rows {
+            let id = format!("{thread}-{name}");
+            sqlx::query(
+                "INSERT INTO messages (id, thread_id, role, content, author_subject_id, post_kind) \
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(&id)
+            .bind(&thread)
+            .bind(role)
+            .bind(content)
+            .bind(author)
+            .bind(kind)
+            .execute(&pool)
+            .await
+            .unwrap();
+            ids.insert(name, id);
+        }
+        let pending: Vec<String> = load_pending_messages(&pool, 100_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.thread_id == thread)
+            .map(|message| message.message_id)
+            .collect();
+        assert_eq!(
+            pending,
+            vec![ids["m1"].clone(), ids["m5"].clone(), ids["m6"].clone()],
+            "only the owner's own turns are mined: no post, no other member's row"
+        );
+        let context = load_preceding_context(&pool, &thread, Some(ids["m6"].as_str()))
+            .await
+            .unwrap();
+        let context: Vec<(String, String)> = context
+            .into_iter()
+            .map(|message| (message.role, message.content))
+            .collect();
+        assert_eq!(
+            context,
+            vec![
+                ("user".to_owned(), "Husk at jeg heter Kari.".to_owned()),
+                ("assistant".to_owned(), "assistant answer".to_owned()),
+            ],
+            "the extractor's context holds neither posts nor member rows"
+        );
+        sqlx::query("DELETE FROM messages WHERE thread_id = $1")
+            .bind(&thread)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(&thread)
+            .execute(&pool)
+            .await
+            .ok();
+    }
 }

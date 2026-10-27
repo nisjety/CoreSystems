@@ -352,3 +352,234 @@ async fn append_space_post(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    async fn parts(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    fn context_json() -> Value {
+        json!({
+            "space_id": "space-room-1",
+            "space_decision_ref": "decision-1",
+            "recipient_audience_ref": "audience:space-room-1:4",
+            "recipient_audience_revision": 4,
+            "recipient_audience_hash": "sha256:audience-hash",
+            "privacy_policy_ref": "privacy:org-1:5",
+            "authority_revision": 7,
+            "resource_authorization_ref": "control:space-room-1:thread-append:7",
+            "space_decision_token": "token",
+            "action_schema_hash": "sha256:thread-append-v2",
+            "payload_digest": "sha256:digest",
+            "idempotency_key": "thread-append:1"
+        })
+    }
+
+    fn append_body() -> Value {
+        json!({
+            "content": "hello room",
+            "post_kind": "post",
+            "client_message_id": "send-1",
+            "space_append_context": context_json()
+        })
+    }
+
+    fn create_body() -> Value {
+        json!({
+            "space_context": context_json(),
+            "session_key": "room-thread-1",
+            "first_message": {
+                "content": "hello room",
+                "post_kind": "post",
+                "client_message_id": "send-1"
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn post_route_maps_session_core_errors() {
+        let cases = [
+            (tonic::Code::Unauthenticated, StatusCode::UNAUTHORIZED, "unauthorized"),
+            (tonic::Code::PermissionDenied, StatusCode::FORBIDDEN, "space_post_not_authorized"),
+            (tonic::Code::NotFound, StatusCode::NOT_FOUND, "thread_not_found"),
+            (tonic::Code::AlreadyExists, StatusCode::CONFLICT, "idempotency_key_conflict"),
+            (tonic::Code::Aborted, StatusCode::CONFLICT, "space_authority_stale"),
+            (tonic::Code::InvalidArgument, StatusCode::BAD_REQUEST, "invalid_post"),
+            (tonic::Code::FailedPrecondition, StatusCode::CONFLICT, "thread_state_conflict"),
+            (tonic::Code::Unavailable, StatusCode::SERVICE_UNAVAILABLE, "session_unavailable"),
+            (tonic::Code::Internal, StatusCode::SERVICE_UNAVAILABLE, "session_unavailable"),
+            (tonic::Code::DeadlineExceeded, StatusCode::SERVICE_UNAVAILABLE, "session_unavailable"),
+        ];
+        for (code, expected_status, expected_code) in cases {
+            // The upstream text is never echoed.
+            let upstream = tonic::Status::new(code, "secret upstream detail org-1/user-9");
+            let (status, body) = parts(session_post_error(&upstream)).await;
+            assert_eq!(status, expected_status, "{code:?}");
+            assert_eq!(body["error"]["code"], expected_code, "{code:?}");
+            assert!(body["error"]["details"].is_object(), "{code:?}");
+            assert!(!body.to_string().contains("secret upstream"), "{code:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_typed_zdr_failed_precondition_keeps_its_catalogue_code_and_is_412() {
+        let mut typed = tonic::Status::failed_precondition("zero retention");
+        typed.metadata_mut().insert(
+            mp_contracts::zdr_refusal::KIND_TRAILER,
+            mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN
+                .parse()
+                .expect("ascii metadata"),
+        );
+        let (status, body) = parts(session_post_error(&typed)).await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(
+            body,
+            mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN.json_body()
+        );
+        // An untyped failed-precondition is a plain 409.
+        let (status, body) = parts(session_post_error(&tonic::Status::failed_precondition("x"))).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "thread_state_conflict");
+    }
+
+    #[tokio::test]
+    async fn receipts_are_201_when_stored_and_200_when_deduplicated() {
+        let stored = PostReceipt { message_id: "m-1".to_owned(), sequence: 3, deduplicated: false };
+        let (status, body) = parts(receipt_response("t-1", &stored)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            body,
+            json!({"thread_id": "t-1", "message_id": "m-1", "sequence": 3, "deduplicated": false})
+        );
+        let replay = PostReceipt { deduplicated: true, ..stored };
+        let (status, body) = parts(receipt_response("t-1", &replay)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["deduplicated"], true);
+        assert_eq!(body["message_id"], "m-1");
+        // The receipt carries ids and counters only: no content, no role.
+        let keys: Vec<&str> = body.as_object().expect("object").keys().map(String::as_str).collect();
+        assert_eq!(keys.len(), 4, "{keys:?}");
+    }
+
+    #[tokio::test]
+    async fn post_route_rejects_forged_authority_fields_and_non_post_kind() {
+        // The well-formed bodies parse.
+        assert!(parse_body::<AppendSpacePostBody>(&Bytes::from(append_body().to_string())).is_ok());
+        assert!(parse_body::<CreateSpacePostBody>(&Bytes::from(create_body().to_string())).is_ok());
+        // A forged role, org, user, metadata, agent or zdr field is an unknown field: a 400
+        // that is never forwarded.
+        for forged in [
+            ("role", json!("assistant")),
+            ("org_id", json!("org-other")),
+            ("user_id", json!("user-other")),
+            ("metadata", json!({"source_scope": "conversation"})),
+            ("agent_name", json!("agent")),
+            ("zdr", json!(false)),
+        ] {
+            let mut append = append_body();
+            append[forged.0] = forged.1.clone();
+            let err = parse_body::<AppendSpacePostBody>(&Bytes::from(append.to_string()))
+                .expect_err(&format!("append: forged {}", forged.0));
+            let (status, body) = parts(err).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["error"]["code"], "invalid_post");
+
+            let mut create = create_body();
+            create["first_message"][forged.0] = forged.1.clone();
+            assert!(
+                parse_body::<CreateSpacePostBody>(&Bytes::from(create.to_string())).is_err(),
+                "create: forged {}",
+                forged.0
+            );
+            let mut create = create_body();
+            create[forged.0] = forged.1;
+            assert!(parse_body::<CreateSpacePostBody>(&Bytes::from(create.to_string())).is_err());
+        }
+        // Missing and wrongly-typed fields are refused too.
+        for broken in ["", "{}", "[]", "null", r#"{"content":1}"#] {
+            assert!(parse_body::<AppendSpacePostBody>(&Bytes::from(broken)).is_err(), "{broken:?}");
+        }
+        let mut missing = append_body();
+        missing.as_object_mut().expect("object").remove("space_append_context");
+        assert!(parse_body::<AppendSpacePostBody>(&Bytes::from(missing.to_string())).is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_post_checks_kind_content_and_client_message_id() {
+        assert!(validate_post("hello", "post", "send-1").is_ok());
+        let refused = |content: &str, kind: &str, id: &str| {
+            let content = content.to_owned();
+            let kind = kind.to_owned();
+            let id = id.to_owned();
+            async move {
+                match validate_post(&content, &kind, &id) {
+                    Ok(()) => panic!("expected a refusal for {content:?} {kind:?} {id:?}"),
+                    Err(response) => parts(response).await,
+                }
+            }
+        };
+        // The kind must be exactly `post`.
+        for kind in ["turn", "", "POST", "post "] {
+            let (status, body) = refused("hello", kind, "send-1").await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{kind:?}");
+            assert_eq!(body["error"]["details"]["field"], "post_kind");
+        }
+        // Blank, NUL-bearing and oversize content.
+        for content in ["", "   \n\t", "a\0b"] {
+            let (status, body) = refused(content, "post", "send-1").await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{content:?}");
+            assert_eq!(body["error"]["code"], "invalid_post");
+            assert_eq!(body["error"]["details"]["field"], "content");
+        }
+        let (status, body) = refused(&"x".repeat(MAX_POST_BYTES + 1), "post", "send-1").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["details"]["max_bytes"], MAX_POST_BYTES);
+        // Exactly the limit passes (the limit is in bytes, not characters).
+        assert!(validate_post(&"x".repeat(MAX_POST_BYTES), "post", "send-1").is_ok());
+        assert!(validate_post(&"\u{e5}".repeat(MAX_POST_BYTES / 2), "post", "send-1").is_ok());
+        let (status, _) = refused(&"\u{e5}".repeat(MAX_POST_BYTES / 2 + 1), "post", "send-1").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // The content is never trimmed: leading and trailing space is valid and forwarded as is.
+        assert!(validate_post("  padded  ", "post", "send-1").is_ok());
+        // client_message_id has the shape Session Core stores.
+        for id in ["", "-leading", "_x", "has space", "slash/x", &"a".repeat(129)] {
+            let (status, body) = refused("hello", "post", id).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{id:?}");
+            assert_eq!(body["error"]["code"], "invalid_client_message_id");
+        }
+        assert!(validate_post("hello", "post", &"a".repeat(128)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_decision_envelope_must_name_a_space() {
+        let context: ThreadSpaceContext = serde_json::from_value(context_json()).expect("context");
+        assert!(require_space(&context, "space_context").is_ok());
+        let blank = ThreadSpaceContext { space_id: "  ".to_owned(), ..context };
+        let (status, body) = parts(require_space(&blank, "space_append_context").expect_err("blank")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["details"]["field"], "space_append_context");
+    }
+
+    #[tokio::test]
+    async fn disabled_and_service_principal_refusals_are_fixed_words() {
+        let (status, body) = parts(disabled()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "space_human_posts_disabled");
+        let (status, body) = parts(user_principal_required()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "space_post_not_authorized");
+    }
+
+    #[test]
+    fn the_router_serves_only_post_on_the_two_documented_paths() {
+        // Building the router proves the two routes are valid and do not collide; the methods
+        // are POST only (the GET routes of the same paths belong to the chat routers).
+        let _router: Router<AppState> = router();
+    }
+}

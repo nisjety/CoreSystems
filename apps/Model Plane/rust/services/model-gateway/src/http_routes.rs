@@ -15277,3 +15277,72 @@ mod thread_messages_page_tests {
         assert_eq!(body["has_more"], serde_json::json!(false));
     }
 }
+
+#[cfg(test)]
+mod space_post_wire_tests {
+    use super::*;
+
+    fn message(post_kind: &str) -> ThreadMessage {
+        ThreadMessage {
+            message_id: "m-1".to_owned(),
+            role: "user".to_owned(),
+            content: "hello".to_owned(),
+            agent_name: String::new(),
+            author_subject_id: "user-2".to_owned(),
+            post_kind: post_kind.to_owned(),
+            metadata: None,
+        }
+    }
+
+    fn summary(reply_count: u32, last_author: &str) -> ThreadSummaryResponse {
+        ThreadSummaryResponse {
+            thread_id: "t-1".to_owned(),
+            session_key: "k".to_owned(),
+            title: "title".to_owned(),
+            preview: "preview".to_owned(),
+            created_at: "2026-10-27T00:00:00Z".to_owned(),
+            updated_at: "2026-10-27T00:00:00Z".to_owned(),
+            pinned: false,
+            space_id: "space-1".to_owned(),
+            owner_subject_id: "user-1".to_owned(),
+            latest_run_id: String::new(),
+            latest_run_status: String::new(),
+            latest_run_updated_at: None,
+            origin: "space".to_owned(),
+            persona_enabled: true,
+            archived_at: String::new(),
+            reply_count,
+            last_author_subject_id: last_author.to_owned(),
+        }
+    }
+
+    #[test]
+    fn thread_message_json_omits_post_kind_for_turns_and_carries_it_for_posts() {
+        // The handler maps a turn (or a row from before post kinds) to an empty kind, which is
+        // omitted, so a turn keeps the shape it always had.
+        let turn = serde_json::to_value(message("")).expect("serialises");
+        assert!(turn.get("post_kind").is_none(), "{turn}");
+        assert_eq!(turn["author_subject_id"], "user-2");
+        let post = serde_json::to_value(message("post")).expect("serialises");
+        assert_eq!(post["post_kind"], "post");
+        assert_eq!(post["author_subject_id"], "user-2");
+        assert_eq!(post["message_id"], "m-1");
+    }
+
+    #[test]
+    fn thread_summary_omits_reply_count_when_zero_and_last_author_when_empty() {
+        let quiet = serde_json::to_value(summary(0, "")).expect("serialises");
+        assert!(quiet.get("reply_count").is_none(), "{quiet}");
+        assert!(quiet.get("last_author_subject_id").is_none(), "{quiet}");
+        let busy = serde_json::to_value(summary(3, "user-2")).expect("serialises");
+        assert_eq!(busy["reply_count"], 3);
+        assert_eq!(busy["last_author_subject_id"], "user-2");
+        // One of the two alone is carried independently of the other.
+        let only_author = serde_json::to_value(summary(0, "user-9")).expect("serialises");
+        assert!(only_author.get("reply_count").is_none());
+        assert_eq!(only_author["last_author_subject_id"], "user-9");
+        let only_count = serde_json::to_value(summary(1, "")).expect("serialises");
+        assert_eq!(only_count["reply_count"], 1);
+        assert!(only_count.get("last_author_subject_id").is_none());
+    }
+}

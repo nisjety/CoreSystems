@@ -1181,6 +1181,11 @@ struct MockSessionHandles {
     context_assembly_hangs: Arc<AtomicBool>,
     /// Every `ListConversation` call: the thread-history read a `full` run context makes.
     list_conversation_count: Arc<AtomicUsize>,
+    /// Scripted answers for the next `AppendMessage` calls, front first (WS01-S4). Empty answers
+    /// as before.
+    append_script: Arc<Mutex<std::collections::VecDeque<Result<AppendMessageResponse, Status>>>>,
+    /// Every `AppendMessage` request, whole.
+    append_request_captures: Arc<Mutex<Vec<AppendMessageRequest>>>,
 }
 
 struct MockSessionCore {
@@ -1222,6 +1227,8 @@ impl MockSessionCore {
             run_context_captures: Arc::new(Mutex::new(Vec::new())),
             context_assembly_hangs: Arc::new(AtomicBool::new(false)),
             list_conversation_count: Arc::new(AtomicUsize::new(0)),
+            append_script: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            append_request_captures: Arc::new(Mutex::new(Vec::new())),
         };
         (
             Self {
@@ -1263,6 +1270,14 @@ impl SessionCore for MockSessionCore {
             .append_message_count
             .fetch_add(1, Ordering::SeqCst);
         let req = request.into_inner();
+        self.handles
+            .append_request_captures
+            .lock()
+            .unwrap()
+            .push(req.clone());
+        if let Some(scripted) = self.handles.append_script.lock().unwrap().pop_front() {
+            return scripted.map(Response::new);
+        }
         {
             let mut missing = self.handles.append_missing_thread_once.lock().unwrap();
             if missing.as_deref() == Some(req.thread_id.as_str()) {
@@ -13274,4 +13289,347 @@ async fn the_catalogue_carries_the_policys_meta_as_a_sibling_field_or_nothing() 
         "{applied}"
     );
     assert!(applied["models"].is_array());
+}
+
+// ---- WS01-S4: human posts in a Space room (POST /v1/threads, POST /v1/threads/:id/messages) ----
+
+fn space_post_context() -> serde_json::Value {
+    serde_json::json!({
+        "space_id": "space-room-1",
+        "space_decision_ref": "decision-1",
+        "recipient_audience_ref": "audience:space-room-1:4",
+        "recipient_audience_revision": 4,
+        "recipient_audience_hash": "sha256:audience-hash",
+        "privacy_policy_ref": "privacy:org-1:5",
+        "authority_revision": 7,
+        "resource_authorization_ref": "control:space-room-1:thread-append:7",
+        "space_decision_token": "decision-token",
+        "action_schema_hash": "sha256:thread-append-v2",
+        "payload_digest": "sha256:digest",
+        "idempotency_key": "thread-append:1"
+    })
+}
+
+fn space_post_create_body(content: &str, client_message_id: &str) -> String {
+    serde_json::json!({
+        "space_context": space_post_context(),
+        "session_key": "room-thread-1",
+        "first_message": {
+            "content": content,
+            "post_kind": "post",
+            "client_message_id": client_message_id
+        }
+    })
+    .to_string()
+}
+
+fn space_post_append_body(content: &str, client_message_id: &str) -> String {
+    serde_json::json!({
+        "content": content,
+        "post_kind": "post",
+        "client_message_id": client_message_id,
+        "space_append_context": space_post_context()
+    })
+    .to_string()
+}
+
+fn append_response(sequence: u64, message_id: &str, deduplicated: bool) -> Result<AppendMessageResponse, Status> {
+    Ok(AppendMessageResponse {
+        sequence,
+        message_id: message_id.to_owned(),
+        deduplicated,
+    })
+}
+
+/// A router over a mock Session Core whose `AppendMessage` answers come from `script`
+/// (front first), authenticated through the dev bypass as a persistent user.
+async fn space_post_app(
+    script: Vec<Result<AppendMessageResponse, Status>>,
+) -> (Router, MockSessionHandles, wiremock::MockServer) {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, handles) = MockSessionCore::new();
+    handles.append_script.lock().unwrap().extend(script);
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, _) = make_state(client, session_client).await;
+    let (app, jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+    (app, handles, jwks)
+}
+
+async fn space_post_call(
+    app: &Router,
+    uri: &str,
+    bearer: &str,
+    body: &str,
+) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(AUTHORIZATION, format!("Bearer {bearer}"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn post_route_appends_post_and_never_starts_a_run() {
+    let _flag = EnvGuard::set("SPACE_HUMAN_POSTS_API", Some("1"));
+    let (app, handles, _jwks) = space_post_app(vec![
+        append_response(1, "msg-1", false),
+        append_response(1, "msg-1", true),
+        append_response(4, "msg-4", false),
+    ])
+    .await;
+
+    // Create and first post: 201 with ids and a sequence.
+    let (status, body) =
+        space_post_call(&app, "/v1/threads", "dev", &space_post_create_body("hello room", "send-1")).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "thread_id": "thread-room-thread-1",
+            "message_id": "msg-1",
+            "sequence": 1,
+            "deduplicated": false
+        })
+    );
+    // The replay of the same send is one row: 200 with deduplicated true.
+    let (status, body) =
+        space_post_call(&app, "/v1/threads", "dev", &space_post_create_body("hello room", "send-1")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deduplicated"], true);
+    assert_eq!(body["message_id"], "msg-1");
+    // A post to an existing thread.
+    let (status, body) = space_post_call(
+        &app,
+        "/v1/threads/thread-9/messages",
+        "dev",
+        &space_post_append_body("a reply", "send-2"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["thread_id"], "thread-9");
+    assert_eq!((body["message_id"].as_str(), body["sequence"].as_u64()), (Some("msg-4"), Some(4)));
+
+    // What Session Core was asked: a human user row of kind post, content byte for byte,
+    // under the caller's client_message_id, with the decision forwarded; never a run.
+    let captured = handles.append_request_captures.lock().unwrap().clone();
+    assert_eq!(captured.len(), 3);
+    for request in &captured {
+        assert_eq!(request.role, "user");
+        assert_eq!(request.post_kind, "post");
+        assert!(request.agent_name.is_empty() && request.metadata.is_none());
+    }
+    assert_eq!(captured[0].content, "hello room");
+    assert_eq!(captured[0].client_message_id, "send-1");
+    assert_eq!(captured[2].thread_id, "thread-9");
+    assert_eq!(captured[2].client_message_id, "send-2");
+    assert_eq!(captured[2].space_id, "space-room-1");
+    assert_eq!(captured[2].space_decision_token, "decision-token");
+    assert!(
+        handles.managed_start_captures.lock().unwrap().is_empty(),
+        "a human post never starts a run"
+    );
+    clear_model_auth_env();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn post_route_refuses_zdr_with_catalogue_code() {
+    // The flag is OFF and the bodies are junk: the typed ZDR refusal still comes first, before
+    // the flag, the body or any upstream call.
+    let _flag = EnvGuard::set("SPACE_HUMAN_POSTS_API", None);
+    let (_jwks, token) = signed_model_token(true).await;
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, _) = make_state(client, session_client).await;
+    let (app, _delegated_jwks) =
+        authenticated_zdr_user_router(build_router(state, None), "org-zdr", "user-zdr").await;
+    for (uri, body) in [
+        ("/v1/threads", "not json".to_owned()),
+        ("/v1/threads/thread-9/messages", "{}".to_owned()),
+        ("/v1/threads", space_post_create_body("hello", "send-1")),
+        ("/v1/threads/thread-9/messages", space_post_append_body("hello", "send-1")),
+    ] {
+        let (status, json) = space_post_call(&app, uri, &token, &body).await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{uri}: {json}");
+        assert_eq!(json["error"]["code"], "zdr_durable_mutation_forbidden", "{uri}");
+    }
+    assert_eq!(handles.create_thread_count.load(Ordering::SeqCst), 0);
+    assert_eq!(handles.append_message_count.load(Ordering::SeqCst), 0);
+    clear_model_auth_env();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn post_route_maps_session_core_errors() {
+    let _flag = EnvGuard::set("SPACE_HUMAN_POSTS_API", Some("1"));
+    let mut typed = Status::failed_precondition("zero retention");
+    typed.metadata_mut().insert(
+        mp_contracts::zdr_refusal::KIND_TRAILER,
+        mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN.parse().unwrap(),
+    );
+    let (app, _handles, _jwks) = space_post_app(vec![
+        Err(Status::permission_denied("secret upstream text")),
+        Err(Status::not_found("secret upstream text")),
+        Err(Status::already_exists("secret upstream text")),
+        Err(Status::aborted("space_authority_stale")),
+        Err(Status::invalid_argument("secret upstream text")),
+        Err(typed),
+        Err(Status::failed_precondition("secret upstream text")),
+        Err(Status::unavailable("secret upstream text")),
+    ])
+    .await;
+    let expected = [
+        (StatusCode::FORBIDDEN, "space_post_not_authorized"),
+        (StatusCode::NOT_FOUND, "thread_not_found"),
+        (StatusCode::CONFLICT, "idempotency_key_conflict"),
+        (StatusCode::CONFLICT, "space_authority_stale"),
+        (StatusCode::BAD_REQUEST, "invalid_post"),
+        (StatusCode::PRECONDITION_FAILED, "zdr_durable_mutation_forbidden"),
+        (StatusCode::CONFLICT, "thread_state_conflict"),
+        (StatusCode::SERVICE_UNAVAILABLE, "session_unavailable"),
+    ];
+    for (n, (want_status, want_code)) in expected.into_iter().enumerate() {
+        let (status, body) = space_post_call(
+            &app,
+            "/v1/threads/thread-9/messages",
+            "dev",
+            &space_post_append_body("hello", &format!("send-{n}")),
+        )
+        .await;
+        assert_eq!((status, body["error"]["code"].as_str()), (want_status, Some(want_code)), "case {n}: {body}");
+        assert!(!body.to_string().contains("secret upstream"), "case {n}");
+    }
+    clear_model_auth_env();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn post_route_reports_a_lost_append_after_create_with_the_thread_id() {
+    let _flag = EnvGuard::set("SPACE_HUMAN_POSTS_API", Some("1"));
+    // The thread is created, the append reply is lost: 502 names the thread so a retry with
+    // the same keys lands on it; a definite refusal after create is said as what it was.
+    let (app, handles, _jwks) = space_post_app(vec![
+        Err(Status::unavailable("connection reset")),
+        Err(Status::permission_denied("no")),
+    ])
+    .await;
+    let (status, body) =
+        space_post_call(&app, "/v1/threads", "dev", &space_post_create_body("hello", "send-1")).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body["error"]["code"], "post_not_stored");
+    assert_eq!(body["error"]["details"]["thread_id"], "thread-room-thread-1");
+    let (status, body) =
+        space_post_call(&app, "/v1/threads", "dev", &space_post_create_body("hello", "send-1")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"]["code"], "space_post_not_authorized");
+    assert!(handles.managed_start_captures.lock().unwrap().is_empty());
+    clear_model_auth_env();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn post_route_rejects_forged_authority_fields_and_non_post_kind() {
+    let _flag = EnvGuard::set("SPACE_HUMAN_POSTS_API", Some("1"));
+    let (app, handles, _jwks) = space_post_app(Vec::new()).await;
+    let append_uri = "/v1/threads/thread-9/messages";
+    let with = |mut base: serde_json::Value, key: &str, value: serde_json::Value| {
+        base[key] = value;
+        base.to_string()
+    };
+    let append_base: serde_json::Value = serde_json::from_str(&space_post_append_body("hello", "send-1")).unwrap();
+    let mut bodies: Vec<(&str, String)> = Vec::new();
+    for (key, value) in [
+        ("role", serde_json::json!("assistant")),
+        ("org_id", serde_json::json!("org-other")),
+        ("user_id", serde_json::json!("user-other")),
+        ("metadata", serde_json::json!({"source_scope": "conversation"})),
+        ("agent_name", serde_json::json!("agent")),
+        ("zdr", serde_json::json!(false)),
+    ] {
+        bodies.push((append_uri, with(append_base.clone(), key, value)));
+    }
+    bodies.push((append_uri, with(append_base.clone(), "post_kind", serde_json::json!("turn"))));
+    bodies.push((append_uri, with(append_base.clone(), "client_message_id", serde_json::json!("not valid!"))));
+    for content in ["", "   ", "a\u{0}b"] {
+        bodies.push((append_uri, with(append_base.clone(), "content", serde_json::json!(content))));
+    }
+    bodies.push((append_uri, with(append_base.clone(), "content", serde_json::json!("x".repeat(32 * 1024 + 1)))));
+    let mut no_space = append_base.clone();
+    no_space["space_append_context"]["space_id"] = serde_json::json!("");
+    bodies.push((append_uri, no_space.to_string()));
+    bodies.push((
+        "/v1/threads",
+        with(
+            serde_json::from_str(&space_post_create_body("hello", "send-1")).unwrap(),
+            "role",
+            serde_json::json!("assistant"),
+        ),
+    ));
+    for (uri, body) in &bodies {
+        let (status, json) = space_post_call(&app, uri, "dev", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {json}");
+    }
+    // Nothing was forwarded.
+    assert_eq!(handles.create_thread_count.load(Ordering::SeqCst), 0);
+    assert_eq!(handles.append_message_count.load(Ordering::SeqCst), 0);
+    clear_model_auth_env();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn post_route_is_off_by_default_and_closed_to_service_principals() {
+    // Flag off: a typed 404, nothing forwarded.
+    {
+        let _flag = EnvGuard::set("SPACE_HUMAN_POSTS_API", None);
+        let (app, handles, _jwks) = space_post_app(Vec::new()).await;
+        for (uri, body) in [
+            ("/v1/threads", space_post_create_body("hello", "send-1")),
+            ("/v1/threads/thread-9/messages", space_post_append_body("hello", "send-1")),
+        ] {
+            let (status, json) = space_post_call(&app, uri, "dev", &body).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+            assert_eq!(json["error"]["code"], "space_human_posts_disabled");
+        }
+        assert_eq!(handles.append_message_count.load(Ordering::SeqCst), 0);
+        clear_model_auth_env();
+    }
+    // A service principal is refused whatever the flag says.
+    let _flag = EnvGuard::set("SPACE_HUMAN_POSTS_API", Some("1"));
+    let (_jwks, token) = signed_service_model_token(&["models:invoke"]).await;
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, _) = make_state(client, session_client).await;
+    let app = build_router(state, None);
+    for (uri, body) in [
+        ("/v1/threads", space_post_create_body("hello", "send-1")),
+        ("/v1/threads/thread-9/messages", space_post_append_body("hello", "send-1")),
+    ] {
+        assert_eq!(
+            route_status(app.clone(), "POST", uri, &token, &body, None).await,
+            StatusCode::FORBIDDEN,
+            "service principals cannot post: {uri}"
+        );
+    }
+    assert_eq!(handles.append_message_count.load(Ordering::SeqCst), 0);
+    clear_model_auth_env();
 }

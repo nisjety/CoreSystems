@@ -19,3 +19,5 @@ pub(crate) mod authz;
 pub(crate) mod events;
 pub(crate) mod memory_scope;
 pub(crate) mod read_service;
+#[cfg(test)]
+pub(crate) mod test_support;

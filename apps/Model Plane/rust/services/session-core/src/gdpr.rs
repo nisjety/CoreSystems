@@ -791,4 +791,36 @@ mod tests {
             "deleting a skill writes a revision holding its text, so the revisions are purged after the skills"
         );
     }
+
+    /// WS02-S1: the org erasure switches the Space event triggers off before any delete that
+    /// could fire them, and purges the Space log beside the org's events, before runs and
+    /// threads. Without the suppression the deferred delete triggers would write fresh
+    /// tombstones for an org that was just erased.
+    #[test]
+    fn purge_suppresses_space_events_before_deletes_and_purges_the_log() {
+        let source = include_str!("gdpr.rs");
+        let pos = |needle: &str| {
+            source
+                .find(needle)
+                .unwrap_or_else(|| panic!("expected to find {needle:?} in gdpr.rs"))
+        };
+        let suppress = pos("space::events::suppress(");
+        let first_delete = pos("DELETE FROM run_loop_checkpoints");
+        let events = pos("DELETE FROM events");
+        let log = pos("DELETE FROM space_event_log WHERE org_id = $1");
+        let heads = pos("DELETE FROM space_event_heads WHERE org_id = $1");
+        let runs = pos("DELETE FROM runs WHERE org_id = $1");
+        let messages = pos("DELETE FROM messages");
+        let threads = pos("DELETE FROM threads WHERE org_id = $1");
+        assert!(
+            suppress < first_delete,
+            "suppress must precede the first DELETE of the transaction"
+        );
+        assert!(suppress < messages && suppress < runs && suppress < threads);
+        assert!(
+            events < log && log < heads && heads < runs,
+            "the Space log is purged beside the org's events, and its heads after it"
+        );
+        assert!(log < threads, "the log is purged before the threads whose delete triggers fire");
+    }
 }

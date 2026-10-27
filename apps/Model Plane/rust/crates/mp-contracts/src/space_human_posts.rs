@@ -29,3 +29,26 @@ pub fn core_enabled() -> bool {
 pub fn api_enabled() -> bool {
     enabled_from(std::env::var(API_ENV).ok().as_deref())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enabled_from_is_on_only_for_an_explicit_on_word() {
+        for on in ["1", "true", "TRUE", "on", "yes", "enabled", " true ", "Enabled"] {
+            assert!(enabled_from(Some(on)), "{on:?} must turn the switch on");
+        }
+        // Unset, empty and mistyped values keep the member path closed.
+        for off in [None, Some(""), Some("  "), Some("0"), Some("false"), Some("off"), Some("tru"), Some("yess"), Some("2")] {
+            assert!(!enabled_from(off), "{off:?} must keep the switch off");
+        }
+    }
+
+    #[test]
+    fn switch_names_are_the_documented_env_vars() {
+        assert_eq!(ENABLED_ENV, "SPACE_HUMAN_POSTS_CORE");
+        assert_eq!(API_ENV, "SPACE_HUMAN_POSTS_API");
+        assert_ne!(ENABLED_ENV, API_ENV);
+    }
+}

@@ -215,3 +215,266 @@ pub(crate) async fn authorize_append(
         Some(denial) => Err(Status::permission_denied(denial.message())),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A member post that passes every condition.
+    fn good() -> MemberFacts {
+        MemberFacts {
+            flag_on: true,
+            caller_is_human: true,
+            org_matches: true,
+            role_is_user: true,
+            post_kind_is_post: true,
+            envelope_complete: true,
+            schema_is_v2: true,
+            thread_space_matches: true,
+            owner_is_system: false,
+            author_revoked: false,
+            content_bytes: 11,
+            content_blank: false,
+        }
+    }
+
+    #[test]
+    fn member_append_denial_table() {
+        let cases: Vec<(&str, MemberFacts, Option<MemberDenial>)> = vec![
+            ("all good", good(), None),
+            ("flag off", MemberFacts { flag_on: false, ..good() }, Some(MemberDenial::FlagOff)),
+            (
+                "service caller",
+                MemberFacts { caller_is_human: false, ..good() },
+                Some(MemberDenial::ServiceCaller),
+            ),
+            ("wrong org", MemberFacts { org_matches: false, ..good() }, Some(MemberDenial::WrongOrg)),
+            (
+                "assistant role",
+                MemberFacts { role_is_user: false, ..good() },
+                Some(MemberDenial::NotUserRole),
+            ),
+            (
+                "turn kind",
+                MemberFacts { post_kind_is_post: false, ..good() },
+                Some(MemberDenial::NotPostKind),
+            ),
+            (
+                "partial envelope",
+                MemberFacts { envelope_complete: false, ..good() },
+                Some(MemberDenial::EnvelopeIncomplete),
+            ),
+            (
+                "v1 schema",
+                MemberFacts { schema_is_v2: false, ..good() },
+                Some(MemberDenial::SchemaNotV2),
+            ),
+            (
+                "other space",
+                MemberFacts { thread_space_matches: false, ..good() },
+                Some(MemberDenial::OtherSpace),
+            ),
+            (
+                "system owner",
+                MemberFacts { owner_is_system: true, ..good() },
+                Some(MemberDenial::SystemOwner),
+            ),
+            (
+                "revoked author",
+                MemberFacts { author_revoked: true, ..good() },
+                Some(MemberDenial::Revoked),
+            ),
+            (
+                "empty",
+                MemberFacts { content_bytes: 0, content_blank: true, ..good() },
+                Some(MemberDenial::EmptyContent),
+            ),
+            (
+                "whitespace only",
+                MemberFacts { content_bytes: 3, content_blank: true, ..good() },
+                Some(MemberDenial::EmptyContent),
+            ),
+            (
+                "oversize",
+                MemberFacts { content_bytes: MEMBER_POST_MAX_BYTES + 1, ..good() },
+                Some(MemberDenial::OversizeContent),
+            ),
+            (
+                "exactly the limit",
+                MemberFacts { content_bytes: MEMBER_POST_MAX_BYTES, ..good() },
+                None,
+            ),
+        ];
+        for (name, facts, expected) in cases {
+            assert_eq!(member_append_denial(&facts), expected, "case: {name}");
+        }
+    }
+
+    #[test]
+    fn member_append_denial_reports_the_first_failing_condition_in_gate_order() {
+        // Everything wrong at once, then fix one condition at a time in gate order.
+        let mut facts = MemberFacts {
+            flag_on: false,
+            caller_is_human: false,
+            org_matches: false,
+            role_is_user: false,
+            post_kind_is_post: false,
+            envelope_complete: false,
+            schema_is_v2: false,
+            thread_space_matches: false,
+            owner_is_system: true,
+            author_revoked: true,
+            content_bytes: MEMBER_POST_MAX_BYTES + 1,
+            content_blank: true,
+        };
+        let order = [
+            MemberDenial::FlagOff,
+            MemberDenial::ServiceCaller,
+            MemberDenial::WrongOrg,
+            MemberDenial::NotUserRole,
+            MemberDenial::NotPostKind,
+            MemberDenial::EnvelopeIncomplete,
+            MemberDenial::SchemaNotV2,
+            MemberDenial::OtherSpace,
+            MemberDenial::SystemOwner,
+            MemberDenial::Revoked,
+            MemberDenial::EmptyContent,
+            MemberDenial::OversizeContent,
+        ];
+        for expected in order {
+            assert_eq!(member_append_denial(&facts), Some(expected));
+            match expected {
+                MemberDenial::FlagOff => facts.flag_on = true,
+                MemberDenial::ServiceCaller => facts.caller_is_human = true,
+                MemberDenial::WrongOrg => facts.org_matches = true,
+                MemberDenial::NotUserRole => facts.role_is_user = true,
+                MemberDenial::NotPostKind => facts.post_kind_is_post = true,
+                MemberDenial::EnvelopeIncomplete => facts.envelope_complete = true,
+                MemberDenial::SchemaNotV2 => facts.schema_is_v2 = true,
+                MemberDenial::OtherSpace => facts.thread_space_matches = true,
+                MemberDenial::SystemOwner => facts.owner_is_system = false,
+                MemberDenial::Revoked => facts.author_revoked = false,
+                MemberDenial::EmptyContent => facts.content_blank = false,
+                MemberDenial::OversizeContent => facts.content_bytes = 1,
+            }
+        }
+        assert_eq!(member_append_denial(&facts), None);
+    }
+
+    #[test]
+    fn passthrough_denials_are_exactly_the_not_a_member_attempt_set() {
+        let passthrough = [
+            MemberDenial::FlagOff,
+            MemberDenial::ServiceCaller,
+            MemberDenial::WrongOrg,
+            MemberDenial::NotUserRole,
+            MemberDenial::NotPostKind,
+        ];
+        let specific = [
+            MemberDenial::EnvelopeIncomplete,
+            MemberDenial::SchemaNotV2,
+            MemberDenial::OtherSpace,
+            MemberDenial::SystemOwner,
+            MemberDenial::Revoked,
+            MemberDenial::EmptyContent,
+            MemberDenial::OversizeContent,
+        ];
+        for denial in passthrough {
+            assert!(denial.is_passthrough(), "{denial:?} must give the owner refusal");
+        }
+        for denial in specific {
+            assert!(!denial.is_passthrough(), "{denial:?} must be a specific denial");
+            assert!(!denial.message().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_flag_off_session_core_never_reveals_member_conditions() {
+        // With the flag off nothing else is looked at: the denial is always FlagOff, which is a
+        // passthrough, so `authorize_append` answers with the owner refusal it always did.
+        let facts = MemberFacts {
+            flag_on: false,
+            author_revoked: true,
+            owner_is_system: true,
+            content_blank: true,
+            ..good()
+        };
+        let denial = member_append_denial(&facts).expect("flag off refuses");
+        assert_eq!(denial, MemberDenial::FlagOff);
+        assert!(denial.is_passthrough());
+    }
+
+    #[test]
+    fn request_facts_read_role_kind_schema_and_content_from_the_request() {
+        let mut req = pb::AppendMessageRequest {
+            role: " user ".to_owned(),
+            post_kind: "post".to_owned(),
+            content: "  hi  ".to_owned(),
+            action_schema_hash: crate::grpc::CONTROL_THREAD_APPEND_SCHEMA_V2.to_owned(),
+            ..Default::default()
+        };
+        let (role_is_user, kind_is_post, _envelope, schema_v2, bytes, blank) = request_facts(&req);
+        assert!(role_is_user && kind_is_post && schema_v2 && !blank);
+        assert_eq!(bytes, "  hi  ".len(), "the byte count is of the untrimmed content");
+
+        req.role = "assistant".to_owned();
+        req.post_kind = "turn".to_owned();
+        req.action_schema_hash = "sha256:thread-append-v1".to_owned();
+        req.content = " \t\n".to_owned();
+        let (role_is_user, kind_is_post, envelope, schema_v2, bytes, blank) = request_facts(&req);
+        assert!(!role_is_user && !kind_is_post && !schema_v2 && blank);
+        assert!(!envelope, "an empty request has no complete decision envelope");
+        assert_eq!(bytes, 3);
+    }
+
+    /// `authorize_append` with the flag off answers a non-owner with the owner refusal. Needs a
+    /// disposable Postgres with session-core migrations, so it belongs to the DB tier.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable Postgres with session-core migrations)"]
+    async fn flag_off_authorize_append_returns_the_owner_refusal() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        if mp_contracts::space_human_posts::core_enabled() {
+            eprintln!("skipping: SPACE_HUMAN_POSTS_CORE is on in this process");
+            return;
+        }
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        let suffix = mp_ids::new_ulid();
+        let org = format!("org-authz-{suffix}");
+        let thread_id = format!("thread-authz-{suffix}");
+        sqlx::query(
+            "INSERT INTO threads (id, org_id, user_id, session_key, space_id, created_at) \
+             VALUES ($1, $2, 'owner-1', $3, 'space-1', now())",
+        )
+        .bind(&thread_id)
+        .bind(&org)
+        .bind(format!("key-{suffix}"))
+        .execute(&pool)
+        .await
+        .expect("seed thread");
+        let member = VerifiedIdentity::user_for_test(&org, "member-2");
+        let req = pb::AppendMessageRequest {
+            thread_id: thread_id.clone(),
+            role: "user".to_owned(),
+            post_kind: "post".to_owned(),
+            content: "hello".to_owned(),
+            space_id: "space-1".to_owned(),
+            ..Default::default()
+        };
+        let owner = VerifiedIdentity::user_for_test(&org, "owner-1");
+        assert_eq!(authorize_append(&pool, &owner, &req).await.ok(), Some(AppendAs::Owner));
+        let refusal = authorize_append(&pool, &member, &req)
+            .await
+            .expect_err("flag off: a non-owner is refused");
+        assert_eq!(refusal.code(), tonic::Code::PermissionDenied);
+        let missing = pb::AppendMessageRequest { thread_id: "no-such".to_owned(), ..req };
+        assert_eq!(
+            authorize_append(&pool, &member, &missing).await.expect_err("missing").code(),
+            tonic::Code::NotFound
+        );
+        sqlx::query("DELETE FROM threads WHERE id = $1").bind(&thread_id).execute(&pool).await.ok();
+    }
+}

@@ -1297,4 +1297,30 @@ mod tests {
         out.push_str(rest);
         out
     }
+
+    /// WS01-S4: a function under `space_routes/` is found by its subpath (so every scan that
+    /// reads `read_sources` covers it), and each post handler refuses a zero-retention or waived
+    /// token before the flag, the body or any upstream call.
+    #[test]
+    fn a_function_in_space_routes_is_found_by_subpath_and_refuses_zdr_first() {
+        for function in ["create_space_post", "append_space_post"] {
+            let body = function_body("space_routes/posts.rs", function)
+                .unwrap_or_else(|| panic!("{function} is found by its subpath"));
+            let gate = body
+                .find("require_non_zdr_durable_mutation(")
+                .unwrap_or_else(|| panic!("{function} calls the durable-mutation gate"));
+            for later in ["api_enabled(", "parse_body(", "session_flow::"] {
+                let at = body
+                    .find(later)
+                    .unwrap_or_else(|| panic!("{function} calls {later}"));
+                assert!(gate < at, "{function}: the ZDR refusal must come before {later}");
+            }
+        }
+        // A subpath-less name does not resolve: the file is named by its subpath.
+        assert!(function_body("posts.rs", "create_space_post").is_none());
+        let names: Vec<String> = read_sources().into_iter().map(|(name, _)| name).collect();
+        for expected in ["space_routes/posts.rs", "space_routes/artifacts.rs"] {
+            assert!(names.iter().any(|name| name == expected), "{expected} is scanned");
+        }
+    }
 }
