@@ -135,7 +135,7 @@ describe('space send pipeline (P-SPA2)', () => {
           skills: [{ id: 'skill_1', name: 'Summarise' } as never],
         }),
       )
-      const request = streamChat.mock.calls[0][0] as Record<string, unknown>
+      const request = streamChat.mock.calls[0]?.[0] as Record<string, unknown>
       expect(request).toMatchObject({
         content: 'hello',
         model: 'test-model',
@@ -153,7 +153,7 @@ describe('space send pipeline (P-SPA2)', () => {
       const { pipeline } = pipelineWith({ sendIdempotency: true })
       streamChat.mockResolvedValueOnce(undefined)
       await pipeline.send(input())
-      const request = streamChat.mock.calls[0][0] as Record<string, unknown>
+      const request = streamChat.mock.calls[0]?.[0] as Record<string, unknown>
       expect(request.clientMessageId).toMatch(/^[0-9a-f]{32}$/)
       expect(request.sessionKey).toBe(`space-post-${String(request.clientMessageId)}`)
     })
@@ -162,7 +162,7 @@ describe('space send pipeline (P-SPA2)', () => {
       const { pipeline } = pipelineWith({ sendIdempotency: true })
       streamChat.mockResolvedValueOnce(undefined)
       await pipeline.send(input({ replyThreadId: 'thr_7' }))
-      const request = streamChat.mock.calls[0][0] as Record<string, unknown>
+      const request = streamChat.mock.calls[0]?.[0] as Record<string, unknown>
       expect(request.threadId).toBe('thr_7')
       expect(request.clientMessageId).toBeTruthy()
       expect(request.sessionKey).toBeUndefined()
@@ -172,7 +172,7 @@ describe('space send pipeline (P-SPA2)', () => {
       const { pipeline } = pipelineWith({ sendIdempotency: true })
       streamChat.mockResolvedValueOnce(undefined)
       await pipeline.send(input({ sendId: 'f'.repeat(32) }))
-      expect((streamChat.mock.calls[0][0] as Record<string, unknown>).clientMessageId).toBe('f'.repeat(32))
+      expect((streamChat.mock.calls[0]?.[0] as Record<string, unknown>).clientMessageId).toBe('f'.repeat(32))
     })
   })
 
@@ -334,10 +334,10 @@ describe('space send pipeline (P-SPA2)', () => {
         .mockResolvedValueOnce(undefined)
       await pipeline.send(input())
       flush()
-      const firstId = (streamChat.mock.calls[0][0] as Record<string, unknown>).clientMessageId
+      const firstId = (streamChat.mock.calls[0]?.[0] as Record<string, unknown>).clientMessageId
       await pipeline.retry()
       expect(streamChat).toHaveBeenCalledTimes(2)
-      expect((streamChat.mock.calls[1][0] as Record<string, unknown>).clientMessageId).toBe(firstId)
+      expect((streamChat.mock.calls[1]?.[0] as Record<string, unknown>).clientMessageId).toBe(firstId)
     })
 
     it('retry does nothing for a non-retryable exchange', async () => {
@@ -370,8 +370,8 @@ describe('space send pipeline (P-SPA2)', () => {
       await sending
       flush()
       expect(resumeStream).toHaveBeenCalledTimes(1)
-      expect(resumeStream.mock.calls[0][0]).toBe('req_5')
-      expect(resumeStream.mock.calls[0][3]).toBe('4')
+      expect(resumeStream.mock.calls[0]?.[0]).toBe('req_5')
+      expect(resumeStream.mock.calls[0]?.[3]).toBe('4')
       expect(pipeline.exchange()).toMatchObject({ status: 'done', assistantContent: 'rest' })
     })
 

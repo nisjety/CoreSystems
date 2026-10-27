@@ -25,16 +25,16 @@ describe('createSpacePost (WS01-S6)', () => {
     })
     const receipt = await createSpacePost('room', { content: 'hello', clientSendId: 'a'.repeat(32) })
     expect(calls).toHaveLength(1)
-    expect(calls[0].url.endsWith('/api/v1/spaces/room/threads')).toBe(true)
-    expect(calls[0].init.method).toBe('POST')
-    expect(JSON.parse(String(calls[0].init.body))).toEqual({ content: 'hello', client_send_id: 'a'.repeat(32) })
+    expect(calls[0]?.url.endsWith('/api/v1/spaces/room/threads')).toBe(true)
+    expect(calls[0]?.init.method).toBe('POST')
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ content: 'hello', client_send_id: 'a'.repeat(32) })
     expect(receipt).toEqual({ threadId: 'thr_1', messageId: 'msg_1', sequence: 3, deduplicated: false })
   })
 
   it('encodes the space ref in the path', async () => {
     const calls = stubFetch(201, { data: { thread_id: 'thr_1', message_id: 'm', sequence: 1 } })
     await createSpacePost('a b/c', { content: 'x', clientSendId: 'b'.repeat(32) })
-    expect(calls[0].url.endsWith('/api/v1/spaces/a%20b%2Fc/threads')).toBe(true)
+    expect(calls[0]?.url.endsWith('/api/v1/spaces/a%20b%2Fc/threads')).toBe(true)
   })
 
   it('maps a 200 deduplicated:true receipt to deduplicated', async () => {
@@ -78,8 +78,8 @@ describe('replyInSpaceThread (WS01-S6)', () => {
   it('POSTs to the thread messages path with the same body shape', async () => {
     const calls = stubFetch(201, { data: { thread_id: 'thr_9', message_id: 'msg_2', sequence: 4 } })
     const receipt = await replyInSpaceThread('room', 'thr_9', { content: 'hi', clientSendId: 'g'.repeat(32) })
-    expect(calls[0].url.endsWith('/api/v1/spaces/room/threads/thr_9/messages')).toBe(true)
-    expect(JSON.parse(String(calls[0].init.body))).toEqual({ content: 'hi', client_send_id: 'g'.repeat(32) })
+    expect(calls[0]?.url.endsWith('/api/v1/spaces/room/threads/thr_9/messages')).toBe(true)
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ content: 'hi', client_send_id: 'g'.repeat(32) })
     expect(receipt.threadId).toBe('thr_9')
   })
 
@@ -92,7 +92,7 @@ describe('replyInSpaceThread (WS01-S6)', () => {
   it('encodes the thread id in the path', async () => {
     const calls = stubFetch(201, { data: { message_id: 'm' } })
     await replyInSpaceThread('room', 'thr/9 x', { content: 'hi', clientSendId: 'i'.repeat(32) })
-    expect(calls[0].url.endsWith('/threads/thr%2F9%20x/messages')).toBe(true)
+    expect(calls[0]?.url.endsWith('/threads/thr%2F9%20x/messages')).toBe(true)
   })
 })
 

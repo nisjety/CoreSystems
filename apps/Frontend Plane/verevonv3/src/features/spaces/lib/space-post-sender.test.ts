@@ -109,10 +109,10 @@ describe('space post sender (WS01-S6)', () => {
       expect(spaceRef).toBe('room')
       expect(input.content).toBe('hello')
       const [entry] = h.journal.entries()
-      expect(entry.sendId).toBe(input.clientSendId)
+      expect(entry?.sendId).toBe(input.clientSendId)
       expect(entry).toMatchObject({ kind: 'post_new', stage: 'accepted', threadId: 'thr_new' })
       expect(h.onAccepted).toHaveBeenCalledTimes(1)
-      expect(h.onAccepted.mock.calls[0][1]).toBe(receipt)
+      expect(h.onAccepted.mock.calls[0]?.[1]).toBe(receipt)
       // An accepted post is no longer this composer's unsettled post.
       expect(h.sender.current()).toBeUndefined()
       expect(h.sender.busy()).toBe(false)
@@ -223,7 +223,7 @@ describe('space post sender (WS01-S6)', () => {
       await h.sender.retry()
       flush()
       expect(createSpacePost).toHaveBeenCalledTimes(2)
-      expect((createSpacePost.mock.calls[1][1] as { clientSendId: string }).clientSendId).toBe(firstId)
+      expect((createSpacePost.mock.calls[1]?.[1] as { clientSendId: string }).clientSendId).toBe(firstId)
       expect(h.journal.entries()).toHaveLength(1)
       expect(h.journal.entries()[0]).toMatchObject({ sendId: firstId, stage: 'accepted' })
     })
@@ -234,7 +234,7 @@ describe('space post sender (WS01-S6)', () => {
       await send(h, { content: 'hello' })
       const firstId = h.sender.current()?.sendId
       await send(h, { content: 'hello' })
-      expect((createSpacePost.mock.calls[1][1] as { clientSendId: string }).clientSendId).toBe(firstId)
+      expect((createSpacePost.mock.calls[1]?.[1] as { clientSendId: string }).clientSendId).toBe(firstId)
     })
 
     it('different text removes the stale entry and mints a new id', async () => {
@@ -243,7 +243,7 @@ describe('space post sender (WS01-S6)', () => {
       await send(h, { content: 'hello' })
       const firstId = h.sender.current()?.sendId
       await send(h, { content: 'something else' })
-      const secondId = (createSpacePost.mock.calls[1][1] as { clientSendId: string }).clientSendId
+      const secondId = (createSpacePost.mock.calls[1]?.[1] as { clientSendId: string }).clientSendId
       expect(secondId).not.toBe(firstId)
       expect(h.journal.get(firstId as string)).toBeUndefined()
     })
@@ -254,7 +254,7 @@ describe('space post sender (WS01-S6)', () => {
       await send(h, { content: 'hello', replyThreadId: 'thr_1' })
       const firstId = h.sender.current()?.sendId
       await send(h, { content: 'hello', replyThreadId: 'thr_2' })
-      expect((replyInSpaceThread.mock.calls[1][2] as { clientSendId: string }).clientSendId).not.toBe(firstId)
+      expect((replyInSpaceThread.mock.calls[1]?.[2] as { clientSendId: string }).clientSendId).not.toBe(firstId)
     })
 
     it('discard drops the unsettled post and sends nothing', async () => {
@@ -287,7 +287,7 @@ describe('space post sender (WS01-S6)', () => {
       window.dispatchEvent(new Event('online'))
       await Promise.resolve()
       expect(createSpacePost).toHaveBeenCalledTimes(1)
-      expect(h.journal.entries()[0].stage).toBe('accepted')
+      expect(h.journal.entries()[0]?.stage).toBe('accepted')
       expect(h.onAccepted).toHaveBeenCalledTimes(1)
     })
 

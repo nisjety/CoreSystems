@@ -76,9 +76,13 @@ describe('SpacesExpandedSidebarPanel', () => {
     expect(screen.getByRole('link', { name: 'Launch room' }).getAttribute('href')).toBe('/spaces/space_shared')
     expect(screen.getByText(/all conversations|alle samtaler/i)).toBeTruthy()
     // A Space conversation opens in its ROOM, never in /chat — the room's
-    // inline timeline is the shared record's one reader.
+    // inline timeline is the shared record's one reader. WS01-S7a: the link now names the
+    // thread, so the room opens it in the side pane.
     expect(screen.getByRole('link', { name: /(?:Open|Åpne) Launch plan.*Prepare the release.*(?:Working|Jobber)/ }).getAttribute('href')).toBe(
-      '/spaces/space%20personal',
+      '/spaces/space%20personal?thread_id=thread%20%2F%20launch#chat',
+    )
+    expect(screen.getByRole('link', { name: /(?:Open|Åpne) Retro notes/ }).getAttribute('href')).toBe(
+      '/spaces/space%20personal?thread_id=thread-retro#chat',
     )
     expect(screen.queryByRole('link', { name: /Åpne rommet|open room/i })).toBeNull()
   })

@@ -492,7 +492,7 @@ describe('action registry', () => {
   // domains/spaces/*.ts and spread them once. The move must not add, drop, rename
   // or reorder an id: the order is what the contract probes and the context pack read.
   it('keeps every action id unique and the spaces.* entries contiguous and in their pre-fragment order (P-SPA1)', () => {
-    const ids = actionRegistry.map((action) => action.id)
+    const ids: string[] = actionRegistry.map((action) => action.id)
     expect(new Set(ids).size).toBe(ids.length)
     // 187 before the move, plus the seven W1 additions (create_post, reply_in_thread, the two
     // effect-policy actions, update_room_details, change_member_role, leave_room).
