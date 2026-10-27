@@ -75,6 +75,7 @@ import {
   type BrowserApprovalEntry,
   type BrowserChromePanel,
   type BrowserChromePopover,
+  type BrowserNetworkEntry,
   type BrowserReplayViewEvent,
   type BrowserSessionViewModel,
   type BrowserStepRationale,
@@ -308,6 +309,30 @@ export function ownerTimelineEventMeta(event: BrowserOwnerTimelineItem): string 
   return parts.length > 0 ? parts.join(' · ') : new Date(event.occurredAt).toLocaleString('nb-NO')
 }
 
+/**
+ * The Network rows of a live session: the rows the projection carries, then one row per response
+ * the live DevTools stream reported, with the method of its request. Kept out of the component's
+ * closure on purpose: with the loop inside it, the checker typed the captured `devtoolsEvents` and
+ * `session` as `never` after the loop (TS2349 at both reads).
+ */
+function liveNetworkRows(sessionRows: BrowserNetworkEntry[], devtools: BrowserDevtoolsEvent[]): BrowserNetworkEntry[] {
+  const requestMethods = new Map<string, string>()
+  for (const event of devtools) {
+    if (event.name === 'Network.requestWillBeSent' && event.url && event.method) {
+      requestMethods.set(event.url, event.method)
+    }
+  }
+  const responses: BrowserNetworkEntry[] = devtools
+    .filter((event) => event.name === 'Network.responseReceived' && event.url)
+    .map((event) => ({
+      content_type: null,
+      method: event.url ? requestMethods.get(event.url) ?? 'GET' : 'GET',
+      status: event.status ?? 0,
+      url: event.url ?? '',
+    }))
+  return [...sessionRows, ...responses].slice(-120)
+}
+
 /** DOM-nodeliste delt mellom sidevisningens fallback og DevTools-panelet. */
 function DomNodeList(props: { nodes: BrowserSessionViewModel['domNodes'] }) {
   return (
@@ -531,17 +556,24 @@ export function BrowserChrome(props: {
     const current = session()
     return props.onKeepAlive && sessionHasHumanBrowsing(current.capabilities) ? (current.sessionId ?? null) : null
   })
-  createEffect(() => {
-    const sessionId = keepAliveSessionId()
-    const keepAlive = props.onKeepAlive
-    if (!sessionId || !keepAlive) return
-    const stop = startSessionKeepAlive({
-      isActive: () =>
-        document.visibilityState === 'visible' && session().sessionId === sessionId && session().status === 'live',
-      tick: keepAlive,
-    })
-    onCleanup(stop)
-  })
+  // Solid 2 takes (compute, apply): compute tracks the session id and the handler; apply starts the
+  // timer and returns its stop function as the cleanup.
+  createEffect(
+    () => {
+      const sessionId = keepAliveSessionId()
+      const keepAlive = props.onKeepAlive
+      return sessionId && keepAlive ? { sessionId, keepAlive } : null
+    },
+    (target) => {
+      if (!target) return
+      const { sessionId, keepAlive } = target
+      return startSessionKeepAlive({
+        isActive: () =>
+          document.visibilityState === 'visible' && session().sessionId === sessionId && session().status === 'live',
+        tick: keepAlive,
+      })
+    },
+  )
   const visibleConsoleEntries = () =>
     hasEvidence() ? filterConsoleEntries(liveConsoleEntries(), consoleFilter()) : liveConsoleEntries()
   const controlsDisabled = () => !isLive() || props.browserBusy || wsActionPending() || !session().sessionId
@@ -651,23 +683,7 @@ export function BrowserChrome(props: {
       }))
     return [...session().consoleEntries, ...events].slice(-80)
   }
-  const liveNetworkEntries = () => {
-    const requestMethods = new Map<string, string>()
-    for (const event of devtoolsEvents()) {
-      if (event.name === 'Network.requestWillBeSent' && event.url && event.method) {
-        requestMethods.set(event.url, event.method)
-      }
-    }
-    const events = devtoolsEvents()
-      .filter((event) => event.name === 'Network.responseReceived' && event.url)
-      .map((event) => ({
-        content_type: null,
-        method: event.url ? requestMethods.get(event.url) ?? 'GET' : 'GET',
-        status: event.status ?? 0,
-        url: event.url ?? '',
-      }))
-    return [...session().networkEntries, ...events].slice(-120)
-  }
+  const liveNetworkEntries = () => liveNetworkRows(session().networkEntries, devtoolsEvents())
 
   const togglePanel = (panel: BrowserChromePanel) => setChrome((state) => toggleBrowserChromePanel(state, panel))
   const togglePopover = (popover: BrowserChromePopover) =>
