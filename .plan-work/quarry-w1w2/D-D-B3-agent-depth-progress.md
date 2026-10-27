@@ -18,3 +18,4 @@ Test commands (all through qtest) and results:
 - cargo test -p quarry-edge --test agent_run_control: 35 passed; agent_events_replay 7; attach_cobrowse 4; run_sweeper_integration 26; sse_stream 1
 - cargo check --workspace --all-targets: see end of file
 Uncommitted strays that are not mine: lib.rs, main.rs, fixture_site.rs, step_receipts.rs, observation.rs observe_after hunk (challenge unit).
+- cargo check --workspace --all-targets (qtest): rc 0 on the second run (the first run hit another unit's mid-edit tests/web_policy_routes.rs syntax error).
