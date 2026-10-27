@@ -1,6 +1,7 @@
 {
   "_comment": "Routes the edge registers that docs/openapi.yaml does not describe, each with the reason. A new route must be documented or added here with a reason; an entry that becomes documented or stops existing must be removed (scripts/tests/openapi-route-coverage.test.mjs).",
-  "route_registrations": 86,
+  "route_registrations": 108,
+  "route_registrations_note": "Re-pinned by D-B3-openapi-sdk (D2-003) from 86 to 108: the W2 .route(...) registrations are documented or allowlisted; three internal routes were added and six documented routes removed from the allowlist.",
   "routes": [
     {
       "path": "/graphql",
@@ -24,14 +25,6 @@
     },
     {
       "path": "/v1/agent/runs/{}/browser-session/timeline",
-      "reason": "Browser session surface used by the Verevon browser and the Model Plane; its contract lives in docs/CONTRACTS.md and is documented with the browser slices (WS8, WS9)."
-    },
-    {
-      "path": "/v1/agent/runs/{}/devtools",
-      "reason": "Browser session surface used by the Verevon browser and the Model Plane; its contract lives in docs/CONTRACTS.md and is documented with the browser slices (WS8, WS9)."
-    },
-    {
-      "path": "/v1/agent/runs/{}/events/stream",
       "reason": "Browser session surface used by the Verevon browser and the Model Plane; its contract lives in docs/CONTRACTS.md and is documented with the browser slices (WS8, WS9)."
     },
     {
@@ -83,6 +76,10 @@
       "reason": "Internal route on the trusted inter-plane bus; never part of the public API."
     },
     {
+      "path": "/v1/internal/orgs/{}/profiles",
+      "reason": "Internal route on the trusted inter-plane bus; never part of the public API."
+    },
+    {
       "path": "/v1/internal/page-images/{}/{}/{}/{}",
       "reason": "Internal route on the trusted inter-plane bus; never part of the public API."
     },
@@ -95,24 +92,16 @@
       "reason": "Internal route on the trusted inter-plane bus; never part of the public API."
     },
     {
+      "path": "/v1/internal/queues/{}/enqueue_batch",
+      "reason": "Internal route on the trusted inter-plane bus; never part of the public API."
+    },
+    {
       "path": "/v1/internal/queues/{}/pop",
       "reason": "Internal route on the trusted inter-plane bus; never part of the public API."
     },
     {
-      "path": "/v1/profiles",
-      "reason": "Browser profile store used by the browser workspace; documented with the browser workspace contract."
-    },
-    {
-      "path": "/v1/profiles/create",
-      "reason": "Browser profile store used by the browser workspace; documented with the browser workspace contract."
-    },
-    {
-      "path": "/v1/profiles/{}",
-      "reason": "Browser profile store used by the browser workspace; documented with the browser workspace contract."
-    },
-    {
-      "path": "/v1/profiles/{}/restore_probe",
-      "reason": "Browser profile store used by the browser workspace; documented with the browser workspace contract."
+      "path": "/v1/internal/schedules/preflight",
+      "reason": "Internal route on the trusted inter-plane bus; never part of the public API."
     },
     {
       "path": "/v1/search/images",
