@@ -22,6 +22,11 @@
 //!    them. If the gateway restarts mid-run the orchestrator restarts
 //!    the run from its Temporal checkpoint, which re-creates them.
 //!
+//! The plan-mode bullet has one exception: the plan-mode rung grant has a durable carrier
+//! in Session Core behind `MODEL_GATEWAY_DURABLE_PLAN_GRANT` (see [`DURABLE_PLAN_GRANT_ENV`]),
+//! default off. With that switch on, a recorded grant survives a gateway restart, and every
+//! run start on any replica reads it from Session Core.
+//!
 //! Promote to postgres if either invariant ever stops holding.
 
 // tonic::Status is the unavoidable large Err for gRPC handlers; boxing breaks the service-trait contract.
@@ -78,12 +83,17 @@ pub struct PlanModeStore {
     /// RunAgentRequest reads it back" — no such read existed anywhere, so the
     /// per-call rung gate could never refuse anything.
     ///
-    /// In-memory, so a gateway restart drops the grant and the next run falls
-    /// back to UNSPECIFIED (no graded constraint — today's behaviour for every
-    /// run). That is fail-open for the graded ladder and is accepted ONLY
-    /// because the durable posture gates (plan mode, risky-call approvals)
-    /// are unaffected; the durable thread-scoped carrier belongs in
-    /// session-core and is recorded as follow-up in the decisions ledger.
+    /// With the durable grant switch off (the default) this map is the grant store, in
+    /// memory: a gateway restart drops the grant and the next run falls back to
+    /// UNSPECIFIED (no graded constraint — today's behaviour for every run). That is
+    /// fail-open for the graded ladder and is accepted ONLY because the durable posture
+    /// gates (plan mode, risky-call approvals) are unaffected.
+    ///
+    /// The durable carrier exists (WS04-S4: the `threads` columns of migration 0050, read
+    /// through `ThreadAutonomy`). With the switch on, this map holds only the grant an
+    /// approval taken on this replica could not record in Session Core, read through
+    /// sse.rs `with_local_fallback`. Its removal is deferred (WS04-S9, register D1-672)
+    /// until the switch has been on for one release.
     grants: Arc<DashMap<String, GrantEntry>>,
     /// Whether an execute turn (`execute_granted`, WS14 S2a "run the approved plan") may
     /// run on this gateway. Decided once, when the store is built from the process
@@ -102,8 +112,9 @@ pub struct PlanModeStore {
     /// Whether plan grants live in Session Core instead of this store's memory (build plan
     /// WS04 S4, [`DURABLE_PLAN_GRANT_ENV`]). Decided once, with the store, so the approval
     /// that writes a grant and the run start that reads it can never disagree about where
-    /// it is. With it on this store's `grants` half is not read and not written; with it off
-    /// (the default) every path is the in-memory one it always was.
+    /// it is. With it on, the grant is recorded in and read from Session Core, and this store's
+    /// `grants` half holds only the fallback copy described there; with it off (the default)
+    /// every path is the in-memory one it always was.
     durable_grant_enabled: bool,
     /// The reader of the durable grants (`ThreadAutonomy` on Session Core's endpoint). Held
     /// here, beside the switch it serves, so the two travel together. `None` while the switch
