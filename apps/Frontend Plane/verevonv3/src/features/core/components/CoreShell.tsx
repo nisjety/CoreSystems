@@ -18,6 +18,7 @@ import { CoreWorkspaceContext } from '@/features/core/lib/workspace-context'
 import { getNavbarData, type NavbarPayload } from '@/shared/api/navbar-client'
 import { getDeletionStatus } from '@/shared/api/org-deletion-client'
 import { getSession, type SessionState } from '@/shared/session/session-store'
+import { RegionBoundary } from '@/shared/ui/resilience/RegionBoundary'
 
 /** Extra height the fixed org-deletion banner (Flow C) occupies below the
  * navbar — added to `--dashboard-navbar-height` so `.core-main`'s top
@@ -99,16 +100,18 @@ export function CoreShell(props: { children?: JSX.Element }) {
           '--verevon-sidebar-accent': workspace().accentColor || undefined,
         }}
       >
-        <CoreNavbar
-          activeRoute={activeRoute()}
-          navbarData={navbarData.latest ?? navbarData()}
-          onNavbarRefresh={() => void refetchNavbar()}
-          searchOpen={searchOpen()}
-          onSearchOpenChange={setSearchOpen}
-          workspace={workspace()}
-          sidebarExpanded={sidebarExpanded()}
-          onSidebarToggle={() => setSidebarExpanded((expanded) => !expanded)}
-        />
+        <RegionBoundary region="navbar" compact>
+          <CoreNavbar
+            activeRoute={activeRoute()}
+            navbarData={navbarData.latest ?? navbarData()}
+            onNavbarRefresh={() => void refetchNavbar()}
+            searchOpen={searchOpen()}
+            onSearchOpenChange={setSearchOpen}
+            workspace={workspace()}
+            sidebarExpanded={sidebarExpanded()}
+            onSidebarToggle={() => setSidebarExpanded((expanded) => !expanded)}
+          />
+        </RegionBoundary>
         <Show when={deletionBannerVisible()}>
           <OrgDeletionBanner
             status={deletionStatus.latest ?? deletionStatus()}
@@ -118,17 +121,21 @@ export function CoreShell(props: { children?: JSX.Element }) {
         <Show when={chatAppearanceActive('navigation') && sidebarExpanded()}>
           <button type="button" class="core-sidebar-mobile-scrim" aria-label="Close navigation" onClick={() => setSidebarExpanded(false)} />
         </Show>
-        <CoreSidebar
-          activeRoute={activeRoute()}
-          expanded={sidebarExpanded()}
-          expandedWidth={expandedSidebarWidth()}
-          onExpandedChange={setSidebarExpanded}
-          onOpenSearch={() => setSearchOpen(true)}
-        />
+        <RegionBoundary region="sidebar" compact>
+          <CoreSidebar
+            activeRoute={activeRoute()}
+            expanded={sidebarExpanded()}
+            expandedWidth={expandedSidebarWidth()}
+            onExpandedChange={setSidebarExpanded}
+            onOpenSearch={() => setSearchOpen(true)}
+          />
+        </RegionBoundary>
         <main class="core-main">
           <div class="verevon-workspace-panel dashboard-main-panel core-main__panel">
             <CoreWorkspaceContext value={workspace}>
-              {props.children}
+              <RegionBoundary region="outlet" resetKey={() => location.pathname}>
+                {props.children}
+              </RegionBoundary>
             </CoreWorkspaceContext>
           </div>
         </main>

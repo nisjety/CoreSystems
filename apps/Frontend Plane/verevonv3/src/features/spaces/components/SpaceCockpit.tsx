@@ -2,6 +2,7 @@ import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 
 import { useI18n } from '@/shared/i18n'
+import { RegionBoundary } from '@/shared/ui/resilience/RegionBoundary'
 
 /**
  * The Space cockpit shell: the six tabs the adoption plan specifies
@@ -244,7 +245,9 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
                   </div>
                 }
               >
-                {content()}
+                <RegionBoundary region="space-tab" resetKey={active} compact>
+                  {content()}
+                </RegionBoundary>
               </Show>
             </section>
           )
