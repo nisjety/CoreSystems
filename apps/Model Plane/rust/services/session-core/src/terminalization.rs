@@ -390,9 +390,8 @@ fn validate_managed_start_request(
     }
     if zdr {
         if !request.thread_id.is_empty() {
-            return Err(Status::failed_precondition(
-                "ZDR managed runs require a fresh metadata-only thread",
-            ));
+            return Err(mp_contracts::zdr_refusal::Refusal::feature_not_supported("agent_run")
+                .grpc_status(tonic::Code::FailedPrecondition));
         }
         return Ok(source);
     }
@@ -1660,9 +1659,8 @@ pub(crate) async fn complete_direct_run_with_message_inner(
     // from the user's verified credential, not the service credential's (see
     // `authorize_direct_completion`).
     if completion.zdr {
-        return Err(Status::failed_precondition(
-            "a zero-retention run has no durable assistant message",
-        ));
+        return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+            .grpc_status(tonic::Code::FailedPrecondition));
     }
     // The answer's memories are mirrored under the run's receipt. A waived run's
     // memories stay local: they never reach the external memory service (Z-17).

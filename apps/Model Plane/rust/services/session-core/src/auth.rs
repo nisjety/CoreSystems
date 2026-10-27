@@ -275,9 +275,8 @@ pub fn identity<T>(request: &Request<T>) -> Result<VerifiedIdentity, Status> {
 #[allow(clippy::result_large_err)]
 pub fn authorize_operation(caller: &VerifiedIdentity, service_scope: &str) -> Result<(), Status> {
     if caller.zdr() && !service_scope.ends_with(":read") {
-        return Err(Status::failed_precondition(
-            "ZDR credentials cannot access durable session writes",
-        ));
+        return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+            .grpc_status(tonic::Code::FailedPrecondition));
     }
     if caller.is_service() {
         caller.require_service_scope(service_scope)
@@ -326,9 +325,8 @@ pub const SPACE_DELETION_SERVICE: &str = "service:control-space-deletion";
 #[allow(clippy::result_large_err)]
 pub fn authorize_space_deletion_service(caller: &VerifiedIdentity) -> Result<(), Status> {
     if caller.zdr() {
-        return Err(Status::failed_precondition(
-            "ZDR credentials cannot access durable session writes",
-        ));
+        return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+            .grpc_status(tonic::Code::FailedPrecondition));
     }
     if !caller.is_service() || caller.principal_id() != SPACE_DELETION_SERVICE {
         return Err(Status::permission_denied(
@@ -359,9 +357,8 @@ pub const SCHEDULED_STEP_SERVICE: &str = "service:execution-core";
 #[allow(clippy::result_large_err)]
 pub fn authorize_scheduled_step_service(caller: &VerifiedIdentity) -> Result<(), Status> {
     if caller.zdr() {
-        return Err(Status::failed_precondition(
-            "ZDR credentials cannot access durable scheduled-step receipts",
-        ));
+        return Err(mp_contracts::zdr_refusal::Refusal::feature_not_supported("scheduled_step")
+            .grpc_status(tonic::Code::FailedPrecondition));
     }
     if !caller.is_service() || caller.principal_id() != SCHEDULED_STEP_SERVICE {
         return Err(Status::permission_denied(
@@ -376,9 +373,8 @@ pub fn authorize_scheduled_step_service(caller: &VerifiedIdentity) -> Result<(),
 #[allow(clippy::result_large_err)]
 pub fn authorize_run_action_authority_service(caller: &VerifiedIdentity) -> Result<(), Status> {
     if caller.zdr() {
-        return Err(Status::failed_precondition(
-            "ZDR credentials cannot resolve durable run action authority",
-        ));
+        return Err(mp_contracts::zdr_refusal::Refusal::feature_not_supported("agent_run")
+            .grpc_status(tonic::Code::FailedPrecondition));
     }
     if !caller.is_service() || caller.principal_id() != RUN_ACTION_AUTHORITY_SERVICE {
         return Err(Status::permission_denied(
@@ -394,9 +390,8 @@ pub fn authorize_run_action_authority_service(caller: &VerifiedIdentity) -> Resu
 #[allow(clippy::result_large_err)]
 pub fn authorize_scheduled_step_authority_service(caller: &VerifiedIdentity) -> Result<(), Status> {
     if caller.zdr() {
-        return Err(Status::failed_precondition(
-            "ZDR credentials cannot resolve durable scheduled-step authority",
-        ));
+        return Err(mp_contracts::zdr_refusal::Refusal::feature_not_supported("scheduled_step")
+            .grpc_status(tonic::Code::FailedPrecondition));
     }
     if !caller.is_service() || caller.principal_id() != RUN_ACTION_AUTHORITY_SERVICE {
         return Err(Status::permission_denied(
@@ -578,9 +573,8 @@ pub fn authorize_system_run_owner(caller: &VerifiedIdentity) -> Result<String, S
     // the invariant "a system run is durable" does not depend on the argument
     // string passed to a different function.
     if caller.zdr() {
-        return Err(Status::failed_precondition(
-            "ZDR credentials cannot own durable runs",
-        ));
+        return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+            .grpc_status(tonic::Code::FailedPrecondition));
     }
     caller.require_service_scope(SYSTEM_RUN_OWNER_SCOPE)?;
     let owner = caller.principal_id();
@@ -778,14 +772,14 @@ impl JwtVerifier {
         // Every bearer of one request agrees on zero retention AND on the
         // waiver: a waiver for one connection must never ride a grounding call
         // that the caller's own posture does not carry.
-        if delegated.org_id() != caller.org_id()
-            || delegated.user_id() != caller.user_id()
-            || delegated.zdr() != caller.zdr()
-            || delegated.zdr_waiver() != caller.zdr_waiver()
-        {
+        if delegated.org_id() != caller.org_id() || delegated.user_id() != caller.user_id() {
             return Err(Status::permission_denied(
-                "delegated Data Plane identity or retention posture does not match caller",
+                "delegated Data Plane identity does not match caller",
             ));
+        }
+        if delegated.zdr() != caller.zdr() || delegated.zdr_waiver() != caller.zdr_waiver() {
+            return Err(mp_contracts::zdr_refusal::Refusal::POSTURE_MISMATCH
+                .grpc_status(tonic::Code::PermissionDenied));
         }
         Ok(Some(DelegatedDataPlaneBearer(Arc::from(token))))
     }

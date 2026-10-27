@@ -116,9 +116,8 @@ fn authorize_memory_preflight(
 ) -> Result<(), Status> {
     caller.authorize_org(requested_org)?;
     if caller.zdr() {
-        return Err(Status::failed_precondition(
-            "ZDR credentials cannot access durable memory",
-        ));
+        return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+            .grpc_status(tonic::Code::FailedPrecondition));
     }
     if caller.is_service() {
         caller.require_service_scope(service_scope)?;
@@ -838,9 +837,8 @@ impl MemoryService for MemoryGrpc {
         // A new durable store, so a ZDR credential and a waived one (DEC-32) are
         // both refused before anything is written.
         if !matches!(MemoryRetention::of(&caller), MemoryRetention::Durable) {
-            return Err(Status::failed_precondition(
-                "ZDR credentials cannot change memory controls",
-            ));
+            return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                .grpc_status(tonic::Code::FailedPrecondition));
         }
         let state = match MemoryState::try_from(req.state) {
             Ok(MemoryState::On) => crate::memory_control::MemoryState::On,

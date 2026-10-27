@@ -1846,9 +1846,8 @@ async fn record_scheduled_run_result_inner(
         crate::retention_receipt::RetentionClass::from_storage(&retention_class),
         Some(crate::retention_receipt::RetentionClass::Persistent)
     ) {
-        return Err(Status::failed_precondition(
-            "a zero-retention or waived run has no durable scheduled result",
-        ));
+        return Err(mp_contracts::zdr_refusal::Refusal::feature_not_supported("scheduled_step")
+            .grpc_status(tonic::Code::FailedPrecondition));
     }
 
     let receipt: Option<(String, String, String, String, String, String)> = sqlx::query_as(
@@ -8667,9 +8666,8 @@ impl ManagedRunLifecycle for ManagedRunLifecycleService {
             let caller = identity(&request)?;
             let req = request.into_inner();
             if caller.zdr() {
-                return Err(Status::permission_denied(
-                    "a zero-retention run has no durable output",
-                ));
+                return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::PermissionDenied));
             }
             authorize_operation(&caller, "session:write")?;
             authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
@@ -18881,7 +18879,7 @@ mod direct_completion_db_tests {
         assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
         assert_eq!(
             refused.message(),
-            "a zero-retention run has no durable assistant message",
+            mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN.message(),
             "the run's own retention refuses it, not the credential's"
         );
         let zdr_messages: i64 =

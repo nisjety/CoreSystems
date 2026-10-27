@@ -244,9 +244,8 @@ impl MessageSearchGrpc {
         let recall = purpose == pb::SearchPurpose::Recall;
         if recall {
             if caller.zdr() {
-                return Err(Status::permission_denied(
-                    "recall is not available to zero-retention credentials",
-                ));
+                return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::PermissionDenied));
             }
             // Recall reads the owner's own unscoped threads. A Space read is never
             // widened to it, so a decision or a Space id here is a caller error.
