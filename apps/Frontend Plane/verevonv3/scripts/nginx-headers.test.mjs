@@ -89,3 +89,74 @@ test('the report-only header is emitted on error responses too', () => {
     .find((candidate) => candidate.startsWith('add_header Content-Security-Policy-Report-Only '))
   assert.ok(line?.endsWith(' always;'))
 })
+
+// WS07-S2: the build id file and the entry documents are never cached, and a
+// location that sets its own add_header must re-include the snippet (nginx drops
+// inherited add_header directives as soon as a location defines one).
+const SNIPPET_INCLUDE = 'include /etc/nginx/snippets/verevon-security-headers.conf;'
+const serverConf = readFileSync(join(here, '..', 'nginx.conf'), 'utf8')
+
+/** `{ match, body }` for every `location ... { ... }` block (none of them nest braces). */
+function locations() {
+  return [...serverConf.matchAll(/^\s*location\s+([^{]+?)\s*\{([^}]*)\}/gm)].map((found) => ({
+    match: found[1],
+    body: found[2],
+  }))
+}
+
+function location(match) {
+  const found = locations().find((candidate) => candidate.match === match)
+  assert.ok(found, `nginx.conf has no location ${match}`)
+  return found
+}
+
+test('every location that sets add_header also includes the security headers snippet', () => {
+  const withHeaders = locations().filter((candidate) => /\badd_header\b/.test(candidate.body))
+  assert.ok(withHeaders.length >= 5, 'expected the cache-control locations to be found')
+  for (const candidate of withHeaders) {
+    assert.ok(
+      candidate.body.includes(SNIPPET_INCLUDE),
+      `location ${candidate.match} sets add_header without the security headers snippet`,
+    )
+  }
+})
+
+test('the server block includes the snippet for locations without their own add_header', () => {
+  const serverLevel = serverConf.replace(/^\s*location\s+[^{]+\{[^}]*\}/gm, '')
+  assert.ok(serverLevel.includes(SNIPPET_INCLUDE))
+})
+
+test('/version.json is served as JSON, never cached, and never falls through to the SPA', () => {
+  const { body } = location('= /version.json')
+  assert.match(body, /default_type\s+application\/json;/)
+  assert.match(body, /add_header Cache-Control "no-store" always;/)
+  assert.match(body, /try_files \/version\.json =404;/)
+})
+
+test('/index.html and /boot-watchdog.js revalidate on every load', () => {
+  for (const match of ['= /index.html', '= /boot-watchdog.js']) {
+    const { body } = location(match)
+    assert.match(body, /add_header Cache-Control "no-cache" always;/, `${match} must be no-cache`)
+  }
+})
+
+test('the exact /boot-watchdog.js match precedes the one-year asset regex', () => {
+  const order = locations().map((candidate) => candidate.match)
+  assert.ok(order.indexOf('= /boot-watchdog.js') < order.findIndex((entry) => entry.startsWith('~*') && entry.includes('js')))
+})
+
+test('the snippet carries the five security headers and the CSP', () => {
+  for (const name of [
+    'X-Frame-Options',
+    'X-Content-Type-Options',
+    'Referrer-Policy',
+    'Permissions-Policy',
+    'Strict-Transport-Security',
+    'Content-Security-Policy',
+  ]) {
+    assert.ok(
+      conf.split(/\r?\n/).some((line) => line.startsWith(`add_header ${name} `) && line.endsWith(' always;')),
+      `snippet is missing ${name}`,
+    )
+  }
+})
