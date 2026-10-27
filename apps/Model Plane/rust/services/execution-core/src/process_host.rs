@@ -407,6 +407,10 @@ impl ProcessHost {
         program: &str,
         args: &[String],
     ) -> std::io::Result<SpawnedChild> {
+        // WS06-S7 spawn admission: bounded wait, transient "busy" refusal. Held
+        // for the spawn itself, not the process's lifetime (a background process
+        // would otherwise starve one-shot spawns; see the depth file).
+        let _permit = crate::executor::acquire_spawn_permit().await?;
         let scratch = scratch_dir(request.space_id, process_id);
         tokio::fs::create_dir_all(&scratch).await?;
         if let Some(staged) = &request.staged {

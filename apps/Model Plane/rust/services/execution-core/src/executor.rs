@@ -61,6 +61,113 @@ const _: () = assert!(DEFAULT_CODE_TIMEOUT_SECS > DEFAULT_EXEC_TIMEOUT_SECS);
 /// that straight into the step result (and the model's context).
 const MAX_OUTPUT_CHARS: usize = 64 * 1024;
 
+/// Per-stream byte ceiling while a child is still running (WS06-S7,
+/// `EXECUTION_SANDBOX_MAX_OUTPUT_BYTES`). Past it the child is killed, so a
+/// process printing gigabytes never grows execution-core's memory.
+const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+/// Process-wide spawn concurrency (`EXECUTION_SANDBOX_MAX_CONCURRENT`).
+const DEFAULT_MAX_CONCURRENT_SPAWNS: usize = 8;
+/// How long a spawn waits for a permit (`EXECUTION_SANDBOX_QUEUE_WAIT_MS`).
+const DEFAULT_QUEUE_WAIT_MS: u64 = 5000;
+
+/// Positive integer from an optional raw value; missing, unparseable or zero
+/// falls back to `default`. Pure, so it is unit-testable without env mutation.
+fn parse_positive(raw: Option<&str>, default: u64) -> u64 {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(default)
+}
+
+fn positive_from_env(var: &str, default: u64) -> u64 {
+    parse_positive(std::env::var(var).ok().as_deref(), default)
+}
+
+fn max_output_bytes() -> usize {
+    usize::try_from(positive_from_env(
+        "EXECUTION_SANDBOX_MAX_OUTPUT_BYTES",
+        DEFAULT_MAX_OUTPUT_BYTES as u64,
+    ))
+    .unwrap_or(DEFAULT_MAX_OUTPUT_BYTES)
+}
+
+/// The process-wide spawn gate. Built once from the environment.
+fn spawn_gate() -> &'static (std::sync::Arc<tokio::sync::Semaphore>, Duration) {
+    static GATE: std::sync::OnceLock<(std::sync::Arc<tokio::sync::Semaphore>, Duration)> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| {
+        let permits = usize::try_from(positive_from_env(
+            "EXECUTION_SANDBOX_MAX_CONCURRENT",
+            DEFAULT_MAX_CONCURRENT_SPAWNS as u64,
+        ))
+        .unwrap_or(DEFAULT_MAX_CONCURRENT_SPAWNS)
+        .min(tokio::sync::Semaphore::MAX_PERMITS);
+        let wait = Duration::from_millis(positive_from_env(
+            "EXECUTION_SANDBOX_QUEUE_WAIT_MS",
+            DEFAULT_QUEUE_WAIT_MS,
+        ));
+        (std::sync::Arc::new(tokio::sync::Semaphore::new(permits)), wait)
+    })
+}
+
+/// Take a spawn permit before any sandboxed spawn (WS06-S7). Waits at most
+/// `EXECUTION_SANDBOX_QUEUE_WAIT_MS`; on timeout the spawn is refused with a
+/// transient "busy" error (`WouldBlock`) so the step can be retried later.
+///
+/// # Errors
+/// `WouldBlock` when no permit became free in time.
+pub(crate) async fn acquire_spawn_permit() -> std::io::Result<tokio::sync::OwnedSemaphorePermit> {
+    let (semaphore, wait) = spawn_gate();
+    match tokio::time::timeout(*wait, semaphore.clone().acquire_owned()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "sandbox is busy, retry later",
+        )),
+    }
+}
+
+/// Which stream tripped the output ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
+/// A resource ceiling a child hit and was killed for (WS06-S7 defines the
+/// output case; WS06-S8 adds the per-spawn rlimit classes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitHit {
+    /// A stream produced more than `limit_bytes` while the child ran.
+    Output {
+        stream: OutputStream,
+        limit_bytes: usize,
+    },
+}
+
+/// Read `reader` into `buf` until EOF or until more than `cap` bytes arrive.
+/// Returns true when the cap was exceeded (`buf` then holds exactly `cap`).
+/// `buf` is caller-owned so partial data survives if this future is dropped.
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+    buf: &mut Vec<u8>,
+    cap: usize,
+) -> std::io::Result<bool> {
+    use tokio::io::AsyncReadExt;
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok(false);
+        }
+        let room = cap.saturating_sub(buf.len());
+        if n > room {
+            buf.extend_from_slice(&chunk[..room]);
+            return Ok(true);
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
 /// Pure timeout resolution, split out from the environment read so the knob's
 /// semantics are unit-testable (env mutation is forbidden in this crate).
 /// A missing, unparseable, or zero value falls back to `default_secs`.
@@ -195,6 +302,9 @@ pub struct ExecOutcome {
     /// True if bubblewrap actually wrapped the process (Linux + `bwrap`
     /// present); false means it ran as a transparent passthrough.
     pub sandboxed: bool,
+    /// Set when the child was killed for exceeding a resource ceiling
+    /// (WS06-S7: the per-stream output cap). `None` for a normal exit.
+    pub limit_hit: Option<LimitHit>,
 }
 
 /// Execute `program args` under `policy`, returning scrubbed output.
@@ -328,7 +438,49 @@ async fn spawn_capture(
     // `kill_on_drop` is what makes the timeout real: `timeout()` cancels by
     // DROPPING the output future, and without it the orphaned child keeps
     // running (and holding its sandbox) after we've already given up on it.
-    let output = tokio::time::timeout(timeout, command.kill_on_drop(true).output())
+    // WS06-S7: admission first (bounded wait, transient refusal), held until the
+    // child has been reaped.
+    let _permit = acquire_spawn_permit().await?;
+    let cap = max_output_bytes();
+    // Same stdio as `output()` (stdin closed, both streams piped), but read
+    // through a byte cap so a runaway child is killed instead of buffered.
+    command
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let run = async {
+        let mut child = command.spawn()?;
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let mut hit: Option<LimitHit> = None;
+        if let (Some(out_pipe), Some(err_pipe)) = (child.stdout.take(), child.stderr.take()) {
+            let mut out_f = Box::pin(read_capped(out_pipe, &mut stdout, cap));
+            let mut err_f = Box::pin(read_capped(err_pipe, &mut stderr, cap));
+            let (mut out_done, mut err_done) = (false, false);
+            while !(out_done && err_done) && hit.is_none() {
+                tokio::select! {
+                    r = &mut out_f, if !out_done => {
+                        out_done = true;
+                        if r? {
+                            hit = Some(LimitHit::Output { stream: OutputStream::Stdout, limit_bytes: cap });
+                        }
+                    }
+                    r = &mut err_f, if !err_done => {
+                        err_done = true;
+                        if r? {
+                            hit = Some(LimitHit::Output { stream: OutputStream::Stderr, limit_bytes: cap });
+                        }
+                    }
+                }
+            }
+        }
+        if hit.is_some() {
+            let _ = child.start_kill();
+        }
+        let status = child.wait().await?;
+        Ok::<_, std::io::Error>((stdout, stderr, status, hit))
+    };
+    let (stdout, stderr, status, limit_hit) = tokio::time::timeout(timeout, run)
         .await
         .map_err(|_elapsed| {
             std::io::Error::new(
@@ -340,10 +492,11 @@ async fn spawn_capture(
             )
         })??;
     Ok(ExecOutcome {
-        stdout: scrub_and_cap(&output.stdout),
-        stderr: scrub_and_cap(&output.stderr),
-        exit_code: output.status.code().unwrap_or(-1),
+        stdout: scrub_and_cap(&stdout),
+        stderr: scrub_and_cap(&stderr),
+        exit_code: status.code().unwrap_or(-1),
         sandboxed: cmd.sandboxed,
+        limit_hit,
     })
 }
 

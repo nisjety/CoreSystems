@@ -1178,6 +1178,17 @@ services:
     # sysctl `kernel.unprivileged_userns_clone=1` (host-level, not compose).
     security_opt:
       - seccomp=./seccomp-bwrap.json
+    # Container resource limits (WS06-S7). Starting values, calibrated by WS06-S10:
+    # the tmpfs /tmp (512m in production) counts against mem_limit, and the pids
+    # budget covers tokio's blocking pool (up to 512 threads) plus a fork-bomb margin.
+    mem_limit: ${EXECUTION_CORE_MEM_LIMIT:-3g}
+    memswap_limit: ${EXECUTION_CORE_MEM_LIMIT:-3g}
+    cpus: ${EXECUTION_CORE_CPUS:-3.0}
+    pids_limit: ${EXECUTION_CORE_PIDS_LIMIT:-1536}
+    ulimits:
+      nofile:
+        soft: 16384
+        hard: 16384
     build:
       context: ..
       dockerfile: rust/services/execution-core/Dockerfile
@@ -1187,6 +1198,13 @@ services:
       - "127.0.0.1:9093:9093"   # gRPC compatibility probe; production overlay removes host ports
     environment:
       RUST_LOG: info
+      # Sandbox spawn bounds (WS06-S7). Per-stream output cap in bytes (the child is killed
+      # past it), process-wide concurrent sandbox spawns, and how long a spawn waits for a
+      # permit before the step fails "sandbox is busy, retry later". Invalid or zero values
+      # fall back to these defaults. Starting values, calibrated by WS06-S10.
+      EXECUTION_SANDBOX_MAX_OUTPUT_BYTES: ${EXECUTION_SANDBOX_MAX_OUTPUT_BYTES:-1048576}
+      EXECUTION_SANDBOX_MAX_CONCURRENT: ${EXECUTION_SANDBOX_MAX_CONCURRENT:-8}
+      EXECUTION_SANDBOX_QUEUE_WAIT_MS: ${EXECUTION_SANDBOX_QUEUE_WAIT_MS:-5000}
       # Build plan WS03 S2: raise Do-loop approvals as loop-owned (consumed once by
       # the durable loop through ConsumeApproval) instead of the cold delivery
       # worker's. OFF by default and never for ZDR runs. Stage 1 `/continue` is
