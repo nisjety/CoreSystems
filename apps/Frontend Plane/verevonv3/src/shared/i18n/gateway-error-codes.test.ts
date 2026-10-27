@@ -36,7 +36,8 @@ function productionCode(path: string): string {
       if (line === '}') skipping = false
       continue
     }
-    if (/^mod [a-z_]*tests? \{$/.test(line)) {
+    // browser.rs writes its test module as `pub(crate) mod tests {`; the visibility is optional.
+    if (/^(?:pub(?:\([a-z]+\))? )?mod [a-z_]*tests? \{$/.test(line)) {
       skipping = true
       continue
     }

@@ -107,9 +107,10 @@ describe('browser error copy', () => {
   // copy in errors.ts (it is a code) or added to NOT_AN_ERROR_CODE (it is not). That is
   // the intended tripwire, not a false positive.
   const gatewayDomains = resolve(process.cwd(), 'apps/gateway/src/domains')
-  // Line endings are normalised first: a Windows checkout of the .rs files may be CRLF.
+  // Line endings are normalised first: a Windows checkout of the .rs files may be CRLF. The test
+  // module may carry a visibility (browser.rs writes `pub(crate) mod tests {`), so it is matched too.
   const productionHalf = (file: string) =>
-    (readFileSync(resolve(gatewayDomains, file), 'utf8').replace(/\r\n/g, '\n').split(/^mod tests {/m)[0] ?? '')
+    (readFileSync(resolve(gatewayDomains, file), 'utf8').replace(/\r\n/g, '\n').split(/^(?:pub(?:\([a-z]+\))? )?mod tests \{/m)[0] ?? '')
   // The five shapes a handler names its code in: error("code", ..), a
   // (StatusCode, "code", "message") tuple, a snake_case literal on its own
   // line (a code in a multi-line call or a returned pair), a "code": "..." key
@@ -125,7 +126,27 @@ describe('browser error copy', () => {
   }
   // Snake-case literals the scan above meets that are not error codes. (The bot-wall
   // reasons the scrape handler lists are not codes either; they have BLOCK_REASON_COPY.)
-  const NOT_AN_ERROR_CODE = new Set<string>([])
+  // The first fifteen are capability names: browser_session_capabilities advertises them in a session's
+  // `capabilities` list, one per line. The last is a Quarry capacity reason that browser_capacity_response
+  // maps to browser_capacity_reached and never sends to the person.
+  const NOT_AN_ERROR_CODE = new Set<string>([
+    'hard_reload',
+    'click_point',
+    'mouse_wheel',
+    'wait_for',
+    'inspect_dom',
+    'control_state',
+    'human_takeover',
+    'agent_control',
+    'live_frame',
+    'live_frame_stream',
+    'devtools_events',
+    'screenshot_artifact',
+    'visual_observation',
+    'visual_change',
+    'persistent_profile',
+    'global_run_cap',
+  ])
 
   it('has copy for every code the gateway browser and scrape handlers emit', () => {
     const emitted = new Set<string>()
