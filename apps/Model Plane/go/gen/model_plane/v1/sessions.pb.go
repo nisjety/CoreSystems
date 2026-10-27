@@ -601,8 +601,14 @@ type AppendMessageRequest struct {
 	// derived from content, and never sent for a zero-retention turn (such a
 	// credential cannot append at all). Empty = no receipt, today's behaviour.
 	ClientMessageId string `protobuf:"bytes,18,opt,name=client_message_id,json=clientMessageId,proto3" json:"client_message_id,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// What kind of row this is in the room: "" and "turn" are today's
+	// conversation turn (the owner's prompt, the agent's answer); "post" is a
+	// human message written to the room and never sent to the agent. Posts are
+	// kept out of model context, agent memory and Dreaming (see
+	// ListConversationRequest.include_human_posts). Any other value is refused.
+	PostKind      string `protobuf:"bytes,19,opt,name=post_kind,json=postKind,proto3" json:"post_kind,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AppendMessageRequest) Reset() {
@@ -757,6 +763,13 @@ func (x *AppendMessageRequest) GetAgentName() string {
 func (x *AppendMessageRequest) GetClientMessageId() string {
 	if x != nil {
 		return x.ClientMessageId
+	}
+	return ""
+}
+
+func (x *AppendMessageRequest) GetPostKind() string {
+	if x != nil {
+		return x.PostKind
 	}
 	return ""
 }
@@ -3967,8 +3980,13 @@ type ListConversationRequest struct {
 	// must name a message in this thread that the caller may read; a foreign,
 	// hidden or unknown id is refused the same way.
 	BeforeMessageId string `protobuf:"bytes,7,opt,name=before_message_id,json=beforeMessageId,proto3" json:"before_message_id,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Human posts (post_kind "post") are filtered out of every read unless the
+	// caller sets this. False is the default so every caller, the model-callable
+	// reattach_context included, is contained without doing anything; only the
+	// UI transcript route opts in.
+	IncludeHumanPosts bool `protobuf:"varint,9,opt,name=include_human_posts,json=includeHumanPosts,proto3" json:"include_human_posts,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ListConversationRequest) Reset() {
@@ -4050,6 +4068,13 @@ func (x *ListConversationRequest) GetBeforeMessageId() string {
 	return ""
 }
 
+func (x *ListConversationRequest) GetIncludeHumanPosts() bool {
+	if x != nil {
+		return x.IncludeHumanPosts
+	}
+	return false
+}
+
 // One conversation turn. Named SessionMessage (not ThreadMessage, which the
 // gateway proto already defines in this package) to avoid a name collision.
 type SessionMessage struct {
@@ -4080,8 +4105,11 @@ type SessionMessage struct {
 	// agent_name) and on rows written before authorship was recorded. A reader
 	// must render an empty value as an unnamed author, never as itself.
 	AuthorSubjectId string `protobuf:"bytes,6,opt,name=author_subject_id,json=authorSubjectId,proto3" json:"author_subject_id,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// "turn" or "post" (see AppendMessageRequest.post_kind). Rows written before
+	// the column existed read as "turn".
+	PostKind      string `protobuf:"bytes,11,opt,name=post_kind,json=postKind,proto3" json:"post_kind,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SessionMessage) Reset() {
@@ -4152,6 +4180,13 @@ func (x *SessionMessage) GetMessageId() string {
 func (x *SessionMessage) GetAuthorSubjectId() string {
 	if x != nil {
 		return x.AuthorSubjectId
+	}
+	return ""
+}
+
+func (x *SessionMessage) GetPostKind() string {
+	if x != nil {
+		return x.PostKind
 	}
 	return ""
 }
@@ -4387,9 +4422,16 @@ type ThreadSummary struct {
 	// read/write RPCs above must.
 	PersonaEnabled bool `protobuf:"varint,14,opt,name=persona_enabled,json=personaEnabled,proto3" json:"persona_enabled,omitempty"`
 	// Set when the owner archived the thread; absent for an active thread.
-	ArchivedAt    *timestamppb.Timestamp `protobuf:"bytes,15,opt,name=archived_at,json=archivedAt,proto3" json:"archived_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ArchivedAt *timestamppb.Timestamp `protobuf:"bytes,15,opt,name=archived_at,json=archivedAt,proto3" json:"archived_at,omitempty"`
+	// Human replies in the thread: user rows after the first, counted under the
+	// same audience ceiling as the rest of the read so a count never reveals a
+	// row the reader could not open. Presentation only.
+	ReplyCount uint32 `protobuf:"varint,23,opt,name=reply_count,json=replyCount,proto3" json:"reply_count,omitempty"`
+	// Author subject of the latest human row the reader may see; empty when
+	// there is none. Presentation only, never a grant.
+	LastAuthorSubjectId string `protobuf:"bytes,24,opt,name=last_author_subject_id,json=lastAuthorSubjectId,proto3" json:"last_author_subject_id,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *ThreadSummary) Reset() {
@@ -4525,6 +4567,20 @@ func (x *ThreadSummary) GetArchivedAt() *timestamppb.Timestamp {
 		return x.ArchivedAt
 	}
 	return nil
+}
+
+func (x *ThreadSummary) GetReplyCount() uint32 {
+	if x != nil {
+		return x.ReplyCount
+	}
+	return 0
+}
+
+func (x *ThreadSummary) GetLastAuthorSubjectId() string {
+	if x != nil {
+		return x.LastAuthorSubjectId
+	}
+	return ""
 }
 
 type ListThreadsResponse struct {
@@ -7985,7 +8041,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x14CreateThreadResponse\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x129\n" +
 	"\n" +
-	"created_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xa3\x06\n" +
+	"created_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xc0\x06\n" +
 	"\x14AppendMessageRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x12\n" +
 	"\x04role\x18\x02 \x01(\tR\x04role\x12\x18\n" +
@@ -8006,7 +8062,8 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x0fidempotency_key\x18\x10 \x01(\tR\x0eidempotencyKey\x12\x1d\n" +
 	"\n" +
 	"agent_name\x18\x11 \x01(\tR\tagentName\x12*\n" +
-	"\x11client_message_id\x18\x12 \x01(\tR\x0fclientMessageId\"v\n" +
+	"\x11client_message_id\x18\x12 \x01(\tR\x0fclientMessageId\x12\x1b\n" +
+	"\tpost_kind\x18\x13 \x01(\tR\bpostKind\"v\n" +
 	"\x15AppendMessageResponse\x12\x1a\n" +
 	"\bsequence\x18\x01 \x01(\x04R\bsequence\x12\x1d\n" +
 	"\n" +
@@ -8262,7 +8319,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"updated_at\x18\x11 \x01(\tR\tupdatedAt\x12\x1a\n" +
 	"\brevision\x18\x12 \x01(\x03R\brevision\"M\n" +
 	"\x17ListAgentSkillsResponse\x122\n" +
-	"\x06skills\x18\x01 \x03(\v2\x1a.model_plane.v1.AgentSkillR\x06skills\"\x9c\x02\n" +
+	"\x06skills\x18\x01 \x03(\v2\x1a.model_plane.v1.AgentSkillR\x06skills\"\xcc\x02\n" +
 	"\x17ListConversationRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x19\n" +
@@ -8270,7 +8327,8 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x17space_read_decision_ref\x18\x04 \x01(\tR\x14spaceReadDecisionRef\x129\n" +
 	"\x19space_read_decision_token\x18\x05 \x01(\tR\x16spaceReadDecisionToken\x12\x14\n" +
 	"\x05limit\x18\x06 \x01(\rR\x05limit\x12*\n" +
-	"\x11before_message_id\x18\a \x01(\tR\x0fbeforeMessageId\"\xdd\x01\n" +
+	"\x11before_message_id\x18\a \x01(\tR\x0fbeforeMessageId\x12.\n" +
+	"\x13include_human_posts\x18\t \x01(\bR\x11includeHumanPosts\"\xfa\x01\n" +
 	"\x0eSessionMessage\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12\x1d\n" +
@@ -8279,7 +8337,8 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\bmetadata\x18\x04 \x01(\v2\x17.google.protobuf.StructR\bmetadata\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x05 \x01(\tR\tmessageId\x12*\n" +
-	"\x11author_subject_id\x18\x06 \x01(\tR\x0fauthorSubjectId\"q\n" +
+	"\x11author_subject_id\x18\x06 \x01(\tR\x0fauthorSubjectId\x12\x1b\n" +
+	"\tpost_kind\x18\v \x01(\tR\bpostKind\"q\n" +
 	"\x18ListConversationResponse\x12:\n" +
 	"\bmessages\x18\x01 \x03(\v2\x1e.model_plane.v1.SessionMessageR\bmessages\x12\x19\n" +
 	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"\xef\x02\n" +
@@ -8294,7 +8353,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x06cursor\x18\b \x01(\tR\x06cursor\x12\x1b\n" +
 	"\tthread_id\x18\t \x01(\tR\bthreadId\x129\n" +
 	"\barchived\x18\n" +
-	" \x01(\x0e2\x1d.model_plane.v1.ArchiveFilterR\barchived\"\xed\x04\n" +
+	" \x01(\x0e2\x1d.model_plane.v1.ArchiveFilterR\barchived\"\xc3\x05\n" +
 	"\rThreadSummary\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x1f\n" +
 	"\vsession_key\x18\x02 \x01(\tR\n" +
@@ -8315,7 +8374,10 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x10owner_subject_id\x18\r \x01(\tR\x0eownerSubjectId\x12'\n" +
 	"\x0fpersona_enabled\x18\x0e \x01(\bR\x0epersonaEnabled\x12;\n" +
 	"\varchived_at\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"archivedAt\"o\n" +
+	"archivedAt\x12\x1f\n" +
+	"\vreply_count\x18\x17 \x01(\rR\n" +
+	"replyCount\x123\n" +
+	"\x16last_author_subject_id\x18\x18 \x01(\tR\x13lastAuthorSubjectId\"o\n" +
 	"\x13ListThreadsResponse\x127\n" +
 	"\athreads\x18\x01 \x03(\v2\x1d.model_plane.v1.ThreadSummaryR\athreads\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\tR\n" +
