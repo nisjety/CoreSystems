@@ -162,6 +162,15 @@ GOLDENS=(
   # in "apps/Control Plane/user-core"), never written by hand; the .sha256 pin beside it is written with it.
   # The gateway's typed mapping and the SPA presenter vendor it in their own slices (WS03-S5, WS03-S7).
   "apps/Control Plane/user-core/internal/spaces/testdata/space-denial-codes.golden.json|8d1f1b0ab93bfbde4cc60d2cd560fc5df03d85b7bf7a9e318c3414d9533883fe"
+
+  # WS06-S4: the Space surface registry (one row per route, event subject, index, cache key family,
+  # notification type and preview, each with its ZDR class). AUTHORED by hand, in the same change as
+  # the surface it names (WS01, WS04, WS09, WS10 register their rows in their own PRs); the .sha256
+  # pin beside it carries the same digest. Completeness lints: model-gateway `cargo test -p
+  # model-gateway zdr_posture` (every non-GET route has a row) and the gateway
+  # tests/space_routes_zdr_classes.rs (every /api/v1/spaces route has a row). The consumers vendor a
+  # copy, with the pin, in the same slice as those lints (VENDORED and CONSUMERS rows then).
+  "apps/Model Plane/api/contracts/space-surface.v1.json|3a941eed3e5c9ce403545dcf079f7da36216fcf98890f9ad8d814d4c0cba9fb2"
 )
 
 # "<repo-relative copy>|<repo-relative golden>"
