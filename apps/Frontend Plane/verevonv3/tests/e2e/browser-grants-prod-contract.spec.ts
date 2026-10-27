@@ -292,9 +292,9 @@ test.describe('SC1 production-mode browser grants (L2)', () => {
       seen('session', created.status(), errorMessage(body))
       try {
         expect(created.status(), JSON.stringify(body).slice(0, 300)).toBe(200)
-        expect(String(body.data?.sessionId ?? body.data?.id ?? '')).not.toEqual('')
+        expect(String(body.data?.session?.id ?? body.data?.sessionId ?? body.data?.id ?? '')).not.toEqual('')
       } finally {
-        const id = String(body.data?.sessionId ?? body.data?.id ?? '')
+        const id = String(body.data?.session?.id ?? body.data?.sessionId ?? body.data?.id ?? '')
         if (id) await request.delete(`/api/v1/browser/sessions/${encodeURIComponent(id)}`).catch(() => undefined)
       }
     })
@@ -308,14 +308,14 @@ test.describe('SC1 production-mode browser grants (L2)', () => {
         data: { url: ALLOWED_URL },
       })
       const session = await safeJson(created)
-      const sessionId = String(session.data?.sessionId ?? session.data?.id ?? '')
+      const sessionId = String(session.data?.session?.id ?? session.data?.sessionId ?? session.data?.id ?? '')
       seen('session', created.status(), errorMessage(session))
       expect(created.status(), 'the session must be created for the AI run').toBe(200)
       expect(sessionId, 'the session must exist for the AI run').not.toEqual('')
       try {
         const run = await request.post(`/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/ai-runs`, {
           headers: { 'content-type': 'application/json', origin: LOCAL_ORIGIN },
-          data: { goal: 'Open example.com and read its title.', allowed_domains: [ALLOWED_HOST], max_steps: 3 },
+          data: { goal: 'Open example.com and read its title.', allowedDomains: [ALLOWED_HOST], maxSteps: 3 },
         })
         const runBody = await safeJson(run)
         seen('run', run.status(), errorMessage(runBody))
