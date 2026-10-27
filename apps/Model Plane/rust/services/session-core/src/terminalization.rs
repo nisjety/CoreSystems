@@ -800,6 +800,12 @@ pub(crate) async fn start_managed_run_with_retention_inner(
     } else {
         persisted.thread_id.clone()
     };
+    // One live root run per Space thread (WS09-S1). After the idempotent branch
+    // above, so a replay of the same start key is never refused; skipped for a
+    // child run and for the metadata thread a ZDR start creates.
+    if persisted.parent_run_id.is_empty() && !persisted.create_metadata_thread {
+        crate::run_phase::ensure_thread_idle(&mut transaction, &request.org_id, &thread_id).await?;
+    }
     let run_id = new_ulid();
     insert_managed_run_started(
         &mut transaction,

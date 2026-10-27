@@ -1755,6 +1755,14 @@ pub async fn invoke_stream_sse(
     {
         Ok(run) => run,
         Err(error) => {
+            if crate::session_flow::thread_run_active(&error) {
+                return error_stream(
+                    &request_id,
+                    crate::session_flow::THREAD_RUN_ACTIVE_CODE,
+                    "This thread already has an agent run in progress. Try again when it finishes.",
+                    true,
+                );
+            }
             tracing::warn!(%error, request_id = %request_id, "session-core managed start failed");
             return error_stream(
                 &request_id,

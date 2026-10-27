@@ -19,6 +19,7 @@ services:
     environment:
       RUST_LOG: debug
       COMPACTION_THRESHOLD: "200000"
+      SPACE_RUN_THREAD_GUARD: "true"
 
   inference-core:
     environment:

@@ -1236,6 +1236,27 @@ pub(crate) fn session_error_code(error: &anyhow::Error) -> String {
     )
 }
 
+/// Wire code of a start refused because the Space thread already has a live root
+/// run (WS09-S1). Session Core sets it on the `x-mp-error-code` trailer of an
+/// `Aborted` status; the two services share no crate, so both spell it out.
+pub(crate) const THREAD_RUN_ACTIVE_CODE: &str = "thread_run_active";
+
+/// Whether a Session Core failure is the typed `thread_run_active` refusal: an
+/// `Aborted` status whose `x-mp-error-code` trailer is [`THREAD_RUN_ACTIVE_CODE`].
+/// Looks at every layer of the error chain; the status text is never consulted.
+pub(crate) fn thread_run_active(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<tonic::Status>().is_some_and(|status| {
+            status.code() == Code::Aborted
+                && status
+                    .metadata()
+                    .get("x-mp-error-code")
+                    .and_then(|value| value.to_str().ok())
+                    == Some(THREAD_RUN_ACTIVE_CODE)
+        })
+    })
+}
+
 /// One attempt of `CompleteDirectRunWithMessage` with the Gateway's own
 /// terminalization credential, the one `RecordTerminalOutcome` uses.
 async fn complete_direct_run_rpc(

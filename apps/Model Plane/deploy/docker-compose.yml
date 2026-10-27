@@ -832,6 +832,9 @@ services:
       # fail-closed, which is the intended unprovisioned-development state.
       CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
       CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
+      # One live root run per Space thread (WS09-S1): a second start is refused
+      # with thread_run_active. ON by default; `false` is the kill switch.
+      SPACE_RUN_THREAD_GUARD: ${SPACE_RUN_THREAD_GUARD:-true}
       # Dedicated short-lived service-principal credentials for the optional
       # session-core -> letta-bridge path. When LETTA_MEMORY_ADDR is non-empty,
       # session-core fails startup closed unless all three are configured.

@@ -7727,7 +7727,7 @@ impl SessionCore for SessionService {
                 bool,
                 Option<DateTime<Utc>>,
             )> = sqlx::query_as(
-                "WITH page AS (
+                concat!("WITH page AS (
                     SELECT t.id, t.session_key, t.created_at, t.presentation_title,
                            t.presentation_preview, t.pinned_at, t.last_activity_at, t.space_id,
                            t.origin, t.user_id, t.persona_enabled, t.archived_at
@@ -7779,13 +7779,13 @@ impl SessionCore for SessionService {
                     LIMIT 1
                  ) last_message ON TRUE
                  LEFT JOIN LATERAL (
-                    SELECT id, status, updated_at
-                    FROM runs
-                    WHERE thread_id = page.id
-                    ORDER BY updated_at DESC, created_at DESC, id DESC
+                    SELECT r.id, ", crate::run_phase::run_phase_sql!("r"), " AS status, r.updated_at
+                    FROM runs r
+                    WHERE r.thread_id = page.id
+                    ORDER BY r.updated_at DESC, r.created_at DESC, r.id DESC
                     LIMIT 1
                  ) latest_run ON TRUE
-                 ORDER BY (page.pinned_at IS NOT NULL) DESC, page.last_activity_at DESC, page.id DESC",
+                 ORDER BY (page.pinned_at IS NOT NULL) DESC, page.last_activity_at DESC, page.id DESC"),
             )
             .bind(&req.org_id)
             .bind(&req.user_id)

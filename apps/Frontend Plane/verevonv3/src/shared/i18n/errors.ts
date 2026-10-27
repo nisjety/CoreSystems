@@ -66,6 +66,7 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
 
   // Inbox / tickets / conversations
   thread_id_required: { no: 'Ingen samtale er valgt.', en: 'No conversation is selected.' },
+  thread_run_active: { no: 'Agenten jobber allerede i denne samtalen. Meldingen er lagt ut. Prøv igjen når den er ferdig.', en: 'An agent is already working in this conversation. Your message was posted. Try again when it finishes.' },
   conversation_membership_required: { no: 'Du har ikke tilgang til denne samtalen.', en: 'You do not have access to this conversation.' },
   conversation_upstream_target_rejected: { no: 'Meldingen kunne ikke sendes til mottakeren.', en: 'The message could not be delivered to the recipient.' },
   // A channel send is not a normal retry: the provider may have received it

@@ -380,12 +380,12 @@ fn unresolved_run_action_authority() -> pb::ResolveRunActionAuthorityResponse {
 /// highest `step_ordinal` recorded for the run (0 when none) and
 /// `checkpoint_index` is the run's checkpoint count, both via correlated
 /// sub-selects so a single round trip hydrates the whole `RunDetail`.
-const RUN_SELECT: &str = "SELECT
+const RUN_SELECT: &str = concat!("SELECT
         r.id,
         r.thread_id,
         r.parent_run_id,
         r.agent_id,
-        r.status,
+        ", crate::run_phase::run_phase_sql!("r"), " AS status,
         r.mode,
         r.goal,
         r.final_output,
@@ -418,7 +418,7 @@ const RUN_SELECT: &str = "SELECT
               AND ap.consumed_at IS NOT NULL
         ) END AS fold_pause_consumed
      FROM runs r
-     LEFT JOIN run_loop_checkpoints lc ON lc.run_id = r.id";
+     LEFT JOIN run_loop_checkpoints lc ON lc.run_id = r.id");
 
 /// Whether a durable loop fold is in a state a continuation can claim: paused for
 /// an approval, parked, or `resuming` under a lease that has lapsed. It mirrors
@@ -746,7 +746,7 @@ impl RunService for RunServiceImpl {
                 " AND NOT EXISTS (SELECT 1 FROM threads st \
                   WHERE st.id = r.thread_id AND COALESCE(st.space_id, '') <> '')",
             );
-            query.push_str(" AND ($3 = '' OR r.status = $3)");
+            query.push_str(concat!(" AND ($3 = '' OR ", crate::run_phase::run_phase_sql!("r"), " = $3)"));
             query.push_str(" AND ($4 = '' OR r.id < $4)");
             query.push_str(" ORDER BY r.id DESC LIMIT $5");
 
@@ -828,7 +828,7 @@ impl RunService for RunServiceImpl {
             } else {
                 query.push_str(" WHERE r.thread_id = $1");
             }
-            query.push_str(" AND ($2 = '' OR r.status = $2)");
+            query.push_str(concat!(" AND ($2 = '' OR ", crate::run_phase::run_phase_sql!("r"), " = $2)"));
             query.push_str(" AND ($3 = '' OR r.id < $3)");
             query.push_str(" ORDER BY r.id DESC LIMIT $4");
 

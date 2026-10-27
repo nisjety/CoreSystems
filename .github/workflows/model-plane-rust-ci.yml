@@ -197,6 +197,19 @@ jobs:
             echo "expected at least 18 loop checkpoint tests to run, got ${passed:-0}"
             exit 1
           fi
+      # WS09 S1: the honest run phase and the per-thread run guard against a
+      # migrated Postgres (two-member characterization, guard on and off, terminal,
+      # stale, child-run and non-Space cases). The count fails the job if the
+      # filter stops matching them.
+      - name: Run the run phase and thread run guard tests against a migrated database
+        run: |
+          set -euo pipefail
+          cargo test -p session-core --bin session-core run_phase -- --ignored --test-threads=1 2>&1 | tee run-phase-tests.log
+          passed=$(grep -oE "test result: ok\. [0-9]+ passed" run-phase-tests.log | grep -oE "[0-9]+" | head -1)
+          if [ -z "$passed" ] || [ "$passed" -lt 7 ]; then
+            echo "expected at least 7 run phase tests to run, got ${passed:-0}"
+            exit 1
+          fi
 
   # WS12 S11 (D11): an optional clippy warning-count ratchet. It never denies a
   # warning. It is off unless the repo variable MODEL_PLANE_CLIPPY_RATCHET is the
