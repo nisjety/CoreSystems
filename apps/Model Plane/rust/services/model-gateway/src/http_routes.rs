@@ -15346,3 +15346,62 @@ mod space_post_wire_tests {
         assert!(only_count.get("last_author_subject_id").is_none());
     }
 }
+
+#[cfg(test)]
+mod memory_withheld_json_tests {
+    use super::*;
+
+    fn summary(withheld_reason: &str, origin_space_ref: &str) -> MemorySummaryResponse {
+        MemorySummaryResponse {
+            memory_id: "mem-1".to_owned(),
+            topic: "USER".to_owned(),
+            content: "likes tea".to_owned(),
+            updated_at: "2026-10-27T12:00:00Z".to_owned(),
+            provenance: "unknown",
+            withheld_reason: withheld_reason.to_owned(),
+            origin_space_ref: origin_space_ref.to_owned(),
+        }
+    }
+
+    #[test]
+    fn memories_json_omits_withheld_fields_for_an_ordinary_row() {
+        let ordinary = serde_json::to_value(summary("", "")).expect("serialises");
+        assert!(ordinary.get("withheld_reason").is_none(), "{ordinary}");
+        assert!(ordinary.get("origin_space_ref").is_none(), "{ordinary}");
+        // The shape an older SPA reads is unchanged.
+        for key in ["memory_id", "topic", "content", "updated_at", "provenance"] {
+            assert!(ordinary.get(key).is_some(), "{key} must stay: {ordinary}");
+        }
+    }
+
+    #[test]
+    fn memories_json_carries_withheld_reason_and_origin_space_when_set() {
+        let withheld = serde_json::to_value(summary("room_origin_unverified", "space-room-1")).expect("serialises");
+        assert_eq!(withheld["withheld_reason"], "room_origin_unverified");
+        assert_eq!(withheld["origin_space_ref"], "space-room-1");
+    }
+
+    #[test]
+    fn memories_json_carries_each_withheld_field_independently() {
+        let only_reason = serde_json::to_value(summary("room_origin_unverified", "")).expect("serialises");
+        assert_eq!(only_reason["withheld_reason"], "room_origin_unverified");
+        assert!(only_reason.get("origin_space_ref").is_none());
+        let only_space = serde_json::to_value(summary("", "space-room-1")).expect("serialises");
+        assert!(only_space.get("withheld_reason").is_none());
+        assert_eq!(only_space["origin_space_ref"], "space-room-1");
+    }
+
+    #[test]
+    fn the_listing_envelope_still_serialises_with_withheld_rows_inside() {
+        let body = serde_json::to_value(ListMemoriesResponse {
+            memories: vec![summary("room_origin_unverified", "space-room-1"), summary("", "")],
+            degraded: false,
+            degradation_reason: String::new(),
+        })
+        .expect("serialises");
+        let rows = body["memories"].as_array().expect("array");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["withheld_reason"], "room_origin_unverified");
+        assert!(rows[1].get("withheld_reason").is_none());
+    }
+}

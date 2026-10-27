@@ -2234,4 +2234,57 @@ mod tests {
             Some(mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN)
         );
     }
+
+    mod space_containment_wire {
+        use super::*;
+        use crate::dreaming::{MemoryProvenance, MemorySearchRow};
+
+        fn row(origin_space_ref: &str, withheld_reason: &str) -> MemorySearchRow {
+            MemorySearchRow {
+                id: "mem-1".to_owned(),
+                thread_id: "thread-a".to_owned(),
+                topic: "USER".to_owned(),
+                content: "likes tea".to_owned(),
+                score: 0.5,
+                updated_at: DateTime::parse_from_rfc3339("2026-10-27T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                provenance: MemoryProvenance::Unknown,
+                origin_space_ref: origin_space_ref.to_owned(),
+                withheld_reason: withheld_reason.to_owned(),
+                exact_match: false,
+            }
+        }
+
+        /// WS17-S2: `pg_row_to_entry` carries both fields to the wire entry untouched.
+        #[test]
+        fn pg_row_to_entry_copies_origin_space_ref_and_withheld_reason() {
+            let withheld = pg_row_to_entry(
+                row("space-room-1", crate::space::memory_scope::WITHHELD_ROOM_ORIGIN),
+                "user-a",
+            );
+            assert_eq!(withheld.origin_space_ref, "space-room-1");
+            assert_eq!(withheld.withheld_reason, "room_origin_unverified");
+            assert_eq!(withheld.user_id, "user-a");
+            assert_eq!(withheld.memory_id, "mem-1");
+
+            let ordinary = pg_row_to_entry(row("", ""), "user-a");
+            assert_eq!(ordinary.origin_space_ref, "");
+            assert_eq!(ordinary.withheld_reason, "");
+        }
+
+        /// The merge keeps a withheld row's fields on its way out of the search path.
+        #[test]
+        fn merged_search_entries_keep_the_withheld_fields() {
+            let merged = merge_memory_search_results(
+                vec![row("space-room-1", crate::space::memory_scope::WITHHELD_ROOM_ORIGIN)],
+                "user-a",
+                Vec::new(),
+                10,
+            );
+            assert_eq!(merged.len(), 1);
+            assert_eq!(merged[0].withheld_reason, "room_origin_unverified");
+            assert_eq!(merged[0].origin_space_ref, "space-room-1");
+        }
+    }
 }

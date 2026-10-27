@@ -21073,3 +21073,7 @@ mod conversation_page_db_tests {
 #[cfg(test)]
 #[path = "grpc_space_w1_tests.rs"]
 pub(crate) mod space_w1_tests;
+
+#[cfg(test)]
+#[path = "grpc_space_memory_tests.rs"]
+mod space_memory_tests;

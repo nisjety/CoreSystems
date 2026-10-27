@@ -175,3 +175,7 @@ pub(crate) fn topic_writes_beyond_thread(topic: &str) -> bool {
 pub(crate) fn record_contained(op: &'static str) {
     metrics::counter!("mp_session_memory_contained_total", "op" => op).increment(1);
 }
+
+#[cfg(test)]
+#[path = "memory_scope_tests.rs"]
+mod tests;

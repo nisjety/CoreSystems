@@ -22,3 +22,38 @@ pub fn containment_enabled_from(value: Option<&str>) -> bool {
 pub fn containment_enabled() -> bool {
     containment_enabled_from(std::env::var(MEMORY_SPACE_CONTAINMENT_ENV).ok().as_deref())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn containment_is_off_only_for_exactly_zero_false_or_off() {
+        for off in ["0", "false", "off"] {
+            assert!(!containment_enabled_from(Some(off)), "{off} switches it off");
+        }
+    }
+
+    #[test]
+    fn the_off_words_are_case_and_whitespace_insensitive() {
+        for off in ["FALSE", "False", "OFF", "Off", " 0 ", "\tfalse\n", "  OFF  "] {
+            assert!(!containment_enabled_from(Some(off)), "{off:?} switches it off");
+        }
+    }
+
+    #[test]
+    fn everything_else_keeps_containment_on() {
+        assert!(containment_enabled_from(None), "unset is on");
+        for on in [
+            "", " ", "1", "true", "on", "yes", "enabled", "no", "disabled", "00", "0.0", "falsey",
+            "of", "offf", "off off", "-0",
+        ] {
+            assert!(containment_enabled_from(Some(on)), "{on:?} must keep containment on");
+        }
+    }
+
+    #[test]
+    fn the_variable_name_is_the_documented_one() {
+        assert_eq!(MEMORY_SPACE_CONTAINMENT_ENV, "MEMORY_SPACE_CONTAINMENT");
+    }
+}
