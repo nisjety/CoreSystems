@@ -1410,11 +1410,14 @@ pub(crate) async fn close_session(
         &user.user_id,
     )
     .await;
-    if !status.is_success() && status != StatusCode::NOT_FOUND {
-        return forward_quarry_failure(status, body);
-    }
+    // The grant is revoked whatever Quarry answered: a person who closed the
+    // session wants its authority gone, and a close that failed upstream must not
+    // leave the session and run grants live until their TTL (D1-020).
     if let Some(grant_id) = grant_id.as_deref() {
         revoke_session_grant(&state, &user, &headers, grant_id).await;
+    }
+    if !status.is_success() && status != StatusCode::NOT_FOUND {
+        return forward_quarry_failure(status, body);
     }
     (StatusCode::OK, Json(ok(json!({ "closed": true })))).into_response()
 }
@@ -7449,6 +7452,43 @@ pub(crate) mod tests {
                     .and_then(|v| v.to_str().ok()),
                 Some("Bearer test-plane-token-browser-broker")
             );
+        }
+
+        /// D1-020: a close Quarry fails (anything but 2xx or 404) still revokes the
+        /// session grant; the person still gets the failure.
+        #[tokio::test]
+        async fn a_close_that_quarry_fails_still_revokes_the_session_grant() {
+            let up = upstreams().await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/v1/agent/runs/run-1/browser-session"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    json!({ "data": owner_projection(Some(GRANT)) }),
+                ))
+                .mount(&up.quarry)
+                .await;
+            Mock::given(wm_method("DELETE"))
+                .and(wm_path("/v1/agent/runs/run-1"))
+                .respond_with(ResponseTemplate::new(500).set_body_json(
+                    json!({ "error": { "code": "INTERNAL", "message": "close failed" } }),
+                ))
+                .mount(&up.quarry)
+                .await;
+            Mock::given(wm_method("DELETE"))
+                .and(wm_path(format!("/v1/browser/grants/{GRANT}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "revoked": true })))
+                .mount(&up.model)
+                .await;
+            let response = close_session(
+                State(state(&up, BrowserGrantMode::Strict)),
+                Extension(test_user("user-a", "org-a")),
+                HeaderMap::new(),
+                Path("run-1".to_owned()),
+            )
+            .await;
+            assert_ne!(response.status(), StatusCode::OK, "the failure is still reported");
+            let revokes =
+                requests_to(&up.model, "DELETE", &format!("/v1/browser/grants/{GRANT}")).await;
+            assert_eq!(revokes.len(), 1, "the grant is revoked all the same");
         }
 
         async fn start_run_with(state: AppState, body: StartAiRunBody) -> (StatusCode, Value) {

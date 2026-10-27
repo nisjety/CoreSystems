@@ -4954,11 +4954,40 @@ pub(super) async fn dispatch_orchestration_cancel_run(
 // legacy gate in execution-core), so offering it as a working input would
 // misrepresent what this action actually does. maxCostUsd IS real and is
 // forwarded (see build_ai_run_request in browser.rs).
+/// The headers a `browser_run.start` action forwards: the caller's, with an
+/// `Idempotency-Key` added when they carry none. The key is the action
+/// envelope's own when it is usable, else a generated one, so a retry the gateway
+/// makes on its own (a keyring retry of the Model Gateway call) finds the run the
+/// first attempt made instead of starting a second one (D1-020). A key the caller
+/// sent in the header is left alone.
+fn run_start_headers(headers: &HeaderMap, envelope_key: &str) -> HeaderMap {
+    let mut forwarded = headers.clone();
+    if forwarded.contains_key("idempotency-key") {
+        return forwarded;
+    }
+    let trimmed = envelope_key.trim();
+    let usable = !trimmed.is_empty()
+        && trimmed.len() <= 128
+        && trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'));
+    let key = if usable {
+        trimmed.to_owned()
+    } else {
+        format!("act-{:032x}", rand::random::<u128>())
+    };
+    if let Ok(value) = axum::http::HeaderValue::from_str(&key) {
+        forwarded.insert("idempotency-key", value);
+    }
+    forwarded
+}
+
 pub(super) async fn dispatch_browser_run_start(
     state: &AppState,
     user: &AuthenticatedUser,
     headers: &HeaderMap,
     input: &Value,
+    idempotency_key: &str,
 ) -> Response {
     let session_id = ticket_string(input, "sessionId");
     let goal = ticket_string(input, "goal");
@@ -4995,7 +5024,7 @@ pub(super) async fn dispatch_browser_run_start(
     let response = start_browser_ai_run(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
-        headers.clone(),
+        run_start_headers(headers, idempotency_key),
         PathExtractor(session_id.to_owned()),
         Json(body),
     )
@@ -6149,6 +6178,37 @@ fn social_execution(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_browser_run_start_always_forwards_an_idempotency_key() {
+        // The caller's own header wins.
+        let mut own = HeaderMap::new();
+        own.insert("idempotency-key", "caller-key".parse().unwrap());
+        let forwarded = run_start_headers(&own, "envelope-key");
+        assert_eq!(forwarded.get("idempotency-key").unwrap(), "caller-key");
+        assert_eq!(forwarded.get_all("idempotency-key").iter().count(), 1);
+
+        // Otherwise the envelope's key, when it has the accepted shape.
+        let forwarded = run_start_headers(&HeaderMap::new(), "act-123:abc");
+        assert_eq!(forwarded.get("idempotency-key").unwrap(), "act-123:abc");
+
+        // Otherwise a generated one, which Model Gateway's key shape accepts.
+        for bad in ["", "  ", "has space", "semi;colon", &"x".repeat(129)] {
+            let forwarded = run_start_headers(&HeaderMap::new(), bad);
+            let key = forwarded
+                .get("idempotency-key")
+                .expect("a generated key")
+                .to_str()
+                .unwrap();
+            assert!(key.starts_with("act-") && key.len() <= 128, "{key}");
+            assert!(key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':')));
+        }
+        let first = run_start_headers(&HeaderMap::new(), "");
+        let second = run_start_headers(&HeaderMap::new(), "");
+        assert_ne!(first.get("idempotency-key"), second.get("idempotency-key"));
+    }
+
     use super::*;
 
     #[test]

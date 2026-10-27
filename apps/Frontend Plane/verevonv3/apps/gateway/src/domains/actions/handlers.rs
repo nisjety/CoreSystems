@@ -363,7 +363,8 @@ pub(super) async fn execute_action(
             dispatch_orchestration_cancel_run(&state, &user, &headers, &body.input).await
         }
         "browser_run.start" => {
-            dispatch_browser_run_start(&state, &user, &headers, &body.input).await
+            dispatch_browser_run_start(&state, &user, &headers, &body.input, &body.idempotency_key)
+                .await
         }
         "browser_run.control" => {
             dispatch_browser_run_control(&state, &user, &headers, &body.input).await
