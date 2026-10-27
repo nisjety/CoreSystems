@@ -66,12 +66,29 @@ test('the_request_keys_the_edge_reads_are_documented_too', () => {
   }
 });
 
+/** Every inline `enum: [...]` list under one property of a block, in document order. */
+function enumLists(block, property) {
+  const at = block.indexOf(`\n        ${property}:\n`);
+  assert.ok(at >= 0, `property ${property} not found`);
+  const after = block.slice(at + 1);
+  const next = after.slice(1).search(/\n        [A-Za-z_][A-Za-z0-9_]*:\s*\n/);
+  const section = next >= 0 ? after.slice(0, next + 1) : after;
+  return [...section.matchAll(/enum:\s*\[([^\]]*)\]/g)].map((match) => match[1].split(',').map((value) => value.trim()));
+}
+
 test('formats_and_extractor_enums_equal_the_rust_enums', () => {
   const block = component('ScrapeRequest');
-  const formatsDefs = schema.$defs.ScrapeFormat.oneOf?.map((entry) => entry.const) ?? schema.$defs.ScrapeFormat.enum;
+  // The golden's ScrapeFormat is an anyOf: a string enum of the bare names, and the capture object {type: screenshot | pdf}.
+  const members = schema.$defs.ScrapeFormat.anyOf ?? schema.$defs.ScrapeFormat.oneOf;
+  assert.ok(Array.isArray(members), 'ScrapeFormat is an anyOf (or oneOf) in the golden');
+  const bareNames = members.find((member) => Array.isArray(member.enum))?.enum;
+  const captureTypes = members.find((member) => member.properties?.type?.enum)?.properties.type.enum;
+  assert.ok(bareNames && captureTypes, 'ScrapeFormat has the bare names and the capture object');
   const extractorDefs = schema.$defs.Extractor.oneOf?.map((entry) => entry.const) ?? schema.$defs.Extractor.enum;
   // The wire spells rawHtml in camelCase and the type in snake_case (both are accepted).
-  assert.deepEqual(enumValues(block, 'formats').map(snake).sort(), [...formatsDefs].sort());
+  const [wireNames, wireCapture] = enumLists(block, 'formats');
+  assert.deepEqual(wireNames.map(snake).sort(), bareNames.map(snake).sort());
+  assert.deepEqual(wireCapture, captureTypes);
   assert.deepEqual(enumValues(block, 'extractor').map(snake).sort(), [...extractorDefs].sort());
 });
 
