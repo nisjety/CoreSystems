@@ -288,8 +288,12 @@ mod tests {
     #[test]
     fn require_claim_flag_defaults_off_and_parses_strictly() {
         assert!(!PolicyBaseline::from_lookup(|_| None).unwrap().requires_claim());
-        let on = |_: &str| Some("1".to_owned());
+        // Only the claim variable is set: a lookup that answered "1" for every name would
+        // also hand "1" to the enforcement variable, which is not a valid mode.
+        let on = |name: &str| (name == REQUIRE_CLAIM_ENV).then(|| "1".to_owned());
         assert!(PolicyBaseline::from_lookup(on).unwrap().requires_claim());
+        let off = |name: &str| (name == REQUIRE_CLAIM_ENV).then(|| "0".to_owned());
+        assert!(!PolicyBaseline::from_lookup(off).unwrap().requires_claim());
         assert!(PolicyBaseline::from_lookup(|name| (name == REQUIRE_CLAIM_ENV).then(|| "TRUE".to_owned()))
             .unwrap()
             .requires_claim());

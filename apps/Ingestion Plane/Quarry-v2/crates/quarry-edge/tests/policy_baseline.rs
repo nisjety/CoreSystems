@@ -124,7 +124,9 @@ fn enforce_denies_an_asked_domain_with_the_request_as_source() {
         .expect_err("enforce refuses the asked host");
     assert_eq!(error.code.http_status(), 403);
     let details = error.details.expect("the denial carries details");
-    assert_eq!(details["reason"], "policy_denied");
+    // A host refusal is the typed `domain_denied` (WS7.B closed reason set, build plan WS7.B),
+    // not the capability reason `policy_denied`; the edge adds the `domains.deny` capability.
+    assert_eq!(details["reason"], "domain_denied");
     assert_eq!(details["capability"], "domains.deny");
     assert_eq!(details["decision_source"], "request");
 

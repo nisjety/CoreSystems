@@ -100,7 +100,11 @@ async fn persistent_profile_is_allowed_when_nothing_disables_it() {
 #[tokio::test]
 async fn a_disabled_capability_is_refused_on_rest_step_and_consumes_nothing() {
     let edge = Edge::start(RunLimits::default()).await;
-    let person = member_token();
+    // `browser.act.interact` applies to an autonomous principal only (the catalogue's
+    // `applies_to`, WS7.B): a person clicking is not an agent clicking, so the same ask does
+    // not refuse a person's token (`human_principal_skips_autonomous_only_keys`). The
+    // autonomous caller here is the service principal that drives its own runs.
+    let person = service_token();
     let run = start_without_interaction(&edge, &person).await;
     let before = steps_taken(&edge, &run).await;
 
@@ -131,7 +135,11 @@ async fn a_disabled_capability_is_refused_on_rest_step_and_consumes_nothing() {
 #[tokio::test]
 async fn the_browser_socket_refuses_the_same_capability_through_the_same_gate() {
     let edge = Edge::start(RunLimits::default()).await;
-    let person = member_token();
+    // `browser.act.interact` applies to an autonomous principal only (the catalogue's
+    // `applies_to`, WS7.B): a person clicking is not an agent clicking, so the same ask does
+    // not refuse a person's token (`human_principal_skips_autonomous_only_keys`). The
+    // autonomous caller here is the service principal that drives its own runs.
+    let person = service_token();
     let run = start_without_interaction(&edge, &person).await;
     let before = steps_taken(&edge, &run).await;
 
