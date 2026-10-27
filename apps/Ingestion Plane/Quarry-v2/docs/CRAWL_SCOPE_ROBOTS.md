@@ -23,7 +23,7 @@ These are the approved defaults of the build plan (its open questions were appro
 
 - **Default scope (X-10, approved default).** Same host, with `www.` equivalence in both directions. Whole host (`crawl_entire_domain` is true). Page cap 1000. Existing crawls lose off-site pages when scope is enforced, so scope goes out in `observe` first.
 - **Page and depth bounds (WS6.A).** Absent or `0` takes the default: `QUARRY_CRAWL_DEFAULT_MAX_PAGES` (1000) and `QUARRY_CRAWL_DEFAULT_MAX_DEPTH` (5). Above the hard ceiling the value is clamped to `QUARRY_CRAWL_HARD_MAX_PAGES` (5000; the owner may still rule 10,000) and `QUARRY_CRAWL_HARD_MAX_DEPTH` (10). The plan's `QUARRY_EDGE__CRAWL_DEFAULT_MAX_PAGES` and `QUARRY_EDGE__CRAWL_MAX_PAGES_CAP` names are dropped.
-- **`max_pages: 0` (X-10).** Treated as absent in `lenient` mode. In `strict` mode it is a `400 invalid_option` (WS14.S6 and S8). The gateway keeps its existing `400` for `maxPages` of `0`. Test name for the pair: `crawl_request_zero_pages_is_default_in_lenient_and_400_in_strict`.
+- **`max_pages: 0` (X-10).** Treated as absent in `lenient` mode. In `strict` mode it is a `400 invalid_option` (WS14.S6 and S8). The gateway keeps its existing `400` for `maxPages` of `0`. Test name for the pair: `zero_pages_is_default_in_lenient_and_400_in_strict`.
 - **Robots when unreachable (X-10, ADR-5 / OQ-5).** Recommended default: `disallow` (RFC 9309 treats a 5xx or timeout on `/robots.txt` as "disallow all"). The enforce flip waits for X-10 and ADR-5 and for a soak. Flaky robots endpoints will stop crawls; that is the cost, and it is accepted only after the soak.
 - **Ignore-robots override (X-10, ADR-1 and OQ-11).** Only an audited Control Plane entitlement (`web.robots_override`, ceiling `robots.max_mode` with `strict < respect < ignore`, default `respect`). Grantor: platform operators (default), not org admins, unless OQ-11 is ruled otherwise. The audit event is written by quarry-control before the job is acknowledged, and the job fails closed if the audit write fails. WS14.S7 is gated on this and on a Control Plane credential PR. It is not built.
 - **ZDR (X-10, ADR-4).** Keep the refusal. Lifting it would touch five retention surfaces (control job `params`, Temporal history, the control event log, the Postgres frontier queue, checkpoints). The refusal text and status are unchanged (R-25).
@@ -42,7 +42,7 @@ These are the approved defaults of the build plan (its open questions were appro
 ## 4. Robots semantics (planned, WS14.S4)
 
 - Fetch `/robots.txt` for each origin over `https`, then `http` only if `https` fails. The fetch goes through the same SSRF guard and DNS pinning as page fetches. The current `ReqwestRobotsFetcher` is not used as written: it has no SSRF guard and fails open on 5xx and transport errors.
-- Status codes: 2xx parses the body. 404, 403 and 410 mean no rules (allow all). 5xx and timeouts are "unreachable" and follow `QUARRY_EDGE__CRAWL_ROBOTS_UNREACHABLE` (`disallow` by default).
+- Status codes: 2xx parses the body. 404, 403 and 410 mean no rules (allow all). 5xx and timeouts are "unreachable" and follow `QUARRY_EDGE__ROBOTS_UNREACHABLE` (`disallow` by default).
 - Group selection follows RFC 9309: the most specific user-agent group, then `*`. `Allow` and `Disallow` use longest-match.
 - `Crawl-delay` raises the per-host interval up to `QUARRY_CRAWL_DELAY_MAX_S` (10 s by default, ceiling 60 s).
 - Cache: `QUARRY_ROBOTS_CACHE_MAX_ENTRIES` (10,000) and `QUARRY_ROBOTS_FETCH_TIMEOUT_S` (8).
@@ -85,7 +85,7 @@ Old names in `docs/CONTRACTS.md` (before this document) are superseded by the ta
 |---|---|---|---|
 | `QUARRY_EDGE__CRAWL_SCOPE_MODE` | `off`, `observe`, `enforce` | `observe` (WS14.S3) | `off` stamps `scope.legacy=true` and sends no context. `enforce` is set by WS14.S8 after the soak. |
 | `QUARRY_EDGE__CRAWL_ROBOTS` | `observe`, `enforce` | `observe` (WS14.S4) | Enforce needs X-10 and ADR-5. |
-| `QUARRY_EDGE__CRAWL_ROBOTS_UNREACHABLE` | `disallow`, `allow` | `disallow` | Recommended default. |
+| `QUARRY_EDGE__ROBOTS_UNREACHABLE` | `disallow`, `allow` | `disallow` | Recommended default. |
 | `QUARRY_EDGE__CRAWL_REQUEST_VALIDATION` | `lenient`, `strict` | `lenient` (WS14.G, I) | `strict` is the 400 behaviour for `max_pages: 0`. |
 | `QUARRY_EDGE__CRAWL_BATCH_MAX_URLS` | integer | `500` at the edge; the gateway keeps 200 | WS14.S5. |
 
