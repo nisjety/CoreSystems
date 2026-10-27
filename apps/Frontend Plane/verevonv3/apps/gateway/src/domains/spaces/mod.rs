@@ -29,6 +29,7 @@ use crate::{
 
 mod denial;
 use denial::{typed_response, with_gap_details, Decision, SpaceDenial};
+pub(crate) mod human_posts;
 pub(crate) mod room_admin;
 mod schedule_template;
 mod stream;
@@ -810,7 +811,9 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 /// adds one `.merge(<module>::routes())` line here, so it never edits the route table above.
 /// Merged before `require_session`, so every module route is session-gated.
 fn module_routes() -> Router<AppState> {
-    Router::new().merge(stream::routes())
+    Router::new()
+        .merge(human_posts::routes())
+        .merge(stream::routes())
 }
 
 #[derive(Debug, Deserialize)]
@@ -5013,7 +5016,19 @@ async fn space_context(
     (
         StatusCode::OK,
         Json(
-            json!({"data": {"space": public_space(&space), "membership": crate::envelope::unwrap_data(&response)}}),
+            json!({"data": {
+                "space": public_space(&space),
+                "membership": crate::envelope::unwrap_data(&response),
+                // Server rollout flags the SPA reads to show or hide a control. Never an
+                // authorization input: Control and Session Core decide who may do anything.
+                "features": {
+                    "human_posts": state.space_features.human_posts_api,
+                    "thread_pane": state.space_features.thread_pane_ui,
+                    "send_idempotency": state.space_features.send_idempotency_api,
+                    "connectivity_banner": state.space_features.connectivity_banner_ui,
+                },
+                "limits": { "post_max_chars": human_posts::POST_MAX_CHARS },
+            }}),
         ),
     )
 }

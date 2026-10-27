@@ -170,6 +170,42 @@ fn read_zdr_flag(organization: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// The catalogue refusal a durable Space write answers when the caller's posture is Zero Data
+/// Retention (`zdr_durable_mutation_forbidden`) or cannot be established
+/// (`zdr_decision_unavailable`). Body shape `{error:{code,message,retryable,action}}`, with the
+/// message, retryable flag and action copied from the Model Plane catalogue
+/// (`mp-contracts` `zdr_refusal.rs`, pinned for the SPA in `contracts/zdr-refusals.json`) so the
+/// browser renders the same text whichever plane refused. Any other code falls back to the
+/// stricter durable-mutation refusal.
+pub(crate) fn zdr_refusal_body(code: &str) -> Value {
+    let (code, message, retryable, action) = if code == ZDR_DECISION_UNAVAILABLE {
+        (
+            ZDR_DECISION_UNAVAILABLE,
+            "The zero data retention settings cannot be confirmed right now. The request was not sent to any model. Try again shortly.",
+            true,
+            "retry",
+        )
+    } else {
+        (
+            ZDR_DURABLE_MUTATION_FORBIDDEN,
+            "Zero Data Retention credentials cannot create, change, or delete durable state.",
+            false,
+            "none",
+        )
+    };
+    serde_json::json!({
+        "error": {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+            "action": action,
+        }
+    })
+}
+
+pub(crate) const ZDR_DURABLE_MUTATION_FORBIDDEN: &str = "zdr_durable_mutation_forbidden";
+pub(crate) const ZDR_DECISION_UNAVAILABLE: &str = "zdr_decision_unavailable";
+
 #[cfg(test)]
 mod tests {
     use super::*;

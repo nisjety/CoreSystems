@@ -212,6 +212,14 @@ services:
       # its 6 s poll). A rollout control only; Control's decision and Session Core's gate decide
       # who may stream, and an org under Zero Data Retention gets poll_only even when on.
       SPACE_REALTIME_STREAM: ${SPACE_REALTIME_STREAM:-true}
+      # WS01-S5: human posts in a room (POST .../threads and .../threads/{id}/messages; 404 when off) and
+      # the SPA feature flags the room context reports. Rollout controls only: Control's decision and
+      # Session Core's member gate decide who may post, and a Zero Data Retention org is refused regardless.
+      # SPACE_HUMAN_POSTS_API must match model-gateway's flag of the same name, which gates the same call.
+      SPACE_HUMAN_POSTS_API: ${SPACE_HUMAN_POSTS_API:-true}
+      SPACE_THREAD_PANE_UI: ${SPACE_THREAD_PANE_UI:-true}
+      SPACE_SEND_IDEMPOTENCY_API: ${SPACE_SEND_IDEMPOTENCY_API:-true}
+      SPACE_CONNECTIVITY_BANNER_UI: ${SPACE_CONNECTIVITY_BANNER_UI:-true}
     ports:
       - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:3185:3185"
     networks:

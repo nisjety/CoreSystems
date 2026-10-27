@@ -160,6 +160,15 @@ pub(crate) struct SpaceFeatureFlags {
     /// or query) of each CSP report, for a host inventory. Forced off when `APP_ENV` is
     /// production (see `dev_only_flag`); the counters never carry a URL either way.
     pub(crate) csp_report_log_hosts: bool,
+    /// `SPACE_CONNECTIVITY_BANNER_UI` (WS01-S5): reported to the SPA as `features.connectivity_banner`
+    /// (the offline versus service-down banner). A rollout control, never an authorization input.
+    pub(crate) connectivity_banner_ui: bool,
+    /// `SPACE_HUMAN_POSTS_API` (WS01-S5): the two human-post routes (`POST .../threads` and
+    /// `POST .../threads/{thread_id}/messages`) and `features.human_posts`. Off answers 404
+    /// `space_human_posts_disabled`. A rollout control, never an authorization input: Control's
+    /// decision and Session Core's member gate decide who may post, and a Zero Data Retention org
+    /// is refused whatever this says.
+    pub(crate) human_posts_api: bool,
     /// `SPACE_MEMBERSHIP_WRITER_API` (WS04-S6): room member add, role change and leave go to
     /// Control's actor-carrying writer, then the audience reconcile. Off keeps the legacy
     /// Convex-then-declare path (emergency stop only: it cannot remove a member added through
@@ -174,6 +183,13 @@ pub(crate) struct SpaceFeatureFlags {
     /// on its 6 s poll. A rollout control, never an authorization input; an org under Zero Data
     /// Retention gets `poll_only` even when on.
     pub(crate) realtime_stream: bool,
+    /// `SPACE_SEND_IDEMPOTENCY_API` (WS01-S5): reported to the SPA as `features.send_idempotency`
+    /// (the SPA attaches a client send id to an agent-path send so a retry cannot double-post).
+    /// Session Core's dedupe is inert without a key. A rollout control, never an authorization input.
+    pub(crate) send_idempotency_api: bool,
+    /// `SPACE_THREAD_PANE_UI` (WS01-S5): reported to the SPA as `features.thread_pane` (the right-hand
+    /// thread pane and `?thread_id=` deep link). A rollout control, never an authorization input.
+    pub(crate) thread_pane_ui: bool,
 }
 
 impl SpaceFeatureFlags {
@@ -182,9 +198,13 @@ impl SpaceFeatureFlags {
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
             client_policy: crate::client_contract::ClientPolicy::from_env(),
             csp_report_log_hosts: dev_only_flag("CSP_REPORT_LOG_HOSTS"),
+            connectivity_banner_ui: space_flag("SPACE_CONNECTIVITY_BANNER_UI"),
+            human_posts_api: space_flag("SPACE_HUMAN_POSTS_API"),
             membership_writer_api: space_flag("SPACE_MEMBERSHIP_WRITER_API"),
             policy_admin_api: space_flag("SPACE_POLICY_ADMIN_API"),
             realtime_stream: space_flag("SPACE_REALTIME_STREAM"),
+            send_idempotency_api: space_flag("SPACE_SEND_IDEMPOTENCY_API"),
+            thread_pane_ui: space_flag("SPACE_THREAD_PANE_UI"),
         }
     }
 }

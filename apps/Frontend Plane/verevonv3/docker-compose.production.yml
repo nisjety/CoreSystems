@@ -17,6 +17,10 @@ services:
             SPACE_POLICY_ADMIN_API: "false"
             SPACE_MEMBERSHIP_WRITER_API: "false"
             SPACE_REALTIME_STREAM: "false"
+            SPACE_HUMAN_POSTS_API: "false"
+            SPACE_THREAD_PANE_UI: "false"
+            SPACE_SEND_IDEMPOTENCY_API: "false"
+            SPACE_CONNECTIVITY_BANNER_UI: "false"
             MODEL_GATEWAY_DEV_BEARER: ""
             VEREVON_PUBLIC_ORIGIN: ${VEREVON_PUBLIC_ORIGIN:?VEREVON_PUBLIC_ORIGIN is required in production}
 
