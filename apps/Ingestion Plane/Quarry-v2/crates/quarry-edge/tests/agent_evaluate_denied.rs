@@ -7,7 +7,8 @@
 //! browser WebSocket) and for a person's token and a service principal's:
 //!
 //! - the answer is `403 FORBIDDEN` with `details.reason == "raw_script_denied"` (the
-//!   socket's error frame begins with `Forbidden:`) and does not echo the script;
+//!   socket's error frame carries `code: "FORBIDDEN"` and the same reason, D1-022) and
+//!   does not echo the script;
 //! - the driver is never asked to evaluate anything (`RecordingDriver::evaluate_calls`);
 //! - no receipt, no timeline item, no budget step or attempt, no spent approval and no
 //!   step counter move, so the denial cannot be used to burn a run's allowance;
@@ -277,8 +278,9 @@ async fn the_browser_socket_refuses_evaluate_with_an_error_frame() {
     let refused = socket
         .next_matching(|message| message["type"] == "error")
         .await;
-    let text = refused["message"].as_str().unwrap_or_default().to_owned();
-    assert!(text.starts_with("Forbidden:"), "{refused}");
+    // D1-022: the frame carries the REST code in its wire spelling, not the Display text.
+    assert_eq!(refused["code"], "FORBIDDEN", "{refused}");
+    assert_eq!(refused["details"]["reason"], "raw_script_denied", "{refused}");
     for marker in MARKERS {
         assert!(!refused.to_string().contains(marker), "{refused}");
     }

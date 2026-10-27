@@ -151,8 +151,8 @@ async fn the_browser_socket_refuses_the_same_capability_through_the_same_gate() 
     let refused = socket
         .next_matching(|message| message["type"] == "error")
         .await;
-    let text = refused["message"].as_str().unwrap_or_default().to_owned();
-    assert!(text.starts_with("Forbidden:"), "{refused}");
+    // D1-022: the frame carries the REST code in its wire spelling, not the Display text.
+    assert_eq!(refused["code"], "FORBIDDEN", "{refused}");
     assert_eq!(
         steps_taken(&edge, &run).await,
         before,
