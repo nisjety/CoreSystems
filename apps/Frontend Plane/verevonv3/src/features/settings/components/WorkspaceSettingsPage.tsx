@@ -12,6 +12,7 @@ import { PluginsSection } from '@/features/settings/components/PluginsSection'
 import { CronSchedulesSection } from '@/features/settings/components/CronSchedulesSection'
 import { OrgModelAccessSection } from '@/features/settings/components/OrgModelAccessSection'
 import { OrgQuotasSection } from '@/features/settings/components/OrgQuotasSection'
+import { OrgSpacePolicySection } from '@/features/settings/components/OrgSpacePolicySection'
 import { MemorySection } from '@/features/settings/components/MemorySection'
 import { LearningSection } from '@/features/settings/components/LearningSection'
 import { ChatGptSubscriptionPanel } from '@/features/integrations/components/ChatGptSubscriptionPanel'
@@ -241,6 +242,8 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   quotas: [],
   // Model access renders its own live policy editor, so no shared status grid.
   'model-access': [],
+  // Space policy renders its own live console (hidden when the gateway flag is off), so no shared status grid.
+  'space-policy': [],
   // Memory renders its own live list, so it carries no shared status grid.
   memory: [],
   // Learning renders its own proposals and ledger, so it carries no shared status grid.
@@ -505,6 +508,9 @@ function WorkspaceSettingsSection(props: {
       </Match>
       <Match when={props.section === 'model-access'}>
         <OrgModelAccessSection />
+      </Match>
+      <Match when={props.section === 'space-policy'}>
+        <OrgSpacePolicySection />
       </Match>
       <Match when={props.section === 'memory'}>
         <MemorySection />
