@@ -67,12 +67,30 @@ pub fn egress_policy(decision: &Decision, allowed_domains: &[String]) -> Browser
     // sub-resource, frame or redirect to one of them is refused where it happens, even on
     // a run whose allow list is empty or names a parent domain. Empty when no rule denies.
     let denied = decision.policy().denied_hosts();
-    match decision.policy().narrow_egress(allowed_domains) {
+    egress_for_narrowing(
+        decision.policy().narrow_egress(allowed_domains),
+        allowed_domains,
+        &denied,
+    )
+}
+
+/// The browser boundary for one narrowing result. `from_allowed_domains(&[])` is the
+/// unrestricted policy, so a narrowed set with no host in it must never reach that
+/// constructor: it is "nothing is allowed" (D2-020). `narrow_egress` itself answers
+/// `DenyAll` for an empty result, and this keeps the boundary closed even if a future
+/// change to it, or a narrowing from another source, ever produced an empty set.
+fn egress_for_narrowing(
+    narrowing: EgressNarrowing,
+    allowed_domains: &[String],
+    denied: &[String],
+) -> BrowserEgressPolicy {
+    match narrowing {
         EgressNarrowing::Unchanged => {
-            BrowserEgressPolicy::from_allowed_domains(allowed_domains).with_denied_domains(&denied)
+            BrowserEgressPolicy::from_allowed_domains(allowed_domains).with_denied_domains(denied)
         }
+        EgressNarrowing::Narrowed(hosts) if hosts.is_empty() => BrowserEgressPolicy::deny_all(),
         EgressNarrowing::Narrowed(hosts) => {
-            BrowserEgressPolicy::from_allowed_domains(&hosts).with_denied_domains(&denied)
+            BrowserEgressPolicy::from_allowed_domains(&hosts).with_denied_domains(denied)
         }
         EgressNarrowing::DenyAll => BrowserEgressPolicy::deny_all(),
     }
@@ -325,6 +343,80 @@ mod tests {
             egress_policy(&decision, &[]),
             BrowserEgressPolicy::from_allowed_domains(&[])
         );
+    }
+
+    #[test]
+    fn an_empty_narrowed_set_denies_all_instead_of_becoming_unrestricted() {
+        // D2-020: `from_allowed_domains(&[])` is the unrestricted policy, so an empty
+        // `Narrowed` set must not be built through it.
+        let denied = vec!["ads.example".to_string()];
+        let egress = egress_for_narrowing(
+            EgressNarrowing::Narrowed(Vec::new()),
+            &["example.com".to_string()],
+            &denied,
+        );
+        assert!(!egress.is_unconstrained());
+        assert!(!egress.allows_url("https://example.com/"));
+        assert!(!egress.allows_url("https://anywhere.test/"));
+        assert_eq!(egress, BrowserEgressPolicy::deny_all());
+        // The same input as `DenyAll` is the same boundary.
+        assert_eq!(
+            egress_for_narrowing(EgressNarrowing::DenyAll, &[], &[]),
+            BrowserEgressPolicy::deny_all()
+        );
+        // A non-empty narrowing is still a narrowing, with the deny list riding along.
+        let kept = egress_for_narrowing(
+            EgressNarrowing::Narrowed(vec!["example.com".to_string()]),
+            &["example.com".to_string(), "other.test".to_string()],
+            &denied,
+        );
+        assert!(kept.allows_url("https://example.com/"));
+        assert!(!kept.allows_url("https://other.test/"));
+    }
+
+    #[test]
+    fn narrow_egress_never_answers_an_empty_narrowed_set() {
+        // The invariant the boundary above relies on: whatever the policy denies, the
+        // narrowing is `Unchanged`, a non-empty `Narrowed` set or `DenyAll`.
+        let deny = |hosts: &[&str]| {
+            PolicyBaseline::default()
+                .decide(
+                    Principal::Autonomous,
+                    false,
+                    Some(
+                        RequestAsk {
+                            deny_domains: hosts.iter().map(|h| (*h).to_string()).collect(),
+                            ..Default::default()
+                        }
+                        .into_layer()
+                        .expect("a valid ask"),
+                    ),
+                )
+                .expect("the policy resolves")
+        };
+        let hosts = |list: &[&str]| list.iter().map(|h| (*h).to_string()).collect::<Vec<_>>();
+        let decisions = [deny(&[]), deny(&["a.test"]), deny(&["a.test", "b.test", "c.test"])];
+        let inputs = [
+            hosts(&[]),
+            hosts(&["a.test"]),
+            hosts(&["a.test", "b.test"]),
+            hosts(&["a.test", "b.test", "c.test", "d.test"]),
+            hosts(&["x.a.test", "y.test"]),
+            hosts(&["A.TEST"]),
+        ];
+        for decision in &decisions {
+            for input in &inputs {
+                match decision.policy().narrow_egress(input) {
+                    EgressNarrowing::Narrowed(kept) => {
+                        assert!(!kept.is_empty(), "an empty narrowed set for {input:?}")
+                    }
+                    EgressNarrowing::DenyAll => {
+                        assert!(!input.is_empty(), "DenyAll for an empty input")
+                    }
+                    EgressNarrowing::Unchanged => {}
+                }
+            }
+        }
     }
 
     #[test]

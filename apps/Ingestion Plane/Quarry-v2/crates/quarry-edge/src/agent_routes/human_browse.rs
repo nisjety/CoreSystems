@@ -400,5 +400,9 @@ mod tests {
         let narrowed = BrowserEgressPolicy::from_allowed_domains(&["only.example".to_owned()]);
         let kept = open_web_egress(&open, narrowed);
         assert!(!kept.allows_url("https://example.com/"));
+        // D2-020: a deny-all from the web policy is kept too, never replaced by the open web.
+        let denied_all = open_web_egress(&open, BrowserEgressPolicy::deny_all());
+        assert!(!denied_all.allows_url("https://example.com/"));
+        assert!(!denied_all.allows_url("https://only.example/"));
     }
 }
