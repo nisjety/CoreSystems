@@ -866,6 +866,10 @@ services:
       # tenant memory and recalls only its own rows. ON in every environment; only an exact
       # `0`, `false` or `off` (plus a restart) restores the old behaviour. Never an authorization input.
       MEMORY_SPACE_CONTAINMENT: ${MEMORY_SPACE_CONTAINMENT:-1}
+      # Member append path (WS01-S3): a Space member who does not own a thread may append a human
+      # `post` to it, only with a v2 Control decision. OFF unless set; dev override turns it on.
+      # Never an authorization input.
+      SPACE_HUMAN_POSTS_CORE: ${SPACE_HUMAN_POSTS_CORE:-0}
       SESSION_CORE_LOOP_CHECKPOINT_ENABLED: ${SESSION_CORE_LOOP_CHECKPOINT_ENABLED:-false}
       # Sweep that closes a tool reservation still open long after its run ended or
       # parked, as `unknown_outcome` (WS03 S5). Off by default: turning it on changes

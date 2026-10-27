@@ -19,6 +19,7 @@ pub mod run_context;
 pub mod run_origin;
 pub mod scheduled_contract;
 pub mod skill_recovery;
+pub mod space_human_posts;
 pub mod space_memory;
 pub mod telemetry_labels;
 pub mod tool_arguments;

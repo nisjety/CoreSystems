@@ -101,7 +101,7 @@ const CONTROL_THREAD_APPEND_ACTION: &str = "model.thread.append";
 const CONTROL_THREAD_APPEND_SCHEMA: &str = "sha256:thread-append-v1";
 /// v2 binds `post_kind` into the effect digest (Control `threadAppendSchemaV2`). Only a
 /// v2 decision can authorize a `post`; a v1 decision keeps authorizing a `turn` only.
-const CONTROL_THREAD_APPEND_SCHEMA_V2: &str = "sha256:thread-append-v2";
+pub(crate) const CONTROL_THREAD_APPEND_SCHEMA_V2: &str = "sha256:thread-append-v2";
 const CONTROL_THREAD_READ_ACTION: &str = "model.thread.read";
 const CONTROL_THREAD_READ_SCHEMA: &str = "sha256:thread-read-v1";
 const CONTROL_SCHEDULED_RUN_AUDIENCE: &str = "model-plane-capability-core";
@@ -2335,6 +2335,11 @@ fn validate_thread_space_context_shape(req: &pb::CreateThreadRequest) -> Result<
 /// is only permitted for an unscoped thread (or the bootstrap first message
 /// atomically following its already-verified create); it must never silently
 /// downgrade a later scoped append.
+/// Whether the request carries the complete signed-decision envelope (WS01-S3's member gate).
+pub(crate) fn append_space_context_is_complete(req: &pb::AppendMessageRequest) -> bool {
+    matches!(validate_append_space_context_shape(req), Ok(true))
+}
+
 fn validate_append_space_context_shape(req: &pb::AppendMessageRequest) -> Result<bool, Status> {
     let values = [
         req.space_id.trim(),
@@ -3142,7 +3147,7 @@ fn verify_append_space_decision_with_key(
     Ok(claims.space_kind)
 }
 
-fn verify_append_space_decision(
+pub(crate) fn verify_append_space_decision(
     req: &pb::AppendMessageRequest,
     org_id: &str,
     user_id: &str,
@@ -3455,6 +3460,7 @@ fn support_thread_id(session_key: &str) -> Option<&str> {
 /// (`agent_name`), and a system/tool turn has no human author to name. Passing
 /// it in rather than reading it off the request is the point -- a client that
 /// could name the author of a message could put words in someone's mouth.
+#[cfg_attr(not(test), allow(dead_code))] // the owner-path wrapper the tests (and older callers) use
 async fn append_message_inner(
     pool: &PgPool,
     letta: Option<&LettaMemoryAdapter>,
@@ -3462,11 +3468,31 @@ async fn append_message_inner(
     req: pb::AppendMessageRequest,
     author_subject_id: &str,
 ) -> Result<Response<pb::AppendMessageResponse>, Status> {
+    append_message_inner_as(
+        pool,
+        letta,
+        retention,
+        req,
+        author_subject_id,
+        crate::space::authz::AppendAs::Owner,
+    )
+    .await
+}
+
+/// [`append_message_inner`] under an explicit authority (`Member` only from `authorize_append`).
+async fn append_message_inner_as(
+    pool: &PgPool,
+    letta: Option<&LettaMemoryAdapter>,
+    retention: MemoryRetention,
+    req: pb::AppendMessageRequest,
+    author_subject_id: &str,
+    append_as: crate::space::authz::AppendAs,
+) -> Result<Response<pb::AppendMessageResponse>, Status> {
     let mut tx = pool
         .begin()
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
-    let appended = append_message_in_tx(&mut tx, &req, author_subject_id).await?;
+    let appended = append_message_in_tx_as(&mut tx, &req, author_subject_id, append_as).await?;
     tx.commit()
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -3526,7 +3552,9 @@ pub(crate) async fn append_message_in_tx(
 /// run's terminal receipt is stored exactly as an ordinary append stores it.
 /// The caller commits, then passes `memory` to [`sync_appended_memory`].
 /// `append_as` names the authority: `Owner` is the former behaviour; `Member`
-/// is refused until the member gate (WS01-S3) lands.
+/// (WS01-S3) appends only a human `post`, re-checked under the thread lock by
+/// `space::append::enforce_member_append`, stamped from the verified request and
+/// writing no thread column.
 // The body is the former `append_message_inner`, moved unchanged; splitting it
 // would scatter checks that must all run under the one thread lock.
 #[allow(clippy::too_many_lines)]
@@ -3536,11 +3564,7 @@ pub(crate) async fn append_message_in_tx_as(
     author_subject_id: &str,
     append_as: crate::space::authz::AppendAs,
 ) -> Result<AppendedMessage, Status> {
-    if append_as != crate::space::authz::AppendAs::Owner {
-        return Err(Status::permission_denied(
-            "member appends are not enabled on this Session Core",
-        ));
-    }
+    let member = append_as == crate::space::authz::AppendAs::Member;
     let author_subject_id = if req.role.trim() == "user" {
         author_subject_id.trim()
     } else {
@@ -3570,8 +3594,8 @@ pub(crate) async fn append_message_in_tx_as(
     let mut letta_sync: Option<AppendedMemory> = None;
 
     let has_append_context = validate_append_space_context_shape(req)?;
-    let thread: (String, String, Option<String>, String, Option<String>) =
-        sqlx::query_as("SELECT org_id, user_id, space_id, source_scope, space_kind FROM threads WHERE id = $1 FOR UPDATE")
+    let thread: (String, String, Option<String>, String, Option<String>, Option<i64>) =
+        sqlx::query_as("SELECT org_id, user_id, space_id, source_scope, space_kind, recipient_audience_revision FROM threads WHERE id = $1 FOR UPDATE")
             .bind(&req.thread_id)
             .fetch_optional(&mut **tx)
             .await
@@ -3580,7 +3604,26 @@ pub(crate) async fn append_message_in_tx_as(
     // WS17-S1: the thread's Space kind. A verified decision below stamps a kind-less thread.
     let mut space_kind: Option<String> = thread.4.clone();
 
+    if member {
+        // WS01-S3: every member condition, the decision (subject = the caller) and the stale
+        // audience check run here under the thread lock. A member append never rewrites the
+        // thread's authority columns and never self-heals its kind.
+        crate::space::append::enforce_member_append(
+            tx,
+            req,
+            author_subject_id,
+            &crate::space::append::LockedThread {
+                org_id: &thread.0,
+                owner_id: &thread.1,
+                space_id: thread.2.as_deref(),
+                audience_revision: thread.5,
+            },
+        )
+        .await?;
+    }
+
     match thread.2.as_deref() {
+        Some(_) if member => {}
         Some(stored_space_id) => {
             if !has_append_context && req.role.trim() == "user" {
                 // A scoped create is verified before the thread exists, so its
@@ -3592,7 +3635,23 @@ pub(crate) async fn append_message_in_tx_as(
                         .fetch_one(&mut **tx)
                         .await
                         .map_err(|e| Status::internal(e.to_string()))?;
-                if message_count != 0 {
+                // A replay of the bootstrap send (same client_message_id, lost reply) is answered
+                // with the original row by the dedupe lookup below, which writes nothing, so it
+                // is not a decision-less append.
+                let is_replay = if message_count != 0 && !req.client_message_id.trim().is_empty() {
+                    let (found,): (bool,) = sqlx::query_as(
+                        "SELECT EXISTS(SELECT 1 FROM messages WHERE thread_id = $1 AND client_message_id = $2)",
+                    )
+                    .bind(&req.thread_id)
+                    .bind(req.client_message_id.trim())
+                    .fetch_one(&mut **tx)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+                    found
+                } else {
+                    false
+                };
+                if message_count != 0 && !is_replay {
                     return Err(Status::permission_denied(
                         "a fresh Control Space append decision is required",
                     ));
@@ -3666,6 +3725,10 @@ pub(crate) async fn append_message_in_tx_as(
         None => {}
     }
 
+    // A member's `metadata` is never stored: it could carry a source scope or retrieval hint
+    // that is not theirs to set.
+    let member_metadata_ignored = member;
+
     // `messages.metadata` has existed in the schema since 0001_init but was
     // never written, so a turn's evidence (grounding/citations/artifacts) died
     // with the stream that produced it. Persist it here and `list_conversation`
@@ -3674,6 +3737,7 @@ pub(crate) async fn append_message_in_tx_as(
     let mut metadata_json = req
         .metadata
         .as_ref()
+        .filter(|_| !member_metadata_ignored)
         .map_or_else(|| serde_json::json!({}), struct_to_json);
 
     // This scope is immutable after the first user message. Enforce it here,
@@ -3681,7 +3745,9 @@ pub(crate) async fn append_message_in_tx_as(
     // a restricted task or relabel history that already used other sources.
     let requested_isolation = metadata_json["source_scope"] == "conversation";
     let stored_isolation = thread.3 == "conversation";
-    if req.role == "user" {
+    // The owner's source-scope lock is the owner's to set; a member post is a room message, not
+    // a retrieval turn, so it neither widens nor narrows it.
+    if req.role == "user" && !member {
         if stored_isolation && !requested_isolation {
             return Err(Status::failed_precondition("This conversation requires conversation-only source scope."));
         }
@@ -3696,7 +3762,7 @@ pub(crate) async fn append_message_in_tx_as(
         }
     }
     let conversation_only = stored_isolation || (req.role == "user" && requested_isolation);
-    if conversation_only {
+    if conversation_only && !member {
         metadata_json["source_scope"] = serde_json::json!("conversation");
         // Per-turn retrieval-source filter (chat-wave2 scope spec §2.4):
         // deliberately NOT part of the immutability check above — this axis
@@ -3719,8 +3785,8 @@ pub(crate) async fn append_message_in_tx_as(
     // Compared trimmed: the queue path stores the trimmed text and the resend carries the
     // composer's own.
     if !client_message_id.is_empty() {
-        let existing: Option<(String, i64, String, String, String)> = sqlx::query_as(
-            "SELECT id, sequence, role, content, post_kind FROM messages
+        let existing: Option<(String, i64, String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT id, sequence, role, content, post_kind, author_subject_id FROM messages
              WHERE thread_id = $1 AND client_message_id = $2",
         )
         .bind(&req.thread_id)
@@ -3728,9 +3794,14 @@ pub(crate) async fn append_message_in_tx_as(
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
-        if let Some((existing_id, existing_sequence, existing_role, existing_content, existing_kind)) = existing {
+        if let Some((existing_id, existing_sequence, existing_role, existing_content, existing_kind, existing_author)) = existing {
+            // A post's key belongs to its author: another member repeating the same id and text
+            // must not be handed someone else's row.
+            let author_differs = post_kind == "post"
+                && existing_author.as_deref().unwrap_or_default() != author_subject_id;
             if existing_role != req.role
                 || existing_kind != post_kind
+                || author_differs
                 || existing_content.trim() != req.content.trim()
             {
                 return Err(Status::already_exists(
@@ -3752,8 +3823,12 @@ pub(crate) async fn append_message_in_tx_as(
          (id, thread_id, role, content, created_at, agent_name, metadata, space_id, recipient_audience_ref,
           recipient_audience_revision, recipient_audience_hash, authority_revision, resource_authorization_ref,
           author_subject_id, post_kind)
-         SELECT $1, t.id, $3, $4, $5, NULLIF($6, ''), $7, t.space_id, t.recipient_audience_ref,
-                t.recipient_audience_revision, t.recipient_audience_hash, t.authority_revision, t.resource_authorization_ref,
+         SELECT $1, t.id, $3, $4, $5, NULLIF($6, ''), $7, t.space_id,
+                COALESCE($10::text, t.recipient_audience_ref),
+                COALESCE($11::bigint, t.recipient_audience_revision),
+                COALESCE($12::text, t.recipient_audience_hash),
+                COALESCE($13::bigint, t.authority_revision),
+                COALESCE($14::text, t.resource_authorization_ref),
                 NULLIF($8, ''), $9
          FROM threads t WHERE t.id=$2
          RETURNING sequence, space_id, recipient_audience_ref, recipient_audience_revision,
@@ -3764,10 +3839,17 @@ pub(crate) async fn append_message_in_tx_as(
     .bind(&req.role)
     .bind(&req.content)
     .bind(now)
-    .bind(req.agent_name.trim())
+    .bind(if member { "" } else { req.agent_name.trim() })
     .bind(&metadata_json)
     .bind(author_subject_id)
     .bind(post_kind)
+    // A member's row carries the audience and authority its own verified decision named (the
+    // thread's columns are the owner's and stay untouched); the owner path copies the thread's.
+    .bind(member.then(|| req.recipient_audience_ref.clone()))
+    .bind(if member { Some(i64::try_from(req.recipient_audience_revision).map_err(|_| Status::invalid_argument("recipient audience revision out of range"))?) } else { None })
+    .bind(member.then(|| req.recipient_audience_hash.clone()))
+    .bind(if member { Some(i64::try_from(req.authority_revision).map_err(|_| Status::invalid_argument("authority revision out of range"))?) } else { None })
+    .bind(member.then(|| req.resource_authorization_ref.clone()))
     .fetch_one(&mut **tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
@@ -6632,15 +6714,17 @@ impl SessionCore for SessionService {
             let caller = identity(&request)?;
             authorize_operation(&caller, "session:write")?;
             let req = request.into_inner();
-            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate)
-                .await?;
+            // The thread's owner keeps the owner path unchanged; another Space member may append
+            // a human `post` only through the member gate (WS01-S3, flag `SPACE_HUMAN_POSTS_CORE`).
+            let append_as = crate::space::authz::authorize_append(&self.pool, &caller, &req).await?;
             let author_subject_id = caller.user_id().unwrap_or_default().to_owned();
-            append_message_inner(
+            append_message_inner_as(
                 &self.pool,
                 self.letta_memory.as_ref(),
                 MemoryRetention::of(&caller),
                 req,
                 &author_subject_id,
+                append_as,
             )
             .await
         }

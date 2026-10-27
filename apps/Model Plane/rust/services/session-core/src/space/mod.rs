@@ -6,13 +6,15 @@
 //! the message, thread and run tables stay Session Core's, and every durable
 //! Space write still carries a verified Control decision.
 //!
-//! - [`authz`]: who a message is appended as ([`authz::AppendAs`]) and, in
-//!   later slices, the member-append gate.
+//! - [`authz`]: who a message is appended as ([`authz::AppendAs`]) and the member-append gate
+//!   (WS01-S3).
+//! - [`append`]: the member rules inside the append transaction (WS01-S3).
 //! - [`read_service`]: the empty `SpaceRoomReadService` registration (D3).
 //! - [`events`]: the Space event log's flag sync, listener, sweeper, gate and erasure hooks
 //!   (WS02-S1; the log itself is written by triggers in migration 0072).
 //! - [`memory_scope`]: the memory containment resolver for shared-room threads (WS17-S1).
 
+pub(crate) mod append;
 pub(crate) mod authz;
 pub(crate) mod events;
 pub(crate) mod memory_scope;

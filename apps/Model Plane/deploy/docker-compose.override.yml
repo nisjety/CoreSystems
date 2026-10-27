@@ -20,6 +20,7 @@ services:
       RUST_LOG: debug
       COMPACTION_THRESHOLD: "200000"
       SPACE_RUN_THREAD_GUARD: "true"
+      SPACE_HUMAN_POSTS_CORE: "1"
 
   inference-core:
     environment:
