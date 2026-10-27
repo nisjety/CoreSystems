@@ -16,14 +16,14 @@ The roadmap marks most phases ❌. **The code says otherwise.** This is the root
 
 | Roadmap claim | Actual state in code | Evidence |
 |---|---|---|
-| P1 orchestration shell ❌ | **Largely DONE** | `session-core/orchestration_store.rs` (25 pub fns: plans/steps/todos/approvals/lineage), `orchestration_grpc.rs`, `orchestration_nats.rs`; gateway routes `/v1/orchestration/{plans,todos,runs/:id/cancel,resume,plans}`, `/v1/runs/:id/events`; migration `0003_orchestration_tables` |
+| P1 orchestration shell ❌ | **Largely DONE** | `session-core/orchestration_store.rs` (25 pub fns: plans/steps/todos/approvals/lineage), `orchestration_grpc.rs`, `orchestration_nats.rs`; gateway routes `/v1/orchestration/{plans,todos,runs/:id/cancel,resume,plans}`, `/v1/runs/:id/events`; migration `0003_orchestration_tables`. Cancel, queue and probe reach the owning gateway replica over NATS request/reply behind `MODEL_GATEWAY_RUN_CONTROL_BUS`, default off. |
 | P4 tasks/cron ❌ | **DONE (with overlap)** | session-core migration `0004_tasks_cron_hooks_skills_memory` (tasks, task_events/assignments/dependencies/artifacts, cron_schedules/fires); Go `task-core` service (store+cron); gateway `/v1/tasks`,`/v1/cron` |
 | P5 multimodal ❌ (chat-only) | **DONE** | inference-core `provider/{vision,video,speech,doc_intel,realtime}.rs`; gateway routes for all 8 groups: `/v1/ai/{chat,embeddings,images,documents,speech,translate,video,realtime,language,models}` |
 | P2 capability registries ❌ (all Unimplemented) | **Mostly DONE** | capability-core packages: `registry/`(models), `commands/`, `tasks/`, `schedule/`, `coordination/`, `modalities/`, `sandbox/`, `policy/`(RBAC), `artifacts/`, `failover/`, `streaming/`, `roadmap/` |
 | P7 knowledge plane ❌ | **Partial — routes live** | gateway `/v1/graph/entities`,`/v1/graph/expand`,`/v1/wiki/pages`; dataplane protos `graph_v1`,`wiki_v1`,`knowledge_v2` |
 | P8 token efficiency ❌ | **Partial** | gateway `/v1/toon/encode`; execution-core compaction hook; `session-core/compaction.rs` |
 | MCP / plugins "not started" | **Registries EXIST (in-mem)** | gateway `runtime_registries.rs`: mcp (Wave 10g), plugins (10h), commands+hooks+permissions (10i) |
-| Plan mode / approvals ❌ | **EXIST (in-mem, gateway)** | `coordinator.rs` (PlanModeStore, TeamWorkerStore), `approvals.rs` (ApprovalStore) |
+| Plan mode / approvals ❌ | **EXIST (in-mem, gateway)** | `coordinator.rs` (PlanModeStore, TeamWorkerStore), `approvals.rs` (ApprovalStore). The plan-mode rung grant has a durable carrier in session-core (`threads` columns, migration 0050, `ThreadAutonomy.GetThreadGrant`) behind `MODEL_GATEWAY_DURABLE_PLAN_GRANT`, default off; the in-memory `PlanModeStore` grant stays as the rollback path and as the write-failure fallback. |
 
 **Conclusion:** Model Plane v1 is ~80–90% feature-complete against its own roadmap. The remaining work is **harmonization + a few genuine gaps**, not greenfield phases.
 
@@ -52,7 +52,7 @@ Legend — **Owner** = single system of record. **Relay** = ingress/enforcement 
 | Identity / org / billing | **Control Plane** (external) | — | model-gateway validates JWT | — | ✅ clean (read-only) |
 | Thread / message timeline | **session-core** | Postgres | gateway ingress | outbox | ✅ |
 | Run metadata + lifecycle | **session-core** | Postgres | execution-core transitions | NATS run-events | ✅ |
-| Plans / steps / todos / approvals / subagent-lineage | **session-core** (`orchestration_store.rs`) | Postgres | gateway `coordinator.rs`/`approvals.rs` are **ephemeral caches** | `orchestration_nats.rs` | ⚠️ **CONSOLIDATE**: gateway stores must defer to session-core (see §4.1) |
+| Plans / steps / todos / approvals / subagent-lineage | **session-core** (`orchestration_store.rs`) | Postgres | gateway `coordinator.rs`/`approvals.rs` are **ephemeral caches**. The plan-mode rung grant has a durable carrier in session-core (`threads` columns, migration 0050, `ThreadAutonomy.GetThreadGrant`) behind `MODEL_GATEWAY_DURABLE_PLAN_GRANT`, default off; the in-memory `PlanModeStore` grant stays as the rollback path and as the write-failure fallback. | `orchestration_nats.rs` | ⚠️ **CONSOLIDATE**: gateway stores must defer to session-core (see §4.1) |
 | Approval cause, decision provenance and scope (`approvals.metadata.cause`, `metadata.decision`, `approval_scope_grants`) | **session-core** (record, provenance, grant store); **execution-core** derives the cause at the gate (`runtime_loop/agent.rs` `approval_kind_for`, `approval_reason_for`; `runtime_loop/mod.rs` `resolve_write_approval`); **model-gateway** projects and validates scope and never grants | Postgres (`approvals`; grants from WS13-S6) | gateway decide route (`rust/services/model-gateway/src/http_routes.rs`); BFF validates the shape | `orchestration_nats.rs` | planned WS13 S1-S6; S0 pins today's kinds and reasons |
 | Approval step-up claim (WS13-S5) | **Control Plane** (auth-core mints `step_up` on re-verify) | none; the claim is never stored | model-gateway reads it at the decide edge | - | planned, WS13-S5 (DEC-09) |
 | Checkpoints / context assembly / compaction | **session-core** | Postgres + MinIO | execution-core triggers | — | ✅ |
@@ -80,6 +80,7 @@ Legend — **Owner** = single system of record. **Relay** = ingress/enforcement 
 | Fine-tuning jobs | **session-core** (persist) + **model-gateway** (Azure) | Postgres | poller | NATS finetune | ✅ (Wave 7) |
 | Knowledge: graph / wiki extraction | **Data Plane** (read) + session-core context | Data Plane | gateway `/v1/graph`,`/v1/wiki` relay | NATS | 🟡 extraction service is P7 gap |
 | Compact transport (TOON) | **model-gateway** (`/v1/toon`) + shared crate | — | — | — | ✅ (benchmark/reversibility = P8 finish) |
+| Run control across gateway replicas (cancel/queue/probe) | **model-gateway** (`run_control.rs`) | none | the receiving replica relays to the owner when the stream lives on another replica | core NATS request/reply, at-most-once, subjects `mp.v1.runctl.>` (ACL `deploy/nats.conf:34,:40`) | built, default off (`MODEL_GATEWAY_RUN_CONTROL_BUS`); not live-verified |
 
 ---
 
