@@ -22,10 +22,16 @@ pub(super) fn is_user_facing_event(event_type: quarry_core::event::EventType) ->
 
 /// WS6.J: the next event of a run's channel, or `None` when shutdown has asked the streams
 /// to end (so graceful shutdown never waits on a viewer).
+///
+/// Biased toward the channel: the drain emits each run's `agent.expired` and only then closes
+/// the streams, so when both are ready at the stream's next poll the buffered event must go
+/// out first. With the default random branch order a viewer could be sent `done` without the
+/// event that says why the run ended.
 pub(super) async fn recv_unless_closing<T: Clone>(
     rx: &mut tokio::sync::broadcast::Receiver<T>,
 ) -> Option<Result<T, tokio::sync::broadcast::error::RecvError>> {
     tokio::select! {
+        biased;
         received = rx.recv() => Some(received),
         () = crate::drain::streams_closing() => None,
     }
