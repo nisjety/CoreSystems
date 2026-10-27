@@ -349,46 +349,9 @@ func (s *Server) setupRoutes() {
 			// enclosing group, same as every other internal route here.
 			internal.GET("/mail-task/resolve", s.resolveMailTaskAlias)
 
-			spacesGroup := internal.Group("/spaces")
-			{
-				spacesGroup.POST("/register", s.requireSpaceLifecycleRegistrar, s.registerSpace)
-				spacesGroup.POST("/deletion-authorizations", s.requireSpaceDeletionAuthorizer, s.authorizeSpaceDeletion)
-				spacesGroup.PUT("/deletion-policy", s.requireSpacePolicyWriter, s.upsertSpaceDeletionPolicy)
-				spacesGroup.PUT("/:space_ref/legal-hold", s.requireSpacePolicyWriter, s.applySpaceLegalHold)
-				spacesGroup.DELETE("/:space_ref/legal-hold", s.requireSpacePolicyWriter, s.releaseSpaceLegalHold)
-				spacesGroup.GET("", s.requireVerifiedSpaceResolver, s.listSpacesForSubject)
-				spacesGroup.GET("/:space_ref/roster", s.requireVerifiedSpaceResolver, s.spaceRoster)
-				spacesGroup.PUT("/:space_ref/memberships", s.requireSpaceMembershipWriter, s.replaceSpaceMemberships)
-				spacesGroup.POST("/recipient-audiences", s.requireSpaceAudiencePublisher, s.registerRecipientAudience)
-				spacesGroup.PUT("/effect-policy", s.requireSpacePolicyWriter, s.upsertSpaceEffectPolicy)
-				spacesGroup.GET("/:space_ref/membership", s.requireVerifiedSpaceResolver, s.resolveCurrentSpaceMembership)
-				spacesGroup.POST("/personal-thread-decision", s.requireVerifiedSpaceResolver, s.issuePersonalThreadDecision)
-				spacesGroup.POST("/thread-decision", s.requireVerifiedSpaceResolver, s.issueThreadDecision)
-				spacesGroup.POST("/thread-append-decision", s.requireVerifiedSpaceResolver, s.issueThreadAppendDecision)
-				spacesGroup.POST("/thread-read-decision", s.requireVerifiedSpaceResolver, s.issueThreadReadDecision)
-				spacesGroup.POST("/personal-retrieval-decision", s.requireVerifiedSpaceResolver, s.issuePersonalRetrievalDecision)
-				spacesGroup.POST("/retrieval-decision", s.requireVerifiedSpaceResolver, s.issueRetrievalDecision)
-				spacesGroup.POST("/personal-import-decision", s.requireVerifiedSpaceResolver, s.issuePersonalImportDecision)
-				spacesGroup.POST("/schedule-create-decision", s.requireVerifiedSpaceResolver, s.issueScheduleCreateDecision)
-				// S4.3 watches. Create is gateway-delegated (a member asks);
-				// observe is service-delegated (the sweeper asks, immediately
-				// before it records anything a human can read).
-				spacesGroup.POST("/watch-create-decision", s.requireVerifiedSpaceResolver, s.issueWatchCreateDecision)
-				spacesGroup.POST("/watch-observe-decision", s.requireVerifiedSpaceResolver, s.issueWatchObserveDecision)
-				spacesGroup.POST("/import-execution-decision", s.requireSpaceImportReauthorizer, s.issuePersonalImportExecutionDecision)
-				spacesGroup.POST("/schedule-fire-decision", s.requireSpaceScheduleFireReauthorizer, s.issueScheduleFireDecision)
-				spacesGroup.POST("/sandbox-capability-decision", s.requireSpaceSandboxCapabilityReauthorizer, s.issueSpaceCapabilityDecision)
-				spacesGroup.POST("/scheduled-run-decision", s.requireSpaceScheduleFireReauthorizer, s.issueScheduledRunDecision)
-				spacesGroup.POST("/scheduled-run-execution-decision", s.requireSpaceScheduledRunExecutor, s.issueScheduledRunExecutionDecision)
-				spacesGroup.POST("/scheduled-step-decision", s.requireSpaceScheduledStepExecutor, s.issueScheduledStepDecision)
-				spacesGroup.POST("/owner-grant-decision", s.requireVerifiedSpaceResolver, s.issueOwnerGrantDecision)
-				spacesGroup.POST("/model-action-view", s.requireSpaceAgentActionViewer, s.issueModelActionView)
-				spacesGroup.POST("/run-action-decision", s.requireSpaceAgentActionAuthorizer, s.issueRunActionDecision)
-				spacesGroup.POST("/run-action-authority-check", s.requireCurrentRunActionAuthorityChecker, s.checkCurrentRunActionAuthority)
-				spacesGroup.POST("/owner-effect-reservations/reserve", s.requireOwnerEffectReservationCoordinator, s.reserveOwnerEffect)
-				spacesGroup.POST("/owner-effect-reservations/:reservation_id/commit", s.requireOwnerEffectReservationCoordinator, s.commitOwnerEffectReservation)
-				spacesGroup.GET("/owner-effect-reservations/:reservation_id", s.requireOwnerEffectReservationCoordinator, s.getOwnerEffectReservation)
-			}
+			// Space routes live in routes_spaces.go; features add their own
+			// routes_<feature>.go and register through registerSpaceFeatureRoutes.
+			s.registerSpaceRoutes(internal.Group("/spaces"))
 
 			// Per-user authz facade — the single internal surface Data Plane
 			// services (documents-api, retrieval) call to resolve a viewer's
@@ -406,6 +369,9 @@ func (s *Server) setupRoutes() {
 				authz.DELETE("/grant", s.authzRevoke)
 				authz.GET("/grants", s.authzGrantsByResource)
 			}
+
+			// Non-space feature routes register from their own routes_<feature>.go.
+			s.registerFeatureRoutes(v1, internal)
 		}
 	}
 
