@@ -170,7 +170,7 @@ type InferRequest struct {
 	RequestId string `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	// Tenant identifier.
 	OrgId string `protobuf:"bytes,2,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
-	// Requested model (e.g. "claude-sonnet-4-20250514", "gpt-4o").
+	// Requested model (e.g. "claude-sonnet-5-5", "gpt-4o").
 	Model string `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`
 	// Optional provider hint: "anthropic", "openai", etc.
 	ProviderHint string `protobuf:"bytes,4,opt,name=provider_hint,json=providerHint,proto3" json:"provider_hint,omitempty"`
