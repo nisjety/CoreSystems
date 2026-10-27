@@ -81,7 +81,7 @@ func (p PrivacyPolicySnapshot) Validate() error {
 		"deletion_scope":     p.DeletionScope,
 	} {
 		if strings.TrimSpace(value) == "" {
-			return fmt.Errorf("space privacy policy %s is required", label)
+			return authorityIncompleteDenial(fmt.Sprintf("space privacy policy %s is required", label))
 		}
 	}
 	return nil
@@ -113,16 +113,16 @@ func (e PersonalThreadDecisionEvidence) validatePersonalAuthority() error {
 		return err
 	}
 	if e.Membership.Kind != KindPersonal {
-		return fmt.Errorf("personal decision requires a personal Space")
+		return kindUnsupportedDenial(string(e.Membership.Kind), "personal decision requires a personal Space")
 	}
 	if !matchesOneOf(e.Membership.Role, "viewer", "editor", "manager", "owner") {
-		return fmt.Errorf("space role %q cannot access a personal Space", e.Membership.Role)
+		return roleBelowFloorDenial(fmt.Sprintf("space role %q cannot access a personal Space", e.Membership.Role), "viewer", "editor", "manager", "owner")
 	}
 	if strings.TrimSpace(e.RecipientAudienceRef) == "" || strings.TrimSpace(e.RecipientAudienceHash) == "" || e.RecipientSubjectID != e.Membership.SubjectID {
-		return fmt.Errorf("personal Space recipient audience must be exactly the current subject")
+		return authorityIncompleteDenial("personal Space recipient audience must be exactly the current subject")
 	}
 	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" {
-		return fmt.Errorf("personal Space resource authorization is required")
+		return authorityIncompleteDenial("personal Space resource authorization is required")
 	}
 	return e.Privacy.Validate()
 }
@@ -132,10 +132,10 @@ func (e PersonalThreadDecisionEvidence) Validate() error {
 		return err
 	}
 	if !matchesOneOf(e.Membership.Role, "editor", "manager", "owner") {
-		return fmt.Errorf("space role %q cannot create a thread", e.Membership.Role)
+		return roleBelowFloorDenial(fmt.Sprintf("space role %q cannot create a thread", e.Membership.Role), "editor", "manager", "owner")
 	}
 	if !e.ThreadCreateEntitled {
-		return fmt.Errorf("thread creation entitlement is not active")
+		return entitlementOffDenial("thread_create", "thread creation entitlement is not active")
 	}
 	return nil
 }
@@ -149,16 +149,19 @@ func (e PersonalThreadDecisionEvidence) ValidateForSharedThread() error {
 		return err
 	}
 	if e.Membership.Kind == KindPersonal {
-		return fmt.Errorf("shared thread decision requires a non-personal Space")
+		return kindUnsupportedDenial(string(e.Membership.Kind), "shared thread decision requires a non-personal Space")
 	}
 	if !matchesOneOf(e.Membership.Role, "editor", "manager", "owner") {
-		return fmt.Errorf("space role %q cannot create a shared thread", e.Membership.Role)
+		return roleBelowFloorDenial(fmt.Sprintf("space role %q cannot create a shared thread", e.Membership.Role), "editor", "manager", "owner")
 	}
 	if strings.TrimSpace(e.RecipientAudienceRef) == "" || strings.TrimSpace(e.RecipientAudienceHash) == "" {
-		return fmt.Errorf("shared Space recipient audience is required")
+		return authorityIncompleteDenial("shared Space recipient audience is required")
 	}
-	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" || !e.ThreadCreateEntitled {
-		return fmt.Errorf("shared Space thread authority is incomplete")
+	if !e.ThreadCreateEntitled {
+		return entitlementOffDenial("thread_create", "shared Space thread authority is incomplete")
+	}
+	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" {
+		return authorityIncompleteDenial("shared Space thread authority is incomplete")
 	}
 	return e.Privacy.Validate()
 }
@@ -172,16 +175,19 @@ func (e PersonalThreadDecisionEvidence) ValidateForSharedRetrieval() error {
 		return err
 	}
 	if e.Membership.Kind == KindPersonal {
-		return fmt.Errorf("shared retrieval decision requires a non-personal Space")
+		return kindUnsupportedDenial(string(e.Membership.Kind), "shared retrieval decision requires a non-personal Space")
 	}
 	if !matchesOneOf(e.Membership.Role, "viewer", "editor", "manager", "owner") {
-		return fmt.Errorf("space role %q cannot retrieve in a shared Space", e.Membership.Role)
+		return roleBelowFloorDenial(fmt.Sprintf("space role %q cannot retrieve in a shared Space", e.Membership.Role), "viewer", "editor", "manager", "owner")
 	}
 	if strings.TrimSpace(e.RecipientAudienceRef) == "" || strings.TrimSpace(e.RecipientAudienceHash) == "" {
-		return fmt.Errorf("shared Space recipient audience is required")
+		return authorityIncompleteDenial("shared Space recipient audience is required")
 	}
-	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" || !e.RetrievalReadEntitled {
-		return fmt.Errorf("shared Space retrieval authority is incomplete")
+	if !e.RetrievalReadEntitled {
+		return entitlementOffDenial("retrieval_read", "shared Space retrieval authority is incomplete")
+	}
+	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" {
+		return authorityIncompleteDenial("shared Space retrieval authority is incomplete")
 	}
 	return e.Privacy.Validate()
 }
@@ -200,16 +206,19 @@ func (e PersonalThreadDecisionEvidence) ValidateForSharedThreadRead() error {
 		return err
 	}
 	if e.Membership.Kind == KindPersonal {
-		return fmt.Errorf("shared thread read decision requires a non-personal Space")
+		return kindUnsupportedDenial(string(e.Membership.Kind), "shared thread read decision requires a non-personal Space")
 	}
 	if !matchesOneOf(e.Membership.Role, "viewer", "editor", "manager", "owner") {
-		return fmt.Errorf("space role %q cannot read a shared Space", e.Membership.Role)
+		return roleBelowFloorDenial(fmt.Sprintf("space role %q cannot read a shared Space", e.Membership.Role), "viewer", "editor", "manager", "owner")
 	}
 	if strings.TrimSpace(e.RecipientAudienceRef) == "" || strings.TrimSpace(e.RecipientAudienceHash) == "" {
-		return fmt.Errorf("shared Space recipient audience is required")
+		return authorityIncompleteDenial("shared Space recipient audience is required")
 	}
-	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" || !e.ThreadReadEntitled {
-		return fmt.Errorf("shared Space thread read authority is incomplete")
+	if !e.ThreadReadEntitled {
+		return entitlementOffDenial("thread_read", "shared Space thread read authority is incomplete")
+	}
+	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" {
+		return authorityIncompleteDenial("shared Space thread read authority is incomplete")
 	}
 	return e.Privacy.Validate()
 }
@@ -232,13 +241,16 @@ func (e PersonalThreadDecisionEvidence) ValidateForOwnScheduledThreadRead() erro
 		return err
 	}
 	if e.Membership.Kind != KindPersonal {
-		return fmt.Errorf("this decision is for a personal Space only")
+		return kindUnsupportedDenial(string(e.Membership.Kind), "this decision is for a personal Space only")
 	}
 	if !matchesOneOf(e.Membership.Role, "owner") {
-		return fmt.Errorf("only the Space's own owner may read it")
+		return roleBelowFloorDenial("only the Space's own owner may read it", "owner")
 	}
-	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" || !e.ThreadReadEntitled {
-		return fmt.Errorf("own scheduled thread read authority is incomplete")
+	if !e.ThreadReadEntitled {
+		return entitlementOffDenial("thread_read", "own scheduled thread read authority is incomplete")
+	}
+	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" {
+		return authorityIncompleteDenial("own scheduled thread read authority is incomplete")
 	}
 	return e.Privacy.Validate()
 }
@@ -250,7 +262,7 @@ func (e PersonalThreadDecisionEvidence) ValidateForRetrieval() error {
 		return err
 	}
 	if !e.RetrievalReadEntitled {
-		return fmt.Errorf("retrieval entitlement is not active")
+		return entitlementOffDenial("retrieval_read", "retrieval entitlement is not active")
 	}
 	return nil
 }
@@ -263,10 +275,10 @@ func (e PersonalThreadDecisionEvidence) ValidateForImport() error {
 		return err
 	}
 	if !matchesOneOf(e.Membership.Role, "editor", "manager", "owner") {
-		return fmt.Errorf("space role %q cannot import content", e.Membership.Role)
+		return roleBelowFloorDenial(fmt.Sprintf("space role %q cannot import content", e.Membership.Role), "editor", "manager", "owner")
 	}
 	if !e.ImportWriteEntitled {
-		return fmt.Errorf("import entitlement is not active")
+		return entitlementOffDenial("import_write", "import entitlement is not active")
 	}
 	return nil
 }
@@ -284,13 +296,13 @@ func (e PersonalThreadDecisionEvidence) ValidateForAgentAction() error {
 		return err
 	}
 	if !matchesOneOf(e.Membership.Role, "editor", "manager", "owner") {
-		return fmt.Errorf("space role %q cannot request an agent action", e.Membership.Role)
+		return roleBelowFloorDenial(fmt.Sprintf("space role %q cannot request an agent action", e.Membership.Role), "editor", "manager", "owner")
 	}
 	if !e.AgentActionEntitled {
-		return fmt.Errorf("agent action entitlement is not active")
+		return entitlementOffDenial("agent_action", "agent action entitlement is not active")
 	}
 	if e.Privacy.ZeroDataRetention {
-		return fmt.Errorf("zero data retention forbids durable owner actions")
+		return zdrForbidsDenial("agent_action", "zero data retention forbids durable owner actions")
 	}
 	return nil
 }

@@ -134,13 +134,13 @@ func IssueScheduleCreateDecision(evidence PersonalThreadDecisionEvidence, reques
 		return Decision{}, err
 	}
 	if !matchesOneOf(evidence.Membership.Role, "editor", "manager", "owner") {
-		return Decision{}, fmt.Errorf("space role %q cannot create a schedule", evidence.Membership.Role)
+		return Decision{}, roleBelowFloorDenial(fmt.Sprintf("space role %q cannot create a schedule", evidence.Membership.Role), "editor", "manager", "owner")
 	}
 	if !evidence.ScheduleFireEntitled {
-		return Decision{}, fmt.Errorf("schedule creation entitlement is not active")
+		return Decision{}, entitlementOffDenial("schedule_fire", "schedule creation entitlement is not active")
 	}
 	if evidence.Privacy.ZeroDataRetention {
-		return Decision{}, fmt.Errorf("zero data retention forbids durable schedule creation")
+		return Decision{}, zdrForbidsDenial("schedule_create", "zero data retention forbids durable schedule creation")
 	}
 	if err := request.Validate(); err != nil || now.IsZero() {
 		return Decision{}, fmt.Errorf("schedule create decision request is invalid")
