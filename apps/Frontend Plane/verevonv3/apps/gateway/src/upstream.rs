@@ -1573,11 +1573,63 @@ pub(crate) async fn proxy_bearer_json_with_headers(
     user_id: &str,
     extra_headers: &[(String, String)],
 ) -> (StatusCode, Json<Value>) {
+    proxy_bearer_json_with_headers_and_timeout(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        user_id,
+        extra_headers,
+        None,
+    )
+    .await
+}
+
+/// As `proxy_bearer_json`, with a per-request ceiling in place of the standard
+/// client's 25 s. For the one upstream call that is meant to run longer (a scrape
+/// that drives the browser); every other caller keeps the client default.
+pub(crate) async fn proxy_bearer_json_with_timeout(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    user_id: &str,
+    timeout: Duration,
+) -> (StatusCode, Json<Value>) {
+    proxy_bearer_json_with_headers_and_timeout(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        user_id,
+        &[],
+        Some(timeout),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)] // the shared tail of the two public wrappers above
+async fn proxy_bearer_json_with_headers_and_timeout(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    user_id: &str,
+    extra_headers: &[(String, String)],
+    timeout: Option<Duration>,
+) -> (StatusCode, Json<Value>) {
     let mut req = state
         .client
         .request(method, url)
         .header("x-user-id", user_id);
     req = crate::request_id::apply(req);
+    if let Some(timeout) = timeout {
+        req = req.timeout(timeout);
+    }
 
     for (name, value) in extra_headers {
         req = req.header(name, value);

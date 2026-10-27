@@ -13,21 +13,66 @@ use crate::{
     cache_admission::{variant_digest, CacheAdmission},
     config::AppState,
     domains::browser::{
-        is_valid_artifact_id, scrape_artifact_content_type, BrowserArtifactAbsence,
+        is_valid_artifact_id, scrape_artifact_content_type, BrowserArtifactAbsence, CallerClass,
         MAX_BROWSER_ARTIFACT_BYTES,
     },
     domains::knowledge::shared,
     envelope::{error, ok},
     middleware::AuthenticatedUser,
     public_url::normalize_public_http_url,
-    upstream::{proxy_bearer_json, proxy_sse_stream},
+    upstream::{proxy_bearer_json, proxy_bearer_json_with_timeout, proxy_sse_stream},
 };
 
 const PREVIEW_MARKDOWN_CHAR_LIMIT: usize = 80_000;
 
+/// WS13.5: the ceiling for a scrape that drives the browser (actions, a screenshot, a
+/// PDF). The edge bounds an actions run at 115 s and its router at 125 s, so the edge
+/// answers with its typed timeout before this one fires. Every other scrape keeps the
+/// standard client's 25 s.
+const SCRAPE_BROWSER_TIMEOUT: Duration = Duration::from_secs(125);
+
+/// Whether a scrape body asks for work that outlasts the standard 25 s: a non-empty
+/// `actions` list, an object-form format, or a `screenshot` or `pdf` format.
+fn scrape_needs_browser_budget(body: &Value) -> bool {
+    let has_actions = body
+        .get("actions")
+        .and_then(Value::as_array)
+        .is_some_and(|actions| !actions.is_empty());
+    let has_capture_format = body
+        .get("formats")
+        .and_then(Value::as_array)
+        .is_some_and(|formats| {
+            formats.iter().any(|format| match format {
+                Value::Object(_) => true,
+                Value::String(name) => matches!(name.as_str(), "screenshot" | "pdf"),
+                _ => false,
+            })
+        });
+    has_actions || has_capture_format
+}
+
+/// WS13.5: stamp who proposed this scrape, from the caller the gateway verified.
+/// The edge reads `initiated_by` as a tighten-only hint: `"agent"` makes it refuse
+/// `actions`, so a Model-authored list relayed under a person's bearer is refused as a
+/// service principal's would be. A verified service principal is always the agent,
+/// whatever the body says; a person's session keeps a stated `"agent"` (it can only
+/// tighten) and nothing else: any other client value is dropped, never forwarded.
+fn stamp_scrape_origin(body: &mut Value, caller: CallerClass) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    let stated_agent = object.get("initiated_by").and_then(Value::as_str) == Some("agent");
+    if caller == CallerClass::ServicePrincipal || stated_agent {
+        object.insert("initiated_by".to_owned(), json!("agent"));
+    } else {
+        object.remove("initiated_by");
+    }
+}
+
 pub(super) async fn scrape(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    caller: Option<Extension<CallerClass>>,
     headers: HeaderMap,
     Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
@@ -44,10 +89,23 @@ pub(super) async fn scrape(
         Err(message) => return (StatusCode::BAD_REQUEST, Json(error("invalid_url", message))),
     };
     body["url"] = Value::String(normalized);
+    stamp_scrape_origin(&mut body, caller.map(|Extension(class)| class).unwrap_or_default());
 
     let cookie = shared::cookie_header(&headers);
     let token = shared::quarry_token(&state, &user, &cookie).await;
     let url = format!("{}/v1/scrape", state.quarry_edge_url);
+    if scrape_needs_browser_budget(&body) {
+        return proxy_bearer_json_with_timeout(
+            &state,
+            Method::POST,
+            &url,
+            Some(body),
+            token.as_deref(),
+            &user.user_id,
+            SCRAPE_BROWSER_TIMEOUT,
+        )
+        .await;
+    }
     proxy_bearer_json(
         &state,
         Method::POST,
@@ -1170,6 +1228,114 @@ fn crawl_job_status(value: &Value) -> Option<&str> {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    /// WS13.5: only work that drives the browser gets the long ceiling.
+    #[test]
+    fn scrape_actions_timeout_budget_applies_to_browser_work_only() {
+        let long = |body: Value| scrape_needs_browser_budget(&body);
+        assert!(long(json!({ "url": "https://e.test/", "actions": [{ "type": "click" }] })));
+        assert!(long(json!({ "formats": ["markdown", "screenshot"] })));
+        assert!(long(json!({ "formats": ["pdf"] })));
+        assert!(long(json!({ "formats": [{ "type": "screenshot", "fullPage": true }] })));
+        assert!(!long(json!({ "url": "https://e.test/" })));
+        assert!(!long(json!({ "url": "https://e.test/", "actions": [] })));
+        assert!(!long(json!({ "formats": ["markdown", "html"] })));
+        assert_eq!(SCRAPE_BROWSER_TIMEOUT, Duration::from_secs(125));
+    }
+
+    /// WS13.5: the origin stamp is tighten-only and comes from the verified caller.
+    #[test]
+    fn model_originated_scrape_carries_initiated_by_agent() {
+        // A verified service principal is the agent whatever the body says.
+        for stated in [None, Some("human"), Some("agent"), Some("anything")] {
+            let mut body = json!({ "url": "https://e.test/", "actions": [{ "type": "wait" }] });
+            if let Some(stated) = stated {
+                body["initiated_by"] = json!(stated);
+            }
+            stamp_scrape_origin(&mut body, CallerClass::ServicePrincipal);
+            assert_eq!(body["initiated_by"], "agent", "stated {stated:?}");
+        }
+        // A person's own call carries no hint, and a client-chosen value is dropped.
+        let mut person = json!({ "url": "https://e.test/" });
+        stamp_scrape_origin(&mut person, CallerClass::User);
+        assert!(person.get("initiated_by").is_none());
+        let mut forged = json!({ "url": "https://e.test/", "initiated_by": "human" });
+        stamp_scrape_origin(&mut forged, CallerClass::User);
+        assert!(forged.get("initiated_by").is_none(), "only the enum is forwarded");
+        // A person may label their own request as the agent's: it can only tighten.
+        let mut stated = json!({ "url": "https://e.test/", "initiated_by": "agent" });
+        stamp_scrape_origin(&mut stated, CallerClass::User);
+        assert_eq!(stated["initiated_by"], "agent");
+    }
+
+    /// WS13.5: end to end through the handler. The upstream is slower than a 1 s client
+    /// default: a plain scrape times out (502), the same scrape with actions waits it out
+    /// under the 125 s ceiling, and the forwarded body carries the stamp for a service
+    /// principal only.
+    #[tokio::test]
+    async fn scrape_actions_timeout_is_per_request_and_the_stamp_reaches_the_edge() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(1500))
+                    .set_body_json(json!({ "data": { "status": 200 } })),
+            )
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        state.client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let call = |body: Value, caller: Option<CallerClass>| {
+            let state = state.clone();
+            async move {
+                scrape(
+                    State(state),
+                    Extension(preview_user()),
+                    caller.map(Extension),
+                    HeaderMap::new(),
+                    Json(body),
+                )
+                .await
+                .into_response()
+                .status()
+            }
+        };
+
+        let plain = call(json!({ "url": "https://example.com/" }), None).await;
+        assert_eq!(plain, StatusCode::BAD_GATEWAY, "the client default still applies to a plain scrape");
+
+        let with_actions = call(
+            json!({ "url": "https://example.com/", "actions": [{ "type": "wait", "milliseconds": 100 }] }),
+            Some(CallerClass::ServicePrincipal),
+        )
+        .await;
+        assert_eq!(with_actions, StatusCode::OK, "an actions scrape runs under the long ceiling");
+
+        let received = quarry.received_requests().await.unwrap();
+        let bodies: Vec<Value> = received
+            .iter()
+            .filter(|request| request.url.path() == "/v1/scrape")
+            .map(|request| serde_json::from_slice(&request.body).unwrap())
+            .collect();
+        let actions_body = bodies
+            .iter()
+            .find(|body| body.get("actions").is_some())
+            .expect("the actions request reached the edge");
+        assert_eq!(actions_body["initiated_by"], "agent");
+        let plain_body = bodies
+            .iter()
+            .find(|body| body.get("actions").is_none())
+            .expect("the plain request reached the edge");
+        assert!(plain_body.get("initiated_by").is_none(), "a direct call carries no stamp");
+    }
 
     /// WS14.S3: the scope switches are forwarded in snake case from either spelling, and
     /// are absent when the caller sends neither.
