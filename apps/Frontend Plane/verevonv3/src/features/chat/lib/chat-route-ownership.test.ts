@@ -49,11 +49,20 @@ async function sourceFiles(): Promise<Array<{ path: string; text: string }>> {
   return out
 }
 
+/** The file's text without whole-line comments, so prose about a link is not mistaken for one. */
+function codeLines(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*(\/\/|\/\*|\*)/.test(line))
+    .join('\n')
+}
+
 describe('chat route ownership', () => {
   it('no surface outside the chat feature deep-links a thread into /chat', async () => {
     const offenders = (await sourceFiles())
       .filter((file) => !file.path.startsWith('features/chat/'))
-      .filter((file) => THREAD_ADOPTION.test(file.text))
+      // A comment that explains the rule (space-thread-deep-link.ts) is not a link.
+      .filter((file) => THREAD_ADOPTION.test(codeLines(file.text)))
       .map((file) => file.path)
 
     expect(

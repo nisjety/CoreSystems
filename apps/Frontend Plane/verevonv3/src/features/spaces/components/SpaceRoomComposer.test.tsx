@@ -85,6 +85,10 @@ async function send(text: string) {
 }
 
 beforeEach(() => {
+  // DEPTH-SPA-2: SpaceConnectivityBanner (WS01-S8) writes a signal while it mounts, which Solid 2
+  // refuses inside a component (REACTIVE_WRITE_IN_OWNED_SCOPE) and halts the reactive system for the
+  // rest of the file. The banner has its own switch; these tests are about the send path, so keep it off.
+  vi.stubEnv('VITE_SPACE_CONNECTIVITY_BANNER_UI', 'false')
   chatClient.streamChat.mockReset()
   chatClient.cancelInvocation.mockReset()
   chatClient.cancelInvocation.mockResolvedValue(undefined)
@@ -98,6 +102,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.unstubAllEnvs()
   cleanup()
   window.localStorage.clear()
 })

@@ -44,6 +44,12 @@ vi.mock('@/shared/api/spaces-client', () => ({
   getSpaceAgents: spacesClient.getSpaceAgents,
   getSpaceContext: spacesClient.getSpaceContext,
   getSpaceRoster: spacesClient.getSpaceRoster,
+  // The page reads the roster through the view (WS04-S6), which also says whether the member writer
+  // is on. Mirrors the real one over the hoisted roster read, with the writer off.
+  getSpaceRosterView: async (spaceRef: string) => ({
+    members: await spacesClient.getSpaceRoster(spaceRef),
+    writerApi: false,
+  }),
   getSpaceThreads: spacesClient.getSpaceThreads,
   getPersonalSpaceDeletionReceipt: spacesClient.getPersonalSpaceDeletionReceipt,
   listSpaces: spacesClient.listSpaces,
@@ -51,6 +57,19 @@ vi.mock('@/shared/api/spaces-client', () => ({
   getSpaceInstructions: spacesClient.getSpaceInstructions,
   updateSpaceInstructions: spacesClient.updateSpaceInstructions,
   getSpaceThreadTranscript: spacesClient.getSpaceThreadTranscript,
+  // The timeline and the artifacts tab read through loadSpaceTranscript (WS07-S4), which turns the
+  // transcript read's outcome into a value. Mirrors the real one over the hoisted read.
+  loadSpaceTranscript: async (spaceRef: string, threadId: string) => {
+    try {
+      const snapshot = await spacesClient.getSpaceThreadTranscript(spaceRef, threadId)
+      return { state: 'ok' as const, threadId: snapshot.threadId, turns: snapshot.turns }
+    } catch (error) {
+      const status = (error as { status?: number } | null)?.status
+      if (status === 403) return { state: 'restricted' as const }
+      if (status === 404) return { state: 'missing' as const }
+      return { state: 'error' as const }
+    }
+  },
   setSpaceAgentState: spacesClient.setSpaceAgentState,
   revokeSpaceAgent: spacesClient.revokeSpaceAgent,
   getSpaceWork: spacesClient.getSpaceWork,
@@ -139,6 +158,9 @@ function renderSpacePage(path = '/spaces/space_personal_1') {
 // Norwegian, so these assertions pin what an actual first-time user sees.
 describe('SpacePage', () => {
   beforeEach(() => {
+    // DEPTH-SPA-2: the connectivity banner the composer mounts writes a signal inside its component
+    // (REACTIVE_WRITE_IN_OWNED_SCOPE), which halts reactivity for the file. Off here; it has its own switch.
+    vi.stubEnv('VITE_SPACE_CONNECTIVITY_BANNER_UI', 'false')
     spacesClient.getSpaceContext.mockReset()
     spacesClient.getSpaceThreads.mockReset()
     spacesClient.getPersonalSpaceDeletionReceipt.mockReset()
@@ -203,7 +225,10 @@ describe('SpacePage', () => {
     spacesClient.getInstallableSpaceAgents.mockResolvedValue([])
   })
 
-  afterEach(() => vi.restoreAllMocks())
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.restoreAllMocks()
+  })
 
   it('fails closed on the next membership recheck instead of keeping stale Space content visible', async () => {
     spacesClient.getSpaceContext
