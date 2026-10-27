@@ -169,6 +169,11 @@ pub(crate) struct SpaceFeatureFlags {
     /// the console that reads them. Off answers 404 `space_policy_admin_disabled`. A rollout
     /// control, never an authorization input; Control's role check and write switch decide.
     pub(crate) policy_admin_api: bool,
+    /// `SPACE_REALTIME_STREAM` (WS02-S4): `GET /api/v1/spaces/{space_ref}/events`, the validating
+    /// relay of the Space event stream. Off answers 404 `space_stream_disabled` and the SPA stays
+    /// on its 6 s poll. A rollout control, never an authorization input; an org under Zero Data
+    /// Retention gets `poll_only` even when on.
+    pub(crate) realtime_stream: bool,
 }
 
 impl SpaceFeatureFlags {
@@ -179,6 +184,7 @@ impl SpaceFeatureFlags {
             csp_report_log_hosts: dev_only_flag("CSP_REPORT_LOG_HOSTS"),
             membership_writer_api: space_flag("SPACE_MEMBERSHIP_WRITER_API"),
             policy_admin_api: space_flag("SPACE_POLICY_ADMIN_API"),
+            realtime_stream: space_flag("SPACE_REALTIME_STREAM"),
         }
     }
 }

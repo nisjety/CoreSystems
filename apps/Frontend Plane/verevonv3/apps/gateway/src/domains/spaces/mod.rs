@@ -31,6 +31,7 @@ mod denial;
 use denial::{typed_response, with_gap_details, Decision, SpaceDenial};
 pub(crate) mod room_admin;
 mod schedule_template;
+mod stream;
 
 static THREAD_SCOPE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -809,7 +810,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 /// adds one `.merge(<module>::routes())` line here, so it never edits the route table above.
 /// Merged before `require_session`, so every module route is session-gated.
 fn module_routes() -> Router<AppState> {
-    Router::new()
+    Router::new().merge(stream::routes())
 }
 
 #[derive(Debug, Deserialize)]
