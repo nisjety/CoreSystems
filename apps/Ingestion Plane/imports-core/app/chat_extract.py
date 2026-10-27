@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from app.parsers import _parse_local, OfficeArchiveTooLargeError, UnsupportedFileTypeError
+from app.ocr import OcrUnavailableError, ocr_enabled, ocr_pdf
 
 
 
@@ -58,12 +59,29 @@ def extract_chat_document(request: ChatExtractRequest) -> dict:
     except Exception as exc:
         # Parser exceptions may contain document text. Do not expose or log them.
         raise HTTPException(422, "The attachment could not be read. Check the file and retry.") from exc
+    ocr_result = None
     if not text.strip():
-        raise HTTPException(422, "No readable text found. Scanned files require a text version.")
+        # Local Tesseract for a PDF with no text layer, off unless the switch is the
+        # literal "true". No network; nothing persists beyond the OCR's temporary
+        # directory. This does not change the ZDR attachment refusal elsewhere.
+        if Path(request.filename).suffix.lower() == ".pdf" and ocr_enabled():
+            try:
+                ocr_result = ocr_pdf(content)
+            except OcrUnavailableError as exc:
+                raise HTTPException(422, "The scanned file could not be read. Try a text version.") from exc
+            text = ocr_result.text
+        if not text.strip():
+            raise HTTPException(422, "No readable text found. Scanned files require a text version.")
+    cut = ocr_result is not None and ocr_result.pages_read < ocr_result.pages_total
+    if cut:
+        # OCR stopped at the page cap or the deadline; the text says how far it got.
+        text += f"\n\n[Read the first {ocr_result.pages_read} of {ocr_result.pages_total} pages. The rest was not read.]"
     if len(text) > _MAX_CHARS:
         raise HTTPException(413, "The document is too long for this turn. Choose a smaller excerpt.")
     data = {"name": request.filename, "content": text, "persisted": False}
-    if metadata.get("truncated"):
-        # The sheet was cut on a row boundary; the text says where.
+    if metadata.get("truncated") or cut:
+        # A sheet cut on a row boundary, or OCR that read only some pages: the text says where.
         data["truncated"] = True
+    if ocr_result is not None:
+        data["ocr"] = True
     return {"data": data}
