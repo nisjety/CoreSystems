@@ -341,12 +341,7 @@ impl FallbackDriver {
                         );
                         return Ok(shell);
                     }
-                    return Err(e.with_details(serde_json::json!({
-                        "fallback_attempts": attempts
-                            .iter()
-                            .map(|(k, msg)| serde_json::json!({"driver": format!("{k:?}"), "error": msg}))
-                            .collect::<Vec<_>>(),
-                    })));
+                    return Err(with_fallback_attempts(e, &attempts));
                 }
             }
         }
@@ -374,14 +369,7 @@ impl FallbackDriver {
             .join("; ");
 
         Err(last_err
-            .map(|e| {
-                e.with_details(serde_json::json!({
-                    "fallback_attempts": attempts
-                        .iter()
-                        .map(|(k, msg)| serde_json::json!({"driver": format!("{k:?}"), "error": msg}))
-                        .collect::<Vec<_>>(),
-                }))
-            })
+            .map(|e| with_fallback_attempts(e, &attempts))
             .unwrap_or_else(|| {
                 quarry_core::QuarryError::new(
                     ErrorCode::DriverFailed,
@@ -669,6 +657,26 @@ pub(crate) fn is_retryable_driver_error(code: ErrorCode) -> bool {
     )
 }
 
+/// The error with the per-driver attempts added to its details. A typed reason the driver
+/// already put there (`action_failed` with the ordered outcomes of a scrape-time action
+/// run, a block reason) stays: the attempts are one more key, never a replacement.
+fn with_fallback_attempts(
+    mut error: quarry_core::QuarryError,
+    attempts: &[(DriverKind, String)],
+) -> quarry_core::QuarryError {
+    let listed = serde_json::json!(attempts
+        .iter()
+        .map(|(k, msg)| serde_json::json!({"driver": format!("{k:?}"), "error": msg}))
+        .collect::<Vec<_>>());
+    match error.details.as_mut().and_then(serde_json::Value::as_object_mut) {
+        Some(object) => {
+            object.insert("fallback_attempts".to_owned(), listed);
+            error
+        }
+        None => error.with_details(serde_json::json!({ "fallback_attempts": listed })),
+    }
+}
+
 pub(crate) fn error_code_short(code: ErrorCode) -> &'static str {
     match code {
         ErrorCode::BadRequest => "bad_request",
@@ -761,6 +769,39 @@ mod tests {
                 "simulated failure",
             ))
         }
+    }
+
+    /// Fails with a typed reason in the details, as a scrape-time action run does.
+    struct ReasonedFailDriver;
+
+    #[async_trait]
+    impl Driver for ReasonedFailDriver {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Browser
+        }
+
+        async fn fetch(&self, _url: &Url) -> QuarryResult<FetchResponse> {
+            Err(
+                QuarryError::new(ErrorCode::DriverFailed, "a scrape action failed").with_details(
+                    serde_json::json!({ "reason": "action_failed", "actions": [{ "index": 0 }] }),
+                ),
+            )
+        }
+    }
+
+    /// The attempts are added to a driver's own details, never put in their place:
+    /// the typed `action_failed` reason and its ordered outcomes reach the caller.
+    #[tokio::test]
+    async fn a_typed_reason_survives_the_fallback_attempts() {
+        let mut drivers: HashMap<DriverKind, Arc<dyn Driver>> = HashMap::new();
+        drivers.insert(DriverKind::Browser, Arc::new(ReasonedFailDriver));
+        let fb = FallbackDriver::new(DriverKind::Browser, vec![], drivers);
+        let url: Url = "https://example.com".parse().unwrap();
+        let err = fb.fetch(&url).await.unwrap_err();
+        let details = err.details.as_ref().expect("details");
+        assert_eq!(details["reason"], "action_failed");
+        assert_eq!(details["actions"][0]["index"], 0);
+        assert_eq!(details["fallback_attempts"].as_array().map(Vec::len), Some(1));
     }
 
     struct BlockDriver {
