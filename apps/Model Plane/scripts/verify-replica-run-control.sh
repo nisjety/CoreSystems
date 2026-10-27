@@ -33,18 +33,51 @@
 #   MODEL_GATEWAY_SHARED_TURN_RECORD=true MODEL_GATEWAY_SEND_RECEIPTS=true
 # MODEL_GATEWAY_SHARED_IDEMPOTENCY stays unset (WS04-S7 is not flipped by this proof).
 #
-# Usage:    MP_PROOF_BEARER=<bearer of the proof user> ./scripts/verify-replica-run-control.sh
+# Usage:    MP_PROOF_COOKIE_JAR=<curl cookie jar of a signed-in proof user> ./scripts/verify-replica-run-control.sh
+#           or, in direct mode, MP_PROOF_BEARER, MP_PROOF_SESSION_BEARER and MP_PROOF_INFERENCE_BEARER, all three set.
+# Cookie mode is the one to use. It mints the user, session-core and inference-core bearers from AUTH_CORE_URL
+#           (default http://127.0.0.1:3011) with curl -b and jq -r: GET /api/model-plane/token, GET
+#           /api/session-core/token and GET /api/inference-core/token, each answering JSON with the token in `token`
+#           (model-plane-token.controller.ts:134-203, plane-token.controller.ts:203-274). Every request that carries
+#           a bearer mints all three again first, so the 300 s default ttl of the session and inference tokens cannot
+#           lapse mid-run. A failed mint is a FAIL naming the audience and HTTP status; the body is never printed.
+#           Direct mode uses the three values as given and never re-mints, so they must be fresh, and a run that
+#           outlives their ttl fails.
 # Optional: PROOF_MODEL is the Anthropic model id every turn asks for (default claude-sonnet-5-5). It may
 #           use only letters, digits, '.', '_', ':' and '-', at most 64 of them. PROOF_SHORT_PROMPT is the
 #           preflight and case 6 turn. PROOF_TOOL_PROMPT must make the model call a tool on the proof stack
 #           (case 2 waits for a tool_call frame); PROOF_PLAN_PROMPT must make it propose a plan (case 3 waits
 #           for plan_proposed). PROOF_OUT overrides the evidence file; the other PROOF_* variables are read at
 #           the top of the script.
-# The bearer is read from the environment and is never printed or written.
+# The bearers are read from the environment or minted into shell variables; none is printed or written.
+# The org must be non-ZDR and its plan must allow the Anthropic model PROOF_MODEL. A ZDR turn never registers its
+# stream, so Stop never reaches the bus (http_routes.rs:7868-7886), and queue, rating, plan approval and the
+# durable run cancel refuse ZDR turns (require_non_zdr_durable_mutation, zdr_posture::continuation_gate).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-: "${MP_PROOF_BEARER:?set MP_PROOF_BEARER to the bearer of the proof user (never printed)}"
+# Two credential modes, both from the environment (see the header). The three bearer variables stay empty
+# until mint_all fills them in cookie mode; direct mode checks that all three were given.
+AUTH_CORE_URL="${AUTH_CORE_URL:-http://127.0.0.1:3011}"
+MP_PROOF_BEARER="${MP_PROOF_BEARER:-}"
+MP_PROOF_SESSION_BEARER="${MP_PROOF_SESSION_BEARER:-}"
+MP_PROOF_INFERENCE_BEARER="${MP_PROOF_INFERENCE_BEARER:-}"
+if [ -n "${MP_PROOF_COOKIE_JAR:-}" ]; then
+  if [ ! -r "$MP_PROOF_COOKIE_JAR" ]; then
+    echo "FAIL: MP_PROOF_COOKIE_JAR is set but is not a readable cookie jar" >&2
+    exit 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "FAIL: cookie mode needs jq on PATH to read the minted tokens" >&2
+    exit 1
+  fi
+  CRED_MODE=cookie
+elif [ -n "$MP_PROOF_BEARER" ] && [ -n "$MP_PROOF_SESSION_BEARER" ] && [ -n "$MP_PROOF_INFERENCE_BEARER" ]; then
+  CRED_MODE=direct
+else
+  echo "FAIL: set MP_PROOF_COOKIE_JAR to a curl cookie jar of a signed-in proof user, or set all of MP_PROOF_BEARER, MP_PROOF_SESSION_BEARER and MP_PROOF_INFERENCE_BEARER" >&2
+  exit 1
+fi
 
 # The owner's order: the direct Anthropic API only. This is assigned, not defaulted, so an exported
 # PROOF_PROVIDER cannot move the proof to another provider.
@@ -102,21 +135,50 @@ expect() { # expect <actual> <wanted> <label>
   echo "    ok: $3"
 }
 
-http_post() { # http_post <base> <path> [json] -> prints the status; the body is in $WORK/last.body
-  local base="$1" path="$2" body="${3-}"
+mint_token() { # mint_token <audience path> <label> -> MINTED holds the token; the body stays in this function
+  local out code body
+  out="$(curl -s -b "$MP_PROOF_COOKIE_JAR" -w '\n%{http_code}' "$AUTH_CORE_URL/api/$1/token" || true)"
+  code="${out##*$'\n'}"
+  body="${out%$'\n'*}"
+  # http_post runs mint_all inside a command substitution, which captures stdout and drops the FAIL line, so these go
+  # to stderr, which the evidence tee also reads. Only the status is printed; the body never is.
+  if [ "$code" != 200 ]; then fail "mint $2: auth-core answered HTTP ${code:-none}" >&2; fi
+  MINTED="$(printf '%s' "$body" | jq -r '.token // empty' 2>/dev/null || true)"
+  if [ -z "$MINTED" ]; then fail "mint $2: the answer carries no token" >&2; fi
+}
+mint_all() { # refreshes MP_PROOF_BEARER, MP_PROOF_SESSION_BEARER and MP_PROOF_INFERENCE_BEARER; cookie mode only
+  [ "$CRED_MODE" = cookie ] || return 0
+  mint_token model-plane "the model-plane user token"; MP_PROOF_BEARER="$MINTED"
+  mint_token session-core "session-core"; MP_PROOF_SESSION_BEARER="$MINTED"
+  mint_token inference-core "inference-core"; MP_PROOF_INFERENCE_BEARER="$MINTED"
+}
+http_post() { # http_post <base> <path> [json] [session] -> prints the status; the body is in $WORK/last.body
+  # The session bearer goes out only with the fourth argument "session": queue, feedback, plan approval and the
+  # durable run cancel take it (http_routes.rs:8632-8637, :7433-7437, :8063, :1962). Stop takes only the user token
+  # (invoke_cancel, http_routes.rs:7860-7864), so it is sent without the fourth argument.
+  local base="$1" path="$2" body="${3-}" want="${4-}"
+  local session_hdr=()
+  mint_all
+  if [ "$want" = session ]; then session_hdr=(-H "x-session-authorization: Bearer $MP_PROOF_SESSION_BEARER"); fi
   if [ -n "$body" ]; then
     curl -s -o "$WORK/last.body" -w '%{http_code}' -X POST "$base$path" \
-      -H "Authorization: Bearer $MP_PROOF_BEARER" -H 'Content-Type: application/json' -d "$body" || true
+      -H "Authorization: Bearer $MP_PROOF_BEARER" ${session_hdr[@]+"${session_hdr[@]}"} \
+      -H 'Content-Type: application/json' -d "$body" || true
   else
     curl -s -o "$WORK/last.body" -w '%{http_code}' -X POST "$base$path" \
-      -H "Authorization: Bearer $MP_PROOF_BEARER" || true
+      -H "Authorization: Bearer $MP_PROOF_BEARER" ${session_hdr[@]+"${session_hdr[@]}"} || true
   fi
 }
 last_body() { cat "$WORK/last.body" 2>/dev/null || true; }
 
 start_stream() { # start_stream <base> <out-file> <json> -> STREAM_PID
+  mint_all
+  # The stream start needs the session and inference bearers as well (auth.rs:1291-1292, sse.rs:1069-1070).
   curl -sN --max-time 900 -X POST "$1/v1/invoke/stream" \
-    -H "Authorization: Bearer $MP_PROOF_BEARER" -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $MP_PROOF_BEARER" \
+    -H "x-session-authorization: Bearer $MP_PROOF_SESSION_BEARER" \
+    -H "x-inference-authorization: Bearer $MP_PROOF_INFERENCE_BEARER" \
+    -H 'Content-Type: application/json' \
     -d "$3" >"$2" 2>/dev/null &
   STREAM_PID=$!
   STREAM_PIDS="$STREAM_PIDS $STREAM_PID"
@@ -247,7 +309,7 @@ if [ -z "$RID" ]; then fail "case 2: the connected frame carries no request_id";
 wait_frame "$WORK/case2.sse" tool_call 240 || fail "case 2: no tool round on A; set PROOF_TOOL_PROMPT to a prompt that calls a tool"
 CMID="ws04proof-$STAMP-$RANDOM"
 QUEUE_BODY="{\"content\":\"Also say in one line who first traded salt.\",\"client_message_id\":\"$CMID\"}"
-CODE="$(http_post "$B" "/v1/invoke/$RID/queue" "$QUEUE_BODY")"
+CODE="$(http_post "$B" "/v1/invoke/$RID/queue" "$QUEUE_BODY" session)"
 echo "    POST B /v1/invoke/$RID/queue -> $CODE $(last_body)"
 expect "$CODE" 202 "case 2: queue via B answers 202"
 case "$(last_body)" in
@@ -260,7 +322,7 @@ case "$(last_body)" in
 esac
 # Scoped to the thread, so an id reused by an earlier run lives in another thread and cannot count here.
 expect "$(psql_one "SELECT count(*) FROM messages WHERE thread_id='$THREAD_ID' AND client_message_id='$CMID'")" 1 "case 2: one stored row for the client message id"
-CODE="$(http_post "$B" "/v1/invoke/$RID/queue" "$QUEUE_BODY")"
+CODE="$(http_post "$B" "/v1/invoke/$RID/queue" "$QUEUE_BODY" session)"
 echo "    POST B /v1/invoke/$RID/queue again, same body -> $CODE"
 expect "$(psql_one "SELECT count(*) FROM messages WHERE thread_id='$THREAD_ID' AND client_message_id='$CMID'")" 1 "case 2: the repeat stores no second row"
 wait_frame "$WORK/case2.sse" queued_input 240 || fail "case 2: A did not deliver the queued message"
@@ -284,7 +346,7 @@ THREAD_ID="$(json_field thread_id "$CONNECTED")"
 if [ -z "$PLAN_ID" ] || [ -z "$RUN_ID" ] || [ -z "$THREAD_ID" ]; then
   fail "case 3: missing plan, run or thread id (plan=$PLAN_ID run=$RUN_ID thread=$THREAD_ID)"
 fi
-CODE="$(http_post "$A" "/v1/runs/$RUN_ID/plan-approval" "{\"decision\":\"approve\",\"plan_id\":\"$PLAN_ID\",\"granted_rung\":\"workspace_write\",\"justification\":\"$JUSTIFICATION\"}")"
+CODE="$(http_post "$A" "/v1/runs/$RUN_ID/plan-approval" "{\"decision\":\"approve\",\"plan_id\":\"$PLAN_ID\",\"granted_rung\":\"workspace_write\",\"justification\":\"$JUSTIFICATION\"}" session)"
 echo "    POST A /v1/runs/$RUN_ID/plan-approval -> $CODE $(last_body)"
 expect "$CODE" 200 "case 3: approval on A answers 200"
 start_stream "$B" "$WORK/case3-do.sse" '{"content":"'"$DO_PROMPT"'","thread_id":"'"$THREAD_ID"'","provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
@@ -309,7 +371,7 @@ RID="$(json_field request_id "$(frame_data "$WORK/case6.sse" connected)")"
 if [ -z "$RID" ]; then fail "case 6: the connected frame carries no request_id"; fi
 wait "$P" 2>/dev/null || true
 expect "$(json_field provider_used "$(frame_data "$WORK/case6.sse" usage)")" "$PROOF_PROVIDER" "case 6: the turn on A was served by $PROOF_PROVIDER"
-CODE="$(http_post "$B" "/v1/feedback" "{\"request_id\":\"$RID\",\"rating\":\"positive\"}")"
+CODE="$(http_post "$B" "/v1/feedback" "{\"request_id\":\"$RID\",\"rating\":\"positive\"}" session)"
 echo "    POST B /v1/feedback -> $CODE $(last_body)"
 case "$CODE" in
   200) echo "    ok: B rated the turn streamed on A" ;;
@@ -337,19 +399,20 @@ echo "    killed $A_CTR; stopped frames on the dead stream: $(frame_count "$WORK
 CODE="$(http_post "$B" "/v1/invoke/$RID/cancel")"
 echo "    POST B /v1/invoke/$RID/cancel -> $CODE $(last_body)"
 expect "$CODE" 404 "case 4: Stop via B answers 404 with no owner"
-CODE="$(http_post "$B" "/v1/orchestration/runs/$RUN_ID/cancel")"
+CODE="$(http_post "$B" "/v1/orchestration/runs/$RUN_ID/cancel" "" session)"
 echo "    POST B /v1/orchestration/runs/$RUN_ID/cancel -> $CODE $(last_body)"
 case "$CODE" in
   200|202) echo "    ok: the durable run cancel is accepted" ;;
   *) fail "case 4: durable run cancel answered $CODE" ;;
 esac
-CODE="$(http_post "$B" "/v1/invoke/$RID/queue" '{"content":"Also note the date."}')"
+CODE="$(http_post "$B" "/v1/invoke/$RID/queue" '{"content":"Also note the date."}' session)"
 echo "    POST B /v1/invoke/$RID/queue -> $CODE $(last_body)"
 expect "$CODE" 404 "case 4: queue via B answers 404 with no owner"
 case "$(last_body)" in
   *'"resend_as_new_turn":true'*) echo "    ok: the answer says resend_as_new_turn" ;;
   *) fail "case 4: the answer does not say resend_as_new_turn" ;;
 esac
+mint_all
 curl -sN --max-time 30 -H "Authorization: Bearer $MP_PROOF_BEARER" "$B/v1/invoke/resume/$RID" \
   >"$WORK/case4-resume.sse" 2>/dev/null || true
 echo "    resume on B: $(grep -c '^event: ' "$WORK/case4-resume.sse" || true) frame(s) from the buffer"
