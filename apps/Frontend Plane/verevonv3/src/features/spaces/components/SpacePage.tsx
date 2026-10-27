@@ -51,6 +51,7 @@ import {
 import { canRemove, countActiveOwners } from '../lib/space-roles'
 import { SpaceCreateAgentDialog } from './SpaceCreateAgentDialog'
 import { SpaceRoomComposer } from './SpaceRoomComposer'
+import { SpaceRoomSettings } from './SpaceRoomSettings'
 import { SpaceRoomTimeline, roomAgentName } from './SpaceRoomTimeline'
 import {
   SpaceAuxPane,
@@ -490,6 +491,21 @@ export default function SpacePage() {
                 <div class="verevon-space-header__title">
                   <p class="verevon-space-eyebrow">{spaceWorkroomLabel(current().space.kind, i18n.tr)}</p>
                   <h1 id="space-title">{spaceDisplayName(current().space, i18n.tr)}</h1>
+                  <Show when={current().space.topic?.trim()}>
+                    {(topic) => <p class="verevon-space-header__topic">{topic()}</p>}
+                  </Show>
+                  <SpaceRoomSettings
+                    spaceRef={current().space.space_ref}
+                    name={current().space.name}
+                    topic={current().space.topic}
+                    role={current().membership.role}
+                    kind={current().space.kind}
+                    lifecycle={current().space.lifecycle}
+                    enabled={current().features?.room_details === true}
+                    onSaved={() => {
+                      void refetchContext()
+                    }}
+                  />
                   <div class="verevon-space-meta" aria-label={i18n.tr('Status for rommet', 'Current Space status')}>
                     <span>{spaceKindLabel(current().space.kind, i18n.tr)}</span>
                     <span aria-hidden="true">·</span>

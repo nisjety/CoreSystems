@@ -26,7 +26,39 @@ const spaceLeaveRoomInput = z.object({
   spaceRef: z.string().min(1),
 })
 
+// WS04-S2: a room's name and topic. Application (convex-core `spaces`) owns the labels and
+// runs the one set of rules (NFC, trim, name 1-120, topic 0-250, no control or bidi
+// characters); the gateway only gates owner or manager from Control's live role. The topic is
+// a display label, never prompt or notification content. An empty `topic` clears it.
+const spaceUpdateRoomDetailsInput = z
+  .object({
+    spaceRef: z.string().min(1),
+    name: z.string().max(2000).optional(),
+    topic: z.string().max(2000).optional(),
+  })
+  .refine((value) => value.name !== undefined || value.topic !== undefined, {
+    message: 'Provide a name or a topic.',
+  })
+
+const spaceUpdateRoomDetailsOutput = z.object({
+  space_ref: z.string(),
+  name: z.string(),
+  topic: z.string().nullable(),
+})
+
 export const ws04SpaceActions = [
+  {
+    id: 'spaces.update_room_details',
+    label: 'Update Space room name and topic',
+    description:
+      'Rename a named room or set its topic. Only a room owner or manager may; the organization room and personal Spaces follow their own rules. An empty topic clears it.',
+    ownerPlane: 'application',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: spaceUpdateRoomDetailsInput,
+    outputSchema: spaceUpdateRoomDetailsOutput,
+  },
   {
     id: 'spaces.change_member_role',
     label: 'Change Space member role',

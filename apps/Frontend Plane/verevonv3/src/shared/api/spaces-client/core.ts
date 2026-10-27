@@ -28,6 +28,8 @@ export type SpaceSummary = {
    * ACTION on this must test `=== false`, never `!value`: the room whose
    * membership is derived is the one where an editor would silently fail. */
   is_organization_room?: boolean
+  /** The room's one-line topic (WS04-S2). Absent or null when none is set. A label, not authority. */
+  topic?: string | null
 }
 
 /** A server-composed lifecycle + current-membership read. It contains no
@@ -44,6 +46,8 @@ export type SpaceContext = {
     thread_pane?: boolean
     send_idempotency?: boolean
     connectivity_banner?: boolean
+    /** WS04-S2: the owner or manager may edit the room's name and topic. */
+    room_details?: boolean
   }
   /** Server-stated bounds (WS01-S5). Absent on an older gateway: use the documented defaults. */
   limits?: {
