@@ -322,6 +322,12 @@ pub async fn schedule_refresh(
         "refresh",
     )?;
     validate_url(&req.url).map_err(|e| err_response(&request_id, e))?;
+    // D2-018: a URL queued here is fetched later by a worker, so the web policy's host
+    // rules apply before it is queued, as they do for crawl. A denied URL is never queued.
+    let decision = crate::web_policy_edge::decide(&state.policy, &claims, false, None)
+        .map_err(|error| crate::web_policy_edge::envelope_error(&request_id, error))?;
+    crate::web_policy_edge::gate_url(&decision, &req.url)
+        .map_err(|error| crate::web_policy_edge::envelope_error(&request_id, error))?;
     let Some(pool) = state.queue_pool.as_ref() else {
         return Err(err_response(
             &request_id,
