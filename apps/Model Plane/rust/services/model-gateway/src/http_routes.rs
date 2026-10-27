@@ -10255,6 +10255,14 @@ struct MemorySummaryResponse {
     /// unknown row "stated" would be the one wrong answer: it is the claim a
     /// user would rely on when deciding whether to keep it.
     provenance: &'static str,
+    /// Closed vocabulary; omitted for an ordinary row. "room_origin_unverified" marks a
+    /// row learned in a shared room before containment: listed to its owner, never
+    /// recalled (WS17-S2).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    withheld_reason: String,
+    /// Space the withheld row was learned in (an id, never content); omitted when empty.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    origin_space_ref: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -10302,6 +10310,8 @@ async fn list_memories(
             content: entry.content,
             updated_at: timestamp_to_rfc3339(entry.updated_at),
             provenance: memory_provenance_label(entry.provenance),
+            withheld_reason: entry.withheld_reason,
+            origin_space_ref: entry.origin_space_ref,
         })
         .collect();
 

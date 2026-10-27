@@ -41,6 +41,21 @@ pub(crate) fn legacy_room_origin_exclusion(flag_param: &str, thread_param: &str)
     )
 }
 
+/// Closed vocabulary value for `MemoryEntry.withheld_reason` (WS17-S2): a user-scope row
+/// learned in a shared room before containment existed. Listed to its owner, never recalled.
+pub(crate) const WITHHELD_ROOM_ORIGIN: &str = "room_origin_unverified";
+
+/// The Space a legacy room-origin row was learned in, as a scalar subquery over an
+/// unaliased `agent_memory` query (`NULL` for an ordinary row, or when `flag_param` is
+/// false: with containment off the row is recalled again, so it is not withheld). Same
+/// `source_links` shape as [`legacy_room_origin_exclusion`], so the list and the recall
+/// filter always agree on which rows are withheld.
+pub(crate) fn legacy_room_origin_space(flag_param: &str) -> String {
+    format!(
+        "(SELECT ct.space_id FROM unnest(agent_memory.source_links) AS sl(link)            JOIN threads ct ON ct.id = substr(sl.link, 8)           WHERE {flag_param} AND sl.link LIKE 'thread:%'             AND ct.space_id IS NOT NULL AND ct.space_kind IS DISTINCT FROM 'personal'           ORDER BY ct.space_id LIMIT 1)"
+    )
+}
+
 /// Message shown when a contained thread tries to write tenant- or user-wide memory.
 pub(crate) const REFUSAL_CONTAINED: &str =
     "memory_scope_contained: a shared room cannot write user, policy, agent or workspace memory";

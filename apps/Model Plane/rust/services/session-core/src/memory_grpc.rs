@@ -201,6 +201,8 @@ fn pg_row_to_entry(
         }),
         user_id: owner_user_id.to_owned(),
         provenance: memory_provenance(row.provenance) as i32,
+        origin_space_ref: row.origin_space_ref,
+        withheld_reason: row.withheld_reason,
     }
 }
 
@@ -641,6 +643,8 @@ impl MemoryService for MemoryGrpc {
                 }),
                 user_id: user_id.to_owned(),
                 provenance: memory_provenance(row.provenance) as i32,
+                origin_space_ref: row.origin_space_ref,
+                withheld_reason: row.withheld_reason,
             })
             .collect();
 
@@ -2024,6 +2028,8 @@ mod tests {
                 score,
                 updated_at,
                 provenance: MemoryProvenance::Inferred,
+                origin_space_ref: String::new(),
+                withheld_reason: String::new(),
                 exact_match,
             }
         }
@@ -2041,6 +2047,8 @@ mod tests {
                 }),
                 user_id: "user-a".to_owned(),
                 provenance: 0,
+                origin_space_ref: String::new(),
+                withheld_reason: String::new(),
             }
         }
 

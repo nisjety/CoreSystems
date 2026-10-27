@@ -120,6 +120,11 @@ pub(crate) struct MemorySearchRow {
     pub score: f32,
     pub updated_at: DateTime<Utc>,
     pub provenance: MemoryProvenance,
+    /// Space a withheld legacy row was learned in; empty for every ordinary row (WS17-S2).
+    pub origin_space_ref: String,
+    /// `memory_scope::WITHHELD_ROOM_ORIGIN` when the row is listed but never recalled;
+    /// empty otherwise (WS17-S2).
+    pub withheld_reason: String,
     /// True when `query` literally appears in this row's content or key.
     ///
     /// pgstore's candidate pool is ordered by `confidence` — a self-reported
@@ -1625,6 +1630,8 @@ pub(crate) async fn search_agent_memory(
                     // surface built to display them: every recalled memory
                     // rendered as pre-provenance no matter how it was written.
                     provenance: MemoryProvenance::classify(&source_links),
+                    origin_space_ref: String::new(),
+                    withheld_reason: String::new(),
                     content,
                     score: memory_score(confidence, exact_bonus),
                     updated_at,
@@ -1833,8 +1840,11 @@ pub(crate) async fn list_user_memory(
     limit: i64,
 ) -> Result<Vec<MemorySearchRow>, sqlx::Error> {
     let limit = limit.clamp(1, 200);
-    let rows = sqlx::query_as::<_, (String, String, String, f64, DateTime<Utc>, Vec<String>)>(
-        "SELECT id, kind, content, confidence, updated_at, source_links \
+    // WS17-S2: a row learned in a shared room before containment existed is still the
+    // owner's to see (and keep or delete) but is never recalled; flag it with its Space.
+    let origin_space = crate::space::memory_scope::legacy_room_origin_space("$4");
+    let sql = format!(
+        "SELECT id, kind, content, confidence, updated_at, source_links, {origin_space} \
          FROM agent_memory \
          WHERE org_id = $1 \
            AND owner = $2 \
@@ -1843,21 +1853,32 @@ pub(crate) async fn list_user_memory(
            AND is_latest = true \
            AND (expires_at IS NULL OR expires_at > now()) \
          ORDER BY updated_at DESC \
-         LIMIT $3",
-    )
+         LIMIT $3"
+    );
+    let rows = sqlx::query_as::<
+        _,
+        (String, String, String, f64, DateTime<Utc>, Vec<String>, Option<String>),
+    >(&sql)
     .bind(org_id)
     .bind(owner_user_id)
     .bind(limit)
+    .bind(crate::space::memory_scope::containment_on())
     .fetch_all(pool)
     .await?;
 
     Ok(rows
         .into_iter()
         .map(
-            |(id, kind, content, confidence, updated_at, source_links)| MemorySearchRow {
+            |(id, kind, content, confidence, updated_at, source_links, origin_space)| MemorySearchRow {
                 id,
                 thread_id: String::new(),
                 provenance: MemoryProvenance::classify(&source_links),
+                withheld_reason: if origin_space.is_some() {
+                    crate::space::memory_scope::WITHHELD_ROOM_ORIGIN.to_owned()
+                } else {
+                    String::new()
+                },
+                origin_space_ref: origin_space.unwrap_or_default(),
                 topic: memory_topic("user", &kind).to_owned(),
                 content,
                 score: memory_score(confidence, 0.0),

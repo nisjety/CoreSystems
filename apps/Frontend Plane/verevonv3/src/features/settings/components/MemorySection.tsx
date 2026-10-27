@@ -360,6 +360,17 @@ export function MemorySection() {
                           </span>
                         )}
                       </Show>
+                      <Show when={entry.withheldReason}>
+                        <span
+                          class="verevon-trust-chip"
+                          aria-label={i18n.tr(
+                            'Lært i et delt rom før beskyttelsen kom. Ingen samtale husker dette. Du kan beholde eller slette det.',
+                            'Learned in a shared room before protection existed. No conversation recalls it. You can keep or delete it.',
+                          )}
+                        >
+                          {i18n.tr('Tilbakeholdt – lært i et delt rom', 'Withheld – learned in a shared room')}
+                        </span>
+                      </Show>
                     </p>
                     <span>
                       {i18n.tr('Sist oppdatert', 'Last updated')}: {formatUpdatedAt(entry.updatedAt)}
