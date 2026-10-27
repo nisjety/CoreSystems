@@ -22,6 +22,10 @@ export const spaceTables = {
       v.literal("case"),
     ),
     name: v.string(),
+    // WS04-S2: a short label shown under the room name. Never composed into a
+    // prompt, event or notification (D-WS04-6); optional so existing rooms
+    // need no backfill.
+    topic: v.optional(v.string()),
     ownerExternalAuthId: v.optional(v.string()),
     createdByExternalAuthId: v.string(),
     // Marks THE organization room — the one durable `room` every active member
