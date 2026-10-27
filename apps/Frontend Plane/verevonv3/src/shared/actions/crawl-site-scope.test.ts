@@ -27,7 +27,7 @@ describe('knowledge.crawl_site Model-visible scope', () => {
   const code = crawlSiteSchemaCode(registrySource)
 
   it('has no key that mentions robots or external links', () => {
-    const keys = [...code.matchAll(/^\s{2}(\w+):/gm)].map((match) => match[1])
+    const keys = [...code.matchAll(/^\s{2}(\w+):/gm)].map((match) => match[1] ?? '')
     expect(keys.length).toBeGreaterThan(0)
     for (const key of keys) {
       expect(key.toLowerCase()).not.toMatch(/robot|external/)
