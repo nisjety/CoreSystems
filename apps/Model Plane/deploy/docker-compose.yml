@@ -1647,9 +1647,9 @@ services:
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       CAPABILITY_CORE_SERVICE_ID: ${CAPABILITY_CORE_SERVICE_ID:-capability-core}
       CAPABILITY_CORE_SERVICE_API_KEY: ${CAPABILITY_CORE_SERVICE_API_KEY:-}
-      # llmreviewer's DefaultModel ("claude-sonnet-4-20250514") is inference-
+      # llmreviewer's DefaultModel ("claude-sonnet-5-5") is inference-
       # core's DEFAULT_ANTHROPIC_MODEL constant (rust/services/inference-core/
-      # src/provider/anthropic.rs) -- the direct-API dated-snapshot name, not
+      # src/provider/anthropic.rs) -- the direct-API model id, not
       # one of this environment's actual Azure deployments
       # (AZURE_ANTHROPIC_DEPLOYMENTS below). Every azure-anthropic call for it
       # 404s ("DeploymentNotFound"). Pin the review call to a real deployment

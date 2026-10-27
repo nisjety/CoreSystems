@@ -28,7 +28,7 @@ import (
 
 // DefaultModel is used when NewReviewer is given an empty model, so the model
 // choice isn't pinned in code — the caller (config/env) overrides it.
-const DefaultModel = "claude-sonnet-4-20250514"
+const DefaultModel = "claude-sonnet-5-5"
 
 // reviewMaxTokens caps the review reply. Skill candidates are short JSON; this
 // is generous without inviting a runaway generation.

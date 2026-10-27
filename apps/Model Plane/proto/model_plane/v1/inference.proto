@@ -135,7 +135,7 @@ message InferRequest {
   // Tenant identifier.
   string org_id = 2;
 
-  // Requested model (e.g. "claude-sonnet-4-20250514", "gpt-4o").
+  // Requested model (e.g. "claude-sonnet-5-5", "gpt-4o").
   string model = 3;
 
   // Optional provider hint: "anthropic", "openai", etc.

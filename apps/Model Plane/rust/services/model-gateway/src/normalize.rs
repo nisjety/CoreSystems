@@ -575,9 +575,9 @@ mod tests {
 
     #[test]
     fn explicit_model_is_preserved() {
-        let req = make_request("hello", Some("claude-sonnet-4-20250514"));
+        let req = make_request("hello", Some("claude-sonnet-5-5"));
         let result = normalize(&req).expect("should succeed");
-        assert_eq!(result.model, "claude-sonnet-4-20250514");
+        assert_eq!(result.model, "claude-sonnet-5-5");
     }
 
     #[test]
