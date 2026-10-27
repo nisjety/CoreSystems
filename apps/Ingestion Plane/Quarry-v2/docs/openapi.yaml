@@ -7266,7 +7266,7 @@ components:
           - 1
         scope_applied:
           type: boolean
-          description: True when the scope changed links (enforce mode).
+          description: True when the edge evaluated the scope in both modes. The orchestrator ends a crawl whose report lacks it (D2-029). Only enforce changes links.
         mode:
           type: string
           enum:
