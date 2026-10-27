@@ -441,12 +441,27 @@ mod tests {
 
     #[test]
     fn tile_plan_respects_max_tiles_and_marks_truncated() {
+        // Which limit cuts the page depends on its width. At 1,280 px the 40 Mpx PNG cap binds
+        // first (40,000,000 / 1,280 = 31,250 CSS px), before the 60,000 px content limit.
         let plan = plan_tiles(1280.0, 90_000.0, 1.0, ImageFormat::Png).expect("plan");
         assert!(plan.truncated);
-        assert_eq!(plan.css_height, MAX_CONTENT_CSS_PX);
+        assert_eq!(plan.css_height, 31_250);
         assert!(plan.tiles.len() <= MAX_TILES as usize);
         let sum: u32 = plan.tiles.iter().map(|tile| tile.h).sum();
         assert_eq!(sum, plan.css_height);
+
+        // At 600 px the pixel cap is not reached, so the content limit binds: 15 tiles.
+        let plan = plan_tiles(600.0, 90_000.0, 1.0, ImageFormat::Png).expect("plan");
+        assert!(plan.truncated);
+        assert_eq!(plan.css_height, MAX_CONTENT_CSS_PX);
+        assert_eq!(plan.tiles.len(), 15);
+
+        // The tile limit binds on a narrow page at a high device scale: 16 tiles of 3,555 CSS
+        // px (a capture holds 16,000 device px), which is 56,880 CSS px, under the pixel cap.
+        let plan = plan_tiles(30.0, 90_000.0, 4.5, ImageFormat::Png).expect("plan");
+        assert!(plan.truncated);
+        assert_eq!(plan.tiles.len(), MAX_TILES as usize);
+        assert_eq!(plan.css_height, MAX_TILES * tile_css_height(4.5));
     }
 
     #[test]
