@@ -13,6 +13,18 @@ struct ApiError {
 }
 
 #[derive(Debug, Serialize)]
+struct ApiErrorWithDetailsEnvelope {
+    error: ApiErrorWithDetails,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiErrorWithDetails {
+    code: &'static str,
+    message: String,
+    details: Value,
+}
+
+#[derive(Debug, Serialize)]
 struct ApiSuccessEnvelope<T> {
     data: T,
 }
@@ -57,6 +69,24 @@ pub(crate) fn error(code: &'static str, message: impl Into<String>) -> Value {
         },
     })
     .unwrap_or_else(|_| json!({ "error": { "code": code, "message": "Unknown error." } }))
+}
+
+/// Typed error envelope with a `details` object: `{ error: { code, message, details } }`.
+/// `details` must already be safe for the browser (no upstream URLs, tokens or internal ids).
+#[allow(dead_code, reason = "first consumer is the next Space slice (WS01-S5, WS03-S4)")]
+pub(crate) fn error_with_details(
+    code: &'static str,
+    message: impl Into<String>,
+    details: Value,
+) -> Value {
+    serde_json::to_value(ApiErrorWithDetailsEnvelope {
+        error: ApiErrorWithDetails {
+            code,
+            message: message.into(),
+            details,
+        },
+    })
+    .unwrap_or_else(|_| json!({ "error": { "code": code, "message": "Unknown error.", "details": {} } }))
 }
 
 /// Public response for transport failures. `reqwest::Error` display strings can

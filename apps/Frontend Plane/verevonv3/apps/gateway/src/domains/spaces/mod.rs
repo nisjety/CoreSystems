@@ -793,7 +793,15 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/spaces/deletion-requests/{request_id}",
             get(personal_space_deletion_receipt),
         )
+        .merge(module_routes())
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
+}
+
+/// Registration seam for the per-feature route modules under `domains/spaces/`. A Space slice
+/// adds one `.merge(<module>::routes())` line here, so it never edits the route table above.
+/// Merged before `require_session`, so every module route is session-gated.
+fn module_routes() -> Router<AppState> {
+    Router::new()
 }
 
 #[derive(Debug, Deserialize)]

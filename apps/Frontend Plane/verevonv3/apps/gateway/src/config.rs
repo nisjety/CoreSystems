@@ -137,6 +137,43 @@ pub(crate) struct AppState {
     /// today -- see `domains/mail_task.rs`'s module doc for why this is a real
     /// gap, not an oversight, and what unblocks it.
     pub(crate) mail_task_pipeline: Option<std::sync::Arc<dyn crate::domains::mail_task::MailTaskPipeline>>,
+    /// Space feature flags (P-GW1). Read once in `build_state`, never in a handler, and never an
+    /// authorization input: a flag only decides whether a route or UI surface exists.
+    #[allow(dead_code, reason = "first reader is the next Space slice that adds a flag")]
+    pub(crate) space_features: SpaceFeatureFlags,
+}
+
+/// Space feature flags carried on `AppState`. Every Space slice that adds a flag appends ONE
+/// field here (alphabetical), one line in [`SpaceFeatureFlags::from_env`], and nothing else:
+/// `Default` is all-off, so test literals never name the field and `AppState::for_tests()` needs
+/// no edit. Production default is OFF; development may default ON (see [`space_flag`]).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SpaceFeatureFlags {}
+
+impl SpaceFeatureFlags {
+    pub(crate) fn from_env() -> Self {
+        Self {}
+    }
+}
+
+/// One Space flag: `1|true|yes|on` turns it on; unset falls back to ON in development and OFF
+/// when `APP_ENV` is production. Same rule as every other dev-defaulted gateway flag.
+#[allow(dead_code, reason = "first consumer is the next Space slice that adds a flag")]
+pub(crate) fn space_flag(key: &str) -> bool {
+    env_bool(
+        key,
+        dev_flags_allowed(&env::var("APP_ENV").unwrap_or_default()),
+    )
+}
+
+#[cfg(test)]
+impl AppState {
+    /// A complete, offline `AppState` for tests. Prefer this plus struct-update syntax over a
+    /// fresh literal so a new field never has to be added to every test.
+    #[allow(dead_code, reason = "used by Space slice tests as they land")]
+    pub(crate) fn for_tests() -> Self {
+        crate::tests::test_state(false)
+    }
 }
 
 pub(crate) async fn build_state() -> Result<AppState> {
@@ -284,6 +321,7 @@ pub(crate) async fn build_state() -> Result<AppState> {
         mail_task_nats_password: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_PASSWORD"),
         // See the field doc comment: no production wiring yet.
         mail_task_pipeline: None,
+        space_features: SpaceFeatureFlags::from_env(),
     })
 }
 

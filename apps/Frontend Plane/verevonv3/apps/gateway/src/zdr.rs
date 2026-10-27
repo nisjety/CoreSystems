@@ -65,19 +65,43 @@ pub(crate) fn request_zdr(headers: &HeaderMap, body: Option<&Value>) -> bool {
 /// A failed lookup is deliberately NOT cached, so the posture self-heals on the
 /// next request instead of pinning a whole minute of refusals to one blip.
 pub(crate) async fn org_zdr_enabled(state: &AppState, user: &AuthenticatedUser) -> bool {
+    org_zdr_lookup(state, user).await.treat_as_zdr()
+}
+
+/// Tri-state org ZDR posture. `Unknown` means the lookup failed or there is no authorized org
+/// scope: it is NOT "not ZDR". Persisting callers must go through [`Self::treat_as_zdr`] (which
+/// is true for `Unknown`) so a failed lookup fails closed; callers that need to tell an outage
+/// from a real posture (to answer a typed refusal instead of silently skipping a write) match it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OrgZdrPosture {
+    Enabled,
+    Disabled,
+    Unknown,
+}
+
+impl OrgZdrPosture {
+    /// Fail-closed collapse: only a successful lookup that says "not ZDR" permits persisting.
+    pub(crate) fn treat_as_zdr(self) -> bool {
+        !matches!(self, OrgZdrPosture::Disabled)
+    }
+}
+
+/// The lookup behind [`org_zdr_enabled`], with the failure case kept distinguishable. Same
+/// cache, same org-core call, same non-caching of failures.
+pub(crate) async fn org_zdr_lookup(state: &AppState, user: &AuthenticatedUser) -> OrgZdrPosture {
     let org_id = crate::upstream::authorized_org_id(state, user).await;
     let org_id = org_id.trim();
     if org_id.is_empty() {
         // No authorized org scope: there is no org-scoped store to write to
         // either, and every caller of this rejects such a request on its own
-        // scope check first. Treat as ZDR rather than inventing a posture.
-        return true;
+        // scope check first. No posture to report.
+        return OrgZdrPosture::Unknown;
     }
 
     let key = cache_key("org-zdr", &[org_id]);
     if let Some(cached) = state.cache.lookup_within(&key, ORG_ZDR_CACHE_SECS).await {
         if let Some(value) = cached.as_bool() {
-            return value;
+            return OrgZdrPosture::from_flag(value);
         }
     }
 
@@ -108,7 +132,7 @@ pub(crate) async fn org_zdr_enabled(state: &AppState, user: &AuthenticatedUser) 
             %status,
             "org ZDR posture unavailable; assuming Zero Data Retention and skipping local persistence"
         );
-        return true;
+        return OrgZdrPosture::Unknown;
     }
 
     let enabled = read_zdr_flag(&organization);
@@ -116,7 +140,17 @@ pub(crate) async fn org_zdr_enabled(state: &AppState, user: &AuthenticatedUser) 
         .cache
         .store_for_secs(&key, &Value::Bool(enabled), ORG_ZDR_CACHE_SECS)
         .await;
-    enabled
+    OrgZdrPosture::from_flag(enabled)
+}
+
+impl OrgZdrPosture {
+    fn from_flag(zdr: bool) -> Self {
+        if zdr {
+            OrgZdrPosture::Enabled
+        } else {
+            OrgZdrPosture::Disabled
+        }
+    }
 }
 
 /// Pull `metadata.interactiveRetention.zdr` out of an org-core organization
