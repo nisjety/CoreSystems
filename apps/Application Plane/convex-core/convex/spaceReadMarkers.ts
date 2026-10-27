@@ -33,6 +33,8 @@ export interface ThreadActivityLike {
   readonly updated_at?: string | null;
   readonly latest_run_updated_at?: string | null;
   readonly owner_subject_id?: string | null;
+  /** Who wrote the latest message (WS01-S1). Absent means unknown: the owner rule applies. */
+  readonly last_author_subject_id?: string | null;
 }
 
 /**
@@ -42,8 +44,11 @@ export interface ThreadActivityLike {
  *   the sense the badge means, because there is no last visit to be new since.
  *   Marking everything unread on a first visit would badge a hundred posts at
  *   once and teach people to ignore the badge.
- * - A thread the member started themselves is never unread to them. Their own
- *   post arriving is not news.
+ * - Activity the member wrote themselves is never unread to them. With
+ *   `last_author_subject_id` that is "the latest message is theirs", so someone
+ *   else's reply in a thread they started badges; without the field the older
+ *   rule applies (a thread they started is never unread). Mirrors the SPA's
+ *   `space-unread.ts`; they must agree.
  * - A thread with no readable timestamp cannot be placed relative to the
  *   marker and is left alone rather than guessed at.
  */
@@ -58,12 +63,17 @@ export function unreadThreadIds(
   for (const thread of threads) {
     const id = (thread.thread_id ?? "").trim();
     if (!id) continue;
-    if (viewer && (thread.owner_subject_id ?? "").trim() === viewer) continue;
+    if (viewer && lastWriterOf(thread) === viewer) continue;
     const at = latestActivityMillis(thread);
     if (at === undefined) continue;
     if (at > lastReadAt) out.push(id);
   }
   return out;
+}
+
+function lastWriterOf(thread: ThreadActivityLike): string {
+  const last = (thread.last_author_subject_id ?? "").trim();
+  return last || (thread.owner_subject_id ?? "").trim();
 }
 
 function latestActivityMillis(thread: ThreadActivityLike): number | undefined {

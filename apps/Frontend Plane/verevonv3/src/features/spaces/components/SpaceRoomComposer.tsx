@@ -120,6 +120,8 @@ export interface SpaceRoomComposerProps {
    * `onClearReplyTarget` — on success, or when the member dismisses it. */
   readonly replyTarget?: () => { threadId: string; title: string; awaitingApproval?: boolean } | undefined
   readonly onClearReplyTarget?: () => void
+  /** The reply target is the surface itself (the thread pane's composer): no "cancel reply" control. */
+  readonly replyTargetFixed?: boolean
   /**
    * The room's threads, for the "someone else's agent is working" line above
    * the textarea. Read through the live-work store's projection, which the page
@@ -651,13 +653,15 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
           {(target) => (
             <p class="verevon-space-room-composer__reply">
               {i18n.tr('Svarer i', 'Replying in')} «{target().title}»
-              <button
-                type="button"
-                onClick={() => props.onClearReplyTarget?.()}
-                aria-label={i18n.tr('Avbryt svar', 'Cancel reply')}
-              >
-                ✕
-              </button>
+              <Show when={!props.replyTargetFixed}>
+                <button
+                  type="button"
+                  onClick={() => props.onClearReplyTarget?.()}
+                  aria-label={i18n.tr('Avbryt svar', 'Cancel reply')}
+                >
+                  ✕
+                </button>
+              </Show>
             </p>
           )}
         </Show>

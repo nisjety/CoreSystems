@@ -654,6 +654,30 @@ export default function SpacePage() {
                       roster={() => (roster.error ? [] : roster() ?? [])}
                       viewerSubjectId={() => current().membership.subject_id}
                       agentName={roomAgentName(agents.error ? [] : agents() ?? [])}
+                      footer={
+                        current().features?.human_posts === true ? (
+                          <SpaceRoomComposer
+                            spaceRef={current().space.space_ref}
+                            roster={() => (roster.error ? [] : roster() ?? [])}
+                            agents={() => (agents.error ? [] : agents() ?? [])}
+                            threads={currentThreads}
+                            onExchangeSettled={() => {
+                              void refetchThreads()
+                            }}
+                            replyTarget={() => ({
+                              threadId: threadId(),
+                              title: thread() ? threadTitle(thread() as SpaceThread, i18n.tr) : i18n.tr('Tråd', 'Thread'),
+                              awaitingApproval: thread()?.latest_run_status === AWAITING_APPROVAL_RUN_STATUS,
+                            })}
+                            replyTargetFixed
+                            humanPostsEnabled={() => current().features?.human_posts === true}
+                            viewerSubjectId={() => current().membership.subject_id}
+                            viewerRole={() => current().membership.role}
+                            postMaxChars={() => current().limits?.post_max_chars}
+                            journal={sendJournal}
+                          />
+                        ) : undefined
+                      }
                     />
                   </SpaceAuxPane>
                 )
@@ -765,10 +789,17 @@ function SpaceConversationPanel(props: {
             agents={props.agents}
             onStartConversation={() => focusComposer?.()}
             onCreateAgent={props.onCreateAgent}
+            // With human posts on and the pane available, replying happens in the pane (WS01-S7b);
+            // otherwise Reply keeps pointing the room composer at the thread, as before.
             onReply={(thread) => {
+              if (props.humanPostsEnabled?.() === true && props.onOpenThread) {
+                props.onOpenThread(thread)
+                return
+              }
               setReplyTarget({ threadId: thread.thread_id, title: threadTitle(thread, i18n.tr) })
               focusComposer?.()
             }}
+            collapseLongThreads={props.humanPostsEnabled}
             onApprovalSettled={props.onExchangeSettled}
             onOpenThread={props.onOpenThread}
             pendingPosts={props.journal ? () => props.journal?.forSpace(props.spaceRef) ?? [] : undefined}

@@ -101,7 +101,17 @@ export interface SpaceRoomTimelineProps {
    * after the real turns of the thread it goes to. Absent means no optimistic rows.
    */
   readonly pendingPosts?: () => readonly SpaceJournalEntry[]
+  /**
+   * `features.human_posts` (WS01-S7b). On, a long thread shows its first turn, the last three and
+   * one "N more messages" row that opens the pane, and a post shows its reply count. Takes effect
+   * only with `onOpenThread` (a collapsed turn must be reachable); absent or off, every turn is
+   * drawn as before.
+   */
+  readonly collapseLongThreads?: () => boolean
 }
+
+/** Turns kept visible below the collapsed row: the last three (the first turn is kept above it). */
+const COLLAPSE_TAIL_TURNS = 3
 
 /** The room-level name for an assistant turn that recorded no persona: the
  * single active agent when there is exactly one, else the product name. */
@@ -163,6 +173,7 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
               onOpenThread={props.onOpenThread}
               onApprovalSettled={props.onApprovalSettled}
               pendingReplies={() => pendingRepliesFor(thread.thread_id)}
+              collapse={() => props.collapseLongThreads?.() === true && props.onOpenThread !== undefined}
             />
           )}
         </For>
@@ -195,6 +206,8 @@ function SpaceRoomPost(props: {
   readonly onOpenThread?: (thread: SpaceThread) => void
   /** This browser's own replies to this thread that the transcript does not show yet. */
   readonly pendingReplies?: () => readonly SpaceJournalEntry[]
+  /** Collapse a long thread to first + last three and show the reply count (needs the pane). */
+  readonly collapse?: () => boolean
 }) {
   const i18n = useI18n()
   const [transcript, { refetch: refetchTranscript }] = createResource(
@@ -239,6 +252,16 @@ function SpaceRoomPost(props: {
     props.artifactsOn ? roomItems([...turns(), { artifacts: pendingLive() }]) : [],
   )
   const readState = () => transcript()?.state
+  // First turn + last three, with the middle named by one row that opens the pane. A thread of
+  // four turns or fewer is never collapsed: hiding a single turn behind a click saves nothing.
+  const collapsed = () => props.collapse?.() === true && turns().length > COLLAPSE_TAIL_TURNS + 1
+  const headTurns = (): readonly TranscriptTurn[] => (collapsed() ? turns().slice(0, 1) : turns())
+  const tailTurns = (): readonly TranscriptTurn[] => (collapsed() ? turns().slice(-COLLAPSE_TAIL_TURNS) : [])
+  const hiddenTurnCount = () => (collapsed() ? turns().length - 1 - COLLAPSE_TAIL_TURNS : 0)
+  const replyCount = () => {
+    const count = props.thread.reply_count
+    return props.collapse?.() === true && typeof count === 'number' && count > 0 ? count : 0
+  }
   // Before any turn has loaded, the post is still attributable: the thread's
   // own owner started it.
   const starterName = () =>
@@ -383,7 +406,7 @@ function SpaceRoomPost(props: {
         }
       >
         <SpaceTurnList
-          turns={turns}
+          turns={headTurns}
           roster={props.roster}
           viewerSubjectId={props.viewerSubjectId}
           agentName={props.agentName}
@@ -392,6 +415,27 @@ function SpaceRoomPost(props: {
           threadId={props.thread.thread_id}
           onOpenArtifact={props.artifactsOn ? setOpenArtifactId : undefined}
         />
+        <Show when={collapsed()}>
+          <button
+            type="button"
+            class="verevon-room-post__collapsed"
+            onClick={() => props.onOpenThread?.(props.thread)}
+          >
+            {hiddenTurnCount() === 1
+              ? i18n.tr('1 melding til i tråden', '1 more message in the thread')
+              : i18n.tr(`${hiddenTurnCount()} meldinger til i tråden`, `${hiddenTurnCount()} more messages in the thread`)}
+          </button>
+          <SpaceTurnList
+            turns={tailTurns}
+            roster={props.roster}
+            viewerSubjectId={props.viewerSubjectId}
+            agentName={props.agentName}
+            agents={props.agents}
+            threads={props.threads}
+            threadId={props.thread.thread_id}
+            onOpenArtifact={props.artifactsOn ? setOpenArtifactId : undefined}
+          />
+        </Show>
       </Show>
 
       <SpacePendingReplies entries={props.pendingReplies?.() ?? []} />
@@ -474,7 +518,11 @@ function SpaceRoomPost(props: {
         <Show when={props.onOpenThread}>
           {(open) => (
             <button type="button" class="verevon-room-post__reply" onClick={() => open()(props.thread)}>
-              {i18n.tr('Åpne tråd', 'Open thread')}
+              {replyCount() > 0
+                ? replyCount() === 1
+                  ? i18n.tr('Åpne tråd · 1 svar', 'Open thread · 1 reply')
+                  : i18n.tr(`Åpne tråd · ${replyCount()} svar`, `Open thread · ${replyCount()} replies`)
+                : i18n.tr('Åpne tråd', 'Open thread')}
             </button>
           )}
         </Show>

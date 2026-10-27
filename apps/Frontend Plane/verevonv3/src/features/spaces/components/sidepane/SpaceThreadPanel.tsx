@@ -1,4 +1,5 @@
 import { MessageCircle } from '@/shared/icons'
+import type { JSX } from '@solidjs/web'
 import { Match, Show, Switch } from 'solid-js'
 
 import { threadStatus, formatWhen } from '@/features/spaces/lib/space-thread-presentation'
@@ -40,6 +41,12 @@ export interface SpaceThreadPanelProps {
   readonly viewerSubjectId?: () => string | undefined
   /** Room-level fallback name for an assistant turn that recorded no persona. */
   readonly agentName: string
+  /**
+   * The pane's reply composer (WS01-S7b), drawn under the turns. The page passes it only while
+   * `features.human_posts` is on; absent, the panel stays read-only. Not drawn for a thread that
+   * is not available to this member, because there is nothing to reply to.
+   */
+  readonly footer?: JSX.Element
 }
 
 export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
@@ -142,6 +149,9 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
           </Show>
         </Match>
       </Switch>
+      <Show when={props.footer && current()?.state !== 'missing'}>
+        <div class="verevon-space-thread-panel__composer">{props.footer}</div>
+      </Show>
     </div>
   )
 }
