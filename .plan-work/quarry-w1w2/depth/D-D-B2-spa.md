@@ -1,0 +1,23 @@
+# Depth register: D-D-B2-spa (SPA: vitest, tsc, keep-alive wiring)
+
+Findings this unit did not fix. Fixed items and their evidence are in the commits and in D-D-B2-spa-progress.md.
+Each row: what, where, evidence, and what would close it.
+
+## Open, from this unit's review
+
+| ID | Sev | What | Where | Evidence | Close by |
+|---|---|---|---|---|---|
+| SPA-B2-01 | med | "Ta over" test expects `onBrowserControlMode('human_takeover')`; the chrome passes `(mode, controlEpoch ?? null)`. Fails at HEAD too (not in this unit's named set). The epoch is the WS9.I compare-and-set contract (D2-160), so the test is the stale side. | `src/features/dashboard/home/BrowserBlockedNotice.test.tsx:93`; `BrowserChrome.tsx` toggleBrowserControlMode (HEAD line 683) | vitest run 3 (dashboard/home, 78 files): 1 failed, 1008 passed. Test last changed in a4d1a2469, before the epoch (d15c9cd80, WS9.I). | Owner of the blocked notice: expect `('human_takeover', null)`, or give the fixture a `controlEpoch`. |
+| SPA-B2-02 | med | The keep-alive timer stays dormant after the wiring: the chrome needs the `human_browsing` capability, which Quarry does not project (no `grantKind` in the owner projection). | `apps/gateway` owner projection; `quarry-edge agent_routes/projection.rs`; D-B3-agent-depth | `sessionHasHumanBrowsing` in BrowserChrome; D2-030 | D-B3-agent-depth (Quarry half). |
+| SPA-B2-03 | med | Keep-alive policy still open: 300 s interval against the 20 s evidence leg (D2-219, owner decision); not gated by the feature switch and expiry is silent (D2-185). After `expired` the chrome has no reopen affordance (noted in 3eb2cb70c). | `session-keepalive.ts`, `BrowserChrome.tsx`, `KnowledgeComposer.tsx` keepAliveBrowser | code read | Owner decides the interval; add a gate and an expiry notice. |
+| SPA-B2-04 | low | Same-tick reads: Solid 2 applies a setter at the microtask flush. Components are correct in a browser (each key or click is its own task), but the browser-session controller reads signals straight after writes (D2-175, "settled accessor" fix not done). The three affected tests now call flush() between events; any new test that dispatches two events in one tick needs it too. | `use-browser-session-controller.ts`; the tests named in commit c87d96d0d | flush-only failures, no code bug found | Read through the settled accessor in the controller (D2-175). |
+| SPA-B2-05 | low | Scan residue: both gateway scans read `#[cfg(test)]` items that sit outside a `tests` module as production (for example browser.rs `#[cfg(test)] fn browser_response`, near line 3041). A code literal used only there would be counted. No instance today: both scans pass. | `src/shared/i18n/browser-errors.test.ts`, `gateway-error-codes.test.ts` | reading the scan regexes | Skip `#[cfg(test)]` items too, or move browser.rs tests into a `tests` module. |
+| SPA-B2-06 | low | `NOT_AN_ERROR_CODE` (browser-errors) now lists the 15 capability names. A capability added to `browser_session_capabilities` fails the scan until it is added there. | `browser-errors.test.ts`; `browser.rs` capability list | by design of the tripwire | Owner of the capability list; or give capabilities their own table the scan skips. |
+| SPA-B2-07 | owner | Norwegian and English wording of three copy entries written here: `invalid_scrape_artifact`, `unsupported_schedule_kind`, `schedule_action_unavailable` (errors.ts). They pass the scan rules; the wording is not reviewed. | `src/shared/i18n/errors.ts` | commit eb8ff61a6 | Owner review of the sentences. |
+| SPA-B2-08 | low | Scope: `browser-navigation-error.test.ts` (3 lines) and `BrowserNavigationError.tsx` (1 line) are outside this unit's list; both changed only to follow the `message` to `sentence` rename (b85e61ec2). | as named | commit b85e61ec2 | none; noted for review. |
+| SPA-B2-09 | low | SPA `tsc -b` keeps 33 baseline errors (RemoteSupportPage.tsx 12, quarry-client.ts 21). They are not in this unit. | `src/features/support/components/RemoteSupportPage.tsx`, `src/shared/api/quarry-client.ts` | run2 tsc, 33 errors, all baseline | D1-028 / D2-314 (SDK and support page). |
+| SPA-B2-10 | low | TypeScript quirk seen here: a `for...of` over a signal, inside a component closure, typed later captured reads as `never` (TS2349). Fixed in BrowserChrome by a module-level helper. Other closures of the same shape were not searched. | `BrowserChrome.tsx` liveNetworkRows (commit cea80368a) | probe in scratchpad, not in the repo | If TS2349 appears on a captured signal, move the loop out of the closure. |
+
+## Decisions not made by this unit
+
+None of the open decisions (X-10, X-12, D16 Q2, X-19, X-9, ADR-6/X-20, ADR-4 stage B, counsel) was touched. `allowRedirect` stays off (D2-081). No flag changed.
