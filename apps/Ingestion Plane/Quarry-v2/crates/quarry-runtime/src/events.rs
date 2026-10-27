@@ -133,6 +133,19 @@ impl EventSink {
             .subscribe()
     }
 
+    /// Subscribe only when the run's channel still exists (D2-015). `subscribe` creates a
+    /// sender for a run that has none, which is right for a caller that opens the run's
+    /// channel itself but wrong for a late reader: a stream request that raced the run's
+    /// close would create a sender nobody closes and then wait on it forever. This reads
+    /// the channel under the map's own shard lock, the lock `close_run` takes to remove
+    /// it, so the answer is one of two: a receiver on a sender that is still live (it sees
+    /// `Closed` when the run closes), or `None` for a run that has already closed.
+    pub fn subscribe_open(&self, run_id: &RunKind) -> Option<broadcast::Receiver<Event>> {
+        self.subscribers
+            .get(run_id)
+            .map(|sender| sender.value().subscribe())
+    }
+
     /// Drop the broadcast sender for a run. Existing receivers will see `Closed`.
     pub fn unsubscribe(&self, run_id: &RunKind) {
         self.subscribers.remove(run_id);
@@ -713,6 +726,21 @@ mod tests {
         let recovered = sink.subscribe_with_replay(&run, 0).unwrap();
         assert_eq!(recovered.replay.len(), 300);
         assert_eq!(recovered.replay.first().map(|e| e.seq), Some(1));
+    }
+
+    #[tokio::test]
+    async fn subscribe_open_never_recreates_the_channel_of_a_closed_run() {
+        let (sink, _rx) = sink_with(RingLimits::default());
+        let run: RunKind = Id::new();
+        assert!(sink.subscribe_open(&run).is_none(), "a run never opened has no channel");
+        sink.open_run(&run, 1);
+        let mut rx = sink.subscribe_open(&run).expect("an open run has a channel");
+        sink.close_run(&run);
+        assert!(matches!(rx.recv().await, Err(RecvError::Closed)));
+        // After the close the late reader gets None, and nothing is left behind that
+        // would keep a stream waiting.
+        assert!(sink.subscribe_open(&run).is_none());
+        assert!(!sink.subscribers.contains_key(&run));
     }
 
     #[tokio::test]

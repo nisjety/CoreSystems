@@ -196,6 +196,42 @@ async fn a_closed_run_stream_ends_with_done_run_closed() {
     assert!(body.contains("data: run_closed"), "{body}");
 }
 
+/// D2-015: a stream request that lands after the run's trace closed but before the run left
+/// the registry (the window a close opens) used to subscribe to a channel nothing would ever
+/// close, and hung. It now ends at once with `done` / `run_closed`.
+#[tokio::test]
+#[serial]
+async fn a_stream_that_races_the_close_ends_with_done_instead_of_hanging() {
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+
+    // The close has released the run's trace (replay ring and channel); the registry entry is
+    // still there: this is the state a request that raced the close sees.
+    edge.state.event_sink.close_run(&kind(&run));
+    assert!(edge.live(&run).is_some());
+
+    let response = edge
+        .client
+        .get(format!("http://{}{}", edge.addr, events_route(&run)))
+        .bearer_auth(&person)
+        .send()
+        .await
+        .expect("stream request reaches the edge");
+    assert_eq!(response.status().as_u16(), 200);
+    let body = tokio::time::timeout(std::time::Duration::from_secs(10), response.text())
+        .await
+        .expect("the stream must end, not hang on a channel nothing closes")
+        .expect("the body reads");
+    assert!(body.contains("event: done"), "{body}");
+    assert!(body.contains("data: run_closed"), "{body}");
+    // And the late reader did not leave a channel behind for the dead run.
+    assert!(
+        edge.state.event_sink.subscribe_open(&kind(&run)).is_none(),
+        "no channel is created for a closed run"
+    );
+}
+
 /// Source scan (WS10.S3 DoD): the events stream doc comment must not claim a
 /// `quarry_event_history` table. Only the job history (`quarry_job_history`) exists.
 #[test]

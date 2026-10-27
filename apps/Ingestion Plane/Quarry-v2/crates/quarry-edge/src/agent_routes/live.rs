@@ -292,15 +292,24 @@ pub async fn agent_events_stream(
         None => None,
     };
     // A run without a trace has no ring to replay; it gets the live tail only.
-    let (replay, gap, mut rx, start_seen) = match subscription {
-        Some(sub) => (sub.replay, sub.gap, sub.rx, resume_from),
-        None => (Vec::new(), None, state.event_sink.subscribe(&parsed_run), None),
+    //
+    // D2-015: a run whose channel is already gone is a closed run. The plain `subscribe`
+    // would create a channel for it that nothing ever closes, and this stream would wait
+    // on it for good; `subscribe_open` answers `None` for it, and the stream ends with
+    // `done` (`run_closed`) like a reconnect after the close does.
+    let (replay, gap, rx, start_seen) = match subscription {
+        Some(sub) => (sub.replay, sub.gap, Some(sub.rx), resume_from),
+        None => (Vec::new(), None, state.event_sink.subscribe_open(&parsed_run), None),
     };
     let max_events = query.max_events.unwrap_or(0);
     let sink = state.event_sink.clone();
 
     let stream = async_stream::stream! {
         let _viewer = viewer;
+        let Some(mut rx) = rx else {
+            yield Ok(Event::default().event("done").data("run_closed"));
+            return;
+        };
         let mut emitted: u64 = 0;
         let mut last_seen: Option<u64> = start_seen;
         let mut pending: std::collections::VecDeque<quarry_core::event::Event> = replay.into();
