@@ -94,7 +94,7 @@ Nango packages or Nango runtime services.
   - `GET /api/v1/scim/tokens`
   - `POST /api/v1/scim/tokens`
   - `DELETE /api/v1/scim/tokens/{id}`
-  - `ALL /api/v1/scim/v2/*`
+  - `ALL /api/v1/scim/v2/*` (answers 501; SCIM is not implemented here)
   - `GET /api/v1/projections/integration-profile`
   - `GET /metrics` (internal auth only)
   - `DELETE /api/v1/connections/{id}`
@@ -240,11 +240,12 @@ go run ./cmd/api
   bearer and a signed conversation-core provider-write attestation before token
   lookup or provider calls. Caller-provided `approvalId`/`approvalRef` markers
   are not authorization.
-- SCIM supports durable per-org bearer tokens through `/api/v1/scim/tokens`.
-  Tokens are stored only as SHA-256 hashes and short prefixes; the raw bearer is
-  returned once on create. Legacy global `SCIM_BEARER_TOKEN` and env-scoped
-  `SCIM_ORG_BEARER_TOKENS` remain as bootstrap fallbacks. SCIM calls do not
-  create OAuth sessions.
+- SCIM provisioning is not implemented in this service. `ALL /api/v1/scim/v2/*`
+  answers `501` with an `application/scim+json` error body, stores nothing and
+  publishes no event; `POST /api/v1/scim/tokens` answers `501`. Existing tokens
+  can still be listed and revoked. The global `SCIM_BEARER_TOKEN` and
+  `SCIM_ORG_BEARER_TOKENS` variables are no longer read, and the `scim` provider
+  reports status `unavailable`.
 
 ## Action execution
 

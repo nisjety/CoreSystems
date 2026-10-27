@@ -105,9 +105,8 @@ NestJS provider modules are blueprints while callers migrate:
   runtime connect-session creation.
 - Okta and SCIM are first-party enterprise adapters, but they are not normal
   user OAuth connect-session providers: Okta uses admin/API-token configuration
-  and SCIM is inbound provisioning. SCIM bearer tokens are durable per-org
-  records stored as SHA-256 hashes plus short prefixes; env tokens remain only
-  as bootstrap fallbacks.
+  and SCIM is inbound provisioning, which is not implemented in this service
+  (the routes answer 501 and the provider reports `unavailable`).
 - `GET /api/v1/providers` stays public, matching v1.
   It also returns readiness fields (`configured`, `status`, `missingConfig`) so
   UI callers can distinguish ready OAuth providers from admin/inbound adapters.
