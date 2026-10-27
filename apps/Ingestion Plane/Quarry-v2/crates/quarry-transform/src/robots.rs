@@ -27,11 +27,18 @@ impl RobotsTxt {
         let mut current_agents: Vec<String> = Vec::new();
         let mut after_agents = false;
 
+        // A blank line ends a record of the robots.txt format. It matters only to the next
+        // user-agent line, which then starts a new group: a named group with no rules stays
+        // empty and does not take the rules of the group after it. Rules after a blank line
+        // still belong to the group before them, as they always did.
+        let mut after_blank = false;
         for raw in input.lines() {
             let line = strip_comment(raw).trim();
             if line.is_empty() {
+                after_blank = true;
                 continue;
             }
+            let starts_after_blank = std::mem::take(&mut after_blank);
             let Some((key, value)) = line.split_once(':') else {
                 continue;
             };
@@ -40,7 +47,7 @@ impl RobotsTxt {
 
             match key.as_str() {
                 "user-agent" => {
-                    if after_agents {
+                    if after_agents || starts_after_blank {
                         // New group block — reset
                         current_agents.clear();
                         after_agents = false;
@@ -182,9 +189,13 @@ fn path_matches(pattern: &str, path: &str) -> bool {
         None => (pattern, false),
     };
     if core.contains('*') {
-        // wildcard_match is an anchored full-string match; behaves correctly
-        // both with and without `$`.
-        return wildcard_match(core, path);
+        // wildcard_match matches the whole string. A pattern without `$` is a prefix match
+        // (RFC 9309), so it gets a trailing `*` that takes whatever follows it in the path.
+        return if anchored {
+            wildcard_match(core, path)
+        } else {
+            wildcard_match(&format!("{core}*"), path)
+        };
     }
     if anchored {
         path == core
@@ -306,7 +317,9 @@ mod tests {
     fn query_aware_rules_match_path_and_query() {
         let r = RobotsTxt::parse("User-agent: *\nDisallow: /*?session=\nDisallow: /search$\n");
         assert!(!r.is_allowed("quarry", "/page?session=1"));
-        assert!(!r.is_allowed("quarry", "/a/b?x=1&session=2"));
+        assert!(!r.is_allowed("quarry", "/a/b?session=2"));
+        // `?` is literal, so the rule needs the text "?session=". A later parameter is not matched.
+        assert!(r.is_allowed("quarry", "/a/b?x=1&session=2"));
         assert!(r.is_allowed("quarry", "/page?id=1"));
         // `$` anchors the end of path and query together.
         assert!(!r.is_allowed("quarry", "/search"));
