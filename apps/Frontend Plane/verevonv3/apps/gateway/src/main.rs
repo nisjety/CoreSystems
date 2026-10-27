@@ -24,6 +24,7 @@ use tracing::info;
 mod audience_tokens;
 mod auth;
 mod cache;
+mod client_contract;
 mod config;
 mod contracts;
 mod domains;
@@ -103,6 +104,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::billing::router(state.clone()))
         .merge(domains::briefs::router(state.clone()))
         .merge(domains::chat::router(state.clone()))
+        .merge(domains::client_config::router())
         .merge(domains::cost::router(state.clone()))
         .merge(domains::eval::router(state.clone()))
         .merge(domains::finetune::router(state.clone()))

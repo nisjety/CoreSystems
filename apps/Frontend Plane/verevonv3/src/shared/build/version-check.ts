@@ -1,5 +1,6 @@
 import { createSignal } from 'solid-js'
 import { BUILD_ID, isDevBuild } from '@/shared/build/build-info'
+import { checkClientContract } from '@/shared/build/client-contract'
 
 /**
  * Stale-tab check (WS07-S2). A tab that stays open across a deploy keeps running
@@ -69,6 +70,8 @@ export function checkClientVersion(options: { force?: boolean } = {}): Promise<v
   if (inFlight) return inFlight
   if (options.force !== true && now - lastCheckAt < MIN_CHECK_GAP_MS) return Promise.resolve()
   lastCheckAt = now
+  // The gateway's contract check rides the same triggers (WS07-S3); it never throws.
+  void checkClientContract({ force: options.force })
   inFlight = (async () => {
     try {
       const res = await fetch(VERSION_URL, { cache: 'no-store', credentials: 'omit' })

@@ -5,6 +5,10 @@
 //! status, and the auth path (see `middleware::require_session`) records an
 //! org/tenant-labeled counter so the edge has per-tenant request visibility —
 //! the org being the authoritative id resolved from the validated session.
+//!
+//! Client resilience counters (WS07-S3, `domains/client_config.rs`), created with
+//! `metrics::counter!` where they are recorded: `verevon_client_failures_total{kind,
+//! build_match}`. WS07-S6 adds `verevon_csp_reports_total{directive, disposition}`.
 
 use std::time::Instant;
 

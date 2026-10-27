@@ -62,3 +62,8 @@
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.18);
   font-size: 13px;
 }
+
+/* Both notices at once (WS07-S3): stack the second under the first. */
+.new-version-banner + .new-version-banner {
+  top: 60px;
+}

@@ -152,12 +152,17 @@ pub(crate) struct SpaceFeatureFlags {
     /// `SPACE_DENIALS_TYPED` (WS03-S5): map Control's typed Space denials to the browser envelope.
     /// Off restores pass-through. A rollout control, never an authorization input.
     pub(crate) denials_typed: bool,
+    /// `CLIENT_VERSION_POLICY` / `CLIENT_MIN_CONTRACT` (WS07-S3): the stale-client contract the
+    /// public `/api/v1/client-config` route reports. Unlike the booleans its default is `banner`,
+    /// never off. Carried here (not as an `AppState` field) so no test literal needs an edit.
+    pub(crate) client_policy: crate::client_contract::ClientPolicy,
 }
 
 impl SpaceFeatureFlags {
     pub(crate) fn from_env() -> Self {
         Self {
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
+            client_policy: crate::client_contract::ClientPolicy::from_env(),
         }
     }
 }
