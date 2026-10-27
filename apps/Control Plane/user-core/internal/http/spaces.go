@@ -612,7 +612,8 @@ type sharedThreadReadDecisionRequest struct {
 	IdempotencyKey string `json:"idempotency_key"`
 	// Optional; empty means Session Core, which is what every caller before
 	// S4.2 asked for implicitly. `model-plane-sandbox-manager` targets the
-	// background-process registry instead. Validated against a closed set in
+	// background-process registry instead, and `model-plane-space-stream`
+	// targets Session Core's SpaceEvents realtime stream (WS02). Validated against a closed set in
 	// spaces.SharedThreadReadDecisionRequest.Validate, so an unknown value is
 	// refused here rather than signed into a token nothing accepts.
 	ServiceAudience string `json:"service_audience"`
