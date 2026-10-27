@@ -1432,8 +1432,9 @@ mod capability_wire_tests {
     fn capabilities_flag_defaults_false_and_is_additive_on_the_wire() {
         // Deny by default: a driver that does not say so has no trusted input.
         assert!(!BrowserDriverCapabilities::default().trusted_input);
-        // A peer that predates the field sends no such key and still parses.
-        let older = serde_json::json!({
+        // A peer that predates every additive key sends none of them and still parses: each
+        // additive key reads as false.
+        let oldest = serde_json::json!({
             "persistent_profile": true,
             "devtools_trace": false,
             "downloads_to_artifacts": false,
@@ -1442,6 +1443,36 @@ mod capability_wire_tests {
             "isolated_egress": true,
             "security_evidence": true,
             "atomic_target_actions": true
+        });
+        let parsed_oldest: BrowserDriverCapabilities =
+            serde_json::from_value(oldest).expect("oldest shape parses");
+        assert!(parsed_oldest.atomic_target_actions);
+        for additive in [
+            parsed_oldest.trusted_input,
+            parsed_oldest.background_tabs,
+            parsed_oldest.tab_pinning,
+            parsed_oldest.per_tab_egress,
+            parsed_oldest.scrape_actions,
+            parsed_oldest.capture_options,
+        ] {
+            assert!(!additive);
+        }
+        // A peer that predates trusted_input but has the later additive keys (WS8.E tab keys,
+        // WS13.3 capture keys) sends them as false, and the new key is the only difference.
+        let older = serde_json::json!({
+            "persistent_profile": true,
+            "devtools_trace": false,
+            "downloads_to_artifacts": false,
+            "uploads_from_artifacts": false,
+            "full_visual_fidelity": true,
+            "isolated_egress": true,
+            "security_evidence": true,
+            "atomic_target_actions": true,
+            "background_tabs": false,
+            "tab_pinning": false,
+            "per_tab_egress": false,
+            "scrape_actions": false,
+            "capture_options": false
         });
         let parsed: BrowserDriverCapabilities =
             serde_json::from_value(older.clone()).expect("older shape parses");
