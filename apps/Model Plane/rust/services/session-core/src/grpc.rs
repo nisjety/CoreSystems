@@ -28,6 +28,7 @@ use mp_contracts::model_plane::v1::{
     thread_autonomy_server::{ThreadAutonomy, ThreadAutonomyServer},
 };
 use mp_contracts::run_origin::{RunOrigin, ORIGIN_METADATA_KEY};
+use mp_contracts::retention::{space_zdr_mode, SpaceZdrMode};
 use mp_contracts::zdr_refusal::Refusal;
 use mp_events::idempotency::derive_idempotency_hash;
 use mp_ids::new_ulid;
@@ -2576,12 +2577,10 @@ fn verify_thread_space_decision_with_key(
     .iter()
     .all(|value| !value.trim().is_empty());
     // Boolean policy flags are required serde fields, so merely decoding the
-    // claims establishes their presence; retain them for the later provider/
-    // retention propagation slices without inventing a Model-local default.
-    let _privacy_processing_flags = (
-        claims.third_party_processing_allowed,
-        claims.zero_data_retention,
-    );
+    // claims establishes their presence. `zero_data_retention` is gated below
+    // (WS06-S2); the third-party flag is retained for the later provider
+    // propagation slices without inventing a Model-local default.
+    let _third_party_processing_allowed = claims.third_party_processing_allowed;
     if !privacy_complete || claims.nonce.trim().is_empty() {
         return Err(Status::permission_denied(
             "Control Space decision has incomplete privacy policy or nonce",
@@ -2592,7 +2591,44 @@ fn verify_thread_space_decision_with_key(
             "Control Space decision is expired or not yet valid",
         ));
     }
+    space_decision_retention_gate(
+        claims.zero_data_retention,
+        "thread_create",
+        configured_space_zdr_mode(),
+    )?;
     Ok(())
+}
+
+/// WS06-S2: the Space decision's `zero_data_retention` flag on the legacy owner
+/// `create_thread` and `append_message` paths. Called after the signature, key and binding
+/// checks, so only a decision Control really issued reaches it. A flag of `false` is a no-op.
+/// With the flag set the call is counted (`mp_session_space_zdr_flag_total{action,enforced}`,
+/// closed labels, no ids); under `SESSION_CORE_SPACE_ZDR=enforce` it also refuses with the typed
+/// `zdr_durable_mutation_forbidden` refusal, under `observe` (the default) it proceeds.
+fn space_decision_retention_gate(
+    zero_data_retention: bool,
+    action: &'static str,
+    mode: SpaceZdrMode,
+) -> Result<(), Status> {
+    if !zero_data_retention {
+        return Ok(());
+    }
+    metrics::counter!(
+        "mp_session_space_zdr_flag_total",
+        "action" => action,
+        "enforced" => mode.enforced_label()
+    )
+    .increment(1);
+    match mode {
+        SpaceZdrMode::Observe => Ok(()),
+        SpaceZdrMode::Enforce => {
+            Err(Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::FailedPrecondition))
+        }
+    }
+}
+
+fn configured_space_zdr_mode() -> SpaceZdrMode {
+    space_zdr_mode(env::var("SESSION_CORE_SPACE_ZDR").ok().as_deref())
 }
 
 fn verify_thread_space_decision_with_keys(
@@ -2925,6 +2961,11 @@ fn verify_append_space_decision_with_key(
             "Control Space append decision is expired or incomplete",
         ));
     }
+    space_decision_retention_gate(
+        claims.zero_data_retention,
+        "message_append",
+        configured_space_zdr_mode(),
+    )?;
     Ok(())
 }
 

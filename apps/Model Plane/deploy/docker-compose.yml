@@ -847,6 +847,9 @@ services:
       SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY: ${SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY:-}
       # Durable loop fold store (WS03 S4). Off by default: a loop keeps its fold in
       # memory and a pause cannot be resumed from the store. Sealed under the key above.
+      # Space decision ZDR flag on the legacy owner create/append paths (WS06-S2). `observe`
+      # counts and proceeds; only the exact value `enforce` refuses typed. Never an authorization input.
+      SESSION_CORE_SPACE_ZDR: ${SESSION_CORE_SPACE_ZDR:-observe}
       SESSION_CORE_LOOP_CHECKPOINT_ENABLED: ${SESSION_CORE_LOOP_CHECKPOINT_ENABLED:-false}
       # Sweep that closes a tool reservation still open long after its run ended or
       # parked, as `unknown_outcome` (WS03 S5). Off by default: turning it on changes

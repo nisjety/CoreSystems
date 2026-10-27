@@ -276,6 +276,41 @@ fn resolve_waived<'a>(
     }
 }
 
+/// How a plane treats the Space decision's `zero_data_retention` flag on the legacy owner
+/// `create_thread` and `append_message` paths (WS06-S2, `SESSION_CORE_SPACE_ZDR`).
+///
+/// `Observe` is the default: the flag is counted and the write proceeds, which is the v1
+/// behaviour the posture matrix pins (`policy.space_zdr = not_applied_in_v1`). `Enforce` makes a
+/// ZDR-flagged Space refuse the write with the typed catalogue refusal. The flag is a rollout
+/// switch, never an authorization input: no value of it widens what a decision authorizes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceZdrMode {
+    Observe,
+    Enforce,
+}
+
+impl SpaceZdrMode {
+    /// The label value of the `enforced` metric dimension.
+    #[must_use]
+    pub const fn enforced_label(self) -> &'static str {
+        match self {
+            Self::Observe => "false",
+            Self::Enforce => "true",
+        }
+    }
+}
+
+/// Parse the `SESSION_CORE_SPACE_ZDR` value. Only the exact string `enforce` enables
+/// enforcement; unset, empty, `observe`, `Enforce`, `true` and every other value are `Observe`,
+/// so a typo can never silently turn the refusal on or change what ships by default.
+#[must_use]
+pub fn space_zdr_mode(raw: Option<&str>) -> SpaceZdrMode {
+    match raw {
+        Some("enforce") => SpaceZdrMode::Enforce,
+        _ => SpaceZdrMode::Observe,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
