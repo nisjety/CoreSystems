@@ -313,3 +313,206 @@ fn space_event_json(record: &SpaceEventRecord, space_id: &str) -> Value {
         "refs": Value::Object(refs),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    async fn body_json(response: Response) -> (StatusCode, HeaderMap, Value) {
+        let (parts, body) = response.into_parts();
+        let bytes = to_bytes(body, usize::MAX).await.expect("body");
+        (
+            parts.status,
+            parts.headers,
+            serde_json::from_slice(&bytes).expect("json body"),
+        )
+    }
+
+    #[test]
+    fn last_event_id_parses_only_generation_dot_seq_digits() {
+        assert_eq!(parse_cursor("1.0"), Some((1, 0)));
+        assert_eq!(parse_cursor("12.3456"), Some((12, 3456)));
+        assert_eq!(
+            parse_cursor("999999999999999999.1"),
+            Some((999_999_999_999_999_999, 1))
+        );
+        for bad in [
+            "", "1", "1.", ".1", "1.2.3", "a.1", "1.b", "-1.2", "1.-2", " 1.2", "1.2 ", "1,2",
+            "1.2e3", "+1.2", "0x1.2", "1234567890123456789.1", "1.1234567890123456789",
+        ] {
+            assert_eq!(parse_cursor(bad), None, "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn upstream_statuses_map_to_the_http_vocabulary() {
+        for (code, http, error) in [
+            (tonic::Code::Unauthenticated, StatusCode::UNAUTHORIZED, "unauthorized"),
+            (tonic::Code::PermissionDenied, StatusCode::FORBIDDEN, "space_stream_forbidden"),
+            (tonic::Code::InvalidArgument, StatusCode::BAD_REQUEST, "invalid_request"),
+            (
+                tonic::Code::ResourceExhausted,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "space_stream_capacity",
+            ),
+            (tonic::Code::Unavailable, StatusCode::SERVICE_UNAVAILABLE, "space_stream_unavailable"),
+            (tonic::Code::Internal, StatusCode::SERVICE_UNAVAILABLE, "space_stream_unavailable"),
+            (
+                tonic::Code::FailedPrecondition,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "space_stream_unavailable",
+            ),
+            (tonic::Code::NotFound, StatusCode::SERVICE_UNAVAILABLE, "space_stream_unavailable"),
+        ] {
+            let upstream =
+                tonic::Status::new(code, "upstream text must never be echoed: secret-detail");
+            let (status, headers, body) = body_json(status_response(&upstream)).await;
+            assert_eq!(status, http, "{code:?}");
+            assert_eq!(body["error"]["code"], error, "{code:?}");
+            assert_eq!(body["error"]["details"], json!({}));
+            assert!(
+                !body.to_string().contains("secret-detail"),
+                "{code:?} leaked the upstream text"
+            );
+            if code == tonic::Code::ResourceExhausted {
+                assert_eq!(
+                    headers.get(header::RETRY_AFTER).and_then(|v| v.to_str().ok()),
+                    Some("2")
+                );
+            } else {
+                assert!(
+                    headers.get(header::RETRY_AFTER).is_none(),
+                    "{code:?} must not carry Retry-After"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn header_text_trims_and_defaults_to_empty() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-space-decision-ref", " dec-1 ".parse().unwrap());
+        assert_eq!(header_text(&headers, DECISION_REF_HEADER), "dec-1");
+        assert_eq!(header_text(&headers, DECISION_TOKEN_HEADER), "");
+        assert_eq!(DECISION_REF_HEADER, "x-space-decision-ref");
+        assert_eq!(DECISION_TOKEN_HEADER, "x-space-decision-token");
+    }
+
+    #[test]
+    fn cursor_ids_are_generation_dot_seq() {
+        assert_eq!(cursor_id(3, 41), "3.41");
+    }
+
+    #[test]
+    fn a_space_event_carries_ids_and_closed_words_only() {
+        let record = SpaceEventRecord {
+            seq: 7,
+            generation: 2,
+            kind: "message.appended".to_owned(),
+            at: "2027-01-15T08:00:00.000Z".to_owned(),
+            actor_type: "user".to_owned(),
+            actor_id: "member-2".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            message_id: "msg-1".to_owned(),
+            message_sequence: 12,
+            role: "assistant".to_owned(),
+            ..Default::default()
+        };
+        let value = space_event_json(&record, "space-room");
+        assert_eq!(
+            value,
+            json!({
+                "v": 1,
+                "source": "session",
+                "space_id": "space-room",
+                "generation": 2,
+                "seq": 7,
+                "kind": "message.appended",
+                "at": "2027-01-15T08:00:00.000Z",
+                "actor": {"type": "user", "id": "member-2"},
+                "refs": {
+                    "thread_id": "thread-1",
+                    "message_id": "msg-1",
+                    "role": "assistant",
+                    "message_sequence": 12
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn empty_fields_are_omitted_and_a_stub_carries_no_refs() {
+        let run = SpaceEventRecord {
+            kind: "run.state_changed".to_owned(),
+            actor_type: "system".to_owned(),
+            run_id: "run-1".to_owned(),
+            state: "running".to_owned(),
+            prev_state: "queued".to_owned(),
+            fields: vec!["title".to_owned()],
+            ..Default::default()
+        };
+        let value = space_event_json(&run, "space-room");
+        assert_eq!(value["actor"], json!({"type": "system"}), "no actor id when none");
+        assert_eq!(
+            value["refs"],
+            json!({"run_id": "run-1", "state": "running", "prev": "queued", "fields": ["title"]})
+        );
+        for stub_kind in ["hidden", "redacted"] {
+            let stub = SpaceEventRecord {
+                kind: stub_kind.to_owned(),
+                actor_type: "system".to_owned(),
+                thread_id: "must-not-appear".to_owned(),
+                run_id: "must-not-appear".to_owned(),
+                message_sequence: 9,
+                ..Default::default()
+            };
+            assert_eq!(
+                space_event_json(&stub, "s")["refs"],
+                json!({}),
+                "{stub_kind} carries no refs"
+            );
+        }
+    }
+
+    #[test]
+    fn every_upstream_frame_becomes_an_sse_event_and_an_empty_frame_is_dropped() {
+        use mp_contracts::model_plane::v1::{
+            SpaceStreamClosing, SpaceStreamConnected, SpaceStreamCursorTooOld,
+            SpaceStreamHeartbeat,
+        };
+        let frames = [
+            Frame::Connected(SpaceStreamConnected {
+                mode: "live".to_owned(),
+                ..Default::default()
+            }),
+            Frame::Connected(SpaceStreamConnected {
+                mode: "poll_only".to_owned(),
+                ..Default::default()
+            }),
+            Frame::Event(SpaceEventRecord {
+                kind: "thread.created".to_owned(),
+                ..Default::default()
+            }),
+            Frame::Heartbeat(SpaceStreamHeartbeat {
+                head: 1,
+                generation: 1,
+                cursor: 1,
+            }),
+            Frame::CursorTooOld(SpaceStreamCursorTooOld {
+                reason: "retention".to_owned(),
+                head: 9,
+                generation: 1,
+            }),
+            Frame::Closing(SpaceStreamClosing {
+                code: "lease_expired".to_owned(),
+                reconnect: true,
+                ..Default::default()
+            }),
+        ];
+        for frame in frames {
+            assert!(frame_event(&SpaceEventFrame { frame: Some(frame) }, "space-room").is_some());
+        }
+        assert!(frame_event(&SpaceEventFrame { frame: None }, "space-room").is_none());
+    }
+}

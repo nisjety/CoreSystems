@@ -146,3 +146,122 @@ async fn list_space_artifacts(
     }))
     .into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    async fn body_json(response: Response) -> (StatusCode, Value) {
+        let (parts, body) = response.into_parts();
+        let bytes = to_bytes(body, usize::MAX).await.expect("body");
+        (
+            parts.status,
+            serde_json::from_slice(&bytes).expect("json body"),
+        )
+    }
+
+    #[tokio::test]
+    async fn upstream_statuses_map_to_fixed_words() {
+        for (code, http, error) in [
+            (tonic::Code::Unauthenticated, StatusCode::UNAUTHORIZED, "unauthorized"),
+            (
+                tonic::Code::PermissionDenied,
+                StatusCode::FORBIDDEN,
+                "space_read_not_authorized",
+            ),
+            (tonic::Code::InvalidArgument, StatusCode::BAD_REQUEST, "invalid_request"),
+            (
+                tonic::Code::Unavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "space_artifacts_unavailable",
+            ),
+            (
+                tonic::Code::Internal,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "space_artifacts_unavailable",
+            ),
+            (
+                tonic::Code::ResourceExhausted,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "space_artifacts_unavailable",
+            ),
+            (
+                tonic::Code::NotFound,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "space_artifacts_unavailable",
+            ),
+        ] {
+            let upstream = tonic::Status::new(code, "upstream text: decision-token-secret");
+            let (status, body) = body_json(status_response(&upstream)).await;
+            assert_eq!(status, http, "{code:?}");
+            assert_eq!(body["error"]["code"], error, "{code:?}");
+            assert_eq!(body["error"]["details"], json!({}));
+            assert!(
+                !body.to_string().contains("secret"),
+                "{code:?} echoed the upstream text"
+            );
+        }
+    }
+
+    #[test]
+    fn a_summary_never_carries_content_and_omits_an_empty_agent_name() {
+        let mut summary = SpaceArtifactSummary {
+            thread_id: "thread-1".to_owned(),
+            message_id: "msg-1".to_owned(),
+            artifact_id: "art-1".to_owned(),
+            kind: "document".to_owned(),
+            title: "Plan".to_owned(),
+            version: 2,
+            version_count: 3,
+            size_chars: 120,
+            created_at: "2027-01-15T08:00:00.000000Z".to_owned(),
+            space_id: "space-room".to_owned(),
+            agent_name: String::new(),
+        };
+        let value = summary_json(&summary);
+        assert!(value.get("agent_name").is_none());
+        assert!(value.get("content").is_none());
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "artifact_id",
+                "created_at",
+                "kind",
+                "message_id",
+                "size_chars",
+                "space_id",
+                "thread_id",
+                "title",
+                "version",
+                "version_count"
+            ]
+        );
+        summary.agent_name = "Researcher".to_owned();
+        assert_eq!(summary_json(&summary)["agent_name"], "Researcher");
+    }
+
+    #[test]
+    fn the_query_carries_the_decision_pair_and_paging_only() {
+        let query: ListSpaceArtifactsQuery = serde_json::from_value(json!({
+            "limit": 25,
+            "cursor": "c1",
+            "space_read_decision_ref": "dec-1",
+            "space_read_decision_token": "tok-1"
+        }))
+        .expect("query");
+        assert_eq!(query.limit, Some(25));
+        assert_eq!(query.cursor.as_deref(), Some("c1"));
+        assert_eq!(query.space_read_decision_ref.as_deref(), Some("dec-1"));
+        let empty: ListSpaceArtifactsQuery =
+            serde_json::from_value(json!({})).expect("empty query");
+        assert_eq!(empty.limit, None);
+    }
+}

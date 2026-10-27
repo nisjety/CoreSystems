@@ -2740,4 +2740,43 @@ mod tests {
         assert!(first.contains("full-goal-blake3:"));
         assert!(second.contains("full-goal-blake3:"));
     }
+
+    fn status_with_code(code: tonic::Code, error_code: Option<&'static str>) -> tonic::Status {
+        let mut status = tonic::Status::new(code, "thread already has an active run");
+        if let Some(error_code) = error_code {
+            status
+                .metadata_mut()
+                .insert("x-mp-error-code", tonic::metadata::MetadataValue::from_static(error_code));
+        }
+        status
+    }
+
+    /// WS09-S1: only an `Aborted` status carrying the `x-mp-error-code: thread_run_active`
+    /// trailer is the typed refusal. Any other Aborted, any other code with the trailer and a bare
+    /// message that merely says the words are not.
+    #[test]
+    fn thread_run_active_is_true_only_for_aborted_with_the_error_code_trailer() {
+        use super::{thread_run_active, THREAD_RUN_ACTIVE_CODE};
+        assert_eq!(THREAD_RUN_ACTIVE_CODE, "thread_run_active");
+        let typed = anyhow::Error::new(status_with_code(tonic::Code::Aborted, Some("thread_run_active")));
+        assert!(thread_run_active(&typed));
+        // The refusal wrapped by context layers is still found through the chain.
+        let wrapped = typed.context("append to session core").context("start managed run");
+        assert!(thread_run_active(&wrapped));
+
+        for status in [
+            status_with_code(tonic::Code::Aborted, None),
+            status_with_code(tonic::Code::Aborted, Some("some_other_code")),
+            status_with_code(tonic::Code::Aborted, Some("Thread_Run_Active")),
+            status_with_code(tonic::Code::FailedPrecondition, Some("thread_run_active")),
+            status_with_code(tonic::Code::AlreadyExists, Some("thread_run_active")),
+            status_with_code(tonic::Code::Unavailable, Some("thread_run_active")),
+        ] {
+            let code = status.code();
+            assert!(!thread_run_active(&anyhow::Error::new(status)), "{code:?} must not match");
+        }
+        // The text is never consulted, and a non-status error never matches.
+        assert!(!thread_run_active(&anyhow::anyhow!("thread_run_active")));
+        assert!(!thread_run_active(&anyhow::Error::new(std::io::Error::other("thread_run_active"))));
+    }
 }

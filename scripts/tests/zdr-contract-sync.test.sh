@@ -314,6 +314,14 @@ VENDORED=(
 
   # WS24-S5: model-gateway's copy, read by the Ask-loop arms test in src/tool_loop.rs.
   "apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json|apps/Model Plane/api/contracts/agent-action-admission.json"
+
+  # WS06-S4: the Space surface registry, vendored with its pin into the two lints that check route
+  # completeness: model-gateway (src/zdr_posture.rs, every non-GET route has a row) and the BFF gateway
+  # (tests/space_routes_zdr_classes.rs, every /api/v1/spaces route has a row).
+  "apps/Model Plane/rust/services/model-gateway/tests/fixtures/space-surface.v1.json|apps/Model Plane/api/contracts/space-surface.v1.json"
+  "apps/Model Plane/rust/services/model-gateway/tests/fixtures/space-surface.v1.json.sha256|apps/Model Plane/api/contracts/space-surface.v1.json.sha256"
+  "apps/Frontend Plane/verevonv3/apps/gateway/tests/fixtures/space-surface.v1.json|apps/Model Plane/api/contracts/space-surface.v1.json"
+  "apps/Frontend Plane/verevonv3/apps/gateway/tests/fixtures/space-surface.v1.json.sha256|apps/Model Plane/api/contracts/space-surface.v1.json.sha256"
 )
 
 # "<repo-relative golden>|<consumer>|<tree its copy must live in>|<owning task>"
@@ -365,6 +373,9 @@ CONSUMERS=(
   "apps/Model Plane/api/contracts/agent-action-admission.json|execution-core|apps/Model Plane/rust/services/execution-core/|WS24-S5 (every admitted id has an owner path in the Do catalogue)"
   "apps/Model Plane/api/contracts/agent-action-admission.json|model-gateway|apps/Model Plane/rust/services/model-gateway/|WS24-S5 (every Ask-loop read arm is a contract row, and the reverse)"
   "apps/Model Plane/api/contracts/agent-action-admission.json|capability-core|apps/Model Plane/go/services/capability-core/|WS24-S5 (vendored; the admission table reads it in WS24-S6)"
+  # WS06-S4: the Space surface registry. Each plane that registers Space routes lints them against it.
+  "apps/Model Plane/api/contracts/space-surface.v1.json|model-gateway|apps/Model Plane/rust/services/model-gateway/|WS06-S4 (zdr_posture: every non-GET route has a classified row)"
+  "apps/Model Plane/api/contracts/space-surface.v1.json|bff-gateway|apps/Frontend Plane/verevonv3/apps/gateway/|WS06-S4 (space_routes_zdr_classes: every /api/v1/spaces route has a classified row)"
 )
 
 passes=0

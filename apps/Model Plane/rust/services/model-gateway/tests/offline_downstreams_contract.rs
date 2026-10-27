@@ -60,6 +60,7 @@ macro_rules! one_call_per_client {
             call!(state, message_search_client.search_messages),
             call!(state, learning_client.list_learning_ledger),
             call!(state, space_events_client.stream_space_events),
+            call!(state, space_room_read_client.list_space_artifacts),
             call!(state, managed_run_client.start_managed_run),
             call!(state, run_client.get_run),
             call!(state, orchestration_client.list_plans),
@@ -94,10 +95,10 @@ async fn every_grpc_client_of_the_offline_state_is_unavailable_at_once() {
     for (client, code) in &answers {
         assert_eq!(*code, Code::Unavailable, "{client} must answer Unavailable");
     }
-    assert_eq!(answers.len(), 19, "one call per gRPC client of AppState");
+    assert_eq!(answers.len(), 21, "one call per gRPC client of AppState");
     assert!(
         started.elapsed() < Duration::from_secs(5),
-        "all nineteen answered in {:?}",
+        "all twenty-one answered in {:?}",
         started.elapsed()
     );
 }
@@ -172,7 +173,7 @@ fn the_offline_state_replaces_every_grpc_client_field_of_app_state() {
 
     assert_eq!(
         client_fields.len(),
-        20,
+        21,
         "the gRPC client fields of AppState changed ({client_fields:?}): update this count, the \
          helper and `one_call_per_client!` together"
     );

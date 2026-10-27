@@ -1186,6 +1186,9 @@ struct MockSessionHandles {
     append_script: Arc<Mutex<std::collections::VecDeque<Result<AppendMessageResponse, Status>>>>,
     /// Every `AppendMessage` request, whole.
     append_request_captures: Arc<Mutex<Vec<AppendMessageRequest>>>,
+    /// Refuse `StartManagedRun` as Session Core does when the Space thread already has a live
+    /// root run: `Aborted` with `x-mp-error-code: thread_run_active` (WS09-S1).
+    refuse_start_thread_run_active: Arc<AtomicBool>,
 }
 
 struct MockSessionCore {
@@ -1229,6 +1232,7 @@ impl MockSessionCore {
             list_conversation_count: Arc::new(AtomicUsize::new(0)),
             append_script: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             append_request_captures: Arc::new(Mutex::new(Vec::new())),
+            refuse_start_thread_run_active: Arc::new(AtomicBool::new(false)),
         };
         (
             Self {
@@ -1699,6 +1703,22 @@ impl ManagedRunLifecycle for MockManagedRunLifecycle {
         &self,
         request: TReq<StartManagedRunRequest>,
     ) -> Result<Response<StartManagedRunResponse>, Status> {
+        if self
+            .handles
+            .refuse_start_thread_run_active
+            .load(Ordering::SeqCst)
+        {
+            let mut status = Status::aborted("thread already has an active run");
+            status.metadata_mut().insert(
+                "x-mp-error-code",
+                tonic::metadata::MetadataValue::from_static("thread_run_active"),
+            );
+            status.metadata_mut().insert(
+                "x-mp-active-run-id",
+                tonic::metadata::MetadataValue::from_static("run-already-live"),
+            );
+            return Err(status);
+        }
         let request = request.into_inner();
         let source = managed_source(request.terminal_source)?;
         let thread_id = if request.thread_id.is_empty() {
@@ -3207,6 +3227,9 @@ async fn service_token_is_denied_on_user_delegated_retrieval_and_session_routes(
     for (method, uri, body, delegated) in [
         ("POST", "/v1/invoke", r#"{"content":"q"}"#, None),
         ("GET", "/v1/threads", "", None),
+        // WS02-S3 / WS07-S9: the Space event stream and the room artifacts are user routes.
+        ("GET", "/v1/spaces/s1/events", "", None),
+        ("GET", "/v1/spaces/s1/artifacts", "", None),
         ("POST", "/v1/retrieval", r#"{"query":"q"}"#, None),
         (
             "POST",
@@ -13631,5 +13654,497 @@ async fn post_route_is_off_by_default_and_closed_to_service_principals() {
         );
     }
     assert_eq!(handles.append_message_count.load(Ordering::SeqCst), 0);
+    clear_model_auth_env();
+}
+
+// ---- Space W1: event stream relay, room artifacts route, thread run guard (WS02-S3, WS07-S9, WS09-S1) ----
+
+type MockSpaceFrameStream =
+    Pin<Box<dyn futures::Stream<Item = Result<mpv1::SpaceEventFrame, Status>> + Send>>;
+
+/// A mock Session Core `SpaceEvents`: answers the scripted frames (or refusal) and keeps every
+/// request with the authorization it carried.
+#[derive(Clone)]
+struct MockSpaceEvents {
+    script: Arc<Mutex<Result<Vec<mpv1::SpaceEventFrame>, Status>>>,
+    requests: Arc<Mutex<Vec<(String, mpv1::StreamSpaceEventsRequest)>>>,
+}
+
+impl MockSpaceEvents {
+    fn new() -> Self {
+        Self {
+            script: Arc::new(Mutex::new(Ok(Vec::new()))),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl mpv1::space_events_server::SpaceEvents for MockSpaceEvents {
+    type StreamSpaceEventsStream = MockSpaceFrameStream;
+
+    async fn stream_space_events(
+        &self,
+        request: TReq<mpv1::StreamSpaceEventsRequest>,
+    ) -> Result<Response<Self::StreamSpaceEventsStream>, Status> {
+        let authorization = service_authorization(&request);
+        self.requests
+            .lock()
+            .unwrap()
+            .push((authorization, request.into_inner()));
+        match self.script.lock().unwrap().clone() {
+            Err(status) => Err(status),
+            Ok(frames) => Ok(Response::new(Box::pin(futures::stream::iter(
+                frames.into_iter().map(Ok),
+            )))),
+        }
+    }
+}
+
+/// A mock Session Core `SpaceRoomReadService`.
+#[derive(Clone)]
+struct MockSpaceRoomRead {
+    script: Arc<Mutex<Result<mpv1::ListSpaceArtifactsResponse, Status>>>,
+    requests: Arc<Mutex<Vec<(String, mpv1::ListSpaceArtifactsRequest)>>>,
+}
+
+impl MockSpaceRoomRead {
+    fn new() -> Self {
+        Self {
+            script: Arc::new(Mutex::new(Ok(mpv1::ListSpaceArtifactsResponse::default()))),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl mpv1::space_room_read_service_server::SpaceRoomReadService for MockSpaceRoomRead {
+    async fn list_space_artifacts(
+        &self,
+        request: TReq<mpv1::ListSpaceArtifactsRequest>,
+    ) -> Result<Response<mpv1::ListSpaceArtifactsResponse>, Status> {
+        let authorization = service_authorization(&request);
+        self.requests
+            .lock()
+            .unwrap()
+            .push((authorization, request.into_inner()));
+        self.script.lock().unwrap().clone().map(Response::new)
+    }
+}
+
+/// A router whose Session Core `SpaceEvents` and `SpaceRoomReadService` are the given mocks,
+/// authenticated through the dev bypass as a persistent user.
+async fn space_read_app(events: MockSpaceEvents, room: MockSpaceRoomRead) -> (Router, wiremock::MockServer) {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, _) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _) = make_state(client, session_client).await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(mpv1::space_events_server::SpaceEventsServer::new(events))
+            .add_service(mpv1::space_room_read_service_server::SpaceRoomReadServiceServer::new(room))
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await
+            .ok();
+    });
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    state.space_events_client = mpv1::space_events_client::SpaceEventsClient::new(channel.clone());
+    state.space_room_read_client =
+        mpv1::space_room_read_service_client::SpaceRoomReadServiceClient::new(channel);
+    authenticated_user_router(build_router(state, None), "org_placeholder", "user_placeholder").await
+}
+
+async fn space_get(
+    app: &Router,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, axum::http::HeaderMap, String) {
+    let mut builder = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header(AUTHORIZATION, "Bearer dev");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let response = app.clone().oneshot(builder.body(Body::empty()).unwrap()).await.unwrap();
+    let (parts, body) = response.into_parts();
+    let bytes = to_bytes(body, usize::MAX).await.unwrap();
+    (parts.status, parts.headers, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
+/// `(event, id, data)` of every SSE frame, the id kept as text (`<generation>.<seq>`).
+fn space_sse_frames(body: &str) -> Vec<(String, Option<String>, serde_json::Value)> {
+    body.split("\n\n")
+        .filter_map(|frame| {
+            let event = frame.lines().find_map(|line| line.strip_prefix("event: "))?;
+            let id = frame
+                .lines()
+                .find_map(|line| line.strip_prefix("id: "))
+                .map(str::to_owned);
+            let data = frame
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .and_then(|data| serde_json::from_str(data).ok())
+                .unwrap_or(serde_json::Value::Null);
+            Some((event.to_owned(), id, data))
+        })
+        .collect()
+}
+
+fn space_frame(frame: mpv1::space_event_frame::Frame) -> mpv1::SpaceEventFrame {
+    mpv1::SpaceEventFrame { frame: Some(frame) }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn space_events_route_relays_frames_with_cursor_ids_and_forwards_the_decision() {
+    use mpv1::space_event_frame::Frame;
+    let events = MockSpaceEvents::new();
+    *events.script.lock().unwrap() = Ok(vec![
+        space_frame(Frame::Connected(mpv1::SpaceStreamConnected {
+            generation: 1,
+            head: 5,
+            resumed: true,
+            lease_seconds: 90,
+            heartbeat_seconds: 10,
+            mode: "live".to_owned(),
+            cursor: 5,
+        })),
+        space_frame(Frame::Event(mpv1::SpaceEventRecord {
+            seq: 6,
+            generation: 1,
+            kind: "message.appended".to_owned(),
+            at: "2027-01-15T08:00:00.000Z".to_owned(),
+            actor_type: "user".to_owned(),
+            actor_id: "member-2".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            message_id: "msg-1".to_owned(),
+            message_sequence: 3,
+            role: "user".to_owned(),
+            ..Default::default()
+        })),
+        space_frame(Frame::Heartbeat(mpv1::SpaceStreamHeartbeat {
+            head: 6,
+            generation: 1,
+            cursor: 6,
+        })),
+        space_frame(Frame::Closing(mpv1::SpaceStreamClosing {
+            code: "lease_expired".to_owned(),
+            reconnect: true,
+            retry_after_ms: 0,
+            generation: 1,
+            cursor: 6,
+        })),
+    ]);
+    let (app, _jwks) = space_read_app(events.clone(), MockSpaceRoomRead::new()).await;
+    let (status, headers, body) = space_get(
+        &app,
+        "/v1/spaces/space-room/events",
+        &[
+            ("x-space-decision-ref", "dec-1"),
+            ("x-space-decision-token", "token-aaaa"),
+            ("last-event-id", "1.5"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/event-stream")));
+
+    // The frames pass through with their ids: only the frames that move the position carry one.
+    let frames = space_sse_frames(&body);
+    let shape: Vec<(&str, Option<&str>)> = frames
+        .iter()
+        .map(|(event, id, _)| (event.as_str(), id.as_deref()))
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            ("connected", Some("1.5")),
+            ("space_event", Some("1.6")),
+            ("heartbeat", Some("1.6")),
+            ("closing", Some("1.6")),
+        ],
+        "{body}"
+    );
+    assert_eq!(frames[0].2["mode"], "live");
+    assert_eq!(frames[0].2["space_id"], "space-room");
+    assert_eq!(frames[0].2["resumed"], true);
+    assert_eq!(frames[1].2["kind"], "message.appended");
+    assert_eq!(
+        frames[1].2["refs"],
+        serde_json::json!({
+            "thread_id": "thread-1", "message_id": "msg-1", "role": "user", "message_sequence": 3
+        })
+    );
+    assert_eq!(frames[3].2["code"], "lease_expired");
+    assert_eq!(frames[3].2["reconnect"], true);
+    assert!(!body.contains("token-aaaa"), "the decision never comes back out");
+
+    // The decision, the cursor and the verified bearer reach Session Core; the user id is the caller's.
+    let requests = events.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let (authorization, request) = &requests[0];
+    assert!(authorization.starts_with("Bearer "), "{authorization}");
+    assert_eq!(request.space_id, "space-room");
+    assert_eq!(request.decision_ref, "dec-1");
+    assert_eq!(request.decision_token, "token-aaaa");
+    assert!(request.resume);
+    assert_eq!((request.generation, request.after_seq), (1, 5));
+    assert!(!request.org_id.is_empty() && !request.user_id.is_empty());
+    clear_model_auth_env();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn space_events_route_without_last_event_id_is_a_live_tail_and_a_poll_only_frame_has_no_id() {
+    use mpv1::space_event_frame::Frame;
+    let events = MockSpaceEvents::new();
+    *events.script.lock().unwrap() = Ok(vec![
+        space_frame(Frame::Connected(mpv1::SpaceStreamConnected {
+            mode: "poll_only".to_owned(),
+            ..Default::default()
+        })),
+        space_frame(Frame::Closing(mpv1::SpaceStreamClosing {
+            code: "zdr_poll_only".to_owned(),
+            reconnect: false,
+            ..Default::default()
+        })),
+    ]);
+    let (app, _jwks) = space_read_app(events.clone(), MockSpaceRoomRead::new()).await;
+    let (status, _, body) = space_get(&app, "/v1/spaces/space-room/events", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let frames = space_sse_frames(&body);
+    assert_eq!(frames[0].0, "connected");
+    assert_eq!(frames[0].1, None, "a poll_only answer has no position to resume from");
+    assert_eq!(frames[1].0, "closing");
+    assert_eq!(frames[1].1, None, "a closing with no generation has no id");
+    assert_eq!(frames[1].2["code"], "zdr_poll_only");
+    let requests = events.requests.lock().unwrap();
+    assert!(!requests[0].1.resume);
+    assert_eq!((requests[0].1.generation, requests[0].1.after_seq), (0, 0));
+    clear_model_auth_env();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn space_events_route_maps_refusals_to_statuses_and_a_bad_cursor_never_reaches_upstream() {
+    let events = MockSpaceEvents::new();
+    let (app, _jwks) = space_read_app(events.clone(), MockSpaceRoomRead::new()).await;
+    for (code, expected, error, retry_after) in [
+        (tonic::Code::Unauthenticated, StatusCode::UNAUTHORIZED, "unauthorized", false),
+        (tonic::Code::PermissionDenied, StatusCode::FORBIDDEN, "space_stream_forbidden", false),
+        (tonic::Code::InvalidArgument, StatusCode::BAD_REQUEST, "invalid_request", false),
+        (tonic::Code::ResourceExhausted, StatusCode::SERVICE_UNAVAILABLE, "space_stream_capacity", true),
+        (tonic::Code::Unavailable, StatusCode::SERVICE_UNAVAILABLE, "space_stream_unavailable", false),
+    ] {
+        *events.script.lock().unwrap() = Err(Status::new(code, "upstream-detail-secret"));
+        let (status, headers, body) = space_get(&app, "/v1/spaces/space-room/events", &[]).await;
+        assert_eq!(status, expected, "{code:?}: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"]["code"], error, "{code:?}");
+        assert!(!body.contains("upstream-detail-secret"), "{code:?}");
+        assert_eq!(headers.contains_key("retry-after"), retry_after, "{code:?}");
+        if retry_after {
+            assert_eq!(headers.get("retry-after").unwrap(), "2");
+        }
+    }
+    let calls_before = events.requests.lock().unwrap().len();
+    for bad in ["x", "1", "1.", "a.1", "1.2.3", "-1.2"] {
+        let (status, _, body) =
+            space_get(&app, "/v1/spaces/space-room/events", &[("last-event-id", bad)]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}: {body}");
+        assert!(body.contains("invalid_request"));
+    }
+    let long_space = "s".repeat(129);
+    let (status, _, _) = space_get(&app, &format!("/v1/spaces/{long_space}/events"), &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        events.requests.lock().unwrap().len(),
+        calls_before,
+        "a malformed cursor or space id is answered before any upstream call"
+    );
+    clear_model_auth_env();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn space_artifacts_route_returns_summaries_with_a_null_cursor_on_the_last_page() {
+    let room = MockSpaceRoomRead::new();
+    *room.script.lock().unwrap() = Ok(mpv1::ListSpaceArtifactsResponse {
+        artifacts: vec![
+            mpv1::SpaceArtifactSummary {
+                thread_id: "thread-1".to_owned(),
+                message_id: "msg-2".to_owned(),
+                artifact_id: "art-1".to_owned(),
+                kind: "document".to_owned(),
+                title: "Plan".to_owned(),
+                version: 2,
+                version_count: 2,
+                size_chars: 40,
+                agent_name: "Researcher".to_owned(),
+                created_at: "2027-01-15T08:00:00.000000Z".to_owned(),
+                space_id: "space-room".to_owned(),
+            },
+            mpv1::SpaceArtifactSummary {
+                thread_id: "thread-1".to_owned(),
+                message_id: "msg-1".to_owned(),
+                artifact_id: "art-2".to_owned(),
+                kind: "code".to_owned(),
+                title: "Script".to_owned(),
+                version: 1,
+                version_count: 1,
+                size_chars: 10,
+                agent_name: String::new(),
+                created_at: "2027-01-15T07:00:00.000000Z".to_owned(),
+                space_id: "space-room".to_owned(),
+            },
+        ],
+        next_cursor: String::new(),
+    });
+    let (app, _jwks) = space_read_app(MockSpaceEvents::new(), room.clone()).await;
+    let (status, _, body) = space_get(
+        &app,
+        "/v1/spaces/space-room/artifacts?limit=2&cursor=c1&space_read_decision_ref=dec-1&space_read_decision_token=token-bbbb",
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["next_cursor"], serde_json::Value::Null, "the last page has a null cursor");
+    let artifacts = json["artifacts"].as_array().unwrap();
+    assert_eq!(artifacts.len(), 2);
+    assert_eq!(artifacts[0]["agent_name"], "Researcher");
+    assert!(artifacts[1].get("agent_name").is_none());
+    assert!(artifacts.iter().all(|artifact| artifact.get("content").is_none()));
+    assert!(!body.contains("token-bbbb"));
+
+    let requests = room.requests.lock().unwrap();
+    let (authorization, request) = &requests[0];
+    assert!(authorization.starts_with("Bearer "));
+    assert_eq!(request.space_id, "space-room");
+    assert_eq!(request.limit, 2);
+    assert_eq!(request.cursor, "c1");
+    assert_eq!(request.space_read_decision_ref, "dec-1");
+    assert_eq!(request.space_read_decision_token, "token-bbbb");
+    clear_model_auth_env();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn space_artifacts_route_returns_the_next_cursor_when_there_is_more() {
+    let room = MockSpaceRoomRead::new();
+    *room.script.lock().unwrap() = Ok(mpv1::ListSpaceArtifactsResponse {
+        artifacts: Vec::new(),
+        next_cursor: "next-1".to_owned(),
+    });
+    let (app, _jwks) = space_read_app(MockSpaceEvents::new(), room.clone()).await;
+    let (status, _, body) = space_get(&app, "/v1/spaces/space-room/artifacts", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["next_cursor"], "next-1");
+    let requests = room.requests.lock().unwrap();
+    assert_eq!(requests[0].1.limit, 0, "no limit means Session Core's default");
+    assert_eq!(requests[0].1.cursor, "");
+    clear_model_auth_env();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn space_artifacts_route_maps_refusals_and_fails_a_bad_space_before_upstream() {
+    let room = MockSpaceRoomRead::new();
+    let (app, _jwks) = space_read_app(MockSpaceEvents::new(), room.clone()).await;
+    for (code, expected, error) in [
+        (tonic::Code::Unauthenticated, StatusCode::UNAUTHORIZED, "unauthorized"),
+        (tonic::Code::PermissionDenied, StatusCode::FORBIDDEN, "space_read_not_authorized"),
+        (tonic::Code::InvalidArgument, StatusCode::BAD_REQUEST, "invalid_request"),
+        (tonic::Code::Unavailable, StatusCode::SERVICE_UNAVAILABLE, "space_artifacts_unavailable"),
+        (tonic::Code::Internal, StatusCode::SERVICE_UNAVAILABLE, "space_artifacts_unavailable"),
+    ] {
+        *room.script.lock().unwrap() = Err(Status::new(code, "upstream-detail-secret"));
+        let (status, _, body) = space_get(
+            &app,
+            "/v1/spaces/space-room/artifacts?space_read_decision_ref=dec-1&space_read_decision_token=token-cccc",
+            &[],
+        )
+        .await;
+        assert_eq!(status, expected, "{code:?}: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"]["code"], error, "{code:?}");
+        assert!(!body.contains("upstream-detail-secret") && !body.contains("token-cccc"), "{code:?}");
+    }
+    let calls_before = room.requests.lock().unwrap().len();
+    let long_space = "s".repeat(129);
+    let (status, _, _) = space_get(&app, &format!("/v1/spaces/{long_space}/artifacts"), &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(room.requests.lock().unwrap().len(), calls_before);
+    clear_model_auth_env();
+}
+
+/// WS09-S1: a start refused with `thread_run_active` ends the stream with one `error` frame
+/// carrying that code (retryable), and no inference call is made.
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_thread_run_active_is_an_error_frame_and_makes_no_inference_call() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let infer_calls = Arc::new(AtomicUsize::new(0));
+    let client = spawn_mock(MockOk {
+        infer_call_count: Some(infer_calls.clone()),
+        ..MockOk::default()
+    })
+    .await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    session_handles
+        .refuse_start_thread_run_active
+        .store(true, Ordering::SeqCst);
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, _publisher) = make_state(client, session_client).await;
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"hello","model":"m","thread_id":"thread-busy"}"#,
+        ))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    let frames = sse_frames(&body);
+    let error = frames
+        .iter()
+        .find(|(_, event, _)| event == "error")
+        .unwrap_or_else(|| panic!("an error frame: {body}"));
+    assert_eq!(error.2["code"], "thread_run_active", "{body}");
+    assert_eq!(error.2["retryable"], true, "{body}");
+    assert!(
+        !frames.iter().any(|(_, event, _)| event == "done"),
+        "the refused turn never completes: {body}"
+    );
+    assert_eq!(infer_calls.load(Ordering::SeqCst), 0, "no inference call after the refusal");
+    assert_eq!(
+        session_handles.managed_start_captures.lock().unwrap().len(),
+        0,
+        "the refused start recorded no run"
+    );
     clear_model_auth_env();
 }
