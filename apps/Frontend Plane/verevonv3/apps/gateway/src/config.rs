@@ -160,6 +160,11 @@ pub(crate) struct SpaceFeatureFlags {
     /// or query) of each CSP report, for a host inventory. Forced off when `APP_ENV` is
     /// production (see `dev_only_flag`); the counters never carry a URL either way.
     pub(crate) csp_report_log_hosts: bool,
+    /// `SPACE_MEMBERSHIP_WRITER_API` (WS04-S6): room member add, role change and leave go to
+    /// Control's actor-carrying writer, then the audience reconcile. Off keeps the legacy
+    /// Convex-then-declare path (emergency stop only: it cannot remove a member added through
+    /// Control). A rollout control, never an authorization input; Control decides every role.
+    pub(crate) membership_writer_api: bool,
     /// `SPACE_POLICY_ADMIN_API` (WS03-S4): the three org-admin Space effect-policy routes and
     /// the console that reads them. Off answers 404 `space_policy_admin_disabled`. A rollout
     /// control, never an authorization input; Control's role check and write switch decide.
@@ -172,6 +177,7 @@ impl SpaceFeatureFlags {
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
             client_policy: crate::client_contract::ClientPolicy::from_env(),
             csp_report_log_hosts: dev_only_flag("CSP_REPORT_LOG_HOSTS"),
+            membership_writer_api: space_flag("SPACE_MEMBERSHIP_WRITER_API"),
             policy_admin_api: space_flag("SPACE_POLICY_ADMIN_API"),
         }
     }

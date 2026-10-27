@@ -71,6 +71,9 @@ use super::dispatchers::{
     dispatch_studio_create_project, dispatch_studio_export_social_draft,
     dispatch_studio_save_project,
 };
+use super::dispatchers_spaces::ws04::{
+    dispatch_spaces_change_member_role, dispatch_spaces_leave_room,
+};
 use super::dispatchers_spaces::ws03::{
     dispatch_spaces_apply_effect_preset, dispatch_spaces_set_effect_entitlements,
 };
@@ -529,6 +532,11 @@ pub(super) async fn execute_action(
         "spaces.create_room" => dispatch_space_create_room(&state, &user, &body.input).await,
         "spaces.add_member" => dispatch_space_add_member(&state, &user, &body.input).await,
         "spaces.remove_member" => dispatch_space_remove_member(&state, &user, &body.input).await,
+        "spaces.change_member_role" => {
+            dispatch_spaces_change_member_role(&state, &user, &body.input, &body.idempotency_key)
+                .await
+        }
+        "spaces.leave_room" => dispatch_spaces_leave_room(&state, &user, &body.input).await,
         "spaces.set_effect_entitlements" => {
             dispatch_spaces_set_effect_entitlements(
                 &state,

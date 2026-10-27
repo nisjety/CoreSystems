@@ -631,6 +631,20 @@ export async function getSpaceRoster(spaceRef: string): Promise<readonly SpaceRo
   return response.members
 }
 
+/**
+ * The roster plus whether the gateway's Control member writer is on (WS04-S6). `writerApi` is
+ * true only when the server said so; absence (an older gateway, the flag off) is false, so the
+ * role and leave controls stay hidden rather than offering calls the server refuses.
+ */
+export async function getSpaceRosterView(
+  spaceRef: string,
+): Promise<{ members: readonly SpaceRosterMember[]; writerApi: boolean }> {
+  const response = await requestJson<{ members: readonly SpaceRosterMember[]; writer_api?: boolean }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/roster`,
+  )
+  return { members: response.members, writerApi: response.writer_api === true }
+}
+
 /** One turn of a Space thread, as the room reads it. */
 export type SpaceThreadTurn = {
   readonly role: 'user' | 'assistant' | 'system' | 'tool'
@@ -1026,6 +1040,19 @@ export async function createRoom(name: string): Promise<SpaceSummary> {
 }
 
 /**
+ * Where the recipient audience stands after a membership write (WS04-S6). `pending`: applied or
+ * waiting for acknowledgement, so a new member may need a moment before they can read. `current`:
+ * nothing to change. `unconfirmed`: the reconcile call failed; the change stands and a cron
+ * heals it. Absent on the legacy path.
+ */
+export type SpaceAudienceState = 'pending' | 'current' | 'unconfirmed'
+
+function audienceStateOf(audience: { state?: unknown } | undefined): SpaceAudienceState | undefined {
+  const state = audience?.state
+  return state === 'pending' || state === 'current' || state === 'unconfirmed' ? state : undefined
+}
+
+/**
  * Add one person to a named room.
  *
  * Gated to the room's owner or manager, the same floor as granting an agent:
@@ -1040,15 +1067,25 @@ export async function createRoom(name: string): Promise<SpaceSummary> {
 export async function addSpaceMember(
   spaceRef: string,
   memberId: string,
-): Promise<{ memberCount: number; changed: boolean }> {
-  const response = await requestJson<{ member_count?: number; changed?: boolean }>(
-    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/members`,
-    {
-      method: 'POST',
-      body: JSON.stringify({ member_id: memberId }),
-    },
-  )
-  return { memberCount: response.member_count ?? 0, changed: response.changed === true }
+  role?: string,
+): Promise<{ memberCount: number; changed: boolean; role?: string; audience?: SpaceAudienceState }> {
+  const response = await requestJson<{
+    member_count?: number
+    changed?: boolean
+    role?: string
+    audience?: { state?: unknown }
+  }>(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/members`, {
+    method: 'POST',
+    // `role` is honoured only with the Control member writer on (WS04-S6); absent means
+    // Control's default.
+    body: JSON.stringify(role ? { member_id: memberId, role } : { member_id: memberId }),
+  })
+  return {
+    memberCount: response.member_count ?? 0,
+    changed: response.changed === true,
+    role: response.role,
+    audience: audienceStateOf(response.audience),
+  }
 }
 
 /**
@@ -1061,12 +1098,21 @@ export async function addSpaceMember(
 export async function removeSpaceMember(
   spaceRef: string,
   memberId: string,
-): Promise<{ memberCount: number; changed: boolean }> {
-  const response = await requestJson<{ member_count?: number; changed?: boolean }>(
-    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/members/${encodeURIComponent(memberId)}`,
-    { method: 'DELETE' },
-  )
-  return { memberCount: response.member_count ?? 0, changed: response.changed === true }
+): Promise<{ memberCount: number; changed: boolean; left?: boolean; audience?: SpaceAudienceState }> {
+  const response = await requestJson<{
+    member_count?: number
+    changed?: boolean
+    left?: boolean
+    audience?: { state?: unknown }
+  }>(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/members/${encodeURIComponent(memberId)}`, {
+    method: 'DELETE',
+  })
+  return {
+    memberCount: response.member_count ?? 0,
+    changed: response.changed === true,
+    left: response.left,
+    audience: audienceStateOf(response.audience),
+  }
 }
 
 /**

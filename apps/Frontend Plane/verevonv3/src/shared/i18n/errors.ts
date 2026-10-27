@@ -220,6 +220,22 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
   // WS03 policy and denials
 
   // WS04 membership and room administration
+  invalid_request: { no: 'Forespørselen er ikke gyldig. Ingenting er endret.', en: 'The request is not valid. Nothing was changed.' },
+  feature_disabled: { no: 'Denne funksjonen er ikke slått på for deg ennå.', en: 'This feature is not turned on for you yet.' },
+  idempotency_key_reused: { no: 'Denne forespørselen er allerede brukt til noe annet. Last inn på nytt og prøv igjen.', en: 'This request was already used for something else. Reload and try again.' },
+  member_not_found: { no: 'Personen er ikke medlem av rommet lenger. Last inn på nytt.', en: 'That person is no longer a member of the room. Reload.' },
+  member_not_in_organization: { no: 'Personen er ikke med i organisasjonen, så de kan ikke legges til i rommet.', en: 'That person is not in the organization, so they cannot be added to the room.' },
+  room_archived: { no: 'Rommet er arkivert. Medlemmer kan ikke endres.', en: 'The room is archived. Members cannot be changed.' },
+  room_delegation_required: { no: 'Du har ikke tilgang til å endre medlemmer her.', en: 'You do not have access to change members here.' },
+  room_elevated_role_requires_owner: { no: 'Bare en eier kan gi, endre eller fjerne rollen leder eller eier.', en: 'Only an owner can grant, change or remove a manager or owner.' },
+  room_member_changed: { no: 'Medlemmet ble endret av noen andre. Listen er lastet på nytt; prøv igjen.', en: 'That member was changed by someone else. The list was reloaded; try again.' },
+  room_membership_unavailable: { no: 'Medlemmene kunne ikke endres. Ingenting er endret.', en: 'The members could not be changed. Nothing was changed.' },
+  room_not_found: { no: 'Fant ikke rommet, eller du har ikke tilgang til det.', en: 'The room was not found, or you do not have access to it.' },
+  room_personal_space: { no: 'Et personlig rom har bare én eier og kan ikke ha flere medlemmer.', en: 'A personal Space has one owner and cannot have other members.' },
+  room_role_forbidden: { no: 'Rollen din i dette rommet tillater ikke dette.', en: 'Your role in this room does not allow that.' },
+  room_roster_derived: { no: 'Medlemmene i dette rommet følger organisasjonen og redigeres ikke her.', en: 'The members of this room follow the organization and are not edited here.' },
+  room_sole_owner: { no: 'Rommet må ha minst én eier. Gjør noen andre til eier først.', en: 'The room needs at least one owner. Make someone else an owner first.' },
+  space_authority_unavailable: { no: 'Kunne ikke bekrefte tilgangen akkurat nå. Ingenting er endret. Prøv igjen om litt.', en: 'Access could not be confirmed right now. Nothing was changed. Try again shortly.' },
 
   // WS05 org security
 

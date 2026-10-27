@@ -29,6 +29,7 @@ use crate::{
 
 mod denial;
 use denial::{typed_response, with_gap_details, Decision, SpaceDenial};
+pub(crate) mod room_admin;
 mod schedule_template;
 
 static THREAD_SCOPE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -747,7 +748,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         )
         .route(
             "/api/v1/spaces/{space_ref}/members/{member_id}",
-            delete(remove_space_member),
+            delete(remove_space_member).patch(room_admin::change_member_role_route),
         )
         .route(
             "/api/v1/spaces/{space_ref}/instructions",
@@ -3196,7 +3197,7 @@ async fn space_roster(
         user_name: user.user_name,
         user_role: user.auth_role.unwrap_or_default(),
     };
-    proxy_json(
+    let (status, Json(mut body)) = proxy_json(
         &state,
         Method::GET,
         &url,
@@ -3205,7 +3206,9 @@ async fn space_roster(
         Some(&actor),
         None,
     )
-    .await
+    .await;
+    room_admin::annotate_roster(&state, status, &mut body);
+    (status, Json(body))
 }
 
 /// The active Space this ref names, at ANY kind — personal, room, project, case.
@@ -3666,6 +3669,9 @@ pub(crate) async fn add_space_member(
     Path(space_ref): Path<String>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
+    if room_admin::writer_enabled(&state) {
+        return room_admin::add_member(&state, &user, &space_ref, &body).await;
+    }
     let member_id = body
         .get("member_id")
         .and_then(Value::as_str)
@@ -3680,6 +3686,9 @@ pub(crate) async fn remove_space_member(
     Extension(user): Extension<AuthenticatedUser>,
     Path((space_ref, member_id)): Path<(String, String)>,
 ) -> (StatusCode, Json<Value>) {
+    if room_admin::writer_enabled(&state) {
+        return room_admin::remove_member(&state, &user, &space_ref, &member_id).await;
+    }
     apply_room_membership(&state, &user, &space_ref, &member_id, false).await
 }
 

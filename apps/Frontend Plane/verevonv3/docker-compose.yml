@@ -204,6 +204,10 @@ services:
       # WS03-S4: the three org-admin Space policy routes (404 when off). A rollout control only;
       # Control's role check and its SPACE_POLICY_ADMIN_WRITES switch decide who may change what.
       SPACE_POLICY_ADMIN_API: ${SPACE_POLICY_ADMIN_API:-true}
+      # WS04-S6: room member add, role change and leave on Control's writer (then the audience
+      # reconcile). Off resumes the legacy Convex path (emergency stop only). Control also needs the
+      # spaces:membership:act scope on this gateway's credential; without it every call is 403.
+      SPACE_MEMBERSHIP_WRITER_API: ${SPACE_MEMBERSHIP_WRITER_API:-true}
     ports:
       - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:3185:3185"
     networks:

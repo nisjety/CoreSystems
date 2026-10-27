@@ -1,4 +1,4 @@
-import { useParams, useSearchParams } from '@solidjs/router'
+import { useNavigate, useParams, useSearchParams } from '@solidjs/router'
 // `Blocks` stands in for lucide's `Puzzle` on the "add existing agent" action:
 // the vendored Solid 2 icon barrel carries no Puzzle glyph, and lucide-solid
 // itself is Solid 1-only, so it cannot be imported here.
@@ -11,7 +11,7 @@ import {
   getSpaceAgents,
   getSpaceContext,
   getSpaceInstructions,
-  getSpaceRoster,
+  getSpaceRosterView,
   getSpaceThreads,
   markSpaceRead,
   recordSpacePresence,
@@ -42,7 +42,13 @@ import { agentCardModel } from '../lib/agent-activity'
 import { SpaceBindAgentDialog } from './SpaceBindAgentDialog'
 import { SpaceCockpit } from './SpaceCockpit'
 import { SpaceConfirmButton } from './SpaceConfirmButton'
-import { SpaceMemberControls, SpaceMemberRemoveButton } from './SpaceMemberControls'
+import {
+  SpaceLeaveRoomButton,
+  SpaceMemberControls,
+  SpaceMemberRemoveButton,
+  SpaceMemberRoleSelect,
+} from './SpaceMemberControls'
+import { canRemove, countActiveOwners } from '../lib/space-roles'
 import { SpaceCreateAgentDialog } from './SpaceCreateAgentDialog'
 import { SpaceRoomComposer } from './SpaceRoomComposer'
 import { SpaceRoomTimeline, roomAgentName } from './SpaceRoomTimeline'
@@ -145,7 +151,14 @@ export default function SpacePage() {
   // stays mounted underneath SpaceCockpit (panels hide, they don't unmount),
   // so fetching this per-panel would mean two independent network calls for
   // the same room's agents on every page load.
-  const [roster, { refetch: refetchRoster }] = createResource(spaceRef, getSpaceRoster)
+  // `writerApi` is the server saying its Control member writer is on (WS04-S6); it decides
+  // whether the Members tab offers role and leave controls.
+  const [writerApi, setWriterApi] = createSignal(false)
+  const [roster, { refetch: refetchRoster }] = createResource(spaceRef, async (ref: string) => {
+    const view = await getSpaceRosterView(ref)
+    setWriterApi(view.writerApi)
+    return view.members
+  })
   const [agents, { refetch: refetchAgents }] = createResource(spaceRef, getSpaceAgents)
   const [createAgentOpen, setCreateAgentOpen] = createSignal(false)
   const [bindAgentOpen, setBindAgentOpen] = createSignal(false)
@@ -507,6 +520,8 @@ export default function SpacePage() {
                       role={current().membership.role}
                       kind={current().space.kind}
                       orgId={current().membership.org_id}
+                      actorId={current().membership.subject_id}
+                      writerApi={writerApi()}
                       isOrganizationRoom={current().space.is_organization_room}
                       onMembersChanged={() => {
                         void refetchRoster()
@@ -1242,6 +1257,10 @@ function SpaceMembersPanel(props: {
   readonly role: string
   readonly kind: string
   readonly orgId: string
+  /** The caller's own subject id, so the roster can tell "you" from everyone else. */
+  readonly actorId: string
+  /** The server's Control member writer is on: role select, leave, owner removal (WS04-S6). */
+  readonly writerApi: boolean
   /** The organization's own channel derives its roster from org-core, so it
    * has no editable member list — see `SpaceMemberControls`.
    *
@@ -1258,6 +1277,11 @@ function SpaceMembersPanel(props: {
 }) {
   const i18n = useI18n()
   const roster = props.roster
+  const navigate = useNavigate()
+  const activeOwners = () => countActiveOwners(props.roster.error ? [] : props.roster() ?? [])
+  // Offered only for a named room somebody made, and only when the server said the writer is on.
+  const writerRoom = () =>
+    props.writerApi && props.kind !== 'personal' && props.isOrganizationRoom === false
 
   return (
     <section class="verevon-space-view" aria-labelledby="space-members-title">
@@ -1314,6 +1338,8 @@ function SpaceMembersPanel(props: {
           orgId={props.orgId}
           roster={() => (props.roster.error ? [] : props.roster() ?? [])}
           onChanged={props.onMembersChanged}
+          actorRole={props.role}
+          writerApi={props.writerApi}
         />
       </Show>
 
@@ -1345,13 +1371,29 @@ function SpaceMembersPanel(props: {
                       regardless, so removing the grant would only make this
                       list disagree with the roster it describes. Agents are
                       governed from the Agent tab, not here. */}
+                  {/* Writer on: the role matrix decides, so an owner can role and remove an
+                      owner and anyone may change themselves down. Writer off: the legacy rule
+                      above (a manager removes anyone but the registered owner). */}
+                  <Show when={writerRoom() && member.subject_type === 'user'}>
+                    <SpaceMemberRoleSelect
+                      spaceRef={props.spaceRef}
+                      member={member}
+                      actorId={props.actorId}
+                      actorRole={props.role}
+                      activeOwners={activeOwners()}
+                      onChanged={props.onMembersChanged}
+                    />
+                  </Show>
                   <Show
                     when={
-                      canGrantSpaceMembership(props.role)
-                      && props.kind !== 'personal'
-                      && props.isOrganizationRoom === false
-                      && member.subject_type === 'user'
-                      && member.role !== 'owner'
+                      member.subject_type === 'user'
+                      && (writerRoom()
+                        ? member.subject_id !== props.actorId
+                          && canRemove(props.role, member.role, false, activeOwners()) === null
+                        : canGrantSpaceMembership(props.role)
+                          && props.kind !== 'personal'
+                          && props.isOrganizationRoom === false
+                          && member.role !== 'owner')
                     }
                   >
                     <SpaceMemberRemoveButton
@@ -1365,6 +1407,15 @@ function SpaceMembersPanel(props: {
             </For>
           </ul>
         )}
+      </Show>
+
+      <Show when={writerRoom()}>
+        <SpaceLeaveRoomButton
+          spaceRef={props.spaceRef}
+          actorRole={props.role}
+          activeOwners={activeOwners()}
+          onLeft={() => navigate('/spaces')}
+        />
       </Show>
 
       <Show when={props.kind === 'personal'}>

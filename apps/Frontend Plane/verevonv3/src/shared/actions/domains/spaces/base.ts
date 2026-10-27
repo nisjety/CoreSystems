@@ -93,6 +93,9 @@ const spaceCreateRoomInput = z.object({
 const spaceAddMemberInput = z.object({
   spaceRef: z.string().min(1),
   memberId: z.string().min(1),
+  // WS04-S6: the room role to grant. Absent means Control's default (editor). Honoured only
+  // with the Control member writer on; the legacy path ignores it.
+  role: z.enum(['viewer', 'editor', 'manager', 'owner']).optional(),
 })
 
 const spaceRemoveMemberInput = z.object({

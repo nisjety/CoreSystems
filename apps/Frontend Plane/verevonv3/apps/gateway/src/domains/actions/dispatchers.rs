@@ -5936,7 +5936,10 @@ pub(super) async fn dispatch_space_add_member(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
         PathExtractor(space_ref.to_owned()),
-        Json(json!({ "member_id": member_id })),
+        Json(match ticket_string(input, "role") {
+            "" => json!({ "member_id": member_id }),
+            role => json!({ "member_id": member_id, "role": role }),
+        }),
     )
     .await;
     owner_json_response_to_envelope("spaces.add_member", user, status, payload)

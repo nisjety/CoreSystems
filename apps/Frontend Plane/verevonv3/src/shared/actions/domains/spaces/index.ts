@@ -8,8 +8,10 @@
 // handlers.rs (the body of the dispatcher lives in dispatchers_spaces/<ws>.rs).
 import { baseSpaceActions } from './base'
 import { ws03SpaceActions } from './ws03'
+import { ws04SpaceActions } from './ws04'
 
 export const spaceActions = [
   ...baseSpaceActions,
   ...ws03SpaceActions,
+  ...ws04SpaceActions,
 ] as const
