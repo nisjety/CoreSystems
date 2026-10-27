@@ -9,7 +9,7 @@
 //! - [`authz`]: who a message is appended as ([`authz::AppendAs`]) and the member-append gate
 //!   (WS01-S3).
 //! - [`append`]: the member rules inside the append transaction (WS01-S3).
-//! - [`read_service`]: the empty `SpaceRoomReadService` registration (D3).
+//! - [`read_service`]: `SpaceRoomReadService`, the room read aggregates (D3; `ListSpaceArtifacts` WS07-S9).
 //! - [`events`]: the Space event log's flag sync, listener, sweeper, gate and erasure hooks
 //!   (WS02-S1; the log itself is written by triggers in migration 0072).
 //! - [`memory_scope`]: the memory containment resolver for shared-room threads (WS17-S1).

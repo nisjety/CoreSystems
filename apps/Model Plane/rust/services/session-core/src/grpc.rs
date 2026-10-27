@@ -10058,6 +10058,8 @@ pub async fn serve(
     // Space event stream (WS02-S3): its own small read pool, built before `pool` moves.
     let space_events = crate::space_stream_grpc::SpaceEventsGrpc::new(pool.clone(), space_wakes);
 
+    // Space room read service (WS07-S9): its own handle on the pool, taken before `pool` moves.
+    let session_read_pool = pool.clone();
     let session = SessionService {
         pool,
         retrieval_client,
@@ -10107,7 +10109,7 @@ pub async fn serve(
             auth.clone(),
         ))
         .add_service(SpaceRoomReadServiceServer::with_interceptor(
-            crate::space::read_service::SpaceRoomReadGrpc,
+            crate::space::read_service::SpaceRoomReadGrpc::new(session_read_pool),
             auth.clone(),
         ))
         .add_service(SpaceEventsServer::with_interceptor(

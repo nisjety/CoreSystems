@@ -8,8 +8,7 @@ option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1
 // (artifacts, timeline, thread activity summary). Separate file and service so
 // that SessionCore and every mock of it stay source-compatible.
 //
-// P-SC1 registers the service EMPTY: it carries no RPC yet, so it exposes
-// nothing and persists nothing. Each consumer adds its RPC and messages here,
+// P-SC1 registered the service EMPTY. Each consumer adds its RPC and messages here,
 // in merge order, one proto PR at a time:
 //   WS07-S9   ListSpaceArtifacts
 //   WS15-S6   ListSpaceTimeline
@@ -17,4 +16,42 @@ option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1
 // Every RPC added here is owner-plane read-only: Space access never widens an
 // owner-plane ACL, and a ZDR thread fails closed with the typed refusal
 // catalogue (mp-contracts zdr_refusal.rs).
-service SpaceRoomReadService {}
+service SpaceRoomReadService {
+  // WS07-S9: the room's artifact aggregate. Summaries only (never content); the
+  // caller must be a user principal and must hold a Control Space read decision
+  // (audience `model-plane`, thread:read) for exactly this org, user and Space.
+  rpc ListSpaceArtifacts(ListSpaceArtifactsRequest) returns (ListSpaceArtifactsResponse);
+}
+
+message ListSpaceArtifactsRequest {
+  string org_id = 1;
+  string space_id = 2;
+  // 0 means the default of 50; clamped to 1..200.
+  uint32 limit = 3;
+  // Opaque keyset cursor from a previous response; empty for the first page.
+  string cursor = 4;
+  string space_read_decision_ref = 5;
+  string space_read_decision_token = 6;
+}
+
+// One artifact of the room at its latest version. No content: the viewer reads
+// the thread through the existing transcript route and its own authority.
+message SpaceArtifactSummary {
+  string thread_id = 1;
+  string message_id = 2;
+  string artifact_id = 3;
+  string kind = 4;
+  string title = 5;
+  int64 version = 6;
+  int64 version_count = 7;
+  int64 size_chars = 8;
+  string agent_name = 9;
+  string created_at = 10;
+  string space_id = 11;
+}
+
+message ListSpaceArtifactsResponse {
+  repeated SpaceArtifactSummary artifacts = 1;
+  // Empty when there is no further page.
+  string next_cursor = 2;
+}
