@@ -733,6 +733,48 @@ describe('SpaceRoomComposer — the spend hard stop is a refusal, not a cut-off 
     expect(alert.textContent).toContain('Upstream said no')
     expect(screen.queryByRole('link', { name: 'Åpne Forbrukstak' })).toBeNull()
   })
+
+  // WS03-S7: a typed Space denial error event shows the presenter's words, never event.message.
+  it('shows the denial copy for a typed Space denial, not the event message', async () => {
+    const stream = scriptedStream()
+    renderComposer()
+    fireEvent.input(textarea(), { target: { value: 'Hei' } })
+    flush()
+    fireEvent.submit(textarea().closest('form') as HTMLFormElement)
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalled())
+
+    const onError = stream.handlers().onError as unknown as (event: Record<string, unknown>) => void
+    onError({
+      code: 'forbidden',
+      message: 'Server internal wording',
+      details: { reason: 'space_role_below_floor', resolvable_by: 'space_manager' },
+    })
+    stream.finish()
+    flush()
+
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('Rollen din i dette rommet er ikke høy nok til dette.')
+    expect(alert.textContent).toContain('Be en romleder om hjelp.')
+    expect(alert.textContent).not.toContain('Server internal wording')
+  })
+
+  it('treats an unknown typed reason as the generic denial, not the server text', async () => {
+    const stream = scriptedStream()
+    renderComposer()
+    fireEvent.input(textarea(), { target: { value: 'Hei' } })
+    flush()
+    fireEvent.submit(textarea().closest('form') as HTMLFormElement)
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalled())
+
+    const onError = stream.handlers().onError as unknown as (event: Record<string, unknown>) => void
+    onError({ code: 'forbidden', message: 'Server internal wording', details: { reason: 'space_future_reason' } })
+    stream.finish()
+    flush()
+
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('Dette er ikke tillatt i rommet akkurat nå.')
+    expect(alert.textContent).not.toContain('Server internal wording')
+  })
 })
 
 describe('SpaceRoomComposer — the room\u2019s own typing line', () => {
