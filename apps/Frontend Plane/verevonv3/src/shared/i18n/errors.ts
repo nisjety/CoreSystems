@@ -15,6 +15,7 @@
 // (shared/api/model-entitlement-refusals.ts).
 
 import { isModelEntitlementCode, modelEntitlementPresentation } from '@/shared/api/model-entitlement-refusals'
+import { isSpaceDenial, presentSpaceDenialText } from '@/shared/api/space-denials'
 import { isZdrRefusalCode, zdrRefusalPresentation } from '@/shared/api/zdr-refusals'
 import { en as enStrings } from './en'
 import { no as noStrings } from './no'
@@ -250,6 +251,8 @@ export function translateApiError(
     const shown = modelEntitlementPresentation(code, tr)
     return shown.next === null ? shown.message : `${shown.message} ${shown.next}`
   }
+  // A typed Space denial (WS03): the reason, not the operation code, says why.
+  if (isSpaceDenial(err)) return presentSpaceDenialText(err, tr)
   const copy = (code && ERROR_COPY[code]) || fallback || GENERIC_FALLBACK
   return tr(copy.no, copy.en)
 }

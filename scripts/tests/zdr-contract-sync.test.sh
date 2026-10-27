@@ -262,6 +262,11 @@ VENDORED=(
   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json|apps/Model Plane/api/contracts/zdr-refusals.json"
   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json.sha256|apps/Model Plane/api/contracts/zdr-refusals.json.sha256"
 
+  # WS03-S7: the SPA's copy of the Space denial vocabulary and its pin. space-denials.ts words every
+  # code from it, and space-denials.test.ts reads the copy inside the Frontend tree.
+  "apps/Frontend Plane/verevonv3/src/shared/api/contracts/space-denial-codes.json|apps/Control Plane/user-core/internal/spaces/testdata/space-denial-codes.golden.json"
+  "apps/Frontend Plane/verevonv3/src/shared/api/contracts/space-denial-codes.json.sha256|apps/Control Plane/user-core/internal/spaces/testdata/space-denial-codes.golden.json.sha256"
+
   # QB-T10: Quarry's copies of the Data Plane retrieve-v1 goldens and of their SHA256SUMS pin.
   # crates/quarry-runtime/tests/dp_retrieve_contract.rs includes them and checks every digest.
   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/tests/fixtures/dp-contracts/retrieve-v1/request.golden.json|apps/Data Plane v2/services/retrieval-engine-rs/tests/fixtures/contracts/retrieve-v1/request.golden.json"

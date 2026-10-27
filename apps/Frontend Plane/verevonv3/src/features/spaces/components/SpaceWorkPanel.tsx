@@ -1,5 +1,6 @@
 import { For, Show } from 'solid-js'
 
+import { isSpaceDenial, presentSpaceDenialText } from '@/shared/api/space-denials'
 import { getSpaceWork, type SpaceWork } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -59,9 +60,14 @@ function sectionLabel(section: string, tr: (no: string, en: string) => string): 
  * guessing at what went wrong.
  */
 function gapReason(
-  gap: { readonly code?: string; readonly reason: string },
+  gap: { readonly code?: string; readonly reason: string; readonly details?: Readonly<Record<string, unknown>> },
   tr: (no: string, en: string) => string,
 ): string {
+  // A typed Space denial says why (policy off, role, ZDR ...): the presenter's
+  // words and next step win over the section's generic line.
+  if (isSpaceDenial({ details: gap.details })) {
+    return presentSpaceDenialText({ details: gap.details }, tr)
+  }
   switch (gap.code) {
     case 'runs_read_not_authorized':
       return tr(

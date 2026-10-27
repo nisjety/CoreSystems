@@ -24,13 +24,27 @@ export class ApiError extends Error {
    * by its key, when the body carries one. Null otherwise.
    */
   readonly feature: string | null
+  /**
+   * The structured `details` of a typed refusal (`{ error: { details } }`), for
+   * a Space denial: `reason`, `resolvable_by` and the allowlisted keys. Null
+   * when the body carries none. Read it through `space-denials.ts`, which
+   * accepts only what its vocabulary knows.
+   */
+  readonly details: Readonly<Record<string, unknown>> | null
 
-  constructor(message: string, status: number, code: string | null, feature: string | null = null) {
+  constructor(
+    message: string,
+    status: number,
+    code: string | null,
+    feature: string | null = null,
+    details: Readonly<Record<string, unknown>> | null = null,
+  ) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
     this.feature = feature
+    this.details = details
   }
 }
 
@@ -61,7 +75,7 @@ function applyDevAuth(headers: Headers): void {
 export function extractError(
   body: unknown,
   status: number,
-): { code: string | null; message: string; feature?: string } {
+): { code: string | null; message: string; feature?: string; details?: Readonly<Record<string, unknown>> } {
   if (body && typeof body === 'object') {
     const record = body as Record<string, unknown>
 
@@ -72,10 +86,14 @@ export function extractError(
     if (errorField && typeof errorField === 'object') {
       const e = errorField as Record<string, unknown>
       const feature = typeof e.feature === 'string' && e.feature.trim() ? e.feature : undefined
+      const details = e.details && typeof e.details === 'object' && !Array.isArray(e.details)
+        ? (e.details as Readonly<Record<string, unknown>>)
+        : undefined
       return {
         code: typeof e.code === 'string' ? e.code : null,
         message: typeof e.message === 'string' && e.message.trim() ? e.message : `Request failed (${status})`,
         ...(feature ? { feature } : {}),
+        ...(details ? { details } : {}),
       }
     }
 
@@ -105,7 +123,7 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
   const body = (await response.json().catch(() => null)) as Envelope<T> | Record<string, unknown> | null
 
   if (!response.ok) {
-    const { code, message, feature } = extractError(body, response.status)
+    const { code, message, feature, details } = extractError(body, response.status)
     // A failed sign-in or 2FA challenge is an expected credential error and
     // must remain on its form. Other gateway `unauthorized` responses mean the
     // existing browser session is no longer accepted, so leaving the user on a
@@ -118,7 +136,7 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
     ) {
       window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT))
     }
-    throw new ApiError(message, response.status, code, feature ?? null)
+    throw new ApiError(message, response.status, code, feature ?? null, details ?? null)
   }
 
   return unwrap(body as Envelope<T>)
@@ -150,8 +168,8 @@ export async function requestForm<T>(
   const body = (await response.json().catch(() => null)) as Envelope<T> | Record<string, unknown> | null
 
   if (!response.ok) {
-    const { code, message, feature } = extractError(body, response.status)
-    throw new ApiError(message, response.status, code, feature ?? null)
+    const { code, message, feature, details } = extractError(body, response.status)
+    throw new ApiError(message, response.status, code, feature ?? null, details ?? null)
   }
 
   return unwrap(body as Envelope<T>)

@@ -9,6 +9,7 @@ import {
 import { readSseStream, type SseEvent } from './sse'
 import { createDeltaCoalescer, type DeltaCoalescer } from './delta-coalescer'
 import type { ChatEventPayloads } from './chat-event-payloads.generated'
+import { isSpaceDenial } from './space-denials'
 import { isZdrCode } from './zdr-refusals'
 import {
   isSelectablePrivacyTier,
@@ -342,6 +343,12 @@ export type ChatErrorEvent = {
    * reader's language (`zdr-refusals.ts`). Absent for every other error.
    */
   feature?: string
+  /**
+   * For a typed Space denial (`space-denials.ts`): the refusal's `details`
+   * (`reason`, `resolvable_by` and the allowlisted keys), as a refused request
+   * carried them. Absent for every other error.
+   */
+  details?: Readonly<Record<string, unknown>>
 }
 export type ChatArtifactEvent = {
   id?: string
@@ -2011,6 +2018,16 @@ function streamConnectionFailure(err: unknown, fallback: string): ChatErrorEvent
       code: err.code,
       message: err.message,
       ...(err.feature ? { feature: err.feature } : {}),
+    }
+  }
+  // A typed Space denial (a policy, entitlement, role or ZDR refusal) is the
+  // server's answer about the room, not a sign-in problem: keep its code and
+  // details so the room can say why. An untyped 403 still reads as lost access.
+  if (err instanceof ApiError && (err.status === 403 || err.status === 503) && isSpaceDenial(err)) {
+    return {
+      code: err.code ?? 'forbidden',
+      message: err.message,
+      ...(err.details ? { details: err.details } : {}),
     }
   }
   if (err instanceof ApiError && err.status === 401) {
