@@ -312,7 +312,7 @@ func (s *Server) replaceSpaceMemberships(c *gin.Context) {
 		return
 	}
 	replacement.SpaceRef = strings.TrimSpace(c.Param("space_ref"))
-	revisions, revokedUserSubjects, reactivatedUserSubjects, orgID, err := s.spaceRepo.ReplaceMemberships(c.Request.Context(), replacement)
+	detail, err := s.spaceRepo.ReplaceMembershipsDetailed(c.Request.Context(), replacement)
 	if errors.Is(err, spaces.ErrNoCurrentMembership) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "registered Space not found"})
 		return
@@ -336,16 +336,20 @@ func (s *Server) replaceSpaceMemberships(c *gin.Context) {
 	// ReplaceMemberships just resolved, not the caller's own identity: this
 	// endpoint's principal (application-space-lifecycle) syncs rosters
 	// across every org, not one verified-delegation org at a time.
-	for _, subjectID := range revokedUserSubjects {
-		s.publisher.PublishSpaceMembershipChanged(c.Request.Context(), replacement.SpaceRef, orgID, subjectID, false)
-	}
-	for _, subjectID := range reactivatedUserSubjects {
-		s.publisher.PublishSpaceMembershipChanged(c.Request.Context(), replacement.SpaceRef, orgID, subjectID, true)
+	//
+	// WS04-S4: the event now also names the ledger row (event_id, space_seq,
+	// action, role, actor_kind) and is published for every user row that
+	// became active (new or reactivated) or inactive, never for a role-only
+	// change. `active` stays the current-fact statement.
+	for _, event := range detail.Events {
+		s.publisher.PublishSpaceMembershipEvent(c.Request.Context(), event.SpaceRef, event.OrgID, event.SubjectID,
+			event.Active, event.EventID, event.SpaceSeq, event.Action, event.Role, event.ActorKind)
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
-		"space_ref": replacement.SpaceRef,
-		"members":   len(replacement.Members),
-		"revisions": revisions,
+		"space_ref":             replacement.SpaceRef,
+		"members":               len(replacement.Members),
+		"revisions":             detail.Revisions,
+		"skipped_control_owned": detail.SkippedControlOwned,
 	}})
 }
 

@@ -119,6 +119,14 @@ func (r Registration) Validate() error {
 	return nil
 }
 
+// Roster modes of a registered Space (WS04-S4). "managed" rooms take Control
+// writes; "org_derived" is the organization room, converged by the
+// declarative sync and refused by the Control writer.
+const (
+	RosterModeManaged    = "managed"
+	RosterModeOrgDerived = "org_derived"
+)
+
 type AuthorityChange string
 
 const (
@@ -264,6 +272,10 @@ type MembershipReplacement struct {
 	//
 	// Callers that manage one kind must say so: `["user"]`.
 	ManagedSubjectTypes []string `json:"managed_subject_types,omitempty"`
+	// RosterMode is optional. Only the organization-room sync sends
+	// "org_derived"; Control sets it once on the Space row and never clears it
+	// (WS04-S4). Absent leaves the Space's mode unchanged.
+	RosterMode string `json:"roster_mode,omitempty"`
 }
 
 // managedSubjectTypeSet resolves the kinds this replacement may deactivate.
@@ -287,6 +299,9 @@ func (m MembershipReplacement) Validate() error {
 	}
 	if len(m.Members) > maxSpaceMembers {
 		return fmt.Errorf("space membership exceeds %d subjects", maxSpaceMembers)
+	}
+	if mode := strings.TrimSpace(m.RosterMode); mode != "" && mode != RosterModeOrgDerived {
+		return fmt.Errorf("unknown Space roster mode %q", m.RosterMode)
 	}
 	seen := make(map[string]struct{}, len(m.Members))
 	for _, member := range m.Members {
@@ -346,6 +361,14 @@ type CurrentMembership struct {
 	Kind      Kind              `json:"kind"`
 	Role      string            `json:"role"`
 	Revisions AuthorityRevision `json:"revisions"`
+	// RecipientReady is true when the subject is in the Space's registered
+	// recipient audience at the current audience revision (always true for a
+	// personal Space). Membership without it cannot yet read or post through a
+	// shared decision, so a client shows "access is being prepared" (WS04-S4).
+	RecipientReady bool `json:"recipient_ready"`
+	// RosterMode is "managed" (Control writers) or "org_derived" (the
+	// organization room, whose roster follows the organization).
+	RosterMode string `json:"roster_mode,omitempty"`
 }
 
 func (m CurrentMembership) Validate() error {

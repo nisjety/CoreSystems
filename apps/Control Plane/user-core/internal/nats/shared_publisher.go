@@ -213,6 +213,26 @@ func (sp *SharedPublisher) PublishSpaceMembershipChanged(ctx context.Context, sp
 	})
 }
 
+// PublishSpaceMembershipEvent is PublishSpaceMembershipChanged with the
+// additive ledger fields (WS04-S4): the same subject, the same current-fact
+// `active` statement, plus event_id (the ledger row), space_seq (the
+// authority revision after the change), action, role and actor_kind. No actor
+// id, no names, no topic. Consumers ignore unknown fields, so existing
+// subscribers are unaffected.
+func (sp *SharedPublisher) PublishSpaceMembershipEvent(ctx context.Context, spaceRef, orgID, subjectID string, active bool, eventID string, spaceSeq int64, action, role, actorKind string) {
+	sp.Publish(ctx, "aqencia.controlplane.space.membership_changed", map[string]any{
+		"space_ref":  spaceRef,
+		"org_id":     orgID,
+		"subject_id": subjectID,
+		"active":     active,
+		"event_id":   eventID,
+		"space_seq":  spaceSeq,
+		"action":     action,
+		"role":       role,
+		"actor_kind": actorKind,
+	})
+}
+
 // PublishDocumentAclChanged is the document-scoped back-compat wrapper around
 // PublishResourceGrantsChanged. permission_level is normalized to a role.
 func (sp *SharedPublisher) PublishDocumentAclChanged(ctx context.Context, aclID, orgID, documentID, userID, permissionLevel, action string) {

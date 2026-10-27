@@ -652,7 +652,36 @@ func (r *Repository) SpacesForSubject(ctx context.Context, orgID, subjectID stri
 // re-derived from the caller's own identity. This endpoint's principal
 // (application-space-lifecycle) acts across every org's rosters, not one
 // verified-delegation org at a time.
+//
+// # Source scoping (WS04-S4)
+//
+// Every row carries a `source`. The declaration only ever touches rows it
+// owns: a declared member whose row is `member_ops` or `self_join` is skipped
+// (never re-roled, never reactivated, counted in SkippedControlOwned), the
+// stale pass deactivates only `application_sync` rows (the registrar row,
+// source `registration`, is never deactivated here), and new rows are inserted
+// as `application_sync`. Every changed row also appends a ledger row.
 func (r *Repository) ReplaceMemberships(ctx context.Context, replacement MembershipReplacement) (*AuthorityRevision, []string, []string, string, error) {
+	return r.replaceMemberships(ctx, replacement, &ReplaceMembershipsDetail{})
+}
+
+// ReplaceMembershipsDetailed is ReplaceMemberships plus the facts the HTTP
+// layer needs to publish the additive membership event and report
+// skipped_control_owned.
+func (r *Repository) ReplaceMembershipsDetailed(ctx context.Context, replacement MembershipReplacement) (*ReplaceMembershipsDetail, error) {
+	detail := &ReplaceMembershipsDetail{}
+	revisions, revoked, reactivated, orgID, err := r.replaceMemberships(ctx, replacement, detail)
+	if err != nil {
+		return nil, err
+	}
+	detail.Revisions = revisions
+	detail.RevokedUserSubjects = revoked
+	detail.ReactivatedUserSubjects = reactivated
+	detail.OrgID = orgID
+	return detail, nil
+}
+
+func (r *Repository) replaceMemberships(ctx context.Context, replacement MembershipReplacement, detail *ReplaceMembershipsDetail) (*AuthorityRevision, []string, []string, string, error) {
 	if r == nil || r.db == nil {
 		return nil, nil, nil, "", fmt.Errorf("space authority repository unavailable")
 	}
@@ -681,6 +710,16 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 		// storage.
 		return nil, nil, nil, "", fmt.Errorf("a personal Space membership cannot be replaced")
 	}
+	if strings.TrimSpace(replacement.RosterMode) == RosterModeOrgDerived {
+		// Set once, never cleared. It changes who may write the roster, not
+		// who has access, so it advances no revision.
+		if _, err := tx.Exec(ctx, `
+			UPDATE registered_spaces SET roster_mode='org_derived', updated_at=NOW()
+			WHERE space_ref=$1 AND roster_mode IS DISTINCT FROM 'org_derived'`, space.SpaceRef); err != nil {
+			return nil, nil, nil, "", fmt.Errorf("set Space roster mode: %w", err)
+		}
+	}
+	var pendingLedger []ledgerEntry
 
 	var revisions AuthorityRevision
 	if err := tx.QueryRow(ctx, `
@@ -722,15 +761,21 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 			continue
 		}
 		var wasActive sql.NullBool
+		var priorRole, priorSource sql.NullString
 		if err := tx.QueryRow(ctx, `
-			SELECT active FROM space_memberships
+			SELECT active, role, source FROM space_memberships
 			WHERE space_ref=$1 AND subject_type=$2 AND subject_id=$3 FOR UPDATE`,
-			space.SpaceRef, subjectType, subjectID).Scan(&wasActive); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			space.SpaceRef, subjectType, subjectID).Scan(&wasActive, &priorRole, &priorSource); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil, nil, "", fmt.Errorf("read prior Space member state: %w", err)
 		}
+		if priorSource.Valid && (priorSource.String == SourceMemberOps || priorSource.String == SourceSelfJoin) {
+			// A Control actor owns this row; the declaration never overrides it.
+			detail.SkippedControlOwned++
+			continue
+		}
 		tag, err := tx.Exec(ctx, `
-			INSERT INTO space_memberships (space_ref, subject_type, subject_id, role, active, granted_by)
-			VALUES ($1, $2, $3, $4, TRUE, 'application-space-membership-sync')
+			INSERT INTO space_memberships (space_ref, subject_type, subject_id, role, active, granted_by, source)
+			VALUES ($1, $2, $3, $4, TRUE, 'application-space-membership-sync', 'application_sync')
 			ON CONFLICT (space_ref, subject_type, subject_id) DO UPDATE
 			SET role=EXCLUDED.role,
 			    active=TRUE,
@@ -748,13 +793,24 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 			if subjectType == "user" && wasActive.Valid && !wasActive.Bool {
 				reactivatedUserSubjects = append(reactivatedUserSubjects, subjectID)
 			}
+			entry := ledgerEntry{
+				SpaceRef: space.SpaceRef, OrgID: space.OrgID, ActorKind: ActorKindService,
+				ActorID: applicationLifecycleActor, SubjectType: subjectType, SubjectID: subjectID, ToRole: role,
+			}
+			if wasActive.Valid && wasActive.Bool {
+				entry.Action = ActionRoleChanged
+				entry.FromRole = priorRole.String
+			} else {
+				entry.Action = ActionMemberAdded
+			}
+			pendingLedger = append(pendingLedger, entry)
 		}
 	}
 	// Preserve the owner even when the declared set omits them.
 	declared[ownerKey] = struct{}{}
 
 	rows, err := tx.Query(ctx, `
-		SELECT subject_type, subject_id FROM space_memberships
+		SELECT subject_type, subject_id, role, source FROM space_memberships
 		WHERE space_ref=$1 AND active`, space.SpaceRef)
 	if err != nil {
 		return nil, nil, nil, "", fmt.Errorf("read current Space members: %w", err)
@@ -762,9 +818,14 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 	var stale []MemberGrant
 	for rows.Next() {
 		var current MemberGrant
-		if err := rows.Scan(&current.SubjectType, &current.SubjectID); err != nil {
+		var currentSource string
+		if err := rows.Scan(&current.SubjectType, &current.SubjectID, &current.Role, &currentSource); err != nil {
 			rows.Close()
 			return nil, nil, nil, "", fmt.Errorf("scan current Space member: %w", err)
+		}
+		if currentSource != SourceApplicationSync {
+			// Only rows this declaration created are its to deactivate.
+			continue
 		}
 		if managed != nil {
 			// Outside the caller's declared scope. org-core's roster sync knows
@@ -795,6 +856,11 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 		if member.SubjectType == "user" {
 			revokedUserSubjects = append(revokedUserSubjects, member.SubjectID)
 		}
+		pendingLedger = append(pendingLedger, ledgerEntry{
+			SpaceRef: space.SpaceRef, OrgID: space.OrgID, ActorKind: ActorKindService,
+			ActorID: applicationLifecycleActor, SubjectType: member.SubjectType, SubjectID: member.SubjectID,
+			Action: ActionMemberRemoved, FromRole: member.Role,
+		})
 	}
 
 	if changed {
@@ -810,6 +876,21 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 			&revisions.RecipientAudience, &revisions.Entitlement,
 		); err != nil {
 			return nil, nil, nil, "", fmt.Errorf("advance Space membership revision: %w", err)
+		}
+		for _, entry := range pendingLedger {
+			entry.SpaceSeq = revisions.Authority
+			eventID, err := insertMembershipEvent(ctx, tx, entry)
+			if err != nil {
+				return nil, nil, nil, "", err
+			}
+			if entry.SubjectType == "user" && entry.Action != ActionRoleChanged {
+				detail.Events = append(detail.Events, MembershipChangeEvent{
+					EventID: eventID, SpaceRef: entry.SpaceRef, OrgID: entry.OrgID, SubjectID: entry.SubjectID,
+					Action: entry.Action, Role: entry.ToRole, ActorKind: entry.ActorKind,
+					Active:   entry.Action == ActionMemberAdded || entry.Action == ActionMemberJoined,
+					SpaceSeq: entry.SpaceSeq,
+				})
+			}
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -842,7 +923,14 @@ func (r *Repository) ResolveCurrentUserMembership(ctx context.Context, spaceRef,
 	err := r.db.Pool.QueryRow(ctx, `
 		SELECT s.space_ref, s.org_id, m.subject_id, s.space_kind, m.role,
 		       r.authority_revision, r.membership_revision, r.privacy_revision,
-		       r.recipient_audience_revision, r.entitlement_revision
+		       r.recipient_audience_revision, r.entitlement_revision,
+		       s.roster_mode,
+		       (s.space_kind='personal' OR EXISTS (
+			SELECT 1 FROM space_recipient_audience_members a
+			WHERE a.space_ref=s.space_ref
+			  AND a.revision=r.recipient_audience_revision
+			  AND a.subject_id=m.subject_id
+		       )) AS recipient_ready
 		FROM registered_spaces s
 		JOIN space_memberships m
 		  ON m.space_ref=s.space_ref
@@ -863,6 +951,7 @@ func (r *Repository) ResolveCurrentUserMembership(ctx context.Context, spaceRef,
 		&membership.SpaceRef, &membership.OrgID, &membership.SubjectID, &membership.Kind, &membership.Role,
 		&membership.Revisions.Authority, &membership.Revisions.Membership, &membership.Revisions.Privacy,
 		&membership.Revisions.RecipientAudience, &membership.Revisions.Entitlement,
+		&membership.RosterMode, &membership.RecipientReady,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNoCurrentMembership
