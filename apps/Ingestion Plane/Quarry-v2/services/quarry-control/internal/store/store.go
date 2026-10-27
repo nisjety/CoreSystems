@@ -270,6 +270,17 @@ type EventLog interface {
 	// when no events exist yet. The handler uses this to assign durable
 	// per-run seq server-side regardless of caller numbering.
 	NextSeq(runID quarrycontracts.ID) uint64
+	// AppendNext assigns the event's seq as one above the highest seq of its
+	// run and appends it, as one atomic step (D2-016). NextSeq followed by
+	// Append is two steps: two writers of one run read the same max, one insert
+	// loses on (run_id, seq), and the batch handler's replay tolerance then
+	// drops that event without a trace. AppendNext holds a per-run lock from the
+	// read of the max to the commit of the insert, so the seqs of a run are
+	// unique, gap-free and committed in order, and a follower that has read seq N
+	// never misses an event below N. An event with no run gets seq 1 (the seq of
+	// a job's one event before it has a run). It returns the seq it stored, and
+	// the evt.Seq the caller set is ignored.
+	AppendNext(evt quarrycontracts.Event) (uint64, error)
 	// FindByIdempotencyKey resolves a change-webhook retry to the event
 	// already recorded under the caller's Idempotency-Key header. Scoped
 	// to type='change_detected' — exactly the rows the partial unique
@@ -1484,6 +1495,31 @@ func (l *memEventLog) ForRun(runID quarrycontracts.ID, afterSeq uint64, limit in
 		}
 	}
 	return out
+}
+
+// AppendNext holds the log's write lock across the read of the max and the
+// append, so concurrent writers of one run get distinct, ordered seqs.
+func (l *memEventLog) AppendNext(evt quarrycontracts.Event) (uint64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, e := range l.events {
+		if e.EventID == evt.EventID {
+			// The Postgres store's primary key on event_id.
+			return 0, ErrConflict
+		}
+	}
+	evt.Seq = 1
+	if evt.RunID != nil {
+		var maxSeq uint64
+		for _, e := range l.events {
+			if e.RunID != nil && *e.RunID == *evt.RunID && e.Seq > maxSeq {
+				maxSeq = e.Seq
+			}
+		}
+		evt.Seq = maxSeq + 1
+	}
+	l.events = append(l.events, evt)
+	return evt.Seq, nil
 }
 
 func (l *memEventLog) NextSeq(runID quarrycontracts.ID) uint64 {

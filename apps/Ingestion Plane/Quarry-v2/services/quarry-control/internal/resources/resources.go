@@ -123,12 +123,13 @@ func MountEvents(r chi.Router, db store.DB, apiKey string, sink notify.Sink) {
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "empty batch", nil)
 			return
 		}
-		// Pre-fetch the next per-run seq once and assign monotonically
-		// within the batch. Callers do not share one sequence contract:
-		// workflow activities usually emit seq=0, while quarry-edge's
-		// runtime sink emits a process-wide counter. The control plane
-		// owns durable per-run ordering, so never trust caller seq here.
-		nextSeq := db.Events().NextSeq(runID)
+		// Callers do not share one sequence contract: workflow activities
+		// usually emit seq=0, while quarry-edge's runtime sink emits a
+		// process-wide counter. The control plane owns durable per-run
+		// ordering, so never trust caller seq here: each event takes the
+		// run's next seq in the same transaction as its insert (D2-016), so
+		// two batches of one run in flight at once cannot collide on a seq,
+		// and an event is never dropped as a replay because it lost one.
 		for i := range batch {
 			if batch[i].Type == "" {
 				httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "event.type required", map[string]any{"index": i})
@@ -140,11 +141,13 @@ func MountEvents(r chi.Router, db store.DB, apiKey string, sink notify.Sink) {
 			if batch[i].Timestamp.IsZero() {
 				batch[i].Timestamp = time.Now().UTC()
 			}
-			batch[i].Seq = nextSeq
-			nextSeq++
 			rid := runID
 			batch[i].RunID = &rid
-			if err := db.Events().Append(batch[i]); err != nil {
+			seq, err := db.Events().AppendNext(batch[i])
+			if err == nil {
+				batch[i].Seq = seq
+			}
+			if err != nil {
 				if errors.Is(err, store.ErrConflict) {
 					// Idempotent replay: a publisher may retry a batch
 					// after a partial success. Keep accepting the rest

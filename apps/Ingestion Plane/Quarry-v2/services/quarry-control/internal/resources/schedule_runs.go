@@ -179,11 +179,11 @@ func writeScheduleSkipped(db store.DB, scheduleID, jobID, runID quarrycontracts.
 		JobID:          &jobID,
 		Type:           quarrycontracts.EvtScheduleSkipped,
 		Timestamp:      time.UnixMilli(now).UTC(),
-		Seq:            db.Events().NextSeq(runID),
 		Payload:        map[string]any{"schedule_id": string(scheduleID), "reason": reason},
 		IdempotencyKey: "sched-skip:" + string(scheduleID) + ":" + runKey,
 	}
-	if err := db.Events().Append(evt); err != nil {
+	// The seq is assigned in the same transaction as the insert (D2-016).
+	if _, err := db.Events().AppendNext(evt); err != nil {
 		log.Warn().Str("schedule_id", string(scheduleID)).Msg("schedule_skipped event append failed")
 	}
 }

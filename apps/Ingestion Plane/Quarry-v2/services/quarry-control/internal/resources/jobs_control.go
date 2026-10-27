@@ -206,10 +206,11 @@ func appendJobEvent(db store.DB, j store.Job, evt quarrycontracts.Event) error {
 	if j.RunID != nil {
 		rid := *j.RunID
 		evt.RunID = &rid
-		evt.Seq = db.Events().NextSeq(rid)
-	} else {
-		evt.Seq = 1
+		// The seq is assigned in the same transaction as the insert (D2-016).
+		_, err := db.Events().AppendNext(evt)
+		return err
 	}
+	evt.Seq = 1
 	return db.Events().Append(evt)
 }
 

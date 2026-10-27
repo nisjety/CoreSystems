@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
@@ -1163,7 +1164,12 @@ func (s *sourcesStore) SoftDeleteByOrg(orgID string, id quarrycontracts.ID) erro
 
 type eventLog struct{ pool *pgxpool.Pool }
 
-func (l *eventLog) Append(evt quarrycontracts.Event) error {
+// eventExecer is what an insert of an event needs: the pool or a transaction.
+type eventExecer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+func insertEvent(ctx context.Context, x eventExecer, evt quarrycontracts.Event) error {
 	payload, _ := json.Marshal(evt.Payload)
 	var runID, jobID *string
 	if evt.RunID != nil {
@@ -1174,7 +1180,7 @@ func (l *eventLog) Append(evt quarrycontracts.Event) error {
 		s := string(*evt.JobID)
 		jobID = &s
 	}
-	_, err := l.pool.Exec(context.Background(),
+	_, err := x.Exec(ctx,
 		`INSERT INTO events(event_id, run_id, job_id, type, ts, seq, payload, idempotency_key)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''))`,
 		string(evt.EventID), runID, jobID, string(evt.Type), evt.Timestamp,
@@ -1182,11 +1188,50 @@ func (l *eventLog) Append(evt quarrycontracts.Event) error {
 	return mapPgErr(err)
 }
 
+func (l *eventLog) Append(evt quarrycontracts.Event) error {
+	return insertEvent(context.Background(), l.pool, evt)
+}
+
+// AppendNext takes a transaction-scoped advisory lock on the run, reads the
+// run's max seq, inserts at max+1 and commits (D2-016). Concurrent writers of the
+// same run queue on the lock, so each sees the previous one's committed row and
+// the seqs commit in order. Writers of other runs do not wait: the lock key is
+// the run id. A conflict on the event id or the idempotency key is returned as
+// store.ErrConflict, as Append returns it, and the transaction rolls back.
+func (l *eventLog) AppendNext(evt quarrycontracts.Event) (uint64, error) {
+	ctx := context.Background()
+	if evt.RunID == nil {
+		evt.Seq = 1
+		return evt.Seq, l.Append(evt)
+	}
+	tx, err := l.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	run := string(*evt.RunID)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "quarry-control:events:"+run); err != nil {
+		return 0, err
+	}
+	var maxSeq int64
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(seq), 0) FROM events WHERE run_id = $1`, run).Scan(&maxSeq); err != nil {
+		return 0, err
+	}
+	evt.Seq = uint64(maxSeq) + 1
+	if err := insertEvent(ctx, tx, evt); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return evt.Seq, nil
+}
+
 // NextSeq queries `MAX(seq) + 1` for the given run_id. Returns 1 when
-// no events exist yet. The handler uses this to assign seq server-side
-// when callers don't number their own events, so the unique index on
-// (run_id, seq) doesn't collide on default-zero sequences from
-// activity-driven workflow emits.
+// no events exist yet. It is a read, not a reservation: two writers can read the
+// same value (D2-016). Writers that number server-side use AppendNext, which
+// reads and inserts under one lock; NextSeq stays for readers that only report
+// the next number.
 func (l *eventLog) NextSeq(runID quarrycontracts.ID) uint64 {
 	var n int64
 	err := l.pool.QueryRow(context.Background(),
