@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -1377,12 +1378,32 @@ func (s *Server) upsertSpaceEffectPolicy(c *gin.Context) {
 	if !s.spaceRepoAvailable(c) {
 		return
 	}
-	var policy spaces.EffectPolicy
-	if err := c.ShouldBindJSON(&policy); err != nil {
+	raw, err := c.GetRawData()
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid Space effect policy"})
 		return
 	}
-	updated, err := s.spaceRepo.UpsertEffectPolicy(c.Request.Context(), policy)
+	var policy spaces.EffectPolicy
+	if err := json.Unmarshal(raw, &policy); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid Space effect policy"})
+		return
+	}
+	// An entitlement the caller did not send (or sent as null) keeps its
+	// stored value instead of being reset to false: a re-run of the operator
+	// script can never clear a bit it never mentioned.
+	var stated map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &stated); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid Space effect policy"})
+		return
+	}
+	provided := make(map[string]bool, len(spaces.EntitlementCatalog()))
+	for _, spec := range spaces.EntitlementCatalog() {
+		if value, ok := stated[spec.Column]; ok && strings.TrimSpace(string(value)) != "null" {
+			provided[spec.Key] = true
+		}
+	}
+	actor := spaces.EffectPolicyActor{Type: "service", ID: controlSpacePolicyPrincipal}
+	updated, err := s.spaceRepo.UpsertEffectPolicyPartial(c.Request.Context(), policy, actor, provided)
 	if err != nil {
 		if strings.Contains(err.Error(), "is required") {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "incomplete Space effect policy"})

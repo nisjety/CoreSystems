@@ -123,7 +123,7 @@ func d12Seed(t *testing.T, pool *pgxpool.Pool, repo *spaces.Repository, threadRe
 		LawfulBasis: "contract", PrivacyClass: "internal", RetentionClass: "standard",
 		Residency: "swedencentral", DeletionScope: "space",
 		ThreadReadEntitled: threadReadEntitled,
-	}); err != nil {
+	}, spaces.EffectPolicyActor{Type: "service", ID: "d12-test"}); err != nil {
 		t.Fatalf("seed effect policy: %v", err)
 	}
 }

@@ -379,7 +379,11 @@ func main() {
 	// Plane services (documents-api, retrieval) can resolve grants cross-plane.
 	aclRepo := users.NewAclRepository(db)
 	httpServer := httpserver.NewServer(userService, aclRepo, sharedPublisher, redisClient, httpPort)
-	httpServer.SetSpaceRepository(spaces.NewRepository(db))
+	spaceRepo := spaces.NewRepository(db)
+	// WS03-S1: effect-policy changes insert their audit outbox row on the
+	// change's own transaction; unwired, policy writes fail closed.
+	spaceRepo.SetPolicyAuditOutbox(users.NewSpaceAuditEnqueuer(userRepo))
+	httpServer.SetSpaceRepository(spaceRepo)
 	// WS20-S4: stored-consent schedule contracts. Strict literal true; off by default.
 	httpServer.SetScheduleContractsEnabled(os.Getenv("SCHEDULE_CONTRACT_ENABLED") == "true")
 	httpServer.SetAuthInternalCredential(serviceCredential)

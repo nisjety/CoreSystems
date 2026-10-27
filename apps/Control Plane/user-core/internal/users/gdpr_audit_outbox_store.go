@@ -18,6 +18,39 @@ func (r *Repository) EnqueueAudit(ctx context.Context, row AuditOutboxRow) error
 	return err
 }
 
+// EnqueueAuditTx inserts an audit outbox row on the caller's transaction, so a
+// state change and its audit intent commit or roll back together (WS03-S1).
+// It validates the row exactly like the dispatching path.
+func (r *Repository) EnqueueAuditTx(ctx context.Context, tx pgx.Tx, row AuditOutboxRow) error {
+	if err := validateAuditOutboxRow(row); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO user_audit_outbox (event_id, subject, payload)
+		VALUES ($1, $2, $3::jsonb)
+		ON CONFLICT (event_id) DO NOTHING
+	`, row.EventID, row.Subject, row.Payload)
+	return err
+}
+
+// SpaceAuditEnqueuer adapts Repository to the one-method interface
+// internal/spaces uses for its in-transaction audit insert, so internal/spaces
+// imports nothing from internal/users.
+type SpaceAuditEnqueuer struct{ repo *Repository }
+
+// NewSpaceAuditEnqueuer wraps a Repository for internal/spaces.
+func NewSpaceAuditEnqueuer(repo *Repository) *SpaceAuditEnqueuer {
+	return &SpaceAuditEnqueuer{repo: repo}
+}
+
+// EnqueueAuditTx implements spaces.PolicyAuditOutbox.
+func (e *SpaceAuditEnqueuer) EnqueueAuditTx(ctx context.Context, tx pgx.Tx, eventID, subject string, payload []byte) error {
+	if e == nil || e.repo == nil {
+		return errors.New("audit outbox store is unavailable")
+	}
+	return e.repo.EnqueueAuditTx(ctx, tx, AuditOutboxRow{EventID: eventID, Subject: subject, Payload: payload})
+}
+
 func (r *Repository) ClaimAudit(ctx context.Context) (AuditOutboxRow, bool, error) {
 	row := AuditOutboxRow{}
 	err := r.db.Pool.QueryRow(ctx, `

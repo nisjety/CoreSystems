@@ -33,6 +33,15 @@ type RegisteredSpace struct {
 
 type Repository struct {
 	db *database.DB
+	// policyAudit inserts the user_audit_outbox row of an effect-policy change
+	// on the change's own transaction. Unwired, policy writes fail closed.
+	policyAudit PolicyAuditOutbox
+}
+
+// SetPolicyAuditOutbox wires the in-transaction audit outbox for Space
+// effect-policy changes.
+func (r *Repository) SetPolicyAuditOutbox(outbox PolicyAuditOutbox) {
+	r.policyAudit = outbox
 }
 
 // RegisteredRecipientAudience is the Control-verified receipt for one
@@ -1225,12 +1234,27 @@ func (r *Repository) ResolveOwnScheduledThreadReadDecisionEvidence(ctx context.C
 // UpsertEffectPolicy stores a Control-owned privacy/entitlement floor and
 // fences every active Space in that organization when the effective policy
 // changes. Replays are idempotent: identical policy material does not make
-// outstanding decisions stale merely because a sync retried.
-func (r *Repository) UpsertEffectPolicy(ctx context.Context, policy EffectPolicy) (bool, error) {
+// outstanding decisions stale merely because a sync retried. Every effective
+// change names its actor and appends an immutable event row plus a
+// user_audit_outbox row in the same transaction. All entitlement bits in
+// policy are taken as the desired state (full-row semantics).
+func (r *Repository) UpsertEffectPolicy(ctx context.Context, policy EffectPolicy, actor EffectPolicyActor) (bool, error) {
+	return r.UpsertEffectPolicyPartial(ctx, policy, actor, nil)
+}
+
+// UpsertEffectPolicyPartial is UpsertEffectPolicy where `provided` names the
+// entitlement keys the caller actually stated: a key not in it keeps the
+// stored value (a new row defaults it to false), so an operator re-run can
+// never clear a bit it never mentioned. A nil `provided` means every key was
+// stated.
+func (r *Repository) UpsertEffectPolicyPartial(ctx context.Context, policy EffectPolicy, actor EffectPolicyActor, provided map[string]bool) (bool, error) {
 	if r == nil || r.db == nil {
 		return false, fmt.Errorf("space authority repository unavailable")
 	}
 	if err := policy.Validate(); err != nil {
+		return false, err
+	}
+	if err := actor.Validate(); err != nil {
 		return false, err
 	}
 	tx, err := r.db.Pool.Begin(ctx)
@@ -1239,35 +1263,45 @@ func (r *Repository) UpsertEffectPolicy(ctx context.Context, policy EffectPolicy
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var current EffectPolicy
-	err = tx.QueryRow(ctx, `
-		SELECT org_id, privacy_policy_ref, purpose, lawful_basis, privacy_class,
-		       third_party_processing_allowed, retention_class, residency,
-		       deletion_scope, zero_data_retention, thread_create_entitled, retrieval_read_entitled,
-		       import_write_entitled, agent_action_entitled, schedule_fire_entitled, thread_read_entitled,
-		       sandbox_capability_entitled, process_registry_entitled
-		FROM space_effect_policies WHERE org_id=$1 FOR UPDATE`, policy.OrgID,
-	).Scan(&current.OrgID, &current.PrivacyPolicyRef, &current.Purpose, &current.LawfulBasis,
-		&current.PrivacyClass, &current.ThirdPartyProcessingAllowed, &current.RetentionClass,
-		&current.Residency, &current.DeletionScope, &current.ZeroDataRetention,
-		&current.ThreadCreateEntitled, &current.RetrievalReadEntitled, &current.ImportWriteEntitled, &current.AgentActionEntitled, &current.ScheduleFireEntitled,
-		&current.ThreadReadEntitled, &current.SandboxCapabilityEntitled, &current.ProcessRegistryEntitled)
+	var currentPolicyRev, currentEntRev int64
+	err = scanEffectPolicy(tx.QueryRow(ctx, `
+		SELECT `+effectPolicyColumnList()+`, policy_revision, entitlement_revision
+		FROM space_effect_policies WHERE org_id=$1 FOR UPDATE`, policy.OrgID),
+		&current, &currentPolicyRev, &currentEntRev)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return false, fmt.Errorf("read Space effect policy: %w", err)
 	}
-	if errors.Is(err, pgx.ErrNoRows) {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO space_effect_policies
-			(org_id, privacy_policy_ref, purpose, lawful_basis, privacy_class,
-			 third_party_processing_allowed, retention_class, residency, deletion_scope,
-			 zero_data_retention, thread_create_entitled, retrieval_read_entitled, import_write_entitled, agent_action_entitled, schedule_fire_entitled,
-			 thread_read_entitled, sandbox_capability_entitled, process_registry_entitled)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
-			policy.OrgID, policy.PrivacyPolicyRef, policy.Purpose, policy.LawfulBasis,
-			policy.PrivacyClass, policy.ThirdPartyProcessingAllowed, policy.RetentionClass,
-			policy.Residency, policy.DeletionScope, policy.ZeroDataRetention,
-			policy.ThreadCreateEntitled, policy.RetrievalReadEntitled, policy.ImportWriteEntitled, policy.AgentActionEntitled, policy.ScheduleFireEntitled,
-			policy.ThreadReadEntitled, policy.SandboxCapabilityEntitled, policy.ProcessRegistryEntitled); err != nil {
+	exists := err == nil
+	if provided != nil {
+		for _, spec := range entitlementCatalog {
+			if !provided[spec.Key] {
+				spec.Set(&policy, spec.Get(current))
+			}
+		}
+	}
+	now := time.Now().UTC()
+	if !exists {
+		insertColumns := "org_id, " + strings.Join(effectPolicyPrivacyColumns, ", ") + ", " + entitlementColumnList()
+		args := append([]any{policy.OrgID}, effectPolicyWriteArgs(policy)...)
+		placeholders := make([]string, len(args))
+		for i := range args {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+		}
+		var policyRev, entRev int64
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO space_effect_policies (`+insertColumns+`)
+			VALUES (`+strings.Join(placeholders, ",")+`)
+			RETURNING policy_revision, entitlement_revision`, args...).Scan(&policyRev, &entRev); err != nil {
 			return false, fmt.Errorf("insert Space effect policy: %w", err)
+		}
+		if _, err := insertPolicyEventTx(ctx, tx, r.policyAudit, policyEvent{
+			OrgID: policy.OrgID, Source: PolicyEventSourceOperator, Actor: actor,
+			ChangeKind: PolicyChangeOperatorCreated,
+			Before:     map[string]bool{}, After: EntitlementValues(policy),
+			Changes:        DiffEntitlements(EffectPolicy{}, policy),
+			PrivacyChanged: true, PolicyRevAfter: policyRev, EntRevBefore: 0, EntRevAfter: entRev,
+		}, now); err != nil {
+			return false, err
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return false, fmt.Errorf("commit Space effect policy: %w", err)
@@ -1281,25 +1315,64 @@ func (r *Repository) UpsertEffectPolicy(ctx context.Context, policy EffectPolicy
 		return false, nil
 	}
 	privacyChanged := privacyPolicyChanged(current, policy)
-	entitlementChanged := entitlementPolicyChanged(current, policy)
-	if _, err := tx.Exec(ctx, `
-		UPDATE space_effect_policies SET privacy_policy_ref=$2, purpose=$3, lawful_basis=$4,
-		privacy_class=$5, third_party_processing_allowed=$6, retention_class=$7,
-		residency=$8, deletion_scope=$9, zero_data_retention=$10,
-		thread_create_entitled=$11, retrieval_read_entitled=$12, import_write_entitled=$13, agent_action_entitled=$14, schedule_fire_entitled=$15,
-		thread_read_entitled=$16, sandbox_capability_entitled=$17, process_registry_entitled=$18,
-		policy_revision=policy_revision + CASE WHEN $19 THEN 1 ELSE 0 END,
-		entitlement_revision=entitlement_revision + CASE WHEN $20 THEN 1 ELSE 0 END,
-		updated_at=NOW() WHERE org_id=$1`,
-		policy.OrgID, policy.PrivacyPolicyRef, policy.Purpose, policy.LawfulBasis,
-		policy.PrivacyClass, policy.ThirdPartyProcessingAllowed, policy.RetentionClass,
-		policy.Residency, policy.DeletionScope, policy.ZeroDataRetention,
-		policy.ThreadCreateEntitled, policy.RetrievalReadEntitled, policy.ImportWriteEntitled, policy.AgentActionEntitled, policy.ScheduleFireEntitled,
-		policy.ThreadReadEntitled, policy.SandboxCapabilityEntitled, policy.ProcessRegistryEntitled,
-		privacyChanged, entitlementChanged); err != nil {
+	entitlementChanged := !entitlementsEqual(current, policy)
+	setParts := make([]string, 0, len(effectPolicyPrivacyColumns)+len(entitlementCatalog))
+	n := 2
+	for _, column := range effectPolicyPrivacyColumns {
+		setParts = append(setParts, fmt.Sprintf("%s=$%d", column, n))
+		n++
+	}
+	for _, spec := range entitlementCatalog {
+		setParts = append(setParts, fmt.Sprintf("%s=$%d", spec.Column, n))
+		n++
+	}
+	args := append([]any{policy.OrgID}, effectPolicyWriteArgs(policy)...)
+	args = append(args, privacyChanged, entitlementChanged)
+	var policyRev, entRev int64
+	if err := tx.QueryRow(ctx, `
+		UPDATE space_effect_policies SET `+strings.Join(setParts, ", ")+`,
+		policy_revision=policy_revision + CASE WHEN $`+fmt.Sprint(n)+` THEN 1 ELSE 0 END,
+		entitlement_revision=entitlement_revision + CASE WHEN $`+fmt.Sprint(n+1)+` THEN 1 ELSE 0 END,
+		updated_at=NOW() WHERE org_id=$1
+		RETURNING policy_revision, entitlement_revision`, args...).Scan(&policyRev, &entRev); err != nil {
 		return false, fmt.Errorf("update Space effect policy: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `
+	fenced, err := fenceActiveSpaces(ctx, tx, policy.OrgID, privacyChanged, entitlementChanged)
+	if err != nil {
+		return false, err
+	}
+	if _, err := insertPolicyEventTx(ctx, tx, r.policyAudit, policyEvent{
+		OrgID: policy.OrgID, Source: PolicyEventSourceOperator, Actor: actor,
+		ChangeKind: PolicyChangeOperatorUpdated,
+		Before:     EntitlementValues(current), After: EntitlementValues(policy),
+		Changes:        DiffEntitlements(current, policy),
+		PrivacyChanged: privacyChanged, PolicyRevAfter: policyRev,
+		EntRevBefore: currentEntRev, EntRevAfter: entRev, SpacesFenced: fenced,
+	}, now); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit Space effect policy update: %w", err)
+	}
+	return true, nil
+}
+
+// effectPolicyWriteArgs lists the privacy values then every catalogue bit, in
+// the column order UpsertEffectPolicyPartial builds its SQL from.
+func effectPolicyWriteArgs(p EffectPolicy) []any {
+	args := policyPrivacyValues(p)
+	for _, spec := range entitlementCatalog {
+		args = append(args, spec.Get(p))
+	}
+	return args
+}
+
+// fenceActiveSpaces bumps the authority revision (and the privacy and/or
+// entitlement revision) of every active Space of the org so decisions issued
+// before the change stop being current. It returns the number of Spaces
+// fenced.
+func fenceActiveSpaces(ctx context.Context, tx pgx.Tx, orgID string, privacy, entitlement bool) (int64, error) {
+	tag, err := tx.Exec(ctx, `
 		UPDATE space_authority_revisions r
 		SET authority_revision=authority_revision + 1,
 		    privacy_revision=privacy_revision + CASE WHEN $2 THEN 1 ELSE 0 END,
@@ -1307,13 +1380,11 @@ func (r *Repository) UpsertEffectPolicy(ctx context.Context, policy EffectPolicy
 		    updated_at=NOW()
 		FROM registered_spaces s
 		WHERE r.space_ref=s.space_ref AND s.org_id=$1 AND s.registration_state='active'`,
-		policy.OrgID, privacyChanged, entitlementChanged); err != nil {
-		return false, fmt.Errorf("fence Space authorities for effect policy: %w", err)
+		orgID, privacy, entitlement)
+	if err != nil {
+		return 0, fmt.Errorf("fence Space authorities for effect policy: %w", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("commit Space effect policy update: %w", err)
-	}
-	return true, nil
+	return tag.RowsAffected(), nil
 }
 
 // ResolveOrgEffectPolicy reads an organization's current Control-owned
@@ -1328,19 +1399,9 @@ func (r *Repository) ResolveOrgEffectPolicy(ctx context.Context, orgID string) (
 		return EffectPolicy{}, fmt.Errorf("space authority repository unavailable")
 	}
 	var policy EffectPolicy
-	err := r.db.Pool.QueryRow(ctx, `
-		SELECT org_id, privacy_policy_ref, purpose, lawful_basis, privacy_class,
-		       third_party_processing_allowed, retention_class, residency,
-		       deletion_scope, zero_data_retention, thread_create_entitled, retrieval_read_entitled,
-		       import_write_entitled, agent_action_entitled, schedule_fire_entitled, thread_read_entitled,
-		       sandbox_capability_entitled, process_registry_entitled
-		FROM space_effect_policies WHERE org_id=$1`, strings.TrimSpace(orgID),
-	).Scan(&policy.OrgID, &policy.PrivacyPolicyRef, &policy.Purpose, &policy.LawfulBasis,
-		&policy.PrivacyClass, &policy.ThirdPartyProcessingAllowed, &policy.RetentionClass,
-		&policy.Residency, &policy.DeletionScope, &policy.ZeroDataRetention,
-		&policy.ThreadCreateEntitled, &policy.RetrievalReadEntitled, &policy.ImportWriteEntitled,
-		&policy.AgentActionEntitled, &policy.ScheduleFireEntitled,
-		&policy.ThreadReadEntitled, &policy.SandboxCapabilityEntitled, &policy.ProcessRegistryEntitled)
+	err := scanEffectPolicy(r.db.Pool.QueryRow(ctx, `
+		SELECT `+effectPolicyColumnList()+`
+		FROM space_effect_policies WHERE org_id=$1`, strings.TrimSpace(orgID)), &policy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return EffectPolicy{}, ErrNoOrgEffectPolicy
 	}
@@ -1358,19 +1419,6 @@ func privacyPolicyChanged(current, next EffectPolicy) bool {
 		current.ThirdPartyProcessingAllowed != next.ThirdPartyProcessingAllowed || current.RetentionClass != next.RetentionClass ||
 		current.Residency != next.Residency || current.DeletionScope != next.DeletionScope ||
 		current.ZeroDataRetention != next.ZeroDataRetention
-}
-
-// entitlementPolicyChanged reports whether any entitlement bit of the policy
-// changed. Entitlement changes fence the entitlement revision.
-func entitlementPolicyChanged(current, next EffectPolicy) bool {
-	return current.ThreadCreateEntitled != next.ThreadCreateEntitled ||
-		current.RetrievalReadEntitled != next.RetrievalReadEntitled ||
-		current.ImportWriteEntitled != next.ImportWriteEntitled ||
-		current.AgentActionEntitled != next.AgentActionEntitled ||
-		current.ScheduleFireEntitled != next.ScheduleFireEntitled ||
-		current.ThreadReadEntitled != next.ThreadReadEntitled ||
-		current.SandboxCapabilityEntitled != next.SandboxCapabilityEntitled ||
-		current.ProcessRegistryEntitled != next.ProcessRegistryEntitled
 }
 
 func registeredSpaceForUpdate(ctx context.Context, tx pgx.Tx, spaceRef string) (*RegisteredSpace, error) {
