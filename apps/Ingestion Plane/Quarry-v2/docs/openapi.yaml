@@ -7460,6 +7460,68 @@ components:
             type: string
             nullable: true
             description: The stored record of this scrape, for GET /v1/scrape/{id}. Absent under ZDR and when records are off.
+          actions:
+            type: array
+            description: >-
+              The outcome of each scrape action, in order (WS13.5). Absent from the body when the request had no
+              actions. GET /v1/scrape/{id} returns the same entries with artifact ids only: under ZDR no record is
+              written, so the bytes stay inline in the response.
+            items:
+              $ref: '#/components/schemas/ScrapeActionOutcome'
+    ScrapeActionOutcome:
+      type: object
+      required: [index, type, status, duration_ms]
+      properties:
+        index:
+          type: integer
+          minimum: 0
+          description: Position of the action in the request's actions array.
+        type:
+          type: string
+          description: The action's wire type.
+        status:
+          type: string
+          enum: [ok, failed, skipped]
+        duration_ms:
+          type: integer
+          minimum: 0
+        error:
+          type: object
+          description: Present when the action failed.
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+        output:
+          type: object
+          description: >-
+            A screenshot or pdf the action captured. Stored as an artifact (artifact_id) unless the run is under
+            Zero Data Retention; under ZDR the bytes come inline (data_base64) within the shared inline cap. Neither
+            field is set when the capture is over that cap.
+          required: [kind, content_type, bytes]
+          properties:
+            kind:
+              type: string
+              enum: [screenshot, pdf]
+            content_type:
+              type: string
+            bytes:
+              type: integer
+              minimum: 0
+            width:
+              type: integer
+              minimum: 0
+            height:
+              type: integer
+              minimum: 0
+            artifact_id:
+              type: string
+              description: The stored artifact. Not set under ZDR.
+            data_base64:
+              type: string
+              description: The inline bytes under ZDR, within the shared inline cap.
     Envelope_ScrapeResponse:
       type: object
       required:
