@@ -175,7 +175,8 @@ pub struct RequestWarning {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedCrawl {
     pub url: String,
-    /// `None` when absent, or `0` in `lenient` mode (the default applies).
+    /// `None` when absent. In `lenient` mode a `0` is `Some(0)`: the limits resolver takes the
+    /// default for it and echoes the `0` as the requested value.
     pub max_pages: Option<u32>,
     /// `None` when absent or `0` (the default applies).
     pub max_depth: Option<u32>,
@@ -215,7 +216,8 @@ fn take_flag(found: Option<(&str, &Value)>, invalid: &mut Vec<RequestField>) -> 
     }
 }
 
-/// A page or depth bound. `zero_is_refused` makes `0` a 400 (strict `max_pages`).
+/// A page or depth bound. `zero_is_refused` makes `0` a 400 (strict `max_pages`). Otherwise a
+/// zero is kept as asked, and the limits resolver takes the default for it.
 fn take_bound(
     found: Option<(&str, &Value)>,
     invalid: &mut Vec<RequestField>,
@@ -231,7 +233,8 @@ fn take_bound(
             ));
             None
         }
-        Some(0) => None,
+        // Kept as asked: the resolver echoes it as the requested value and takes the default.
+        Some(0) => Some(0),
         Some(number) => match u32::try_from(number) {
             Ok(number) => Some(number),
             Err(_) => {
@@ -408,7 +411,9 @@ pub fn parse_body(body: &[u8], settings: CrawlRequestSettings) -> Result<ParsedC
     };
 
     let max_pages = take_bound(lookup(object, "max_pages"), &mut invalid, settings.strict);
-    let max_depth = take_bound(lookup(object, "max_depth"), &mut invalid, false);
+    // Depth zero is the default and is not echoed; a page zero is echoed (see `take_bound`).
+    let max_depth =
+        take_bound(lookup(object, "max_depth"), &mut invalid, false).filter(|depth| *depth != 0);
     let ingest = take_flag(lookup(object, "ingest"), &mut invalid);
     let zdr = take_flag(lookup(object, "zdr"), &mut invalid);
     let allow_subdomains = take_flag(lookup(object, "allow_subdomains"), &mut invalid).unwrap_or(false);
@@ -453,6 +458,8 @@ pub fn parse_body(body: &[u8], settings: CrawlRequestSettings) -> Result<ParsedC
         ));
     }
 
+    // Errors from here on are pattern errors; the regex step runs only when there are none.
+    let pattern_errors = invalid.len();
     let include = string_list(lookup(object, "include_paths"), &mut invalid);
     let exclude = string_list(lookup(object, "exclude_paths"), &mut invalid);
     let mut global = 0usize;
@@ -511,7 +518,6 @@ pub fn parse_body(body: &[u8], settings: CrawlRequestSettings) -> Result<ParsedC
     // The regular expressions are compiled here, so a bad pattern is a 400 at the
     // handoff and never reaches the orchestrator. Runs only when the patterns above
     // are clean, so one request does not produce the same error twice.
-    let pattern_errors = invalid.len();
     if invalid.len() == pattern_errors
         && (!include_paths.is_empty() || !exclude_paths.is_empty())
     {
@@ -598,7 +604,7 @@ mod tests {
     fn zero_pages_is_default_in_lenient_and_400_in_strict() {
         let body = json!({ "url": "https://example.com/", "max_pages": 0 });
         let ok = parse(body.clone(), lenient()).expect("lenient accepts zero");
-        assert_eq!(ok.max_pages, None, "zero takes the default");
+        assert_eq!(ok.max_pages, Some(0), "zero is kept as asked; the resolver takes the default");
         let refused = parse(body, strict());
         assert_eq!(
             codes(&refused),
