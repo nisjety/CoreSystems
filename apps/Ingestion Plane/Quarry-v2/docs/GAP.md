@@ -174,7 +174,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 | Depth control | ✅ | ✅ BFS in Go orchestrator | Equivalent |
 | Page limit | ✅ | ✅ | Equivalent |
 | Include / exclude paths | ✅ (regex + glob) | ❌ Not wired. The Rust crawl frontier has pattern fields but no production caller; the Go orchestrator crawl input has no include or exclude field and filters nothing. Corrected 2026-10-23 (WS14.S0). | Open - see WS14 |
-| Sitemap-guided crawl | ✅ | ❌ Not wired. quarry-edge serves no sitemap route and the Go orchestrator has no sitemap activity. Corrected 2026-10-23 (WS14.S0). | Open - see WS14 |
+| Sitemap-guided crawl | ✅ | ❌ Not wired. The crawl request accepts only `sitemap: skip` (`crawl_request.rs`), the Go orchestrator has no sitemap activity, and nothing seeds a crawl from a sitemap. `/v1/map` reads `/sitemap.xml` for its own URL list (`map_routes.rs`). Corrected 2026-10-23 (WS14.S0) and 2026-10-27 (D2-037). | Open - see WS14 |
 | Robots.txt respect | ✅ | ❌ Not enforced in the crawl or batch path. `/v1/map` applies a path-only robots matcher; no `check_robots` route is served and the orchestrator emits no `page.blocked` for robots. Corrected 2026-10-23 (WS14.S0). | Open - see WS14 |
 | Allow external links | ✅ | ❌ Not scoped. The orchestrator follows cross-host links today; pinned by `TestCrawlJobWF_CharacterizesExternalLinkFollowing_Legacy`. Corrected 2026-10-23 (WS14.S0). | Open - see WS14 |
 | Allow subdomains | ✅ | ❌ Not scoped. The crawl path has no host or subdomain rule. Corrected 2026-10-23 (WS14.S0). | Open - see WS14 |
@@ -198,7 +198,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 | Scheduled / cron crawl | ❌ | ✅ | **Firecrawl gap** |
 | Crawl durability (restart-safe) | ❌ Redis-only | ✅ Postgres + checkpoints | **V2 structural advantage** |
 | SSE streaming | ❌ | ✅ | **Firecrawl gap** |
-| Sitemap-guided | ✅ | ❌ Not wired into crawl BFS. No sitemap route is served by quarry-edge. Corrected 2026-10-23 (WS14.S0). | Open - see WS14 |
+| Sitemap-guided | ✅ | ❌ Not wired into crawl BFS. The crawl request accepts only `sitemap: skip`, and `/v1/map` reads `/sitemap.xml` without seeding any crawl. Corrected 2026-10-23 (WS14.S0) and 2026-10-27 (D2-037). | Open - see WS14 |
 | Robots.txt | ✅ | ❌ Not wired into crawl BFS. `quarry-runtime/src/robots_cache.rs` has no production caller and no `check_robots` route is served. Corrected 2026-10-23 (WS14.S0). | Open - see WS14 |
 | Natural language prompt | ✅ | ✅ Model Plane NL ranking when configured (`x-quarry-search-mode: model-ranked`); term-match fallback otherwise | Closed |
 
