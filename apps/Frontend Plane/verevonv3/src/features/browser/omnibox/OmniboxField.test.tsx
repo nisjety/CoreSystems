@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
-import { createSignal } from 'solid-js'
+import { createSignal, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { omniboxHistoryStorageKey } from '@/shared/session/home-local-content'
 
@@ -94,6 +94,7 @@ describe('OmniboxField', () => {
     const input = screen.getByRole('combobox', { name: 'Nettleseradresse' })
 
     fireEvent.input(input, { target: { value: 'example.com' } })
+    flush()
     fireEvent.keyDown(input, { key: 'Enter' })
     expect(onIntent).toHaveBeenLastCalledWith({ kind: 'navigate', url: 'https://example.com' })
   })
@@ -125,6 +126,7 @@ describe('OmniboxField', () => {
     fireEvent.input(input, { target: { value: 'vg' } })
     await waitFor(() => expect(screen.getByRole('listbox')).toBeTruthy())
     fireEvent.keyDown(input, { key: 'ArrowDown' })
+    flush()
     fireEvent.keyDown(input, { key: 'Delete', shiftKey: true })
 
     expect(readOmniboxHistory(keyA)).toEqual([])

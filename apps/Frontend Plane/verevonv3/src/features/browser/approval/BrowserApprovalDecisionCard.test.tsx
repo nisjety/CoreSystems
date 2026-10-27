@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { describe, expect, it, vi } from 'vitest'
 import { BrowserApprovalDecisionCard } from './BrowserApprovalDecisionCard'
 import type { ApprovalCardModel } from './approval-model'
@@ -58,6 +59,7 @@ describe('BrowserApprovalDecisionCard', () => {
     render(() => <BrowserApprovalDecisionCard approval={model} allowRedirect decide={decide} />)
 
     fireEvent.input(screen.getByRole('textbox'), { target: { value: '  use the saved card  ' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /send beskjed/i }))
 
     await waitFor(() =>
@@ -70,6 +72,7 @@ describe('BrowserApprovalDecisionCard', () => {
     render(() => <BrowserApprovalDecisionCard approval={model} allowRedirect decide={decide} />)
 
     fireEvent.input(screen.getByRole('textbox'), { target: { value: 'keep me' } })
+    flush()
     fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter', ctrlKey: true })
 
     expect(decide).not.toHaveBeenCalled()

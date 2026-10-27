@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { fireEvent, render, screen } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   CONSOLE_FILTER_DEBOUNCE_MS,
@@ -73,6 +74,7 @@ describe('ConsoleFilterBar', () => {
     expect(onChange).toHaveBeenLastCalledWith({ levels: [], text: 'boom' })
 
     fireEvent.keyDown(input, { key: 'Escape' })
+    flush()
     expect(onChange).toHaveBeenLastCalledWith({ levels: [], text: '' })
     expect(input.value).toBe('')
   })
