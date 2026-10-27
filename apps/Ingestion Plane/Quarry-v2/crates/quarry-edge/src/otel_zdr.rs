@@ -16,7 +16,10 @@
 //!   delegates to `ParentBased(AlwaysOn)`.
 //! - [`ZdrSpanProcessor`]: at span end, drops a registered or `zdr` span (and
 //!   flags its trace so later spans of it are dropped), and strips the
-//!   `zdr_sensitive` and `never` keys from the spans it keeps.
+//!   `zdr_sensitive` and `never` keys from the spans it keeps: from the span's
+//!   own attributes, from the attributes of every span event (a `tracing` event
+//!   inside a span exports as an OTel span event, and its fields as the event's
+//!   attributes) and from the attributes of its links (D2-022).
 //!
 //! [`ZdrFlagLayer`] is the tracing side: it wraps the OpenTelemetry layer and,
 //! after the wrapped layer has created the span's OTel data, flags the trace
@@ -275,6 +278,20 @@ impl<P: SpanProcessor> ZdrSpanProcessor<P> {
     }
 }
 
+/// Removes the contract's stripped keys from everything of a kept span that can
+/// carry a field: its attributes, its events' attributes and its links'
+/// attributes. Event names are left alone: they are the event message, which the
+/// log-field lint holds to the same no-caller-data rule as the log line itself.
+fn strip_span(span: &mut SpanData) {
+    span.attributes.retain(|kv| !is_stripped_key(kv.key.as_str()));
+    for event in &mut span.events.events {
+        event.attributes.retain(|kv| !is_stripped_key(kv.key.as_str()));
+    }
+    for link in &mut span.links.links {
+        link.attributes.retain(|kv| !is_stripped_key(kv.key.as_str()));
+    }
+}
+
 impl<P: SpanProcessor> SpanProcessor for ZdrSpanProcessor<P> {
     fn on_start(&self, span: &mut Span, cx: &Context) {
         self.inner.on_start(span, cx);
@@ -290,7 +307,7 @@ impl<P: SpanProcessor> SpanProcessor for ZdrSpanProcessor<P> {
         if self.registry.contains(trace_id) {
             return;
         }
-        span.attributes.retain(|kv| !is_stripped_key(kv.key.as_str()));
+        strip_span(&mut span);
         self.inner.on_end(span);
     }
 
@@ -541,6 +558,37 @@ mod tests {
         assert_eq!(spans.len(), 1);
         let keys: Vec<&str> = spans[0].attributes.iter().map(|kv| kv.key.as_str()).collect();
         assert_eq!(keys, vec!["status_code"]);
+    }
+
+    #[test]
+    fn sensitive_event_and_link_attributes_are_stripped_from_a_kept_span() {
+        use opentelemetry::trace::{Event, Link};
+        let (processor, recorder, _registry) = processor(16);
+        let mut data = span_data(trace(7), vec![KeyValue::new("status_code", 200_i64)]);
+        data.events.events.push(Event::new(
+            "fetch finished",
+            SystemTime::UNIX_EPOCH,
+            vec![
+                KeyValue::new("url", "https://example.test/private"),
+                KeyValue::new("error", "connect failed for https://example.test/private"),
+                KeyValue::new("authorization", "Bearer x"),
+                KeyValue::new("status_code", 502_i64),
+            ],
+            0,
+        ));
+        data.links.links.push(Link::new(
+            SpanContext::new(trace(8), SpanId::from(9u64), TraceFlags::SAMPLED, false, TraceState::NONE),
+            vec![KeyValue::new("target", "https://example.test/x"), KeyValue::new("count", 1_i64)],
+            0,
+        ));
+        processor.on_end(data);
+        let spans = recorder.spans();
+        assert_eq!(spans.len(), 1);
+        let event_keys: Vec<&str> = spans[0].events.events[0].attributes.iter().map(|kv| kv.key.as_str()).collect();
+        assert_eq!(event_keys, vec!["status_code"], "the event keeps only the safe key");
+        assert_eq!(spans[0].events.events[0].name, "fetch finished", "the event itself stays");
+        let link_keys: Vec<&str> = spans[0].links.links[0].attributes.iter().map(|kv| kv.key.as_str()).collect();
+        assert_eq!(link_keys, vec!["count"]);
     }
 
     #[test]

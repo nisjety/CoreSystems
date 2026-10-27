@@ -4,7 +4,11 @@
 //! `ZdrSampler`, `ZdrSpanProcessor`), with an in-memory exporter standing in for
 //! OTLP. Each test owns its registry, so tests do not share the process-wide one.
 //!
-//! Written in the W2 build; compiled, not yet run (the test phase runs it).
+//! Written in the W2 build; first run in D-B2-zdr-pins, which found the harness
+//! itself was empty: dropping the last reference to an `SdkTracerProvider` shuts
+//! it down, and `InMemorySpanExporter::shutdown` clears what it holds, so every
+//! test read zero spans whatever the stack did (the three "exports nothing" tests
+//! passed vacuously). `Rig` now keeps the provider alive until the spans are read.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -52,6 +56,8 @@ struct Rig {
     subscriber: Box<dyn tracing::Subscriber + Send + Sync>,
     exporter: InMemorySpanExporter,
     logs: LogCapture,
+    /// Held so the exporter is not shut down (and emptied) before the test reads it.
+    provider: SdkTracerProvider,
 }
 
 /// The real subscriber shape, with `export_on` as the flag and a private registry.
@@ -66,6 +72,7 @@ fn rig(export_on: bool) -> Rig {
         ))
         .build();
     let tracer = provider.tracer("zdr-span-export-test");
+    let provider_alive = provider.clone();
     let logs = LogCapture::default();
     let subscriber = zdr_log::otel_subscriber(
         logs.clone(),
@@ -80,6 +87,7 @@ fn rig(export_on: bool) -> Rig {
         subscriber: Box::new(subscriber),
         exporter,
         logs,
+        provider: provider_alive,
     }
 }
 
@@ -88,9 +96,11 @@ fn run(rig: Rig, body: impl FnOnce()) -> (Vec<opentelemetry_sdk::trace::SpanData
         subscriber,
         exporter,
         logs,
+        provider,
     } = rig;
     tracing::subscriber::with_default(subscriber, body);
     let spans = exporter.get_finished_spans().expect("spans readable");
+    drop(provider);
     (spans, logs.text())
 }
 
@@ -129,6 +139,28 @@ fn non_zdr_twin_exports_spans_and_keeps_no_contract_key() {
         "the zdr_sensitive key is stripped from a kept span: {attributes:?}"
     );
     assert!(attributes.contains(&"request_id"));
+}
+
+/// D2-022: a `tracing` event inside a kept span exports as a span event whose
+/// fields are the event's attributes; the contract's sensitive keys are stripped
+/// from those too, not only from the span's own attributes. The canary values
+/// below must appear nowhere in what the exporter received.
+#[test]
+fn a_kept_spans_events_lose_the_sensitive_keys_too() {
+    const EVENT_URL: &str = "https://event-canary.example.test/secret";
+    let (spans, _log) = run(rig(true), || {
+        let request = tracing::info_span!("request", request_id = "req-plain");
+        let _request = request.enter();
+        tracing::info!(url = EVENT_URL, error = EVENT_URL, status_code = 502_i64, "fetch finished");
+    });
+    assert_eq!(spans.len(), 1, "the non-ZDR span is exported");
+    let events = &spans[0].events.events;
+    assert!(!events.is_empty(), "the event rides on the span, so the strip is exercised");
+    let dump = format!("{:?}", spans[0]);
+    assert!(!dump.contains("event-canary"), "an event field reached the exporter: {dump}");
+    let keys: Vec<&str> = events[0].attributes.iter().map(|kv| kv.key.as_str()).collect();
+    assert!(!keys.contains(&"url") && !keys.contains(&"error"), "{keys:?}");
+    assert!(keys.contains(&"status_code"), "the safe field stays: {keys:?}");
 }
 
 #[test]
