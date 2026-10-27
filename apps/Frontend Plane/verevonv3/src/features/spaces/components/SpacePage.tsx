@@ -64,6 +64,7 @@ import { SpaceArtifactsTab } from './SpaceArtifactsTab'
 import { resolveOpenSpacePane } from '../lib/space-pane-registry'
 import { publishSpaceThreads, publishSpaceUnread, retractSpaceThreads } from '../lib/space-live-work'
 import { unreadThreadIds } from '../lib/space-unread'
+import { createSpaceSendJournal, type SpaceSendJournal } from '../lib/space-send-journal'
 import { hereSentence, readPresence, typingSentence } from '../lib/space-presence'
 import { createSpaceStreamController, type SpaceStreamController, type SpaceStreamState } from '../lib/space-stream'
 import { SpaceLiveIndicator } from './SpaceLiveIndicator'
@@ -177,6 +178,15 @@ export default function SpacePage() {
   const [deletionError, setDeletionError] = createSignal('')
   const [deletionSubmitting, setDeletionSubmitting] = createSignal(false)
   const currentThreads = () => threads()?.threads ?? []
+  // This browser's own sends not yet in the room's record (WS01-S6). The composer writes it, the
+  // timeline draws its optimistic rows, and every projection that arrives settles accepted ones.
+  const sendJournal = createSpaceSendJournal()
+  createEffect(
+    () => ({ ref: spaceRef(), list: threads.error ? undefined : threads()?.threads }),
+    ({ ref, list }) => {
+      if (ref && list) sendJournal.reconcile(ref, list)
+    },
+  )
   // Control's shared-read answer, relayed on the listing. Only an explicit
   // `available: false` restricts; a failed or older listing changes nothing.
   const sharedReadAvailable = () => (threads.error ? true : threads()?.shared_read?.available !== false)
@@ -545,6 +555,10 @@ export default function SpacePage() {
                       roster={() => (roster.error ? [] : roster() ?? [])}
                       agents={() => (agents.error ? [] : agents() ?? [])}
                       unreadThreadIds={unreadIds}
+                      journal={sendJournal}
+                      humanPostsEnabled={() => current().features?.human_posts === true}
+                      viewerRole={() => current().membership.role}
+                      postMaxChars={() => current().limits?.post_max_chars}
                       onOpenThread={threadPaneEnabled ? (thread) => openThread(thread.thread_id) : undefined}
                       typingSentence={() => typingSentence(presenceReading(), i18n.tr)}
                       onTyping={noteTyping}
@@ -677,6 +691,12 @@ function SpaceConversationPanel(props: {
   readonly onOpenThread?: (thread: SpaceThread) => void
   /** The room's in-memory store of this browser's own live artifacts (owned by the page, shared with the Artifacts tab). */
   readonly liveArtifacts: RoomLiveArtifacts
+  /** The send journal the page owns (WS01-S6): the composer records sends here, the timeline draws them. */
+  readonly journal?: SpaceSendJournal
+  /** The room's `features.human_posts`. Off, the composer is the single ask-the-agent box it was. */
+  readonly humanPostsEnabled?: () => boolean
+  readonly viewerRole?: () => string | undefined
+  readonly postMaxChars?: () => number | undefined
 }) {
   const i18n = useI18n()
   const artifactsOn = roomArtifactsEnabled()
@@ -751,6 +771,7 @@ function SpaceConversationPanel(props: {
             }}
             onApprovalSettled={props.onExchangeSettled}
             onOpenThread={props.onOpenThread}
+            pendingPosts={props.journal ? () => props.journal?.forSpace(props.spaceRef) ?? [] : undefined}
             unreadThreadIds={props.unreadThreadIds}
             // A pin or retitle changes the server's order and names; re-read
             // rather than trust this browser's copy of either.
@@ -771,6 +792,11 @@ function SpaceConversationPanel(props: {
         replyTarget={replyTargetWithStatus}
         onClearReplyTarget={() => setReplyTarget(undefined)}
         onArtifact={artifactsOn ? noteLiveArtifact : undefined}
+        humanPostsEnabled={props.humanPostsEnabled}
+        viewerSubjectId={props.viewerSubjectId}
+        viewerRole={props.viewerRole}
+        postMaxChars={props.postMaxChars}
+        journal={props.journal}
       />
     </section>
   )

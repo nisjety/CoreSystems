@@ -214,7 +214,22 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
   // the catalogue modules above.
 
   // WS01 human posts and threads
+  active_membership_required: { no: 'Du er ikke lenger medlem av dette rommet, så du kan ikke skrive her. Ingenting ble sendt.', en: 'You are no longer a member of this room, so you cannot post here. Nothing was sent.' },
+  idempotency_key_conflict: { no: 'Denne meldingen er allerede sendt med et annet innhold. Skriv den på nytt og send igjen.', en: 'This message was already sent with different text. Write it again and send.' },
+  invalid_client_send_id: { no: 'Meldingen kunne ikke sendes på en trygg måte. Last inn på nytt og prøv igjen.', en: 'The message could not be sent safely. Reload and try again.' },
+  invalid_post: { no: 'Meldingen er tom eller for lang. Ingenting ble sendt.', en: 'The message is empty or too long. Nothing was sent.' },
   managed_run_already_started: { no: 'Meldingen var allerede mottatt. Svaret vises i rommet.', en: 'This message was already received. The reply shows in the room.' },
+  post_not_stored: { no: 'Samtalen ble opprettet, men meldingen ble ikke lagret. Prøv igjen; den sendes bare én gang.', en: 'The conversation was created but the message was not saved. Try again; it will only be sent once.' },
+  session_unavailable: { no: 'Samtaletjenesten er utilgjengelig akkurat nå. Meldingen din er beholdt; prøv igjen om litt.', en: 'The conversation service is unavailable right now. Your message is kept; try again shortly.' },
+  space_authority_stale: { no: 'Tilgangen din i rommet ble endret mens du skrev. Prøv igjen; hvis det fortsetter, last inn rommet på nytt.', en: 'Your access to the room changed while you were writing. Try again; if it keeps happening, reload the room.' },
+  space_decision_unavailable: { no: 'Kunne ikke bekrefte at du kan skrive her akkurat nå. Meldingen din er beholdt; prøv igjen om litt.', en: 'We could not confirm that you may post here right now. Your message is kept; try again shortly.' },
+  space_human_posts_disabled: { no: 'Å skrive til rommet uten agent er ikke slått på ennå. Bruk Spør Verevon.', en: 'Posting to the room without the agent is not turned on yet. Use Ask Verevon.' },
+  space_lifecycle_unavailable: { no: 'Rommet kunne ikke kontrolleres akkurat nå. Meldingen din er beholdt; prøv igjen om litt.', en: 'The room could not be checked right now. Your message is kept; try again shortly.' },
+  space_not_found: { no: 'Fant ikke rommet, eller du har ikke tilgang til det.', en: 'The room was not found, or you do not have access to it.' },
+  space_post_not_authorized: { no: 'Rollen din i dette rommet tillater ikke å skrive her. Be en eier eller leder om redigeringstilgang.', en: 'Your role in this room does not allow posting here. Ask an owner or manager for edit access.' },
+  space_read_not_authorized: { no: 'Du kan delta, men organisasjonen har ikke slått på delt lesing, så du kan ikke lese disse meldingene.', en: 'You may take part, but the organization has not enabled shared reading, so you cannot read these messages.' },
+  thread_not_found: { no: 'Samtalen finnes ikke lenger. Meldingen ble ikke sendt.', en: 'The conversation no longer exists. The message was not sent.' },
+  thread_state_conflict: { no: 'Samtalen kan ikke ta imot nye meldinger akkurat nå. Prøv igjen om litt.', en: 'The conversation cannot take new messages right now. Try again shortly.' },
 
   // WS02 realtime stream
   rate_limited: { no: 'For mange forespørsler akkurat nå. Rommet oppdateres litt saktere en liten stund.', en: 'Too many requests right now. The room will refresh a little more slowly for a moment.' },

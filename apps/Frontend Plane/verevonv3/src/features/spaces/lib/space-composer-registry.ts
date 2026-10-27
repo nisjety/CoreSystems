@@ -34,6 +34,14 @@ export interface SpaceComposerModeDefinition {
 }
 
 export const SPACE_COMPOSER_MODES = [
+  // WS01-S6: a human post, stored as the member's own message with no model run. The composer
+  // offers it only while the room's `features.human_posts` is on and the role may post; with it
+  // off the box is the single `ask` mode it always was.
+  {
+    id: 'post',
+    labelNo: 'Send til rommet',
+    labelEn: 'Post to the room',
+  },
   {
     id: 'ask',
     labelNo: 'Spør Verevon',
@@ -42,6 +50,9 @@ export const SPACE_COMPOSER_MODES = [
 ] as const satisfies readonly SpaceComposerModeDefinition[]
 
 export type SpaceComposerModeId = (typeof SPACE_COMPOSER_MODES)[number]['id']
+
+/** The modes that stream a model turn through the send pipeline; `post` has its own transport (`space-post-sender.ts`). */
+export type SpaceStreamedModeId = Exclude<SpaceComposerModeId, 'post'>
 
 export type SpaceComposerModeEntry = SpaceComposerModeDefinition & { readonly id: SpaceComposerModeId }
 
@@ -69,6 +80,8 @@ export interface SpaceComposerSlotContext {
   readonly orgId: string
   readonly mode: () => SpaceComposerModeId
   readonly setMode: (id: SpaceComposerModeId) => void
+  /** The modes the composer offers right now (a subset of the registry; one means no switch is shown). */
+  readonly modes: () => readonly SpaceComposerModeEntry[]
   /** A send is in flight, or the thread is gated; entries disable themselves. */
   readonly disabled: () => boolean
   readonly text: () => string

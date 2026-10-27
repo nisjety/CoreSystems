@@ -17,6 +17,8 @@ import type { IdentityCardModel } from '../lib/agent-activity'
 import { PostTurnHeader, SpaceTurnList, normalizeTranscriptTurns, resolveAuthorName } from './sidepane/SpaceTurnList'
 import type { TranscriptTurn } from './sidepane/SpaceTurnList'
 import { SpaceRestrictedNotice } from './SpaceRestrictedNotice'
+import { SpacePendingNewPost, SpacePendingReplies } from './SpacePendingPost'
+import type { SpaceJournalEntry } from '../lib/space-send-journal'
 import { SpaceArtifactChip } from './SpaceArtifactChip'
 import { SpaceArtifactSheet } from './SpaceArtifactSheet'
 import { roomItems } from '@/features/spaces/lib/room-artifact-items'
@@ -93,6 +95,12 @@ export interface SpaceRoomTimelineProps {
    * room artifact surfaces are off.
    */
   readonly liveArtifacts?: (threadId: string) => readonly ChatArtifact[]
+  /**
+   * This browser's own posts that the room's projection does not carry yet (WS01-S6, the send
+   * journal's entries). A new post is drawn as a post of its own at the end; a reply is drawn
+   * after the real turns of the thread it goes to. Absent means no optimistic rows.
+   */
+  readonly pendingPosts?: () => readonly SpaceJournalEntry[]
 }
 
 /** The room-level name for an assistant turn that recorded no persona: the
@@ -114,10 +122,14 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
   const agentName = createMemo(() => roomAgentName(props.agents()))
   const sharedRead = () => props.sharedReadAvailable?.() !== false
   const artifactsOn = roomArtifactsEnabled()
+  const pendingNewPosts = () =>
+    (props.pendingPosts?.() ?? []).filter((entry) => entry.kind === 'post_new')
+  const pendingRepliesFor = (threadId: string) =>
+    (props.pendingPosts?.() ?? []).filter((entry) => entry.kind === 'post_reply' && entry.threadId === threadId)
 
   return (
     <Show
-      when={orderedThreads().length > 0}
+      when={orderedThreads().length > 0 || pendingNewPosts().length > 0}
       fallback={
         <SpaceRoomIntro
           spaceName={props.spaceName}
@@ -150,9 +162,11 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
               onReply={props.onReply}
               onOpenThread={props.onOpenThread}
               onApprovalSettled={props.onApprovalSettled}
+              pendingReplies={() => pendingRepliesFor(thread.thread_id)}
             />
           )}
         </For>
+        <For each={pendingNewPosts()}>{(entry) => <SpacePendingNewPost entry={entry} />}</For>
       </ol>
     </Show>
   )
@@ -179,6 +193,8 @@ function SpaceRoomPost(props: {
   readonly unread?: () => boolean
   readonly onPresentationChanged?: () => void
   readonly onOpenThread?: (thread: SpaceThread) => void
+  /** This browser's own replies to this thread that the transcript does not show yet. */
+  readonly pendingReplies?: () => readonly SpaceJournalEntry[]
 }) {
   const i18n = useI18n()
   const [transcript, { refetch: refetchTranscript }] = createResource(
@@ -377,6 +393,8 @@ function SpaceRoomPost(props: {
           onOpenArtifact={props.artifactsOn ? setOpenArtifactId : undefined}
         />
       </Show>
+
+      <SpacePendingReplies entries={props.pendingReplies?.() ?? []} />
 
       <Show when={pendingLive().length > 0}>
         <div class="verevon-space-artifact-chips">

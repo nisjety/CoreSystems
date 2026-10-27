@@ -35,6 +35,20 @@ export type SpaceSummary = {
 export type SpaceContext = {
   space: SpaceSummary
   membership: SpaceMembership
+  /**
+   * Server rollout flags (WS01-S5) the UI reads to show or hide a control. Absent on an older
+   * gateway, which means "off". Presentation only, never an authorization input.
+   */
+  features?: {
+    human_posts?: boolean
+    thread_pane?: boolean
+    send_idempotency?: boolean
+    connectivity_banner?: boolean
+  }
+  /** Server-stated bounds (WS01-S5). Absent on an older gateway: use the documented defaults. */
+  limits?: {
+    post_max_chars?: number
+  }
 }
 
 /** Owner-bound conversation index for the selected Space. The BFF has already
@@ -58,6 +72,10 @@ export type SpaceThread = {
    * which already orders pinned posts first. Absent on an older gateway.
    */
   pinned?: boolean
+  /** Replies after the first message (WS01-S1). Absent until Session Core returns it. */
+  reply_count?: number
+  /** Who wrote the latest message (WS01-S1). Absent means unknown, never "you". */
+  last_author_subject_id?: string
 }
 
 /**

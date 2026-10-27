@@ -15,7 +15,7 @@ import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscri
 import type { Skill } from '@/shared/api/skills-client'
 import { updateSpaceThreadPresentation } from '@/shared/api/spaces-client'
 import { beginOwnStream, endOwnStream } from './space-live-work'
-import type { SpaceComposerModeId } from './space-composer-registry'
+import type { SpaceStreamedModeId } from './space-composer-registry'
 import {
   noteSendTransportLost,
   noteSendTransportOk,
@@ -125,7 +125,7 @@ export type SpaceExchange = {
 /** What the composer hands over when a message is sent. */
 export interface SpaceSendInput {
   readonly content: string
-  readonly mode: SpaceComposerModeId
+  readonly mode: SpaceStreamedModeId
   readonly model: AiModelSelection
   /** The Control `subject_id` of a mentioned, bound agent, when one was picked. */
   readonly mentionedAgentRef?: string
@@ -198,7 +198,7 @@ const askStrategy: SpaceSendStrategy = async (run) => {
   )
 }
 
-const SEND_STRATEGIES: Record<SpaceComposerModeId, SpaceSendStrategy> = {
+const SEND_STRATEGIES: Record<SpaceStreamedModeId, SpaceSendStrategy> = {
   ask: askStrategy,
 }
 

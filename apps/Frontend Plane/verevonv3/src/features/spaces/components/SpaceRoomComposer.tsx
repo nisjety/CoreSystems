@@ -1,13 +1,14 @@
-import { createMemo, createSignal, For, Show } from 'solid-js'
+import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
 import type { ChatArtifact } from '@/features/chat/components/chat-types'
 import { listAvailableSkills, MAX_PICKED_SKILLS, type Skill } from '@/shared/api/skills-client'
 import { WandSparkles } from '@/shared/icons'
-import type {
-  SpaceAgent,
-  SpaceRosterMember,
-  SpaceThread,
+import {
+  SPACE_POST_MAX_CHARS_DEFAULT,
+  type SpaceAgent,
+  type SpaceRosterMember,
+  type SpaceThread,
 } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 import { translateApiError } from '@/shared/i18n/errors'
@@ -16,11 +17,15 @@ import { agentAvatarColor } from '../lib/agent-avatar'
 import { AgentAvatar } from './AgentAvatar'
 import { threadTitle } from '../lib/space-thread-presentation'
 import {
-  DEFAULT_SPACE_COMPOSER_MODE,
+  type SpaceComposerModeEntry,
   type SpaceComposerModeId,
   type SpaceComposerSlotContext,
+  visibleSpaceComposerModes,
 } from '../lib/space-composer-registry'
 import { createSpaceSendPipeline } from '../lib/space-send-pipeline'
+import { createSpacePostSender } from '../lib/space-post-sender'
+import { createSpaceSendJournal, type SpaceSendJournal } from '../lib/space-send-journal'
+import { canPostInSpace, postLength } from '../lib/space-posting'
 import { SpaceConnectivityBanner } from './SpaceConnectivityBanner'
 import {
   SkillScope,
@@ -31,6 +36,7 @@ import { createTurnPrivacyTierResolver } from '@/features/dashboard/home/submit-
 import { readAiModelSelection, type AiModelSelection } from '@/shared/ai/model-selection'
 import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
 import { getSession } from '@/shared/session/session-store'
+import './space-send.css'
 
 /**
  * The room's own composer — buzz's "the channel is the workspace" plus Grok's
@@ -134,6 +140,25 @@ export interface SpaceRoomComposerProps {
    * stores it. Absent while the room artifact surfaces are off.
    */
   readonly onArtifact?: (artifact: ChatArtifact, threadId: string) => void
+  /**
+   * Human posts (WS01-S6). `humanPostsEnabled` is the room's `features.human_posts`: off, the box is
+   * byte-for-byte today's single "ask the agent" composer. On, Send posts the message as the
+   * member's own words with no model run, and Ask Verevon is the explicit second mode. None of
+   * these props authorizes anything; Control decides per send.
+   */
+  readonly humanPostsEnabled?: () => boolean
+  /** The reading member's Control subject: Ask is offered in a thread only when they started it. */
+  readonly viewerSubjectId?: () => string | undefined
+  /** The member's role; a role below editor gets a disabled box with the reason stated. */
+  readonly viewerRole?: () => string | undefined
+  /** The reply target's starter, when the caller knows it; otherwise read from `threads`. */
+  readonly threadOwnerSubjectId?: () => string | undefined
+  /** `limits.post_max_chars` from the room context. */
+  readonly postMaxChars?: () => number | undefined
+  /** SD-16: which mode a fresh box starts in while posts are on. Defaults to Send (post). */
+  readonly defaultSendMode?: 'post' | 'ask'
+  /** The room's send journal (the page shares it with the timeline for optimistic rows). */
+  readonly journal?: SpaceSendJournal
 }
 
 export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
@@ -157,7 +182,9 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   const [activeIndex, setActiveIndex] = createSignal(0)
   let skillsLoading = false
   const pickerId = `room-picker-${Math.random().toString(36).slice(2, 8)}`
-  const [mode, setMode] = createSignal<SpaceComposerModeId>(DEFAULT_SPACE_COMPOSER_MODE)
+  // The member's own pick between Send and Ask; `effectiveMode` below is what the box does.
+  const [pickedMode, setPickedMode] = createSignal<SpaceComposerModeId | undefined>(undefined)
+  const [zdrRefused, setZdrRefused] = createSignal(false)
   let textareaRef: HTMLTextAreaElement | undefined
   // The send path (in-flight handles, exchange state, Stop) lives in the send
   // pipeline; the composer keeps the box, the pickers and the chosen chips.
@@ -174,6 +201,73 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   })
   const submitting = pipeline.submitting
   const exchange = pipeline.exchange
+
+  // Human posts (WS01-S6): their own transport, journal and states beside the streamed turn.
+  const journal = props.journal ?? createSpaceSendJournal()
+  const postSender = createSpacePostSender({
+    journal,
+    spaceRef: () => props.spaceRef,
+    describeError: (error) => translateApiError(error, i18n.tr, {
+      no: 'Meldingen ble ikke sendt. Den er beholdt i boksen; prøv igjen.',
+      en: 'The message was not sent. It is kept in the box; try again.',
+    }),
+    baselineUpdatedAt: (threadId) => props.threads?.().find((thread) => thread.thread_id === threadId)?.updated_at,
+    onAccepted: (entry) => {
+      // Cleared only now, on acceptance: until then the words are still here to retry or edit.
+      if (text().trim() === entry.content) setText('')
+      props.onClearReplyTarget?.()
+      props.onExchangeSettled?.()
+    },
+    onZdrRefused: () => setZdrRefused(true),
+  })
+  onCleanup(postSender.dispose)
+  const humanPostsActive = () => props.humanPostsEnabled?.() === true
+  const roleMayPost = () => canPostInSpace(props.viewerRole?.())
+  // Flag on and a role below editor: nothing is offered. Control would refuse every send, so the
+  // box says so instead of accepting text it cannot send.
+  const roleBlocked = () => humanPostsActive() && !roleMayPost()
+  const postMax = () => {
+    const limit = props.postMaxChars?.()
+    return typeof limit === 'number' && Number.isFinite(limit) && limit > 0 ? limit : SPACE_POST_MAX_CHARS_DEFAULT
+  }
+  const replyThreadOwner = () => {
+    const explicit = props.threadOwnerSubjectId?.()
+    if (explicit !== undefined) return explicit
+    const targetId = props.replyTarget?.()?.threadId
+    return targetId ? props.threads?.().find((thread) => thread.thread_id === targetId)?.owner_subject_id : undefined
+  }
+  // A member-invoked run stays owner-gated: Ask is offered in a reply only to the thread's starter.
+  const askAvailable = () => {
+    if (!props.replyTarget?.()) return true
+    const viewer = props.viewerSubjectId?.()?.trim()
+    const owner = replyThreadOwner()?.trim()
+    return Boolean(viewer) && viewer === owner
+  }
+  // An agent mention or a picked skill can only be a question to the agent.
+  const impliesAsk = () => Boolean(mentionedAgentRef()) || pickedSkills().length > 0
+  const offeredModes = createMemo<readonly SpaceComposerModeEntry[]>(() => {
+    const registered = visibleSpaceComposerModes()
+    const ask = registered.filter((entry) => entry.id === 'ask')
+    if (!humanPostsActive()) return ask
+    if (roleBlocked()) return []
+    const post = registered.filter((entry) => entry.id === 'post')
+    return [
+      ...(!zdrRefused() && !impliesAsk() ? post : []),
+      ...(askAvailable() ? ask : []),
+    ]
+  })
+  const effectiveMode = (): SpaceComposerModeId => {
+    const offered = offeredModes()
+    const wanted = pickedMode() ?? (humanPostsActive() ? (props.defaultSendMode ?? 'post') : 'ask')
+    return offered.some((entry) => entry.id === wanted) ? wanted : (offered[0]?.id ?? 'ask')
+  }
+  const nothingOffered = () => humanPostsActive() && offeredModes().length === 0
+  const postBusy = () => postSender.busy()
+  const postFailure = () => {
+    const entry = postSender.current()
+    return entry?.stage === 'failed' ? entry : undefined
+  }
+  const overLimit = () => effectiveMode() === 'post' && postLength(text().trim()) > postMax()
 
   // Threads the server currently reports as working in this room, minus the
   // one this browser is streaming itself (that one has its own indicator in
@@ -375,18 +469,28 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   // A thread paused on a human decision does not take new input. Sending into
   // it would queue a message behind a gate the same person is standing at, and
   // the reply would arrive after an answer they have not given yet.
-  const blockedByApproval = () => props.replyTarget?.()?.awaitingApproval === true
+  // A human post starts no run, so it is not queued behind the gate; only a turn for the agent is.
+  const blockedByApproval = () => props.replyTarget?.()?.awaitingApproval === true && effectiveMode() !== 'post'
   const subscriptionIncompatible = () => selectedModel().provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
     && (Boolean(mentionedAgentRef()) || pickedSkills().length > 0)
 
   async function submitMessage(): Promise<void> {
     const content = text().trim()
-    if (!content || submitting() || blockedByApproval() || subscriptionIncompatible()) return
+    if (!content || nothingOffered()) return
+    if (effectiveMode() === 'post') {
+      if (submitting() || postBusy() || overLimit()) return
+      closePicker()
+      await postSender.send({ content, replyThreadId: props.replyTarget?.()?.threadId })
+      return
+    }
+    if (submitting() || postBusy() || blockedByApproval() || subscriptionIncompatible()) return
 
     closePicker()
+    // A post that failed earlier and is now being asked instead is not retried behind the new send.
+    postSender.discard()
     const input = {
       content,
-      mode: mode(),
+      mode: 'ask' as const,
       model: selectedModel(),
       mentionedAgentRef: mentionedAgentRef(),
       skills: pickedSkills(),
@@ -404,9 +508,10 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   const slotContext: SpaceComposerSlotContext = {
     get spaceRef() { return props.spaceRef },
     orgId,
-    mode,
-    setMode,
-    disabled: () => submitting() || blockedByApproval(),
+    mode: effectiveMode,
+    setMode: setPickedMode,
+    modes: offeredModes,
+    disabled: () => submitting() || blockedByApproval() || postBusy(),
     text,
     setText,
     focus: () => textareaRef?.focus(),
@@ -564,6 +669,27 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
             )}
           </p>
         </Show>
+        <Show when={roleBlocked()}>
+          <p class="verevon-space-room-composer__blocked" role="status">
+            {i18n.tr(
+              'Du har lesetilgang i dette rommet og kan ikke skrive. Be en eier eller leder om redigeringstilgang.',
+              'You have read access in this room and cannot post. Ask an owner or manager for edit access.',
+            )}
+          </p>
+        </Show>
+        <Show when={!roleBlocked() && nothingOffered()}>
+          <p class="verevon-space-room-composer__blocked" role="status">
+            {i18n.tr(
+              'Du kan ikke starte agenten i en annens samtale. Fjern agenten eller ferdigheten for å skrive en melding.',
+              'You cannot start the agent in someone else\'s conversation. Remove the agent or skill to write a message.',
+            )}
+          </p>
+        </Show>
+        <Show when={humanPostsActive() && zdrRefused()}>
+          <p class="verevon-space-room-composer__blocked" role="status">
+            {translateApiError({ code: 'zdr_durable_mutation_forbidden' }, i18n.tr)}
+          </p>
+        </Show>
         <SpaceComposerToolbarSlot ctx={slotContext} />
         <SpaceComposerChipSlot ctx={slotContext} />
         <Show when={pickerOpen()}>
@@ -635,14 +761,46 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
                   'Denne samtalen venter på en godkjenning.',
                   'This conversation is waiting on an approval.',
                 )
-              : i18n.tr(
-                  'Skriv i rommet. @ nevner noen, / velger en ferdighet.',
-                  'Write in the room. @ mentions someone, / picks a skill.',
-                )
+              : humanPostsActive() && effectiveMode() === 'post'
+                ? i18n.tr(
+                    'Skriv til rommet. Meldingen din vises for alle uten at agenten svarer. @ nevner noen, / velger en ferdighet.',
+                    'Write to the room. Your message shows for everyone without the agent replying. @ mentions someone, / picks a skill.',
+                  )
+                : i18n.tr(
+                    'Skriv i rommet. @ nevner noen, / velger en ferdighet.',
+                    'Write in the room. @ mentions someone, / picks a skill.',
+                  )
           }
           rows={2}
-          disabled={submitting() || blockedByApproval()}
+          disabled={submitting() || blockedByApproval() || postBusy() || roleBlocked()}
         />
+        {/* A human post that did not land (WS01-S6). The text is still in the box; Retry repeats
+            the same send under its own key, so a post whose answer was lost lands once. */}
+        <Show when={postFailure()}>
+          {(entry) => (
+            <p class="verevon-space-projection-error verevon-space-room-composer__post-failure" role="alert">
+              {i18n.tr('Meldingen ble ikke sendt. ', 'The message was not sent. ')}
+              {entry().failure?.message}
+              <Show when={entry().failure?.retryable}>
+                <button type="button" onClick={() => { void postSender.retry() }}>
+                  {i18n.tr('Prøv igjen', 'Try again')}
+                </button>
+              </Show>
+              <button type="button" onClick={() => postSender.discard()}>
+                {i18n.tr('Forkast', 'Discard')}
+              </button>
+            </p>
+          )}
+        </Show>
+        <Show when={effectiveMode() === 'post' && postLength(text().trim()) > postMax() * 0.8}>
+          <p
+            class={overLimit() ? 'verevon-space-room-composer__blocked' : 'verevon-space-room-composer__hint'}
+            role={overLimit() ? 'alert' : undefined}
+          >
+            {postLength(text().trim())} / {postMax()}
+            {overLimit() ? i18n.tr(' tegn. Meldingen er for lang.', ' characters. The message is too long.') : ''}
+          </p>
+        </Show>
         <Show when={mentionedAgentRef()}>
           <p class="verevon-space-room-composer__hint">
             {i18n.tr('Vil invokere en agent når du sender.', 'Will invoke an agent when you send.')}
@@ -664,8 +822,14 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
             )}
           </p>
         </Show>
-        <button type="submit" disabled={submitting() || blockedByApproval() || subscriptionIncompatible() || !text().trim()}>
-          {i18n.tr('Send', 'Send')}
+        <button
+          type="submit"
+          disabled={
+            submitting() || blockedByApproval() || subscriptionIncompatible() || !text().trim()
+            || postBusy() || roleBlocked() || nothingOffered() || overLimit()
+          }
+        >
+          {humanPostsActive() && effectiveMode() === 'ask' ? i18n.tr('Spør Verevon', 'Ask Verevon') : i18n.tr('Send', 'Send')}
         </button>
       </form>
     </div>

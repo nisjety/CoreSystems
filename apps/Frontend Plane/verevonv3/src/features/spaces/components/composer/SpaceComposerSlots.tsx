@@ -41,6 +41,37 @@ export function SkillScope(props: { readonly scope: Skill['scope'] }) {
   )
 }
 
+/**
+ * Send or Ask (WS01-S6). Shown only while the composer offers more than one mode: with human
+ * posts off, or when the message can only be a question to the agent (a picked agent or skill, a
+ * reply in someone else's thread), there is nothing to choose and the box looks as it always did.
+ */
+function ModeSwitchEntry(props: { readonly ctx: SpaceComposerSlotContext }) {
+  const i18n = useI18n()
+  return (
+    <div
+      class="verevon-space-room-composer__modes"
+      role="radiogroup"
+      aria-label={i18n.tr('Hvordan meldingen sendes', 'How the message is sent')}
+    >
+      <For each={props.ctx.modes()}>
+        {(mode) => (
+          <button
+            type="button"
+            role="radio"
+            aria-checked={props.ctx.mode() === mode.id ? 'true' : 'false'}
+            data-mode={mode.id}
+            disabled={props.ctx.disabled()}
+            onClick={() => props.ctx.setMode(mode.id)}
+          >
+            {i18n.tr(mode.labelNo, mode.labelEn)}
+          </button>
+        )}
+      </For>
+    </div>
+  )
+}
+
 function ModelPickerEntry(props: { readonly ctx: SpaceComposerSlotContext }) {
   return (
     <AiModelPicker
@@ -80,7 +111,9 @@ function SkillChipsEntry(props: { readonly ctx: SpaceComposerSlotContext }) {
 }
 
 export const SPACE_COMPOSER_TOOLBAR: readonly SpaceComposerSlotEntry[] = [
-  { id: 'model-picker', render: (ctx) => <ModelPickerEntry ctx={ctx} /> },
+  { id: 'mode-switch', enabled: (ctx) => ctx.modes().length > 1, render: (ctx) => <ModeSwitchEntry ctx={ctx} /> },
+  // The model only matters to a turn the agent answers; a human post has none.
+  { id: 'model-picker', enabled: (ctx) => ctx.mode() !== 'post', render: (ctx) => <ModelPickerEntry ctx={ctx} /> },
 ]
 
 export const SPACE_COMPOSER_CHIPS: readonly SpaceComposerSlotEntry[] = [
