@@ -32,6 +32,7 @@ type Server struct {
 	removeMembershipProjection func(context.Context, string, string) error
 	aclRepo                    *users.AclRepository
 	spaceRepo                  *spaces.Repository
+	spaceOrgPolicy             spaceOrgPolicyConfig // org-admin Space policy (WS03-S3)
 	mailTaskService            *mailtask.Service
 	mailTaskUserLookup         MailTaskUserLookup
 	mailTaskEffectPolicy       MailTaskEffectPolicyResolver
@@ -64,6 +65,9 @@ func (s *Server) SetAuthInternalCredential(credential clients.AuthInternalClient
 // authority must not be represented as an owner-resource ACL.
 func (s *Server) SetSpaceRepository(repository *spaces.Repository) {
 	s.spaceRepo = repository
+	if repository != nil {
+		s.spaceOrgPolicy.store = repository
+	}
 	// *spaces.Repository already satisfies MailTaskEffectPolicyResolver
 	// (mail_task_handlers.go) -- wiring it here means production callers
 	// need no separate setter call, while tests can still substitute a fake

@@ -386,6 +386,8 @@ func main() {
 	httpServer.SetSpaceRepository(spaceRepo)
 	// WS20-S4: stored-consent schedule contracts. Strict literal true; off by default.
 	httpServer.SetScheduleContractsEnabled(os.Getenv("SCHEDULE_CONTRACT_ENABLED") == "true")
+	// WS03-S3: org-admin Space policy writes. Strict literal true; off by default.
+	httpServer.SetSpacePolicyAdminWrites(os.Getenv("SPACE_POLICY_ADMIN_WRITES") == "true")
 	httpServer.SetAuthInternalCredential(serviceCredential)
 	// Personal inbound-mail alias (chat-wave2 mail-task spec). The service is
 	// always wired; every route stays 503 on its own until
