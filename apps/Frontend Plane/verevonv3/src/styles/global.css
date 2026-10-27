@@ -28258,6 +28258,40 @@ body.verevon-chat-canvas-resizing * {
   line-height: 1.5;
 }
 
+.verevon-chat-artifact-failure--neutral {
+  background: var(--verevon-surface-subtle, color-mix(in srgb, currentColor 6%, transparent));
+  color: var(--verevon-e-muted);
+}
+
+/* Room HTML artifacts: the click-to-run gate shown in place of the preview. */
+.verevon-chat-artifact-gate {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  border-radius: var(--chat-r-md, 12px);
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  padding: 16px;
+}
+
+.verevon-chat-artifact-gate > div {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.verevon-chat-artifact-gate strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.verevon-chat-artifact-gate p {
+  margin-top: 3px;
+  color: var(--verevon-e-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .verevon-chat-steps-header {
   display: flex;
   align-items: center;
