@@ -487,4 +487,47 @@ describe('action registry', () => {
     expect(preset?.inputSchema.safeParse({ orgId: 'org_1', expectedEntitlementRevision: 0 }).success).toBe(false)
     expect(preset?.inputSchema.safeParse({ orgId: 'org_1', expectedEntitlementRevision: 0, presetId: 'p'.repeat(49) }).success).toBe(false)
   })
+
+  // P-SPA1 moved the spaces.* entries into per-workstream fragments under
+  // domains/spaces/*.ts and spread them once. The move must not add, drop, rename
+  // or reorder an id: the order is what the contract probes and the context pack read.
+  it('keeps every action id unique and the spaces.* entries contiguous and in their pre-fragment order (P-SPA1)', () => {
+    const ids = actionRegistry.map((action) => action.id)
+    expect(new Set(ids).size).toBe(ids.length)
+    // 187 before the move, plus the seven W1 additions (create_post, reply_in_thread, the two
+    // effect-policy actions, update_room_details, change_member_role, leave_room).
+    expect(ids).toHaveLength(194)
+
+    const spaceIds = ids.filter((id) => id.startsWith('spaces.'))
+    const first = ids.indexOf(spaceIds[0] as string)
+    expect(ids.slice(first, first + spaceIds.length)).toEqual(spaceIds)
+
+    // The fourteen entries the fragment move carried, exactly as they stood in action-registry.ts.
+    expect(spaceIds.slice(0, 14)).toEqual([
+      'spaces.create_personal_space',
+      'spaces.ensure_organization_room',
+      'spaces.update_space_instructions',
+      'spaces.create_space_agent',
+      'spaces.bind_space_agent',
+      'spaces.request_personal_space_deletion',
+      'spaces.update_thread_presentation',
+      'spaces.mark_read',
+      'spaces.record_presence',
+      'spaces.set_agent_state',
+      'spaces.revoke_agent',
+      'spaces.create_room',
+      'spaces.add_member',
+      'spaces.remove_member',
+    ])
+    // The later workstream fragments follow them in fragment order (ws01, ws03, ws04).
+    expect(spaceIds.slice(14)).toEqual([
+      'spaces.create_post',
+      'spaces.reply_in_thread',
+      'spaces.set_effect_entitlements',
+      'spaces.apply_effect_preset',
+      'spaces.update_room_details',
+      'spaces.change_member_role',
+      'spaces.leave_room',
+    ])
+  })
 })
