@@ -248,6 +248,18 @@ function createMockResendService(): MockResendService {
   };
 }
 
+// SSO-provisioned members always join as `member`. Refuse to boot on any
+// other SSO_DEFAULT_ROLE so a stray env value cannot grant admin at sign-in.
+function resolveSsoDefaultRole(): 'member' {
+  const configured = process.env.SSO_DEFAULT_ROLE?.trim();
+  if (configured && configured.toLowerCase() !== 'member') {
+    throw new Error(
+      'SSO_DEFAULT_ROLE must be unset or "member"; SSO users are never provisioned with elevated roles',
+    );
+  }
+  return 'member';
+}
+
 function emailFlowsEnabled(): boolean {
   return (
     envFlag('EMAIL_PASSWORD_ENABLED') ||
@@ -1021,43 +1033,16 @@ const authOptions: BetterAuthOptions = {
           sso({
             provisionUser: ({ user, provider }) => {
               console.log(
-                `🏢 Provisioning SSO user: ${user.email} via ${provider.providerId}`,
+                `🏢 Provisioning SSO user: ${user.id} via ${provider.providerId}`,
               );
               // Custom user provisioning logic can be added here
               // e.g., sync with CRM, create workspaces, assign licenses, etc.
             },
             organizationProvisioning: {
               disabled: process.env.SSO_ORG_PROVISIONING_DISABLED === 'true',
-              defaultRole: (process.env.SSO_DEFAULT_ROLE || 'member') as
-                | 'admin'
-                | 'member',
-              getRole: ({
-                userInfo,
-              }: {
-                userInfo: {
-                  attributes?: { department?: string; jobTitle?: string };
-                };
-              }) => {
-                // Assign roles based on SSO attributes
-                const department = userInfo.attributes?.department;
-                const jobTitle = userInfo.attributes?.jobTitle;
-
-                // Admins based on job title
-                if (
-                  jobTitle?.toLowerCase().includes('manager') ||
-                  jobTitle?.toLowerCase().includes('director') ||
-                  jobTitle?.toLowerCase().includes('admin')
-                ) {
-                  return Promise.resolve<'admin' | 'member'>('admin');
-                }
-
-                // IT department gets admin access
-                if (department?.toLowerCase() === 'it') {
-                  return Promise.resolve<'admin' | 'member'>('admin');
-                }
-
-                return Promise.resolve<'admin' | 'member'>('member');
-              },
+              // Roles are never derived from IdP-asserted attributes (job
+              // title, department): any SSO user provisions as member.
+              defaultRole: resolveSsoDefaultRole(),
             },
           }),
         ]
