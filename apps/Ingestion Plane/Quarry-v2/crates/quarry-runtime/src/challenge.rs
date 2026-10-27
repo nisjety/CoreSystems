@@ -307,7 +307,9 @@ const CHALLENGE_PATHS: &[&str] = &[
     "/captcha",
 ];
 
-/// Title cues that make a widget on a short page the challenge itself.
+/// Title cues that make a widget on a short page the challenge itself. A cue counts as whole words
+/// only (see [`contains_phrase`]): "captcha" is not in "How CAPTCHAs work", and a title that merely
+/// says "pardon" is not the interstitial's "pardon our interruption".
 const TITLE_CUES: &[&str] = &[
     "just a moment",
     "attention required",
@@ -319,7 +321,7 @@ const TITLE_CUES: &[&str] = &[
     "security check",
     "access denied",
     "you have been blocked",
-    "pardon",
+    "pardon our interruption",
     "captcha",
     "checking your browser",
     "security challenge",
@@ -460,7 +462,7 @@ impl Page {
     }
 
     fn title_has(&self, needles: &[&str]) -> bool {
-        needles.iter().any(|n| self.title.contains(n))
+        needles.iter().any(|n| contains_phrase(&self.title, n))
     }
 
     fn text_has(&self, needles: &[&str]) -> bool {
@@ -1163,15 +1165,24 @@ fn document_key(raw: &str) -> Option<String> {
 
 /// The status of the response that delivered the document the browser is on:
 /// the latest `Network.responseReceived` whose redacted URL equals the current
-/// one. `None` when the page was reached without a response in the window (a
-/// history push, an event buffer that rolled over).
+/// one, and that came after the last request for that URL. The request starts
+/// the navigation, so a response for the same URL before it is an earlier
+/// visit's (a stale 403 or 429) and is not this page's status. `None` when the
+/// page was reached without an answered request in the window (a history push,
+/// an event buffer that rolled over).
 pub fn main_document_status(events: &[BrowserDevtoolsEvent], current_url: &str) -> Option<u16> {
     let want = document_key(current_url)?;
-    events
+    let for_current = |event: &BrowserDevtoolsEvent| {
+        event.url.as_deref().and_then(document_key).as_deref() == Some(&want)
+    };
+    let start = events
+        .iter()
+        .rposition(|event| event.name == "Network.requestWillBeSent" && for_current(event))?;
+    events[start..]
         .iter()
         .rev()
         .filter(|event| event.name == "Network.responseReceived")
-        .filter(|event| event.url.as_deref().and_then(document_key).as_deref() == Some(&want))
+        .filter(|event| for_current(event))
         .find_map(|event| event.status)
 }
 
@@ -1194,14 +1205,70 @@ fn same_url(a: &str, b: &str) -> bool {
     }
 }
 
+/// Whether `needle` occurs in `haystack` as whole words: no letter or digit on either side of it.
+fn contains_phrase(haystack: &str, needle: &str) -> bool {
+    haystack.match_indices(needle).any(|(at, _)| {
+        let before = haystack[..at].chars().next_back();
+        let after = haystack[at + needle.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
+}
+
+/// Whether `action` is an attempt on the page: a click, a type, a press, a select, an upload, a
+/// download or a script. Only these can be a strike toward the third one (see
+/// [`BlockEpisodes::observe_after`]). A navigation, looking at the page, scrolling, waiting,
+/// answering a dialog and the history steps are not attempts.
+fn is_interaction(action: &AgentAction) -> bool {
+    match action {
+        AgentAction::Click { .. }
+        | AgentAction::ClickRef { .. }
+        | AgentAction::FrameClickRef { .. }
+        | AgentAction::ClickSemantic { .. }
+        | AgentAction::ClickPoint { .. }
+        | AgentAction::Type { .. }
+        | AgentAction::TypeRef { .. }
+        | AgentAction::FrameTypeRef { .. }
+        | AgentAction::TypeSemantic { .. }
+        | AgentAction::Press { .. }
+        | AgentAction::Select { .. }
+        | AgentAction::SelectRef { .. }
+        | AgentAction::FrameSelectRef { .. }
+        | AgentAction::SelectSemantic { .. }
+        | AgentAction::UploadRef { .. }
+        | AgentAction::FrameUploadRef { .. }
+        | AgentAction::DownloadRef { .. }
+        | AgentAction::FrameDownloadRef { .. }
+        | AgentAction::Evaluate { .. } => true,
+        AgentAction::Navigate { .. }
+        | AgentAction::Scroll { .. }
+        | AgentAction::MouseWheel { .. }
+        | AgentAction::Wait { .. }
+        | AgentAction::WaitFor { .. }
+        | AgentAction::WaitForRef { .. }
+        | AgentAction::FrameWaitForRef { .. }
+        | AgentAction::WaitForSemantic { .. }
+        | AgentAction::RespondDialog { .. }
+        | AgentAction::Screenshot { .. }
+        | AgentAction::Pdf
+        | AgentAction::Back
+        | AgentAction::Forward
+        | AgentAction::Reload { .. }
+        | AgentAction::GetContent => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Episodes: the one recovery
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default)]
 struct HostEpisode {
-    /// Strong signals seen on this host in this run, across clearings.
+    /// Strikes on this host in this run, across clearings: the strong signals
+    /// seen after an attempt on the page (every strong signal, for `observe`).
     strong_seen: u32,
+    /// A strong signal stands on this host now: the last observation there was
+    /// strong and nothing has cleared it since. Only this spends a recovery.
+    live_strong: bool,
     /// A wait or a reload of the same URL happened while the host was
     /// challenging.
     recovery_used: bool,
@@ -1278,6 +1345,34 @@ impl BlockEpisodes {
         signal: Option<ChallengeSignal>,
         fingerprint: &str,
     ) -> Option<ChallengeSignal> {
+        self.observe_counted(host, zdr, signal, fingerprint, true)
+    }
+
+    /// [`observe`](Self::observe) for the observation that followed `action`.
+    /// Only an attempt on the page (see `is_interaction`) can be a strike toward
+    /// the third one: a challenge still on screen after a screenshot, a scroll or
+    /// a navigation is the same wall, and counting it would exhaust the host
+    /// before its one recovery had been tried. Every observation still gets its
+    /// signal, and one after a spent recovery is still the loop.
+    pub fn observe_after(
+        &mut self,
+        action: &AgentAction,
+        host: &str,
+        zdr: ZdrMode,
+        signal: Option<ChallengeSignal>,
+        fingerprint: &str,
+    ) -> Option<ChallengeSignal> {
+        self.observe_counted(host, zdr, signal, fingerprint, is_interaction(action))
+    }
+
+    fn observe_counted(
+        &mut self,
+        host: &str,
+        zdr: ZdrMode,
+        signal: Option<ChallengeSignal>,
+        fingerprint: &str,
+        counts: bool,
+    ) -> Option<ChallengeSignal> {
         let key = Self::key(host, zdr);
         let mut signal = match signal {
             Some(signal) if signal.strength == ChallengeStrength::Strong => signal,
@@ -1294,7 +1389,8 @@ impl BlockEpisodes {
             }
         };
         let episode = self.hosts.entry(key).or_default();
-        episode.strong_seen = episode.strong_seen.saturating_add(1);
+        episode.strong_seen = episode.strong_seen.saturating_add(u32::from(counts));
+        episode.live_strong = true;
         let looped =
             episode.exhausted || episode.recovery_used || episode.strong_seen >= MAX_STRONG_PER_HOST;
         if looped {
@@ -1334,6 +1430,7 @@ impl BlockEpisodes {
         if let Some(episode) = self.hosts.get_mut(key) {
             episode.recovery_used = false;
             episode.exhausted = false;
+            episode.live_strong = false;
         }
     }
 
@@ -1353,7 +1450,7 @@ impl BlockEpisodes {
             return;
         };
         if let Some(episode) = self.hosts.get_mut(&Self::key(&host, zdr)) {
-            if episode.strong_seen > 0 && !episode.exhausted {
+            if episode.live_strong && !episode.exhausted {
                 episode.recovery_used = true;
             }
         }
@@ -1502,7 +1599,11 @@ mod tests {
 
     const CONTACT_WITH_WIDGET: &str = r#"<html><head><title>Contact us</title></head><body><form action="/send" method="post"><label>Name <input type="text" name="n"></label><label>Email <input type="email" name="e"></label><textarea name="m"></textarea><div class="g-recaptcha" data-sitekey="k"></div><button>Send</button></form><script src="https://www.google.com/recaptcha/api.js"></script></body></html>"#;
 
-    const CONTACT_PROVE_HUMAN_LABEL: &str = r#"<html><head><title>Contact us</title></head><body><form action="/send" method="post"><label>Name <input type="text" name="n"></label><label>Email <input type="email" name="e"></label><p>Please verify you are human</p><div class="g-recaptcha" data-sitekey="k"></div><button>Send</button></form><script src="https://www.google.com/recaptcha/api.js"></script></body></html>"#;
+    const THIN_CONTACT_WITH_WIDGET: &str = r#"<html><head><title>Contact</title></head><body><form action="/send" method="post"><input type="text" name="n"><div class="g-recaptcha" data-sitekey="k"></div><button>Send</button></form><script src="https://www.google.com/recaptcha/api.js"></script></body></html>"#;
+
+    const THIN_NEWS_WITH_HCAPTCHA: &str = r#"<html><head><title>Subscribe</title></head><body><form><input type="email" name="e"><div class="h-captcha" data-sitekey="k"></div><input type="submit" value="Join"></form><script src="https://js.hcaptcha.com/1/api.js"></script></body></html>"#;
+
+    const CONTACT_PROVE_HUMAN_LABEL: &str =r#"<html><head><title>Contact us</title></head><body><form action="/send" method="post"><label>Name <input type="text" name="n"></label><label>Email <input type="email" name="e"></label><p>Please verify you are human</p><div class="g-recaptcha" data-sitekey="k"></div><button>Send</button></form><script src="https://www.google.com/recaptcha/api.js"></script></body></html>"#;
 
     const NEWSLETTER_WITH_HCAPTCHA: &str = r#"<html><head><title>Subscribe</title></head><body><h1>Our newsletter</h1><form><input type="email" name="e"><div class="h-captcha" data-sitekey="k"></div><input type="submit" value="Join"></form><script src="https://js.hcaptcha.com/1/api.js"></script></body></html>"#;
 
@@ -1615,6 +1716,11 @@ mod tests {
             case("cloudflare error 1020", "https://example.com/e", Some("Attention Required! | Cloudflare"), Some(CF_ERROR_1020), Some(403), Strong(WafInterstitial)),
             // ---- strong, class B (two independent markers) ----
             case("pardon our interruption", "https://example.com/", Some("Pardon Our Interruption"), Some(PARDON_PAGE), Some(200), Strong(WafInterstitial)),
+            // Title cues are whole words: a thin form whose title merely contains a cue's letters is not the wall.
+            case("a thin contact form titled pardon my french, with a visible recaptcha", "https://example.com/contact", Some("Pardon my French - contact"), Some(THIN_CONTACT_WITH_WIDGET), Some(200), Weak),
+            case("a thin newsletter sign-up titled how captchas work, with a visible hcaptcha", "https://example.com/news", Some("How CAPTCHAs work"), Some(THIN_NEWS_WITH_HCAPTCHA), Some(200), Weak),
+            case("a thin newsletter sign-up titled captcha required, with a visible hcaptcha", "https://example.com/news", Some("CAPTCHA required"), Some(THIN_NEWS_WITH_HCAPTCHA), Some(200), Strong(CaptchaWidget)),
+            case("a thin contact form titled pardon our interruption, with a visible recaptcha", "https://example.com/contact", Some("Pardon Our Interruption"), Some(THIN_CONTACT_WITH_WIDGET), Some(200), Strong(CaptchaWidget)),
             case("google sorry page, two groups and a path", "https://www.google.com/sorry/index", Some("https://www.google.com/search?q=x"), Some(GOOGLE_SORRY), Some(429), Strong(UnexpectedBotError)),
             text_case("unusual traffic and automated queries", "https://search.example/results", None, "We have detected unusual traffic from your network. Automated queries are not allowed.", Some(200), Strong(UnexpectedBotError)),
             text_case("title says checking your browser", "https://example.com/", Some("Just a moment..."), "Checking your browser before accessing example.com.", None, Strong(WafInterstitial)),
@@ -1981,6 +2087,7 @@ mod tests {
     fn the_main_document_status_is_the_latest_response_for_the_current_url() {
         let events = vec![
             response_event("https://example.com/old", 301),
+            request_event("https://example.com/page"),
             response_event("https://example.com/page", 403),
             response_event("https://example.com/static/app.js", 200),
             response_event("https://example.com/page", 200),
@@ -2005,6 +2112,31 @@ mod tests {
         let mut request = response_event("https://example.com/page", 200);
         request.name = "Network.requestWillBeSent".into();
         assert_eq!(main_document_status(&[request], "https://example.com/page"), None);
+    }
+
+    fn request_event(url: &str) -> BrowserDevtoolsEvent {
+        let mut event = response_event(url, 200);
+        event.name = "Network.requestWillBeSent".into();
+        event.status = None;
+        event
+    }
+
+    #[test]
+    fn a_response_from_an_earlier_visit_is_not_this_navigations_status() {
+        // The second visit has not been answered yet: the 403 of the first one is not its status.
+        let unanswered = vec![
+            request_event("https://example.com/page"),
+            response_event("https://example.com/page", 403),
+            request_event("https://example.com/page"),
+        ];
+        assert_eq!(main_document_status(&unanswered, "https://example.com/page"), None);
+        let answered = vec![
+            request_event("https://example.com/page"),
+            response_event("https://example.com/page", 403),
+            request_event("https://example.com/page"),
+            response_event("https://example.com/page", 200),
+        ];
+        assert_eq!(main_document_status(&answered, "https://example.com/page"), Some(200));
     }
 
     // ---- episodes ---------------------------------------------------------
@@ -2169,6 +2301,57 @@ mod tests {
         assert_eq!(second.recovery, ChallengeRecovery::Available);
         assert_eq!(third.recovery, ChallengeRecovery::Exhausted);
         assert_eq!(third.block_reason, Some(BlockReason::ChallengeLoop));
+    }
+
+    fn screenshot() -> AgentAction {
+        AgentAction::Screenshot { full_page: false }
+    }
+
+    #[test]
+    fn a_look_at_the_page_is_never_a_strike_toward_the_third_one() {
+        let mut e = episodes();
+        let looks = [
+            screenshot(),
+            AgentAction::GetContent,
+            AgentAction::Navigate { url: PAGE.into() },
+        ];
+        for (n, look) in looks.iter().enumerate() {
+            let signal = e
+                .observe_after(look, HOST, ZdrMode::Off, Some(strong()), &format!("look{n}"))
+                .unwrap();
+            assert_eq!(signal.recovery, ChallengeRecovery::Available, "look {n} is not a strike");
+        }
+        // Three attempts on the page are three strikes, and the third one is the loop.
+        let first = e.observe_after(&click(), HOST, ZdrMode::Off, Some(strong()), "c1").unwrap();
+        let second = e.observe_after(&click(), HOST, ZdrMode::Off, Some(strong()), "c2").unwrap();
+        let third = e.observe_after(&click(), HOST, ZdrMode::Off, Some(strong()), "c3").unwrap();
+        assert_eq!(first.recovery, ChallengeRecovery::Available);
+        assert_eq!(second.recovery, ChallengeRecovery::Available);
+        assert_eq!(third.block_reason, Some(BlockReason::ChallengeLoop));
+    }
+
+    #[test]
+    fn a_wait_after_a_look_spends_the_recovery_of_a_live_challenge() {
+        let mut e = episodes();
+        let first = e.observe_after(&screenshot(), HOST, ZdrMode::Off, Some(strong()), "a").unwrap();
+        assert_eq!(first.recovery, ChallengeRecovery::Available);
+        e.note_recovery_action(&AgentAction::Wait { ms: 10 }, PAGE, ZdrMode::Off);
+        let second = e
+            .observe_after(&screenshot(), HOST, ZdrMode::Off, Some(strong()), "b")
+            .unwrap();
+        assert_eq!(second.block_reason, Some(BlockReason::ChallengeLoop));
+    }
+
+    #[test]
+    fn a_look_after_the_recovery_is_spent_still_reports_the_loop() {
+        let mut e = episodes();
+        e.observe_after(&click(), HOST, ZdrMode::Off, Some(strong()), "a");
+        e.note_recovery_action(&AgentAction::Wait { ms: 10 }, PAGE, ZdrMode::Off);
+        let signal = e
+            .observe_after(&screenshot(), HOST, ZdrMode::Off, Some(strong()), "b")
+            .unwrap();
+        assert_eq!(signal.block_reason, Some(BlockReason::ChallengeLoop));
+        assert_eq!(signal.recovery, ChallengeRecovery::Exhausted);
     }
 
     #[test]
