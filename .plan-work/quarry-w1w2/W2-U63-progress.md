@@ -56,3 +56,9 @@ Unit W2-U63, gated group G2-a, wave 2 (build first, depth later). Branch `quarry
 - `FetchHints` now has two fields; every existing literal uses `..FetchHints::default()`, so nothing else changed. WS5 slice 1 must keep those names.
 - `PageRunner` has a new `robots` field: any new `PageRunner { .. }` literal needs `robots: None`.
 - Run order for the test phase: transform, runtime unit tests, `--test robots_gate_ssrf`, then `--test crawl_scope_robots` in quarry-edge.
+
+## Addendum 2026-10-28: the blank-line note is withdrawn (ROBOTS-RFC, decision 3.2)
+
+- The note "a named empty group allows everything" (under `quarry-transform::robots` above) is withdrawn for consecutive user-agent lines. A blank line between them does not end the group (commit e5e14bb6c, RFC 9309 section 2.2). The note still holds where a rule line separates the groups.
+- Parser gaps closed on 2026-10-28 (unit D2-A-robots-rfc, progress file `.plan-work/quarry-w1w2/D2-A-robots-rfc-progress.md`): a leading UTF-8 BOM is stripped (`c7bf539d4`); a Crawl-delay line no longer ends the user-agent list (`ade9c9d98`); an empty `Allow:` ends it (`eddc51302`). Corpus test `375172656`, its rustfmt formatting `837596154`, docs line `31afcf1bc`. Percent-encoding (D2-184) is not touched.
+- Still open after this addendum: a CR-only line ending is read as one line (outside the three approved gaps), and a Crawl-delay line between two user-agent lines now shares their group. Both are recorded in the progress file for the owner.
