@@ -935,6 +935,13 @@ async fn forward_owner_grant_mutation(
         )
             .into_response();
     }
+    // Creating a grant is a durable write (plan 1.3 #8) and refuses for a ZDR org, before any Control
+    // call; revoking one is allowed under every posture, like every other delete.
+    if operation == "create" {
+        if let Some(refusal) = crate::zdr::durable_write_refusal(state, user, None, None).await {
+            return refusal.into_response();
+        }
+    }
     let actor = ActionActor {
         user_id: user.user_id.clone(),
         user_email: user.user_email.clone(),
@@ -4005,6 +4012,10 @@ pub(crate) async fn update_space_instructions(
             Json(error("invalid_space", "A Space reference is required.")),
         );
     }
+    // Authored instruction text is stored content: refused for a ZDR org before any Control call.
+    if let Some(refusal) = crate::zdr::durable_write_refusal(&state, &user, None, None).await {
+        return refusal;
+    }
     let role = match resolve_space_role(&state, &user, &org_id, space_ref).await {
         Ok(role) => role,
         Err(response) => return response,
@@ -5294,10 +5305,18 @@ mod tests {
             .mount(&conversation)
             .await;
 
+        let org_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(org_zdr_posture(false))
+            .mount(&org_core)
+            .await;
+
         let mut state = crate::tests::test_state(false);
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         state.conversation_core_url = conversation.uri();
+        state.org_core_url = org_core.uri();
 
         let response = crate::build_router(state)
             .oneshot(
@@ -10299,12 +10318,38 @@ mod tests {
         assert!(body.get("persona_enabled").is_none());
     }
 
+    fn org_zdr_posture(zdr: bool) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(
+            json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}),
+        )
+    }
+
     async fn space_instructions_response(
         role: &str,
         method: &str,
         path: &str,
         write_body: Option<Value>,
     ) -> (u16, Value) {
+        let (status, body, _) =
+            space_instructions_probe(role, method, path, write_body, org_zdr_posture(false)).await;
+        (status, body)
+    }
+
+    /// Like `space_instructions_response`, with org-core's answer to the ZDR posture read, and the
+    /// `METHOD path` of every request the Control and Application mocks were asked.
+    async fn space_instructions_probe(
+        role: &str,
+        method: &str,
+        path: &str,
+        write_body: Option<Value>,
+        org_core: ResponseTemplate,
+    ) -> (u16, Value, Vec<String>) {
+        let org = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(org_core)
+            .mount(&org)
+            .await;
         let auth = MockServer::start().await;
         Mock::given(wm_method("GET"))
             .and(wm_path("/api/auth/get-session"))
@@ -10355,6 +10400,7 @@ mod tests {
         state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
+        state.org_core_url = org.uri();
 
         let request = Request::builder()
             .method(method)
@@ -10373,7 +10419,63 @@ mod tests {
         let parsed: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap_or(Value::Null);
-        (status, parsed)
+        let mut asked = Vec::new();
+        for server in [&user_core, &application] {
+            for received in server.received_requests().await.unwrap_or_default() {
+                asked.push(format!("{} {}", received.method, received.url.path()));
+            }
+        }
+        (status, parsed, asked)
+    }
+
+    #[tokio::test]
+    async fn a_zdr_org_cannot_write_space_instructions_and_nothing_upstream_is_asked() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, asked) = space_instructions_probe(
+            "owner",
+            "PATCH",
+            "/api/v1/spaces/space-1/instructions",
+            Some(json!({"instructions": "New rule."})),
+            org_zdr_posture(true),
+        )
+        .await;
+        assert_eq!(status, 412, "{body}");
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert!(
+            !asked.iter().any(|line| line.contains("membership") || line.contains("/api/mutation")),
+            "a ZDR refusal comes before the Control role read and the Convex write: {asked:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn space_instructions_say_so_when_org_core_cannot_answer_the_zdr_posture() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, asked) = space_instructions_probe(
+            "owner",
+            "PATCH",
+            "/api/v1/spaces/space-1/instructions",
+            Some(json!({"instructions": "New rule."})),
+            ResponseTemplate::new(500),
+        )
+        .await;
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(body["error"]["code"], "zdr_decision_unavailable");
+        assert_eq!(body["error"]["retryable"], true);
+        assert!(!asked.iter().any(|line| line.contains("/api/mutation")), "{asked:?}");
+    }
+
+    #[tokio::test]
+    async fn a_zdr_org_can_still_read_space_instructions() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, _) = space_instructions_probe(
+            "viewer",
+            "GET",
+            "/api/v1/spaces/space-1/instructions",
+            None,
+            org_zdr_posture(true),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
     }
 
     #[tokio::test]
@@ -10511,9 +10613,18 @@ mod ws03_s5_ws04_gateway_tests {
         })
     }
 
+    /// org-core's answer to the org's ZDR posture read.
+    fn org_zdr_posture(zdr: bool) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(
+            json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}),
+        )
+    }
+
     fn state_for(user_core: &MockServer, denials_typed: bool) -> AppState {
         let mut state = crate::tests::test_state(false);
         state.user_core_url = user_core.uri();
+        // `refusing_control` also answers org-core's posture read on the same server (not ZDR).
+        state.org_core_url = user_core.uri();
         state.space_features.denials_typed = denials_typed;
         state
     }
@@ -10523,6 +10634,11 @@ mod ws03_s5_ws04_gateway_tests {
         Mock::given(wm_method("POST"))
             .and(wm_path(path))
             .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(org_zdr_posture(false))
             .mount(&user_core)
             .await;
         user_core
@@ -10691,6 +10807,70 @@ mod ws03_s5_ws04_gateway_tests {
 
     /// Owner-grant refusals go through `forward_owner_grant_mutation`: pass-through with the flag
     /// off, `space_owner_grant_not_authorized` with it on.
+    #[tokio::test]
+    async fn a_zdr_org_cannot_create_an_agent_action_grant_but_can_revoke_one() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let owner = || {
+            let mut owner = user();
+            owner.auth_role = Some("owner".to_owned());
+            owner.authorized_membership = Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "owner".to_owned(),
+            });
+            owner
+        };
+        let control =
+            refusing_control("/api/v1/internal/spaces/owner-grant-decision", 403, typed_denial()).await;
+        let org = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(org_zdr_posture(true))
+            .mount(&org)
+            .await;
+        let mut state = state_for(&control, false);
+        state.org_core_url = org.uri();
+
+        let created = forward_owner_grant_mutation(
+            &state,
+            &owner(),
+            "space-1",
+            "conversation-1",
+            "create",
+            None,
+            OwnerGrantMutationRequest { idempotency_key: "grant-1".to_owned() },
+        )
+        .await;
+        assert_eq!(created.status(), axum::http::StatusCode::PRECONDITION_FAILED);
+        let body: Value =
+            serde_json::from_slice(&created.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        let decision_calls = |requests: Vec<wiremock::Request>| {
+            requests
+                .iter()
+                .filter(|request| request.url.path() == "/api/v1/internal/spaces/owner-grant-decision")
+                .count()
+        };
+        assert_eq!(
+            decision_calls(control.received_requests().await.unwrap()),
+            0,
+            "a ZDR create is refused before any Control decision is asked for"
+        );
+
+        // A revoke is allowed under every posture: it reaches Control (which refuses it here, 403).
+        let revoked = forward_owner_grant_mutation(
+            &state,
+            &owner(),
+            "space-1",
+            "conversation-1",
+            "revoke",
+            Some("grant-1"),
+            OwnerGrantMutationRequest { idempotency_key: "revoke-1".to_owned() },
+        )
+        .await;
+        assert_eq!(revoked.status(), axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(decision_calls(control.received_requests().await.unwrap()), 1);
+    }
+
     #[tokio::test]
     async fn owner_grant_refusal_is_typed_only_with_the_flag_on() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;

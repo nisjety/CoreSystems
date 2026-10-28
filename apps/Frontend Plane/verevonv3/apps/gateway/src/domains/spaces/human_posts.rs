@@ -58,7 +58,7 @@ use crate::{
     envelope::{error, error_with_details, unwrap_data},
     middleware::AuthenticatedUser,
     upstream::{authorized_org_id, proxy_json},
-    zdr::{self, OrgZdrPosture},
+    zdr,
 };
 
 /// The longest post, in characters. Reported to the SPA as `data.limits.post_max_chars`.
@@ -176,24 +176,7 @@ async fn zdr_refusal(
     headers: &HeaderMap,
     body: &Value,
 ) -> Option<Reply> {
-    let forbidden = || {
-        (
-            StatusCode::PRECONDITION_FAILED,
-            Json(zdr::zdr_refusal_body(zdr::ZDR_DURABLE_MUTATION_FORBIDDEN)),
-        )
-    };
-    if zdr::request_zdr(headers, Some(body)) {
-        return Some(forbidden());
-    }
-    match zdr::org_zdr_lookup(state, user).await {
-        OrgZdrPosture::Enabled => Some(forbidden()),
-        // An org-core failure is an outage, not a posture: say so, typed, and let the caller retry.
-        OrgZdrPosture::Unknown => Some((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(zdr::zdr_refusal_body(zdr::ZDR_DECISION_UNAVAILABLE)),
-        )),
-        OrgZdrPosture::Disabled => None,
-    }
+    zdr::durable_write_refusal(state, user, Some(headers), Some(body)).await
 }
 
 /// The whole post flow, shared by the two routes and the two actions

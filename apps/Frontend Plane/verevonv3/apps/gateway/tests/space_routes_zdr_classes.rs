@@ -158,41 +158,12 @@ fn every_space_route_has_a_classified_row() {
         routes.len()
     );
     let problems = unclassified(&routes, &surface);
-
-    // DEPTH-sc2-2: routes the Space slices registered without adding their rows to the golden.
-    // Each stays listed until its owner adds the row; the guard below says when to remove it.
-    let known_unregistered = known_unregistered();
-    for known in &known_unregistered {
-        assert!(
-            problems.iter().any(|line| *line == format!("{known} has no row")),
-            "{known} now has a row: remove it from known_unregistered (DEPTH-sc2-2)"
-        );
-    }
-    let unexpected: Vec<&String> = problems
-        .iter()
-        .filter(|line| !known_unregistered.iter().any(|known| **line == format!("{known} has no row")))
-        .collect();
     assert!(
-        unexpected.is_empty(),
+        problems.is_empty(),
         "Space routes without a classified row in space-surface.v1.json (add the row to \
-         api/contracts, re-vendor and re-pin):\n{unexpected:#?}"
+         api/contracts, re-vendor and re-pin):\n{problems:#?}"
     );
 }
-
-/// The routes of this tree that have no row yet (DEPTH-sc2-2): the WS01-S4 human posts, the WS04
-/// room details and member role routes, the WS07-S9 artifacts route and the WS02-S4 event stream.
-fn known_unregistered() -> Vec<String> {
-    KNOWN_UNREGISTERED.iter().map(|id| (*id).to_owned()).collect()
-}
-
-const KNOWN_UNREGISTERED: &[&str] = &[
-    "bff:POST:/api/v1/spaces/{space_ref}/threads",
-    "bff:POST:/api/v1/spaces/{space_ref}/threads/{thread_id}/messages",
-    "bff:PATCH:/api/v1/spaces/{space_ref}",
-    "bff:PATCH:/api/v1/spaces/{space_ref}/members/{member_id}",
-    "bff:GET:/api/v1/spaces/{space_ref}/artifacts",
-    "bff:GET:/api/v1/spaces/{space_ref}/events",
-];
 
 #[test]
 fn a_synthetic_unclassified_space_route_fails_the_lint() {

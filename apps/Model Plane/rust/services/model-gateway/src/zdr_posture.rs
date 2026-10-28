@@ -1439,31 +1439,10 @@ mod tests {
             routes.len()
         );
         let missing = unclassified(&routes, &surface);
-        // DEPTH-sc2-1: WS01-S4 registered the two human-post routes (create_space_post,
-        // append_space_post) without adding their rows to the golden. They stay listed here until
-        // the owner adds the rows (then the guard below tells the next person to empty the list).
-        const KNOWN_UNREGISTERED: &[&str] = &[
-            "mg:POST:/v1/threads",
-            "mg:POST:/v1/threads/:thread_id/messages",
-        ];
-        for known in KNOWN_UNREGISTERED {
-            assert!(
-                missing.iter().any(|line| *line == format!("{known} has no row")),
-                "{known} now has a row: remove it from KNOWN_UNREGISTERED (DEPTH-sc2-1)"
-            );
-        }
-        let unexpected: Vec<&String> = missing
-            .iter()
-            .filter(|line| {
-                !KNOWN_UNREGISTERED
-                    .iter()
-                    .any(|known| **line == format!("{known} has no row"))
-            })
-            .collect();
         assert!(
-            unexpected.is_empty(),
+            missing.is_empty(),
             "non-GET model-gateway routes without a classified row in space-surface.v1.json \
-             (add the row to api/contracts, re-vendor and re-pin):\n{unexpected:#?}"
+             (add the row to api/contracts, re-vendor and re-pin):\n{missing:#?}"
         );
     }
 
