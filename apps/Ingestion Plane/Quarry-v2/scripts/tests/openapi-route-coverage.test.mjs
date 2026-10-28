@@ -1,5 +1,6 @@
-// Every route the edge registers is in docs/openapi.yaml or on the allowlist with
-// a reason, and the allowlist holds nothing that is documented or gone.
+// Every route the edge registers is in docs/openapi.yaml, in docs/openapi-internal.yaml (the
+// /v1/internal/* routes; repo docs only, decision 3.13) or on the allowlist with a reason, and the
+// allowlist holds nothing that is documented or gone.
 //
 //   node --test scripts/tests/openapi-route-coverage.test.mjs
 //
@@ -18,6 +19,12 @@ import { documentedPaths, normalize, productionPart, registeredPaths, routesIn, 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const allowlistPath = path.join(root, 'scripts/openapi-route-allowlist.json');
 const openapi = fs.readFileSync(path.join(root, 'docs/openapi.yaml'), 'utf8');
+const openapiInternal = fs.readFileSync(path.join(root, 'docs/openapi-internal.yaml'), 'utf8');
+
+// The paths both files document. The internal file is never served and never an SDK source.
+function documentedEverywhere() {
+  return [...documentedPaths(openapi), ...documentedPaths(openapiInternal)];
+}
 
 function readAllowlist() {
   return JSON.parse(fs.readFileSync(allowlistPath, 'utf8'));
@@ -66,7 +73,7 @@ test('a_routes_found_floor_guards_against_an_empty_extraction', () => {
 
 test('every_registered_route_is_documented_or_allowlisted_with_a_reason', () => {
   const { paths } = registeredPaths(root);
-  const documented = new Set(documentedPaths(openapi));
+  const documented = new Set(documentedEverywhere());
   const allowlist = readAllowlist();
   const allowed = new Map(allowlist.routes.map((entry) => [normalize(entry.path), entry]));
 
@@ -80,14 +87,14 @@ test('every_registered_route_is_documented_or_allowlisted_with_a_reason', () => 
   assert.deepEqual(
     undocumented,
     [],
-    `routes registered but neither in openapi.yaml nor on scripts/openapi-route-allowlist.json:\n  ${undocumented.join('\n  ')}`,
+    `routes registered but neither in docs/openapi.yaml nor docs/openapi-internal.yaml nor on scripts/openapi-route-allowlist.json:\n  ${undocumented.join('\n  ')}`,
   );
 });
 
 test('the_allowlist_holds_no_stale_entries', () => {
   const { paths } = registeredPaths(root);
   const registered = new Set(paths);
-  const documented = new Set(documentedPaths(openapi));
+  const documented = new Set(documentedEverywhere());
   const stale = [];
   for (const entry of readAllowlist().routes) {
     const route = normalize(entry.path);
@@ -99,8 +106,8 @@ test('the_allowlist_holds_no_stale_entries', () => {
 
 test('every_documented_path_is_still_a_route', () => {
   const registered = new Set(registeredPaths(root).paths);
-  const gone = documentedPaths(openapi).filter((route) => !registered.has(route));
-  assert.deepEqual(gone, [], `documented in openapi.yaml but not registered:\n  ${gone.join('\n  ')}`);
+  const gone = documentedEverywhere().filter((route) => !registered.has(route));
+  assert.deepEqual(gone, [], `documented in docs/openapi.yaml or docs/openapi-internal.yaml but not registered:\n  ${gone.join('\n  ')}`);
 });
 
 test('the_route_count_is_pinned', () => {
