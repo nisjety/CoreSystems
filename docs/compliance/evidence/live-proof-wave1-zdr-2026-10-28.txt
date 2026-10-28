@@ -1,0 +1,171 @@
+Live proof: Wave 1 zero data retention (ZDR) rows on the developer stack: Z-60 pass 1, the org switch gate, the seed
+Date: 2026-10-28 (UTC, 16:30 to 17:20). Branch `zdr-live-proof-wave1` off `model-plane` 0b5d2b7b6. Rebuilt images
+are built from that commit on a clean tree.
+Verification level: LIVE-VERIFIED on a developer stack. Not production. No secrets, tokens, tenant ids or payload
+content below. Rows: D1-220, D1-221, D1-222, D1-223 (already resolved), D1-224, D1-225, D1-330
+(docs/plans/model-plane-depth-register.md). New rows: D1-813, D1-814, D1-815, D1-816.
+Machine output of the proof script: live-reads-zdr-2026-10-28.txt in this folder (runs A to I, each headed there).
+Model policy: the stack runs Anthropic only, from the owner's test env file outside the repos; the only model a turn
+named on purpose was claude-sonnet-5-5. No turn reached a model (every turn below was refused before a model call).
+
+VERDICTS
+  D1-220 RESOLVED. The live refusal shape is HTTP 200 text/event-stream, `event: error`, `code` at top level, with
+    `action`, `message`, `request_id`, `retryable` (run G). The spec's parser reads it unchanged. The tweak the row
+    expected was elsewhere: the composer sends web search by default and model-gateway refuses it under ZDR first
+    (`zdr_feature_not_supported`, feature `web_search`, run F), so the attestation check was never reached. The spec now
+    switches web search off before the turn and takes an optional ZDR_LIVE_TURN_MODEL; with that, pass 1 passes and the
+    page shows "not sent to a model".
+  D1-221 RESOLVED. Ordered deploy (session-core, execution-core, model-gateway, BFF gateway and SPA container restart,
+    inference-core), preflight 6/6 (run D, again in run I), before/turn/after with zero delta on all seven counters
+    (run G). session-core was recreated on its running image d67c5a43f instead of rebuilt (D1-813).
+  D1-222 RESOLVED. A non-ZDR org: the spec refuses at its org guard before opening a chat; a ZDR-TEST org whose switch
+    is off is refused by the second guard; zero delta (run B). The preflight has no org input (D1-219); its own
+    refusal is shown on the out-of-order stack (run A, deploy-order FAIL, exit 1).
+  D1-223 was already resolved (17 zdr_receipt DB tests ok, evidence live-proof-wave1-depth-2026-10-27.txt part 5).
+  D1-224 RESOLVED. zdr-seed-test-org.mjs dry run, --apply (ZDR ON), --zdr false --apply (ZDR OFF), each with the
+    gateway's own org-core credential; zdr-org-switch-gate.spec.ts with ZDR_GATE_LIVE_PATCH=1 3/3 twice (runs C, H).
+  D1-225 RESOLVED. This file and live-reads-zdr-2026-10-28.txt; ZDR.md Z-04, Z-60 and `zdr_unavailable` rows; the
+    ledger's org switch gate entry flipped to implemented and the own-connection entry's build state records pass 1;
+    the runbook index apps/Model Plane/docs/runbooks/README.md links the ZDR runbook. check-doc-codes.mjs gives the
+    same four failures with and without these edits; they predate this session (D1-816).
+  D1-330 OPEN, BLOCKED. Pass 2 needs an attested deployment: D1-327 (no written Microsoft or Anthropic ZDR contract,
+    no owner-named reviewer, so the six *_ZDR_* fields cannot be filled in a signed policy) and the WS01-S12 signed
+    candidate (D1-302, D1-307: key ceremony, candidate, rehearsal). Today's catalogue lists no `zdr` chat model (both
+    specs check it). Also in its way: D1-815 (web search on by default would refuse every pass 2 turn from the SPA) and
+    D1-813 (a candidate built from a clean checkout cannot boot session-core on this database).
+
+SAFETY NET (before anything changed)
+  pg_dump (custom format) to C:/dev/backups/zdr-live-proof-2026-10-28 (outside both checkouts): session_core
+  (model-plane-postgres-1) 22 MB; org_core, auth_service, user_service (controlplane-postgres).
+  Rollback tags of the four running wave images: model-plane-session-core:pre-20261028-d67c5a43,
+  model-plane-execution-core:pre-20261028-08ae0b37, model-plane-model-gateway:pre-20261028-8098b802,
+  model-plane-inference-core:pre-20261028-9e01bbae. An env fingerprint (variable name + truncated SHA-256 of the
+  value, kept in the backup folder, never printed) of each wave container before and after its recreate.
+  No migration ran.
+
+STACK AS FOUND (16:34 UTC)
+  Docker had restarted at about 15:10 UTC; every container came back on its previous image. Wave services: session-core
+  d67c5a43f, execution-core 08ae0b374, model-gateway 8098b802b, inference-core 9e01bbae8 (all contain the WS01-S7 code
+  commit ae4f8b936); the BFF gateway verevon-gateway-rs d67c5a43f (it carries the org switch gate of 81b2376b6;
+  apps/gateway is unchanged between d67c5a43f and 0b5d2b7b6). The SPA container on :5173 serves the main checkout, so
+  the specs ran against a second Vite dev server from this worktree on :5199 (the e2e project's base URL), proxying
+  /api to the same BFF on :3185 (stopped afterwards). auth-core's image label is stale; its dist was checked to carry
+  the retention posture lookup with service headers (interactive-retention-policy.js), and the BFF mints session
+  tokens on every request (no cache), so the org's ZDR reaches the token within auth-core's 45 s posture cache.
+  ZDR_WAVE_COMMIT for the preflight: ae4f8b936 (it contains the S0 ZDR wave docs commit 684247042, S5 c6a0ff7c4 and
+  S6 db07dc0fa).
+
+RUN A: PREFLIGHT ON THE STACK AS FOUND (16:41 UTC) -> REFUSED, as it must be
+  deploy-order FAIL: execution-core had started before session-core and inference-core before model-gateway (Docker's
+  own restart order). wave-revision, migrations 0044/0045 with runs.retention_class, waiver minting off
+  (ZDR_WAIVER_ENABLED unset on all four), no waived run, no ZDR row in session_audit_outbox: PASS. Exit 1.
+
+THE ZDR-TEST ORG (16:44 UTC)
+  A dedicated test account, zdr-test@verevon.dev, made with the project's own seed script
+  (apps/Control Plane/scripts/seed-verified-test-user.sh: Better Auth sign-up, then email_verified=true in
+  auth_service). The generated test password is kept in a 0600 file in the backup folder, never printed.
+  Signed in through the BFF and created "ZDR-TEST wave1 proof" with the normal onboarding route
+  (POST /api/v1/onboarding/actions/create-organization 201, POST /api/v1/onboarding/complete 200). org-core stored it
+  on plan `pro` (the local default; zeroDataRetentionPlans = pro, enterprise), so no plan write was needed. Owner
+  membership active; interactiveRetention.zdr unset.
+  zdr-seed-test-org.mjs dry run (no --apply): the PLAN printed the GET and the PATCH against org-core on 127.0.0.1:18080
+  and sent nothing, exit 0. node --test apps/gateway/scripts/zdr-seed-test-org.test.mjs: 19/19 pass.
+  The seed's credential: the gateway's own org-core credential, passed from the running verevon-gateway-rs container's
+  environment straight into the script's ORG_CORE_SERVICE_TOKEN (never on a command line, in a file or in output).
+  Who ran it: this session, for the owner, on the developer stack; org-core records the owner as updatedBy, because the
+  seed is a signed delegation as that owner (runbook section 4).
+
+RUN C: D1-224, THE GATE WHILE ZDR IS OFF (16:52 UTC) -> 3/3 pass
+  ZDR_GATE_LIVE_PATCH=1 pnpm exec playwright test tests/e2e/zdr-org-switch-gate.spec.ts, as the ZDR-TEST owner:
+    ok the switch agrees with the live catalogue: disabled with the reason while nothing is attested
+    ok the composer predicate and the page rule read the same catalogue shape
+    ok a PATCH turning ZDR on is refused with 409 zdr_no_attested_provider and writes nothing (opt-in)
+  org_core afterwards: interactiveRetention.zdr still unset, updated_at unchanged (16:44:00, the onboarding write).
+  Harness: the e2e project signs in with Origin = its base URL, and auth-core trusts only :5173 and :3185, so setup
+  failed 403 INVALID_ORIGIN (D1-814). Every spec run here therefore signed in through the BFF with Origin :5173 (curl,
+  cookie jar in the backup folder), wrote the two session cookies to tests/e2e/.auth/state.json for host localhost
+  (cookies ignore the port) and ran with --no-deps. No code change.
+
+RUN B: D1-222, NON-ZDR ORGS (16:56-16:58 UTC) -> the spec refuses before sending; zero delta
+  zdr-live-proof.sh --phase before; tests/e2e/zdr-live-turn.spec.ts with ZDR_LIVE_TURN=1:
+    1) as the e2e fixture account (org "Verevon E2E Test", non-ZDR): pass 1 fails at its org guard ("this spec sends a
+       turn only for a ZDR-TEST org", received "Verevon E2E Test"); no chat opened; pass 2 skipped.
+    2) as the ZDR-TEST owner with the org's ZDR still off: fails at the second guard ("the ZDR-TEST org must have ZDR
+       on", expected true, received false).
+  --phase after: threads, messages, runs, feedback_ratings, session_audit_outbox, ZDR outbox rows, mp:gw:cache:* keys
+  unchanged (delta 0 on all seven). The cache count is an authenticated read (PING PONG with the Dragonfly password
+  taken from the running container's own --requirepass, never printed); the cache was empty after the restart.
+
+THE ORDERED DEPLOY (16:40-17:05 UTC)
+  Images built with docker build from this worktree's clean apps/Model Plane at 0b5d2b7b6 (SOURCE_REVISION and
+  BUILD_DATE as compose passes them), staged as model-plane-<service>:zdr-0b5d2b7b6, then each step: retag :latest,
+  recreate with .plan-work/execution/tools/recreate-with-live-env.sh (read-only use from the epic-shaw worktree;
+  EXTRA_ENV_FILE = the owner's test env file outside the repos), wait for healthy, compare the env fingerprint.
+  rebuild-service.sh was not used: its `compose up` does not carry the running NATS passwords, which the helper does.
+    session-core: the rebuilt image crash-looped "migration 1 was previously applied but has been modified" from
+      16:54 to 16:59 (about 6 minutes, session-core down) and was rolled back to its rollback tag. Cause (D1-813): this
+      database's sqlx checksums are of CRLF migration files; a clean checkout has LF since .gitattributes eol=lf
+      (94ce1952c, 2026-10-23). Migration 1: the stored SHA-384 equals the CRLF rendering of the file, not the LF bytes.
+      session-core was therefore recreated on d67c5a43f (contains the wave; differs from 0b5d2b7b6 only in the shared
+      mp-contracts org agent policy, one proto line and a test), started 16:59:39, healthy, env identical to before.
+      It logged three "nats: authorization violation" lines at connect and then connected; /readyz ok. Not investigated.
+    execution-core 0b5d2b7b6 started 17:01:48, healthy, env identical.
+    model-gateway 0b5d2b7b6 started 17:03:19, healthy, env identical apart from BUILD_DATE and SOURCE_REVISION.
+    verevon-gateway-rs (BFF) restarted 17:04:05, healthy; frontend-plane-verevonv3-frontend-1 restarted 17:04:14, :5173 200.
+      The proof's SPA is the worktree dev server on :5199 (it serves the branch's source as is).
+    inference-core 0b5d2b7b6 started 17:04:35, healthy, env identical apart from BUILD_DATE and SOURCE_REVISION.
+  No log line with authorization violation, panic or ERROR in the three rebuilt services after start.
+
+RUN D: PREFLIGHT AFTER THE DEPLOY (17:05 UTC) -> 6/6 PASS
+  deploy-order PASS (16:59:39, 17:01:48, 17:03:19, 17:04:35), wave-revision PASS, migrations-0044-0045 PASS,
+  waiver-minting-off PASS (unset on all four), no-waived-run PASS, no-zdr-row-in-outbox PASS.
+
+SEED ON (17:05:50 UTC)
+  zdr-seed-test-org.mjs --apply: "ZDR is OFF" read first (name, plan pro), then "ZDR is now ON", exit 0. org_core:
+  interactiveRetention.zdr=true. The BFF's org read agreed. A fresh sign-in; the turns waited past auth-core's 45 s
+  posture cache.
+
+RUN E (17:07 UTC): no turn sent. The guards passed (ZDR-TEST org, ZDR on, no `zdr` chat model in the catalogue), but
+  /chat never showed the composer: the cold :5199 dev server found katex and mermaid on that route, bundled them for
+  32 s and reloaded the page ("optimized dependencies changed. reloading"). Zero delta. Environment, not product: its
+  dependency scan had been skipped because @verevon/remote-core is unresolved in a fresh worktree. /chat was then
+  opened once headless (composer in 2.5 s, no chat request).
+RUN F (17:09 UTC): the turn reached the server and was refused, with zero delta, but not by the check pass 1 is for:
+  request: model verevon-balance (the composer's default mode), browse_web true, tools [web_search].
+  stream: HTTP 200, `event: error`, code zdr_feature_not_supported, feature web_search, action turn_off_feature,
+    "This is not supported with zero data retention yet: web search and browsing. The request was refused before any
+    model call."
+  model-gateway turn record: outcome failed, provider_ms 0, model_rounds 0. Nothing reached a model, so no Verevon
+  routing ran, but the request named a Verevon mode; from here the model is pinned. The spec failed on the code
+  (expected zdr_unavailable or zdr_connection_not_supported). This is the D1-220 tweak; the default itself is D1-815.
+RUN G (17:13 UTC): Z-60 PASS 1 -> PASS.
+  ZDR_LIVE_TURN=1 ZDR_LIVE_TURN_MODEL=claude-sonnet-5-5, spec with web search off:
+    ok pass 1: a ZDR-TEST org turn is refused with a typed code and streams no content (4.6 s); pass 2 skipped.
+  request: model claude-sonnet-5-5, browse_web false, tools [], body flag zdr false (the posture came from the token).
+  stream: HTTP 200 text/event-stream, 284 bytes, one frame: `event: error`, code zdr_unavailable, action
+    choose_another_model, "Zero data retention applies to this request, but no model deployment is attested to provide
+    it. The request was not sent to a model.", retryable false. No content frame.
+  inference-core: WARN "provider skipped: ZDR was required but is not verified for this deployment" (provider anthropic).
+  model-gateway turn record: outcome handed_off, route zdr_direct, provider_ms 0, model_rounds 0.
+  Counters before/after: threads 1197, messages 3897, runs 2011, feedback_ratings 20, session_audit_outbox 5043,
+  ZDR outbox rows 0, mp:gw:cache:* keys 0: delta 0 on all seven, no ZDR row in the outbox.
+  Playwright: C:/dev/backups/zdr-live-proof-2026-10-28/playwright/live-turn-pass1-run-g.{json,log} and the trace
+  (outside the repo: it holds the test account's session cookie).
+
+RUN H: D1-224, SWITCHED BACK OFF (17:14 UTC) -> 3/3 pass
+  zdr-seed-test-org.mjs --zdr false --apply: "ZDR is ON" read first, then "ZDR is now OFF", exit 0; org_core zdr=false,
+  updated_at 17:14:00. Then zdr-org-switch-gate.spec.ts with ZDR_GATE_LIVE_PATCH=1: 3/3 pass again (switch disabled
+  with the reason, catalogue fields, PATCH refused 409 zdr_no_attested_provider); org_core unchanged by it.
+RUN I: CLOSING PREFLIGHT (17:15 UTC) -> 6/6 PASS. Nothing was restarted after run D.
+
+WAIVER MINTING
+  Off throughout: ZDR_WAIVER_ENABLED is unset on session-core, execution-core, model-gateway and inference-core (runs A,
+  D, I); no waived run and no ZDR row in the audit outbox at any read.
+
+FINAL STATE (17:20 UTC)
+  session-core d67c5a43f (recreated 16:59:39); execution-core, model-gateway, inference-core 0b5d2b7b6; BFF and SPA
+  container restarted, images unchanged; everything healthy. The :5199 dev server is stopped. Rollback tags
+  model-plane-<service>:pre-20261028-<rev> point at the images that ran before. The staged images keep their
+  zdr-0b5d2b7b6 tags.
+  Test data left: the account zdr-test@verevon.dev and its org "ZDR-TEST wave1 proof" (plan pro, ZDR OFF), kept for the
+  next ZDR proof (pass 2). The refused turns wrote no row anywhere.

@@ -400,7 +400,7 @@ comes first.
 | Z-00 | model-gateway refuses the subscription route by name when only the token carries ZDR. Today `normalize` checks only the body flag and the ZDR stream branch calls the direct path with no provider or connection, so the user's route choice is dropped. | Not built |
 | Z-01 | Strict `zdr` claim, equal posture across delegated bearers. Today model-gateway and inference-core read an absent claim as false and model-gateway does not compare `zdr` across bearers. | Not built |
 | Z-02, Z-03 | Auth Core resolver (stale rule, no failure caching, org-core read route) | Built by the Control Plane wave; readers outside the Control Plane not migrated |
-| Z-04 | Gate on the org switch | Built |
+| Z-04 | Gate on the org switch | Built; live-proven 2026-10-28 on the dedicated `ZDR-TEST` org: the switch is disabled with the reason, the live catalogue has the fields the gate reads, and the PATCH is refused 409 `zdr_no_attested_provider` writing nothing (`docs/compliance/evidence/live-proof-wave1-zdr-2026-10-28.txt` at the repository root) |
 | Z-05a, Z-05b, Z-06 | Typed refusal catalogue and silent-drop closure in the Model Plane (Z-05a, which absorbed Z-07), the SPA's localized rendering of each code (Z-05b), usage frame provenance (Z-06) | Not built |
 | Z-08 | Quarry reads an interactive user token's ZDR claim as a floor and ignores a service principal's | Built in the working tree |
 | Z-10 | Golden posture matrix and connection capability contract | Authored in the working tree on 2026-10-06 with a strict loader, a drift check and, in inference-core, a test that holds the capability file against the real ChatGPT-account provider (`apps/Model Plane/api/contracts/README.md`). No plane evaluates the posture-matrix rows yet |
@@ -411,13 +411,13 @@ comes first.
 | Z-19 to Z-21b | BFF, prompts, composer chip, answer line, admin record and counts (Z-21a is the session-core aggregate behind the counts) | Not built |
 | Z-31, Z-32 | End-to-end helper and ZDR specs; launcher, compose and flag wiring | Not built |
 | Z-40 | Provider attestation (operator action) | Not done |
-| Z-60 | Live proof on `gpt-5.6-terra` with a ZDR-on test organisation | Not run |
+| Z-60 | Live proof on `gpt-5.6-terra` with a ZDR-on test organisation | Pass 1 (fail-closed) run 2026-10-28 on the developer stack, on `claude-sonnet-5-5` (the stack's only allowed test model; a pass 1 turn reaches no model): the wave deployed in order, the preflight passed, one turn from the `ZDR-TEST` org was refused `zdr_unavailable` before any model call with no streamed content, and threads, messages, runs, feedback, the audit outbox and the `mp:gw:cache:*` keyspace were unchanged; the org was switched back off (`docs/compliance/evidence/live-proof-wave1-zdr-2026-10-28.txt` at the repository root). Pass 2 not run: it needs Z-40 |
 
 ### 5.9 Refusal codes: what exists and what is designed
 
 | Code | Where | State |
 |---|---|---|
-| `zdr_unavailable` | inference-core, no attested provider | Built in the working tree; not in the running image |
+| `zdr_unavailable` | inference-core, no attested provider | Built; in the running image, seen live on 2026-10-28 (Z-60 pass 1) |
 | `zdr_no_attested_provider`, `zdr_gate_unavailable` | gateway, enabling org ZDR | Built |
 | `retention_posture_unavailable` | Auth Core mint, posture unresolvable (503) | Built |
 | `zdr_feature_not_supported`, `zdr_durable_mutation_forbidden`, `zdr_draft_persistence_forbidden`, `zdr_ai_proposal_forbidden`, `zdr_recurrence_forbidden` | model-gateway, gateway, conversation-core | Built |
