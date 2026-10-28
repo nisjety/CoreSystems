@@ -5299,3 +5299,11 @@ it also gets a CHAT_REFERENCE_UPLOADS_ENABLED kill switch.
 - Data Plane and Ingestion agreement on the route.
 - A per-user dedupe key, so the ownership 409 in documents-api-go
   (internal/handler/documents.go:316-318) is not an oracle.
+
+## Wave 2 batch W2-20: star and unread state, one content policy on memory writes, ZDR in-stream cost (2026-10-28)
+
+**Status: built and unit-tested, every switch off by default, nothing live-verified.**
+
+- **Star and unread (WS17-S7).** session-core owns both, on the `threads` row (migration 0060: `starred`, `starred_at`, `last_assistant_at`, `last_read_at`). Unread means `last_assistant_at > last_read_at`, and both sides are written with the database clock on the locked row, so an append and a mark-read compare on one clock. WS16 consumes this flag; it does not derive a second definition. The BFF reaches it through `PUT /api/v1/chat/threads/{id}/flags`, not through `SaveThreadRequest`. The sidebar's Starred filter shows only once the caller passes the starred set; CoreSidebar does not pass it yet (depth register).
+- **One content policy on every memory write (WS26-S4).** `session-core/src/write_policy.rs` checks instruction markers, hidden characters and secret shapes on every writer (IndexMemory, memory-dedup, and Dreaming, including the merged text of an EXTEND/SUPERSEDE), and lets only origin `user` write org scope. `IndexMemoryRequest.origin` (tag 7) names the writer; empty or unknown reads as `model_tool`. model-gateway's `create_memory`, the person's own write behind verified user claims, sends `user`. The switch is `CONTENT_WRITE_POLICY` (`off`, `report`, `enforce`; default `off`). The plan row says ship `report`; the rollout default and the enforce date are the owner's call. Writers that bypass session-core (capability-core's direct `agent_memory` SQL, the orchestrator's consolidated write to letta-bridge) are not covered and are logged as P0 in the depth register.
+- **ZDR in-stream cost (WS27-S5, code half).** Behind `MODEL_GATEWAY_ZDR_STREAM_COST` (default off; only the literal `true`), a ZDR answer states its cost in its usage frame, numbers only, computed from the answer's counts and the served model, and stored nowhere. ZDR turns stay out of the ledger, the budget gate and the cost dashboards (DEF-Z-06b). Turning it on is an owner call under DEC-18(d).

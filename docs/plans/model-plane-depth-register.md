@@ -1693,6 +1693,39 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-469 | WS13-S5 | test-gap | P2 | auth-core `src/auth/deployment-contract.spec.ts` fails 3 of 30 before this batch too: the three assertions on `apps/Control Plane/docker-compose.production.yml` service blocks get `undefined` from their match (production render contract, User production verification, release render env files); not caused by W2-19, its app.module.ts assertion passes. | open |
 | D2-470 | WS18-S2 | risk | P2 | The BFF reads GATEWAY_SPACE_APPEND_RETRIEVAL with std::env::var per request in spaces.rs and its tests flip it with set_var/remove_var; that pattern raced under parallel tests before (upstream switches belong on AppState), so the three switch tests can flake in CI. | open |
 
+
+### Wave-mode batch W2-20 (2026-10-28)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-471 | WS17-S7 | risk | P1 | Stream-end mark-read runs in onDone; if the assistant message commits after the done frame, the thread turns unread again while it is open. Confirm the append-before-done order before switching the feature on. | open |
+| D2-472 | WS17-S7 | follow-up | P1 | The sidebar dot and Star/Mark-unread controls cannot reach users until CoreSidebar.tsx (and possibly chat-thread-history.ts) passes the server state; the S7 DoD (dot on a rebuilt stack) is not met until then. | open |
+| D2-473 | WS17-S7 | follow-up | P1 | The BFF flags route is unregistered until chat.rs gains the route; the FE mark-read and star calls will 404 until then. | open |
+| D2-474 | WS17-S7 | follow-up | P1 | The Starred filter covers only the passed set and loaded sessions; the server starred_only listing exists end to end but no caller uses it. | open |
+| D2-475 | WS17-S7 | test-gap | P1 | The session-core tests (including the five new DB tests and the existing cursor unit tests) were not run; the test binary currently fails to compile because of sibling WS26-S4 edits in this shared worktree. | open |
+| D2-476 | WS17-S7 | follow-up | P1 | ChatSidebarOrganizer now always renders a 'Starred' toggle with no switch, but CoreSidebar passes no starredThreadIds, so in production the toggle empties the list until the CoreSidebar shared edit lands. | open |
+| D2-477 | WS17-S7 | follow-up | P1 | history.rs update_thread_flags, ThreadFlagsRequest and update_durable_thread_flags are unregistered. That is dead code until chat.rs adds the flags route, and the FE mark-read calls 404 silently in the meantime (postChatThreadFlags maps 404 to null). | open |
+| D2-478 | WS17-S7 | test-gap | P1 | None of the session-core tests have run, including the five new DB tests and the existing cursor tests. The crate fails to compile because of sibling WS26-S4 files. I re-ran the build: the 16 errors are all in dreaming.rs, memory_grpc.rs, memory_dedup.rs and letta_adapter.rs, with none in grpc.rs. | open |
+| D2-479 | WS17-S7 | follow-up | P3 | 36 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-20.json | open |
+| D2-480 | WS26-S4 | risk | P0 | capability-core workplane_apis.go lines 526, 604 and 630 (INSERT, UPDATE and DELETE on agent_memory) write caller-supplied content straight to the table for user and org scope, bypassing session-core's gate, this policy and the org-scope rule. Not closed by this slice. | open |
+| D2-481 | WS26-S4 | risk | P0 | The orchestrator WriteConsolidatedMemoryActivity (activities.go around line 867) sends IndexMemory to letta-bridge, not session-core. letta-bridge checks neither origin nor content, and its entries feed recall, so the policy never sees that content. | open |
+| D2-482 | WS26-S4 | risk | P0 | orchestrator WriteConsolidatedMemoryActivity sends IndexMemory to letta-bridge rather than session-core, so its Origin "workflow" is never checked and its content bypasses the policy into recall. | open |
+| D2-483 | WS26-S4 | risk | P1 | origin is caller-asserted: any caller with memory:write, including a service principal, can send origin "user" and write org scope. Bind "user" to a non-service VerifiedIdentity before enforce. | open |
+| D2-484 | WS26-S4 | risk | P1 | secret_like reuses scrub.rs patterns that also match prose: the Basic-auth shape matches 'basic understanding' and the inline shape matches 'token: <word>'. Enforce would refuse legitimate memories, so measure in report mode and tighten before enforce. | open |
+| D2-485 | WS26-S4 | decision | P1 | Code default is off (batch rule) while the plan says ship report. Report leaves the org-scope poisoning path open until enforce. The owner picks the rollout default and the enforce date. | open |
+| D2-486 | WS26-S4 | test-gap | P1 | The six ignored Postgres tests have not run, and the in-tree session-core binary cannot compile until the shared edits land. | open |
+| D2-487 | WS26-S4 | live-proof | P1 | The six ignored Postgres tests (index_memory_refuses_injection_text, model_origin_cannot_write_org_scope, user_origin_can_write_org_scope, empty_origin_is_treated_as_model_tool, extractor_candidate_with_marker_is_skipped_not_fatal, refusal_writes_no_row_and_no_mirror) have never run. They need a disposable DATABASE_URL, --ignored --test-threads=1, and the shared edits first. | open |
+| D2-488 | WS26-S4 | follow-up | P3 | 21 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-20.json | open |
+| D2-489 | WS27-S5.code | live-proof | P1 | No live proof: with MODEL_GATEWAY_ZDR_STREAM_COST=true on a rebuilt stack, a ZDR-TEST org turn must show a cost line and no cost-entries row (zdr-live-proof.sh, with the WS01 ZDR precondition). Nothing here is live-verified. | open |
+| D2-490 | WS27-S5.code | follow-up | P1 | The SPA's ZDR cost line is unverified: the frame now carries cost_usd and cost_basis for retention_class zdr, but no frontend file was read or changed, and the run-cost meter (WS27-S4) is unbuilt. | open |
+| D2-491 | WS27-S5.code | risk | P1 | The zdr-contract-sync gate is red at this HEAD (22 not ok), including the vendored zdr-posture-matrix .sha256 pins in mp-contracts and model-gateway, which differ from the golden's pin. The owners must fix those pins before the gate can certify the matrix the ZDR tests read. | open |
+| D2-492 | WS27-S5.code | decision | P1 | Turning MODEL_GATEWAY_ZDR_STREAM_COST on is an owner call under DEC-18(d) (ZDR may state cost in-stream). The plan's enablement waits on Control confirming attribution; this slice does not decide it. | open |
+| D2-493 | WS27-S5.code | live-proof | P1 | There is no live proof that a ZDR-TEST turn with MODEL_GATEWAY_ZDR_STREAM_COST=true shows a cost in its usage frame while writing no cost-entries row and publishing no usage envelope. | open |
+| D2-494 | WS27-S5.code | decision | P1 | Turning the switch on is the owner's call under DEC-18(d): attribution needs Control's confirmation first, and ZDR spend stays outside the ledger, the budget gate and the dashboards (DEF-Z-06b). | open |
+| D2-495 | WS27-S5.code | live-proof | P1 | Live proof: rebuild model-gateway and run with MODEL_GATEWAY_ZDR_STREAM_COST unset (unchanged behaviour), then, after the owner's DEC-18(d) call, run with it set to true. Run zdr-live-proof.sh against the ZDR-TEST org and check that the usage frame carries cost_usd and cost_basis and that GET /api/v1/cost/entries has no row for that request id. | open |
+| D2-496 | WS27-S5.code | live-proof | P1 | Lead shared edits are still owed: the docker-compose.yml env line MODEL_GATEWAY_ZDR_STREAM_COST: ${MODEL_GATEWAY_ZDR_STREAM_COST:-false}, the ZDR.md Metering row rewrite (DEF-Z-06b stays explicit), and the ADR line in docs/decisions/ledger.md. Neither shared file is modified in the tree, which is correct for this slice. | open |
+| D2-497 | WS27-S5.code | follow-up | P3 | 16 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-20.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -1845,3 +1878,6 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS13-S4 | authority | W2-19 | no |
 | WS13-S5 | auth, authority | W2-19 | no |
 | WS18-S2 | authority, policy | W2-19 | no |
+| WS17-S7 | zdr | W2-20 | no |
+| WS26-S4 | policy, audit, zdr | W2-20 | no |
+| WS27-S5.code | zdr, money | W2-20 | no |
