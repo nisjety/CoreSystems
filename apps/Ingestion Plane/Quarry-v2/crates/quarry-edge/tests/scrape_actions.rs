@@ -8,7 +8,9 @@
 //! this file pins is everything the edge does with them: the wire shape
 //! (`data.actions[]`), the stored or inline bytes, the org stamp, the ZDR floor, the
 //! refusals, and that a default request is unchanged. The live-browser half is
-//! `CHROMIUMOXIDE_TEST=1 cargo test -p quarry-runtime --features chromiumoxide`.
+//! `tests/scrape_actions_live.rs`: an evidence-stack run, ignored by default. The real-token
+//! admission (agent label, service principals, the `user` mode) is in
+//! `tests/scrape_actions_real_token.rs` and `tests/scrape_actions_real_token_user_mode.rs`.
 
 use std::{net::SocketAddr, sync::Arc};
 
