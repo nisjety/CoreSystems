@@ -22,6 +22,7 @@ use async_trait::async_trait;
 
 use quarry_browser::session::{
     ProfileMetadata, ProfileStore, ProfileSummary, SaveMeta, SaveOutcome, SessionSnapshot,
+    StampOutcome,
 };
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::ids::kinds::ProfileKind;
@@ -291,6 +292,19 @@ impl ProfileStore for EnvelopeProfileStore {
         profile_id: &ProfileKind,
     ) -> QuarryResult<Option<ProfileMetadata>> {
         self.blobs.load_metadata(org_id, profile_id).await
+    }
+
+    async fn stamp_owner(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        metadata: &ProfileMetadata,
+        saved_at: chrono::DateTime<chrono::Utc>,
+    ) -> QuarryResult<StampOutcome> {
+        // The blob store keeps the tombstones; the placeholder row holds no secret payload.
+        self.blobs
+            .stamp_owner(org_id, profile_id, metadata, saved_at)
+            .await
     }
 }
 

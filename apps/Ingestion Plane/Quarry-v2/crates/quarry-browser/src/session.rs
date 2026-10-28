@@ -255,6 +255,21 @@ pub struct ProfileMetadata {
     pub owner: Option<String>,
 }
 
+impl ProfileMetadata {
+    /// The metadata of a row that exists in storage but carries none of its own: a profile
+    /// saved without a `save_metadata` call (D16 Q2). It is `user_private` with no name and
+    /// no owner, in every store. It is NOT `ProfileMetadata::default()`, whose scope is the
+    /// "no scope was specified" value `Ephemeral`: a row that is stored was deliberately
+    /// persisted, and the Postgres migration 0005 defaults such a row to `user_private`.
+    pub fn stored_default() -> Self {
+        Self {
+            name: None,
+            scope: ProfileScope::UserPrivate,
+            owner: None,
+        }
+    }
+}
+
 /// One row of `ProfileStore::list` — enough to render a profile picker
 /// (name + scope) without a follow-up load per entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,6 +301,28 @@ impl SaveMeta {
         Self {
             saved_at: chrono::Utc::now(),
             owner,
+        }
+    }
+}
+
+/// What a `ProfileStore::stamp_owner` did (WS17.P2, D16 Q2). Not an error in any case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StampOutcome {
+    /// There was no row; one was created with the given name, scope and owner.
+    Stamped,
+    /// A row already exists (any owner, or none): nothing was changed.
+    AlreadyExists,
+    /// A delete newer than the stamp's `saved_at` is on record: nothing was written.
+    IgnoredByTombstone,
+}
+
+impl StampOutcome {
+    /// A short class for logs and counters. Never carries a profile id.
+    pub fn reason_class(self) -> &'static str {
+        match self {
+            Self::Stamped => "stamped",
+            Self::AlreadyExists => "already_exists",
+            Self::IgnoredByTombstone => "tombstone",
         }
     }
 }
@@ -365,12 +402,35 @@ pub trait ProfileStore: Send + Sync {
     /// Load a profile's metadata. `Ok(None)` means no metadata (and, per
     /// `list`'s contract, no snapshot either) exists at all — callers
     /// that already know the profile exists should treat `None` here as
-    /// `ProfileMetadata::default()` (scope `Ephemeral`, no name).
+    /// `ProfileMetadata::stored_default()` (scope `UserPrivate`, no name, no owner).
     async fn load_metadata(
         &self,
         org_id: &str,
         profile_id: &ProfileKind,
     ) -> QuarryResult<Option<ProfileMetadata>>;
+
+    /// Create the row of a profile a run is starting on, with its owner, only if no row
+    /// exists (WS17.P2, D16 Q2). Insert-only: an existing row is never touched, so a
+    /// rename, a rescope or another user's owner cannot be changed by a run start. A
+    /// store that keeps deletion tombstones must refuse the stamp when a delete newer than
+    /// `saved_at` (the start time of the request) is on record, as `save` does, so a profile
+    /// deleted while a run was starting does not come back. The default here has no tombstone
+    /// knowledge and is only correct for a store without them; the stores that keep
+    /// tombstones override it.
+    async fn stamp_owner(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        metadata: &ProfileMetadata,
+        saved_at: chrono::DateTime<chrono::Utc>,
+    ) -> QuarryResult<StampOutcome> {
+        let _ = saved_at;
+        if self.exists(org_id, profile_id).await? {
+            return Ok(StampOutcome::AlreadyExists);
+        }
+        self.save_metadata(org_id, profile_id, metadata).await?;
+        Ok(StampOutcome::Stamped)
+    }
 
     /// Whether a snapshot row exists for this profile. Stores that can answer
     /// without decoding the snapshot override this.
@@ -508,6 +568,40 @@ impl ProfileStore for InMemoryProfileStore {
             .contains_key(&Self::key(org_id, profile_id)))
     }
 
+    async fn stamp_owner(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        metadata: &ProfileMetadata,
+        saved_at: chrono::DateTime<chrono::Utc>,
+    ) -> QuarryResult<StampOutcome> {
+        let key = Self::key(org_id, profile_id);
+        let saved_at = clamp_saved_at(saved_at, chrono::Utc::now());
+        // Lock order: order book, store, metadata (as in `save` and `save_metadata`).
+        let mut book = self.order.write().await;
+        if book
+            .tombstones
+            .get(&key)
+            .is_some_and(|deleted_at| *deleted_at >= saved_at)
+        {
+            return Ok(StampOutcome::IgnoredByTombstone);
+        }
+        let mut stored = self.store.write().await;
+        if stored.contains_key(&key) {
+            return Ok(StampOutcome::AlreadyExists);
+        }
+        stored.insert(key.clone(), SessionSnapshot::default());
+        book.rows.entry(key.clone()).or_default().owner = metadata.owner.clone();
+        self.metadata.write().await.insert(
+            key,
+            ProfileMetadata {
+                owner: None,
+                ..metadata.clone()
+            },
+        );
+        Ok(StampOutcome::Stamped)
+    }
+
     async fn list(&self, org_id: &str) -> QuarryResult<Vec<ProfileSummary>> {
         let prefix = format!("{org_id}\0");
         // Lock order: order book, store, metadata (as in `save`, `delete`, `save_metadata`).
@@ -519,7 +613,10 @@ impl ProfileStore for InMemoryProfileStore {
             .filter_map(|k| {
                 let suffix = k.strip_prefix(&prefix)?;
                 let profile_id: ProfileKind = suffix.parse().ok()?;
-                let found = metadata.get(k).cloned().unwrap_or_default();
+                let found = metadata
+                    .get(k)
+                    .cloned()
+                    .unwrap_or_else(ProfileMetadata::stored_default);
                 Some(ProfileSummary {
                     profile_id,
                     name: found.name,
@@ -574,7 +671,10 @@ impl ProfileStore for InMemoryProfileStore {
         if !metadata.contains_key(&key) && !book.rows.contains_key(&key) {
             return Ok(None);
         }
-        let mut out = metadata.get(&key).cloned().unwrap_or_default();
+        let mut out = metadata
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(ProfileMetadata::stored_default);
         out.owner = book.rows.get(&key).and_then(|row| row.owner.clone());
         Ok(Some(out))
     }
@@ -841,7 +941,10 @@ mod tests {
             .find(|s| s.profile_id == unnamed)
             .expect("unnamed profile missing from list");
         assert!(unnamed_summary.name.is_none());
-        assert_eq!(unnamed_summary.scope, ProfileScope::Ephemeral);
+        // D16 Q2: a stored row with no metadata is user_private, as in Postgres (migration
+        // 0005). The old expectation, `Ephemeral`, was the in-language "no scope" default
+        // and contradicted the accepted decision.
+        assert_eq!(unnamed_summary.scope, ProfileScope::UserPrivate);
     }
 
     #[tokio::test]
@@ -920,7 +1023,157 @@ mod tests {
 
     #[test]
     fn profile_scope_default_is_ephemeral() {
+        // The in-language "no scope was specified" value. A STORED row never reads back as
+        // this: see `stored_default`.
         assert_eq!(ProfileScope::default(), ProfileScope::Ephemeral);
+        assert_eq!(
+            ProfileMetadata::stored_default(),
+            ProfileMetadata {
+                name: None,
+                scope: ProfileScope::UserPrivate,
+                owner: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_profile_saved_without_metadata_reads_back_user_private() {
+        let store = InMemoryProfileStore::new();
+        let pid: ProfileKind = Id::new();
+        store
+            .save(
+                "org_a",
+                &pid,
+                &SessionSnapshot::default(),
+                &SaveMeta::now(Some("user_a".into())),
+            )
+            .await
+            .unwrap();
+        let loaded = store.load_metadata("org_a", &pid).await.unwrap().unwrap();
+        assert_eq!(loaded.scope, ProfileScope::UserPrivate);
+        assert_eq!(loaded.owner.as_deref(), Some("user_a"));
+        assert!(loaded.name.is_none());
+        let listed = store.list("org_a").await.unwrap();
+        assert_eq!(listed[0].scope, ProfileScope::UserPrivate);
+    }
+
+    fn stamp_metadata(owner: &str, scope: ProfileScope) -> ProfileMetadata {
+        ProfileMetadata {
+            name: None,
+            scope,
+            owner: Some(owner.into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn stamp_owner_creates_a_missing_row_with_the_owner_and_scope() {
+        let store = InMemoryProfileStore::new();
+        let pid: ProfileKind = Id::new();
+        let outcome = store
+            .stamp_owner(
+                "org_a",
+                &pid,
+                &stamp_metadata("user_a", ProfileScope::OrgShared),
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, StampOutcome::Stamped);
+        let loaded = store.load_metadata("org_a", &pid).await.unwrap().unwrap();
+        assert_eq!(loaded.owner.as_deref(), Some("user_a"));
+        assert_eq!(loaded.scope, ProfileScope::OrgShared);
+        assert!(store.exists("org_a", &pid).await.unwrap());
+        // Other tenants see nothing.
+        assert!(store.load_metadata("org_b", &pid).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn stamp_owner_never_touches_an_existing_row() {
+        let store = InMemoryProfileStore::new();
+        let pid: ProfileKind = Id::new();
+        store
+            .save_metadata(
+                "org_a",
+                &pid,
+                &ProfileMetadata {
+                    name: Some("Work".into()),
+                    scope: ProfileScope::OrgShared,
+                    owner: Some("user_a".into()),
+                },
+            )
+            .await
+            .unwrap();
+        let outcome = store
+            .stamp_owner(
+                "org_a",
+                &pid,
+                &stamp_metadata("user_b", ProfileScope::UserPrivate),
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, StampOutcome::AlreadyExists);
+        let loaded = store.load_metadata("org_a", &pid).await.unwrap().unwrap();
+        assert_eq!(loaded.owner.as_deref(), Some("user_a"));
+        assert_eq!(loaded.scope, ProfileScope::OrgShared);
+        assert_eq!(loaded.name.as_deref(), Some("Work"));
+        // An ownerless legacy row is not claimed by a stamp either.
+        let legacy: ProfileKind = Id::new();
+        store
+            .save(
+                "org_a",
+                &legacy,
+                &SessionSnapshot::default(),
+                &SaveMeta::now(None),
+            )
+            .await
+            .unwrap();
+        let outcome = store
+            .stamp_owner(
+                "org_a",
+                &legacy,
+                &stamp_metadata("user_b", ProfileScope::UserPrivate),
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, StampOutcome::AlreadyExists);
+        let loaded = store.load_metadata("org_a", &legacy).await.unwrap().unwrap();
+        assert!(loaded.owner.is_none());
+    }
+
+    #[tokio::test]
+    async fn stamp_owner_honours_a_tombstone_newer_than_the_request() {
+        let store = InMemoryProfileStore::new();
+        let pid: ProfileKind = Id::new();
+        let request_started = chrono::Utc::now() - chrono::Duration::seconds(2);
+        // The profile is deleted after the request began, before its stamp ran.
+        store.delete("org_a", &pid).await.unwrap();
+        let outcome = store
+            .stamp_owner(
+                "org_a",
+                &pid,
+                &stamp_metadata("user_a", ProfileScope::UserPrivate),
+                request_started,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, StampOutcome::IgnoredByTombstone);
+        assert!(!store.exists("org_a", &pid).await.unwrap());
+        assert!(store.load_metadata("org_a", &pid).await.unwrap().is_none());
+
+        // A request that began after the delete is a new profile under the same id.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let outcome = store
+            .stamp_owner(
+                "org_a",
+                &pid,
+                &stamp_metadata("user_a", ProfileScope::UserPrivate),
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, StampOutcome::Stamped);
     }
 
     #[test]

@@ -17,7 +17,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 
 use quarry_browser::session::{
-    clamp_saved_at, ProfileMetadata, ProfileSummary, SaveMeta, SaveOutcome,
+    clamp_saved_at, ProfileMetadata, ProfileSummary, SaveMeta, SaveOutcome, StampOutcome,
 };
 use quarry_core::error::QuarryResult;
 use quarry_core::ids::kinds::ProfileKind;
@@ -124,6 +124,25 @@ pub trait ProfileBlobStore: Send + Sync {
         profile_id: &ProfileKind,
     ) -> QuarryResult<Option<ProfileMetadata>>;
 
+    /// Create the row of a profile a run is starting on, with its owner, only if there is no
+    /// row (WS17.P2, D16 Q2): the blob-level twin of `ProfileStore::stamp_owner`. A store that
+    /// keeps tombstones overrides this and refuses when a delete newer than `saved_at` is on
+    /// record; this default has no tombstone knowledge.
+    async fn stamp_owner(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        metadata: &ProfileMetadata,
+        saved_at: DateTime<Utc>,
+    ) -> QuarryResult<StampOutcome> {
+        let _ = saved_at;
+        if self.exists(org_id, profile_id).await? {
+            return Ok(StampOutcome::AlreadyExists);
+        }
+        self.save_metadata(org_id, profile_id, metadata).await?;
+        Ok(StampOutcome::Stamped)
+    }
+
     /// One page of plaintext rows (legacy JSON set, no envelope), ordered by
     /// (org_id, profile_id) strictly after after. WS17.E3 backfill only.
     async fn plaintext_page(
@@ -229,9 +248,10 @@ impl ProfileBlobStore for InMemoryBlobStore {
                         payload,
                         saved_at: Some(saved_at),
                         rev: 1,
+                        // A row saved without a `save_metadata` call is user_private (D16 Q2).
                         metadata: ProfileMetadata {
                             owner: meta.owner.clone(),
-                            ..ProfileMetadata::default()
+                            ..ProfileMetadata::stored_default()
                         },
                     },
                 );
@@ -354,6 +374,41 @@ impl ProfileBlobStore for InMemoryBlobStore {
             .map(|r| r.metadata.clone()))
     }
 
+    async fn stamp_owner(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        metadata: &ProfileMetadata,
+        saved_at: DateTime<Utc>,
+    ) -> QuarryResult<StampOutcome> {
+        let key = Self::key(org_id, profile_id);
+        let saved_at = clamp_saved_at(saved_at, Utc::now());
+        let mut st = self.state.write().await;
+        if st
+            .tombstones
+            .get(&key)
+            .is_some_and(|deleted_at| *deleted_at >= saved_at)
+        {
+            return Ok(StampOutcome::IgnoredByTombstone);
+        }
+        if st.rows.contains_key(&key) {
+            return Ok(StampOutcome::AlreadyExists);
+        }
+        st.rows.insert(
+            key,
+            MemRow {
+                payload: BlobPayload::Legacy {
+                    json: serde_json::to_value(quarry_browser::session::SessionSnapshot::default())
+                        .unwrap_or(serde_json::Value::Null),
+                },
+                saved_at: None,
+                rev: 0,
+                metadata: metadata.clone(),
+            },
+        );
+        Ok(StampOutcome::Stamped)
+    }
+
     async fn plaintext_page(
         &self,
         after: Option<&(String, String)>,
@@ -411,6 +466,64 @@ impl ProfileBlobStore for InMemoryBlobStore {
 mod tests {
     use super::*;
     use chrono::Duration;
+
+    #[tokio::test]
+    async fn a_row_put_without_metadata_is_user_private_and_keeps_its_owner() {
+        let store = InMemoryBlobStore::new();
+        let id = pid("a");
+        store
+            .put(
+                "org_a",
+                &id,
+                BlobPayload::Legacy {
+                    json: serde_json::json!({}),
+                },
+                &SaveMeta::now(Some("user_a".into())),
+            )
+            .await
+            .unwrap();
+        let meta = store.load_metadata("org_a", &id).await.unwrap().unwrap();
+        assert_eq!(
+            meta.scope,
+            quarry_browser::session::ProfileScope::UserPrivate
+        );
+        assert_eq!(meta.owner.as_deref(), Some("user_a"));
+    }
+
+    #[tokio::test]
+    async fn stamp_owner_is_insert_only_and_honours_tombstones() {
+        let store = InMemoryBlobStore::new();
+        let id = pid("b");
+        let owner = ProfileMetadata {
+            name: None,
+            scope: quarry_browser::session::ProfileScope::UserPrivate,
+            owner: Some("user_a".into()),
+        };
+        let started = Utc::now() - Duration::seconds(2);
+        store.delete("org_a", &id).await.unwrap();
+        // A delete newer than the request: no row comes back.
+        assert_eq!(
+            store.stamp_owner("org_a", &id, &owner, started).await.unwrap(),
+            StampOutcome::IgnoredByTombstone
+        );
+        assert!(!store.exists("org_a", &id).await.unwrap());
+        // A later request creates it once; a second stamp leaves it alone.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        assert_eq!(
+            store.stamp_owner("org_a", &id, &owner, Utc::now()).await.unwrap(),
+            StampOutcome::Stamped
+        );
+        let other = ProfileMetadata {
+            owner: Some("user_b".into()),
+            ..owner.clone()
+        };
+        assert_eq!(
+            store.stamp_owner("org_a", &id, &other, Utc::now()).await.unwrap(),
+            StampOutcome::AlreadyExists
+        );
+        let meta = store.load_metadata("org_a", &id).await.unwrap().unwrap();
+        assert_eq!(meta.owner.as_deref(), Some("user_a"));
+    }
 
     fn pid(_tag: &str) -> ProfileKind {
         ProfileKind::new()

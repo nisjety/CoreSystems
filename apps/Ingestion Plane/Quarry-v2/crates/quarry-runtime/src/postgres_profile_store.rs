@@ -27,7 +27,7 @@ use sqlx::Row;
 
 use quarry_browser::session::{
     ProfileMetadata, ProfileScope, ProfileStore, ProfileSummary, SaveMeta, SaveOutcome,
-    SessionSnapshot,
+    SessionSnapshot, StampOutcome,
 };
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::ids::kinds::ProfileKind;
@@ -441,7 +441,9 @@ impl ProfileStore for PostgresProfileStore {
                 out.push(ProfileSummary {
                     profile_id,
                     name,
-                    scope: scope_str.parse::<ProfileScope>().unwrap_or_default(),
+                    scope: scope_str
+                        .parse::<ProfileScope>()
+                        .unwrap_or(ProfileScope::UserPrivate),
                     owner,
                 });
             }
@@ -497,9 +499,70 @@ impl ProfileStore for PostgresProfileStore {
 
         Ok(row.map(|(name, scope, owner)| ProfileMetadata {
             name,
-            scope: scope.parse::<ProfileScope>().unwrap_or_default(),
+            scope: scope
+                .parse::<ProfileScope>()
+                .unwrap_or(ProfileScope::UserPrivate),
             owner,
         }))
+    }
+
+    async fn stamp_owner(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        metadata: &ProfileMetadata,
+        saved_at: chrono::DateTime<chrono::Utc>,
+    ) -> QuarryResult<StampOutcome> {
+        // Insert-only: ON CONFLICT DO NOTHING never touches an existing row's name, scope or
+        // owner. The tombstone guard is the one `save` uses (a delete at or after the
+        // request's own start, with the same 5 s clamp on the stamp).
+        let inserted: Option<(i32,)> = sqlx::query_as(
+            "WITH s AS ( \
+                 SELECT LEAST($7::timestamptz, NOW() + INTERVAL '5 seconds') AS saved_at \
+             ) \
+             INSERT INTO quarry_profiles \
+                 (org_id, profile_id, snapshot, name, scope, owner_user_id, created_at, updated_at) \
+             SELECT $1::text, $2::text, $3::jsonb, $4::text, $5::text, $6::text, NOW(), NOW() FROM s \
+             WHERE NOT EXISTS ( \
+                 SELECT 1 FROM quarry_profile_tombstones t \
+                 WHERE t.org_id = $1::text AND t.profile_id = $2::text \
+                   AND t.deleted_at >= s.saved_at \
+             ) \
+             ON CONFLICT (org_id, profile_id) DO NOTHING \
+             RETURNING 1",
+        )
+        .bind(org_id)
+        .bind(profile_id.to_string())
+        .bind(empty_snapshot_json())
+        .bind(&metadata.name)
+        .bind(metadata.scope.as_str())
+        .bind(&metadata.owner)
+        .bind(saved_at)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| db_err("stamp_owner", e))?;
+        if inserted.is_some() {
+            return Ok(StampOutcome::Stamped);
+        }
+        // Nothing was written. Diagnose only the reason, for the log class.
+        let (tombstoned,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM quarry_profile_tombstones \
+                 WHERE org_id = $1 AND profile_id = $2 \
+                   AND deleted_at >= LEAST($3::timestamptz, NOW() + INTERVAL '5 seconds') \
+             )",
+        )
+        .bind(org_id)
+        .bind(profile_id.to_string())
+        .bind(saved_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| db_err("stamp_owner:diagnose", e))?;
+        Ok(if tombstoned {
+            StampOutcome::IgnoredByTombstone
+        } else {
+            StampOutcome::AlreadyExists
+        })
     }
 }
 
@@ -579,6 +642,16 @@ impl ProfileBlobStore for PostgresProfileBlobStore {
         ProfileStore::load_metadata(&self.inner, org_id, profile_id).await
     }
 
+    async fn stamp_owner(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        metadata: &ProfileMetadata,
+        saved_at: chrono::DateTime<chrono::Utc>,
+    ) -> QuarryResult<StampOutcome> {
+        ProfileStore::stamp_owner(&self.inner, org_id, profile_id, metadata, saved_at).await
+    }
+
     async fn plaintext_page(
         &self,
         after: Option<&(String, String)>,
@@ -619,6 +692,7 @@ mod tests {
             viewport: None,
             locale: Some("en-US".into()),
             timezone: None,
+            ..Default::default()
         }
     }
 
@@ -838,6 +912,79 @@ mod tests {
                 .unwrap(),
             SaveOutcome::Stored { rev: 2 }
         );
+    }
+
+    /// D16 Q2: a row saved without metadata is user_private (migration 0005's default), and the
+    /// in-memory stores agree.
+    #[tokio::test]
+    async fn a_profile_saved_without_metadata_reads_back_user_private() {
+        let Some(pool) = fresh_pool().await else {
+            return;
+        };
+        clean(&pool).await;
+        let store = PostgresProfileStore::new(pool);
+        let id: ProfileKind = quarry_core::ids::Id::new();
+        store
+            .save("org_a", &id, &snap(), &SaveMeta::now(Some("user_a".into())))
+            .await
+            .unwrap();
+        let loaded = store.load_metadata("org_a", &id).await.unwrap().unwrap();
+        assert_eq!(loaded.scope, ProfileScope::UserPrivate);
+        assert_eq!(loaded.owner.as_deref(), Some("user_a"));
+        let listed = store.list("org_a").await.unwrap();
+        assert_eq!(listed[0].scope, ProfileScope::UserPrivate);
+    }
+
+    /// D16 Q2: the stamp at run start is insert-only, and a delete newer than the request's start
+    /// refuses it (the tombstone guard of `save`).
+    #[tokio::test]
+    async fn stamp_owner_is_insert_only_and_honours_tombstones() {
+        let Some(pool) = fresh_pool().await else {
+            return;
+        };
+        clean(&pool).await;
+        let store = PostgresProfileStore::new(pool);
+        let id: ProfileKind = quarry_core::ids::Id::new();
+        let owner = ProfileMetadata {
+            name: None,
+            scope: ProfileScope::UserPrivate,
+            owner: Some("user_a".into()),
+        };
+        let request_started = chrono::Utc::now() - chrono::Duration::seconds(2);
+        store.delete("org_a", &id).await.unwrap();
+        assert_eq!(
+            store
+                .stamp_owner("org_a", &id, &owner, request_started)
+                .await
+                .unwrap(),
+            StampOutcome::IgnoredByTombstone
+        );
+        assert!(!store.exists("org_a", &id).await.unwrap());
+
+        // A request that started after the delete creates the row once.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            store
+                .stamp_owner("org_a", &id, &owner, chrono::Utc::now())
+                .await
+                .unwrap(),
+            StampOutcome::Stamped
+        );
+        let other = ProfileMetadata {
+            owner: Some("user_b".into()),
+            scope: ProfileScope::OrgShared,
+            ..owner.clone()
+        };
+        assert_eq!(
+            store
+                .stamp_owner("org_a", &id, &other, chrono::Utc::now())
+                .await
+                .unwrap(),
+            StampOutcome::AlreadyExists
+        );
+        let loaded = store.load_metadata("org_a", &id).await.unwrap().unwrap();
+        assert_eq!(loaded.owner.as_deref(), Some("user_a"));
+        assert_eq!(loaded.scope, ProfileScope::UserPrivate);
     }
 
     #[tokio::test]

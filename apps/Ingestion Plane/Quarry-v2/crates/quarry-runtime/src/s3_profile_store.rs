@@ -227,7 +227,7 @@ impl ProfileStore for S3ProfileStore {
             let metadata = self
                 .load_metadata(org_id, &profile_id)
                 .await?
-                .unwrap_or_default();
+                .unwrap_or_else(ProfileMetadata::stored_default);
             out.push(ProfileSummary {
                 profile_id,
                 name: metadata.name,

@@ -30,6 +30,7 @@ use redis::AsyncCommands;
 
 use quarry_browser::session::{
     ProfileMetadata, ProfileStore, ProfileSummary, SaveMeta, SaveOutcome, SessionSnapshot,
+    StampOutcome,
 };
 use quarry_core::error::QuarryResult;
 use quarry_core::ids::kinds::ProfileKind;
@@ -177,6 +178,21 @@ impl ProfileStore for CachedProfileStore {
         profile_id: &ProfileKind,
     ) -> QuarryResult<Option<ProfileMetadata>> {
         self.inner.load_metadata(org_id, profile_id).await
+    }
+
+    async fn stamp_owner(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        metadata: &ProfileMetadata,
+        saved_at: chrono::DateTime<chrono::Utc>,
+    ) -> QuarryResult<StampOutcome> {
+        // Pass-through, like `save_metadata`: the stamp only creates a row that did not
+        // exist, so there is no cached snapshot to invalidate. The inner store keeps the
+        // tombstones.
+        self.inner
+            .stamp_owner(org_id, profile_id, metadata, saved_at)
+            .await
     }
 }
 
@@ -341,6 +357,18 @@ impl ProfileBlobStore for CachedBlobStore {
         profile_id: &ProfileKind,
     ) -> QuarryResult<Option<ProfileMetadata>> {
         self.inner.load_metadata(org_id, profile_id).await
+    }
+
+    async fn stamp_owner(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        metadata: &ProfileMetadata,
+        saved_at: chrono::DateTime<chrono::Utc>,
+    ) -> QuarryResult<StampOutcome> {
+        self.inner
+            .stamp_owner(org_id, profile_id, metadata, saved_at)
+            .await
     }
 
     async fn plaintext_page(
@@ -632,7 +660,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(store.load_metadata("org_a", &id).await.unwrap().is_none());
+        // A row saved without metadata reads back as the stored default (D16 Q2): user_private,
+        // no name. The old expectation, `None`, held for no store: the snapshot row exists.
+        let default = store.load_metadata("org_a", &id).await.unwrap().unwrap();
+        assert_eq!(
+            default.scope,
+            quarry_browser::session::ProfileScope::UserPrivate
+        );
+        assert!(default.name.is_none());
 
         let metadata = ProfileMetadata {
             name: Some("Shared support inbox".into()),
