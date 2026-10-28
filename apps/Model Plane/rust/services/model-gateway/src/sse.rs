@@ -13,10 +13,10 @@ use axum::{
 use chrono::Utc;
 use futures::Stream;
 use mp_contracts::model_plane::v1::{
-    orchestration_event, ApprovalKind, ApprovalState, ChatMessage, ContextSegment,
-    GetContextAssemblyRequest, InferRequest, OrchestrationEvent, PlanState, RunAgentRequest,
-    RunAgentResponse, StreamRunEventsRequest, SubagentRole, TodoState, ToolDefinition,
-    VerificationStatus,
+    orchestration_event, ApprovalKind, ApprovalState, CancelRunRequest, ChatMessage,
+    ContextSegment, GetContextAssemblyRequest, InferRequest, OrchestrationEvent, PlanState,
+    RunAgentRequest, RunAgentResponse, StreamRunEventsRequest, SubagentRole, TodoState,
+    ToolDefinition, VerificationStatus,
 };
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
@@ -10621,6 +10621,10 @@ const AGENTIC_EVENT_DRAIN_GRACE: std::time::Duration = std::time::Duration::from
 /// the longest. See [`with_keep_alive`].
 const AGENTIC_KEEP_ALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// How often a Do stream checks whether its client stopped it. The check is a flag read, so a
+/// Stop is seen within this much of the click, at no cost to the run.
+const AGENTIC_STOP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// The deadline for one run: pure, the environment arrives as `lookup` (compare
 /// `run_budget::resolve_run_budget`). `pinned_to_subscription` is
 /// [`AgentRoute::is_pinned`].
@@ -10660,7 +10664,8 @@ fn agent_dispatch_unavailable_event(request_id: &str, run_id: &str) -> Event {
 }
 
 /// What the agent dispatch task came back with: Execution Core's response or
-/// the transport status, or the join error of a task that did not finish.
+/// the transport status, or the join error of a task that did not finish. A
+/// dispatch the client stopped is aborted, so its join error is a cancelled one.
 type DispatchJoin = Result<Result<RunAgentResponse, tonic::Status>, tokio::task::JoinError>;
 
 /// The run was still going when the follow deadline passed. Nothing was
@@ -10724,6 +10729,15 @@ fn agentic_run_events(
 /// dropped, which detaches the task rather than aborting it, so the run goes
 /// on in Execution Core and writes its answer to the thread. When the dispatch
 /// result and the deadline are both ready at one poll, the result wins.
+///
+/// A Stop is the client's own: `stop` is the stream's cancel flag, set by the
+/// cancel route, by a durable cancel of the run or by a peer's Stop over the
+/// bus. It is read on a short tick inside the same loop, and then the dispatch
+/// is aborted. That drops the call to Execution Core, which is what stops the
+/// run's loop, and the follow returns at once: the answer is no longer wanted,
+/// so the tail is not drained. The order is the dispatch result, then the stop,
+/// then the deadline, so a run that finished in the same poll keeps its answer
+/// and a Stop that lands at the deadline is still a Stop.
 async fn follow_agentic_run<S>(
     events: S,
     mut dispatch: tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>,
@@ -10731,6 +10745,7 @@ async fn follow_agentic_run<S>(
     drain_grace: std::time::Duration,
     step_frame: impl Fn(&OrchestrationEvent) -> Option<Event>,
     tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    stop: &std::sync::atomic::AtomicBool,
 ) -> Result<DispatchJoin, DeadlineExpired>
 where
     S: Stream<Item = Result<OrchestrationEvent, tonic::Status>>,
@@ -10738,12 +10753,23 @@ where
     tokio::pin!(events);
     let deadline = tokio::time::sleep_until(deadline_at);
     tokio::pin!(deadline);
+    let mut stop_poll = tokio::time::interval(AGENTIC_STOP_POLL_INTERVAL);
+    stop_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut tail_open = true;
 
     let joined = loop {
         tokio::select! {
             biased;
             joined = &mut dispatch => break joined,
+            _ = stop_poll.tick() => {
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    // Aborting drops the call to Execution Core. A dispatch that finished
+                    // meanwhile keeps its own result: aborting a finished task changes
+                    // nothing, and the await hands that result back.
+                    dispatch.abort();
+                    return Ok((&mut dispatch).await);
+                }
+            }
             () = &mut deadline => return Err(DeadlineExpired),
             next = events.next(), if tail_open => match next {
                 Some(Ok(event)) => {
@@ -10817,6 +10843,27 @@ fn with_keep_alive(
     out_rx
 }
 
+/// Leaves a stopped agentic run cancelled in Session Core, as the durable cancel route does
+/// (`cancel_run` in `http_routes`): the same `RunService.CancelRun`, with the same metadata-only
+/// reason. It is idempotent, so a run that is already terminal answers `false`. A failure is the
+/// caller's to log, and the run then stays for session-core's recovery.
+#[allow(clippy::result_large_err)]
+async fn cancel_stopped_agentic_run(
+    state: &AppState,
+    run_id: &str,
+    bearer: &VerifiedModelBearer,
+) -> Result<bool, tonic::Status> {
+    let request = authenticated_session_request(
+        CancelRunRequest {
+            run_id: run_id.to_owned(),
+            reason: "user_requested".to_owned(),
+        },
+        bearer,
+    )?;
+    let response = state.run_client.clone().cancel_run(request).await?;
+    Ok(response.into_inner().cancelled)
+}
+
 /// Agentic run stream for the one already-prepared durable Session Core run.
 ///
 /// Execution Core owns agent progression, tool dispatch, approvals, assistant
@@ -10887,6 +10934,21 @@ fn agentic_run_stream(
         // executor resumes it or session-core's park TTL ends it. Computed once, here, so no
         // dispatch arm is guarded by the resume itself.
         let parking = resume.as_ref().is_some_and(|r| r.mode == "park");
+
+        // A Stop reaches this run while it is followed: the cancel route, a durable cancel of the
+        // run and a peer's Stop over the bus all find the entry made here. It is in place before
+        // `connected`, so a Stop never misses a stream the client has been told is running. A Do
+        // run takes no mid-run input, so the queue is not registered. A ZDR turn never reaches
+        // this function (`invoke_stream_sse` takes `zdr_direct_stream` first). The guard releases
+        // the entry on every exit of this task, so no exit below calls `finish`.
+        let cancel_flag = state
+            .cancels
+            .register_run(&request_id, &org_id, &user_id, &run_id);
+        let _registration = state.cancels.hold(&request_id);
+        state
+            .run_control
+            .attach(&state.cancels, &state.queued_inputs, &request_id, &run_id)
+            .await;
 
         // The prepared run exists — surface its ids so the SPA can drive durable
         // observation (GET /v1/runs/{run_id}/events) and approvals. After a gateway
@@ -11112,6 +11174,7 @@ fn agentic_run_stream(
                     .map(|step| step.to_sse(&request_id))
             },
             &tx,
+            &cancel_flag,
         )
         .await;
         tracing::info!(
@@ -11181,6 +11244,55 @@ fn agentic_run_stream(
                 let _ = tx
                     .send(Ok(dispatch_unknown_event(spend, &request_id, &run.run_id)))
                     .await;
+                return;
+            }
+            // The client stopped the run: its cancel flag is set and `follow_agentic_run` aborted
+            // the dispatch, so the call to Execution Core is dropped and the run's loop stops with
+            // it. The answer, and with it the run's usage, never arrives, so a stopped run's usage
+            // is not ledgered. A park continue is stopped the same way, the one exception to the
+            // park regime, which never terminalizes: a Stop is the user's explicit choice. The
+            // client gets the terminal `stopped` frame the Ask path sends, and Session Core is
+            // asked to leave the run cancelled. A failure is logged by its code, never a second
+            // frame.
+            Ok(Err(join_error))
+                if join_error.is_cancelled()
+                    && cancel_flag.load(std::sync::atomic::Ordering::Relaxed) =>
+            {
+                tracing::info!(
+                    %request_id,
+                    run_id = %run.run_id,
+                    "the client stopped an agentic run; its dispatch was aborted"
+                );
+                let stopped = crate::sse_events::ChatEvent::Stopped {
+                    reason: "client cancelled".to_owned(),
+                };
+                let _ = tx.send(Ok(stopped.to_sse(&request_id))).await;
+                match cancel_stopped_agentic_run(&state, &run_id, &model_bearer).await {
+                    Ok(true) => {
+                        // Session Core wrote the RUN_CANCELLED receipt in the same transaction; the
+                        // run subject closes the attempt with that event, as the other exits do.
+                        let cancelled = build_stream_envelope(
+                            &request_id,
+                            "RUN_CANCELLED",
+                            &org_id,
+                            &user_id,
+                            &model,
+                        );
+                        let _ = state
+                            .publisher
+                            .publish(&subjects::run_event_subject(&run_id), &cancelled)
+                            .await;
+                    }
+                    Ok(false) => tracing::info!(
+                        run_id = %run_id,
+                        "a stopped agentic run was already terminal in Session Core"
+                    ),
+                    Err(status) => tracing::warn!(
+                        run_id = %run_id,
+                        code = ?status.code(),
+                        "Session Core did not record the stop of an agentic run"
+                    ),
+                }
                 return;
             }
             Ok(Err(join_error)) => {
@@ -14679,7 +14791,7 @@ mod agentic_follow_tests {
     use super::{
         agent_dispatch_unavailable_event, follow_agentic_run, resolve_agentic_run_deadline,
         with_keep_alive, DeadlineExpired, DispatchJoin, AGENTIC_EVENT_DRAIN_GRACE,
-        AGENTIC_KEEP_ALIVE_INTERVAL, AGENTIC_RUN_DEADLINE_ENV,
+        AGENTIC_KEEP_ALIVE_INTERVAL, AGENTIC_RUN_DEADLINE_ENV, AGENTIC_STOP_POLL_INTERVAL,
     };
     use axum::response::{
         sse::{Event, Sse},
@@ -14833,6 +14945,16 @@ mod agentic_follow_tests {
         dispatch: Dispatch,
         deadline: Duration,
     ) -> Followed {
+        follow_stoppable(tail, dispatch, deadline, &AtomicBool::new(false)).await
+    }
+
+    /// [`follow`], with the client's stop flag in the caller's hands.
+    async fn follow_stoppable(
+        tail: impl Stream<Item = Result<OrchestrationEvent, tonic::Status>>,
+        dispatch: Dispatch,
+        deadline: Duration,
+        stop: &AtomicBool,
+    ) -> Followed {
         let started = Instant::now();
         let forwarded = Arc::new(Mutex::new(Vec::new()));
         let recorder = forwarded.clone();
@@ -14848,6 +14970,7 @@ mod agentic_follow_tests {
                 Some(Event::default().event("step_update").data(id))
             },
             &tx,
+            stop,
         )
         .await;
         let elapsed = started.elapsed();
@@ -15051,6 +15174,98 @@ mod agentic_follow_tests {
             Ok(Err(join_error)) => assert!(join_error.is_cancelled()),
             other => panic!("expected the join error, got {other:?}"),
         }
+    }
+
+    /// Dropping the future of a dispatch is what stops Execution Core's loop, so the flag this sets
+    /// is the proof that the abort reached the call.
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// A dispatch that never answers on its own, and a flag that says whether its future was dropped.
+    fn dispatch_held_open() -> (Dispatch, Arc<AtomicBool>) {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = DropFlag(dropped.clone());
+        let handle = tokio::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+            Ok(completed())
+        });
+        (handle, dropped)
+    }
+
+    /// Sets `stop` after `after`, as the client's Stop does.
+    fn stop_after(stop: Arc<AtomicBool>, after: Duration) {
+        tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            stop.store(true, Ordering::SeqCst);
+        });
+    }
+
+    /// A follow that ended because its dispatch was aborted: the join error is a cancelled one.
+    fn was_stopped(result: &Result<DispatchJoin, DeadlineExpired>) -> bool {
+        matches!(result, Ok(Err(join)) if join.is_cancelled())
+    }
+
+    /// A Stop aborts the dispatch and ends the follow within one tick of the click. The run's
+    /// answer is not wanted, so the tail is not drained either: the follow ends at the Stop, not
+    /// at the Stop plus the drain grace.
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_aborts_the_dispatch_and_ends_the_follow_within_one_tick() {
+        let (dispatch, dropped) = dispatch_held_open();
+        let stop = Arc::new(AtomicBool::new(false));
+        stop_after(stop.clone(), secs(2));
+        let run = follow_stoppable(open_tail(Vec::new()), dispatch, secs(120), &stop).await;
+
+        assert!(
+            was_stopped(&run.result),
+            "the dispatch was aborted: {:?}",
+            run.result
+        );
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the call to Execution Core was dropped with it"
+        );
+        assert!(
+            run.elapsed >= secs(2),
+            "ended before the click: {:?}",
+            run.elapsed
+        );
+        assert!(
+            run.elapsed <= secs(2) + AGENTIC_STOP_POLL_INTERVAL + SLACK,
+            "ended more than one tick after the click: {:?}",
+            run.elapsed
+        );
+    }
+
+    /// A Stop that is already set when the follow starts is read before a deadline that has
+    /// passed: the run is stopped, not reported as expired.
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_is_read_before_an_expired_deadline() {
+        let (dispatch, dropped) = dispatch_held_open();
+        let stop = AtomicBool::new(true);
+        let run = follow_stoppable(open_tail(Vec::new()), dispatch, Duration::ZERO, &stop).await;
+
+        assert!(was_stopped(&run.result), "{:?}", run.result);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    /// A run that finished before the Stop keeps its answer: the dispatch is polled first, so a
+    /// result that is ready at the poll wins over a stop that is also set.
+    #[tokio::test(start_paused = true)]
+    async fn a_run_that_finished_before_the_stop_keeps_its_answer() {
+        let dispatch: Dispatch = tokio::spawn(async { Ok(completed()) });
+        while !dispatch.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let stop = AtomicBool::new(true);
+        let run = follow_stoppable(open_tail(Vec::new()), dispatch, secs(120), &stop).await;
+
+        assert_eq!(expect_response(run.result).status, "completed");
     }
 
     fn lookup(value: Option<&str>) -> impl Fn(&str) -> Option<String> + '_ {
@@ -19520,6 +19735,85 @@ mod continue_run_tests {
         let terminalizes = position(construction, "terminalize_agent_dispatch_rejection_authenticated");
         assert!(spent_path < terminalizes, "the spent path comes before the terminalization");
         assert!(construction.contains("continue_refusal_event("));
+    }
+
+    /// A Do run is registered for Stop before its `connected` frame, by the two calls the Ask path
+    /// makes, and the registration is released by a guard that drops with the task: no exit calls
+    /// `finish` by hand. Nothing is registered in the queue, since no loop drains mid-run input for
+    /// a Do run. A stopped run ends with the `stopped` frame the Ask path sends, one run-subject
+    /// `RUN_CANCELLED` and no second frame.
+    #[test]
+    fn the_agentic_stream_is_registered_for_stop_before_connected_and_released_by_a_guard() {
+        let code = squash(&stream_code());
+        let registered = position(&code, "register_run(&request_id, &org_id, &user_id, &run_id)");
+        let held = position(
+            &code,
+            "let _registration = state.cancels.hold(&request_id);",
+        );
+        let attached = position(
+            &code,
+            "attach(&state.cancels, &state.queued_inputs, &request_id, &run_id)",
+        );
+        let connected = position(
+            &code,
+            "let connected = connected_payload(&run_id, &thread_id, &request_id, spend);",
+        );
+        assert!(
+            registered < held && held < attached && attached < connected,
+            "registered, held, attached, then connected"
+        );
+        assert!(
+            !code.contains("queued_inputs.register("),
+            "a Do run takes no mid-run input"
+        );
+        assert!(
+            !code.contains(".finish("),
+            "no exit releases the entry by hand"
+        );
+
+        // The guard releases the entry when it drops: the drop is in the registry's own impl.
+        let registry = include_str!("cancel_registry.rs").replace("\r\n", "\n");
+        let drop_impl = &registry[position(&registry, "impl Drop for Registration {")..];
+        let drop_impl = &drop_impl[..position(drop_impl, "\n}\n")];
+        assert!(
+            drop_impl.contains("self.cancels.finish(&self.request_id);"),
+            "{drop_impl}"
+        );
+
+        // The stop: one terminal frame, one run-subject event, one Session Core cancel.
+        let stop = arm_text(
+            &code,
+            "Ok(Err(join_error)) if join_error.is_cancelled()",
+            "Ok(Err(join_error)) => {",
+        );
+        assert_eq!(
+            stop.matches("tx.send(").count(),
+            1,
+            "one terminal frame: {stop}"
+        );
+        assert_eq!(stop.matches(".publish(").count(), 1, "{stop}");
+        assert_eq!(
+            stop.matches("cancel_stopped_agentic_run(").count(),
+            1,
+            "{stop}"
+        );
+        assert!(
+            stop.contains("reason: \"client cancelled\".to_owned()"),
+            "{stop}"
+        );
+        assert!(stop.contains("\"RUN_CANCELLED\""), "{stop}");
+        assert!(
+            !stop.contains("terminalize") && !stop.contains("dispatch_unknown_event"),
+            "a stop is a cancellation, not a degraded or terminalized dispatch: {stop}"
+        );
+
+        // The helper sends the reason the durable cancel route sends, and one CancelRun.
+        let helper = without_comments(&item_text("async fn cancel_stopped_agentic_run(", "\n}\n"));
+        assert!(
+            helper.contains("reason: \"user_requested\".to_owned()"),
+            "{helper}"
+        );
+        assert_eq!(helper.matches("cancel_run(").count(), 1, "{helper}");
     }
 
     /// The claim token is a secret of the click: no log statement of the pre-consume or of

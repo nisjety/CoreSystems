@@ -1661,4 +1661,44 @@ mod tests {
         let mut local = ProducerLiveness::new(owner_cancels, RunControl::off(), "req-1", "org-a", "user-a");
         assert!(local.is_live().await);
     }
+
+    /// A Do run's stream is registered the way `agentic_run_stream` registers it: its run id, and
+    /// no queued-input registration, since a Do run takes no mid-run input. A peer's Stop by the
+    /// run id reaches it, and a queued message for it is refused as for a stream that is not here.
+    #[tokio::test]
+    async fn a_do_run_stream_is_stoppable_by_run_id_from_a_peer_and_takes_no_queued_input() {
+        let hub = LoopbackHub::new();
+        let (owner, peer) = (rc(&hub), rc(&hub));
+        let (owner_cancels, peer_cancels) = (CancelRegistry::new(), CancelRegistry::new());
+        let no_queue = QueuedInputRegistry::new();
+        let flag = owner_cancels.register_run("req-do", "org-a", "user-a", "run-do");
+        assert!(
+            owner
+                .attach(&owner_cancels, &no_queue, "req-do", "run-do")
+                .await
+        );
+
+        assert_eq!(
+            peer.cancel_run(&peer_cancels, "run-do", "org-a", "user-a")
+                .await,
+            CancelRoute::Peer
+        );
+        assert!(
+            flag.load(std::sync::atomic::Ordering::Relaxed),
+            "the Do stream observes the Stop"
+        );
+
+        let peer_queue = QueuedInputRegistry::new();
+        let mut msg = RunControlMsg::new(RunControlOp::Queue, "org-a", "user-a");
+        msg.request_id = "req-do".into();
+        msg.text = Some("use EUR".into());
+        assert_eq!(
+            peer.queue_input(&peer_queue, &msg).await,
+            QueueRoute::NoOwner
+        );
+        assert!(
+            no_queue.drain("req-do").is_empty(),
+            "nothing was queued for the Do stream"
+        );
+    }
 }

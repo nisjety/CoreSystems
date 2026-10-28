@@ -130,6 +130,18 @@ impl CancelRegistry {
         self.inner.remove(request_id);
     }
 
+    /// Hold `request_id`'s registration for as long as the returned guard lives. Dropping the
+    /// guard is [`finish`](Self::finish), so a stream that holds its entry this way releases it
+    /// on every exit of the task that holds the guard, a panic included, with no call at each
+    /// exit to forget.
+    #[must_use]
+    pub fn hold(&self, request_id: &str) -> Registration {
+        Registration {
+            cancels: self.clone(),
+            request_id: request_id.to_owned(),
+        }
+    }
+
     /// Whether this caller's stream is still being produced in THIS process.
     ///
     /// Bound to the same tenant/user as [`cancel_for`](Self::cancel_for), so a
@@ -155,6 +167,19 @@ impl CancelRegistry {
     #[must_use]
     pub fn active(&self) -> usize {
         self.inner.len()
+    }
+}
+
+/// The registration of one stream, released when it is dropped. See [`CancelRegistry::hold`].
+#[must_use = "dropping the registration ends the stream's cancel entry"]
+pub struct Registration {
+    cancels: CancelRegistry,
+    request_id: String,
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        self.cancels.finish(&self.request_id);
     }
 }
 
@@ -259,5 +284,44 @@ mod tests {
         // A stream that already finished does not keep a listener it was handed late.
         assert!(!reg.attach_remote("req-1", listen().await));
         assert_eq!(hub.listener_count(), 0);
+    }
+
+    #[test]
+    fn a_held_registration_ends_when_its_holder_drops_it() {
+        let reg = CancelRegistry::new();
+        let flag = reg.register_run("req-held", "org-a", "user-a", "run-1");
+        {
+            let _held = reg.hold("req-held");
+            assert_eq!(reg.active(), 1);
+        }
+        assert_eq!(reg.active(), 0, "the drop released the entry");
+        assert!(
+            !reg.cancel_for("req-held", "org-a", "user-a"),
+            "a released stream is not cancellable"
+        );
+        assert!(!flag.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn a_held_registration_takes_its_bus_listener_with_it() {
+        use crate::queued_input::QueuedInputRegistry;
+        use crate::run_control::{LoopbackHub, RunControl};
+        let hub = LoopbackHub::new();
+        let control = RunControl::loopback(hub.clone(), std::time::Duration::from_millis(100));
+        let reg = CancelRegistry::new();
+        let _flag = reg.register_run("req-1", "org-a", "user-a", "run-1");
+        let held = reg.hold("req-1");
+        assert!(
+            control
+                .attach(&reg, &QueuedInputRegistry::new(), "req-1", "run-1")
+                .await
+        );
+        assert_eq!(hub.listener_count(), 1);
+        drop(held);
+        assert_eq!(
+            hub.listener_count(),
+            0,
+            "the release took the subscription with the entry"
+        );
     }
 }
