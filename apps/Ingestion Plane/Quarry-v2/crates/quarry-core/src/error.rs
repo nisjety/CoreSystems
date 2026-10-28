@@ -159,6 +159,23 @@ impl QuarryError {
         }))
     }
 
+    /// A page reload (`AgentAction::Reload`) proposed by an agent (WS9.B). Reload is a
+    /// person's action: it re-submits a form post and drops page state, which a model
+    /// must not do on its own. Quarry decides who the agent is from the verified token
+    /// (a service principal, or a person's token labelled `agent`), so the refusal holds
+    /// on every entry point whatever a gateway in front did or did not check (D2-012).
+    /// Nothing is consumed. Not retryable by the same caller.
+    pub fn agent_reload_denied() -> Self {
+        Self::new(
+            ErrorCode::Forbidden,
+            "reload is available to people, not to agents; use navigate",
+        )
+        .with_details(serde_json::json!({
+            "reason": "agent_reload_denied",
+            "denied_action": "reload",
+        }))
+    }
+
     /// The run met a strong challenge on a host, spent the one recovery it is
     /// allowed there, and asked for more. 403, not retryable by the same
     /// caller: the next step is a person (user take-over) or another source.

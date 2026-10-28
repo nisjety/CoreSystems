@@ -959,7 +959,8 @@ pub enum AgentAction {
     Forward,
     GetContent,
     /// Reload the current page (WS9.B). Human-only on the wire: the Model
-    /// Plane `browser.act` schema never exposes it. `ignore_cache` bypasses
+    /// Plane `browser.act` schema never exposes it, and the edge refuses it from the
+    /// derived agent (`agent_reload_denied`, D2-012). `ignore_cache` bypasses
     /// the HTTP cache (CDP `Page.reload{ignoreCache}`).
     Reload {
         #[serde(default)]

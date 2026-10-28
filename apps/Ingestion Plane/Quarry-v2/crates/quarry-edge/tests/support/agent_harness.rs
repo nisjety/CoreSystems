@@ -205,6 +205,8 @@ pub struct RecordingDriver {
     tab_selects: Mutex<Vec<String>>,
     tab_closes: Mutex<Vec<String>>,
     evaluate_calls: AtomicU32,
+    /// How many times the driver was asked to reload the page.
+    reload_calls: AtomicU32,
     /// How the next `goto` holds before it fails with the deadline `Timeout`.
     timeout_next_goto: Mutex<Option<GotoHold>>,
     /// How many `goto` calls have started (the call is then running, so the step that made
@@ -254,6 +256,11 @@ impl RecordingDriver {
     /// How many times the driver was asked to run page script (`evaluate`).
     pub fn evaluate_calls(&self) -> u32 {
         self.evaluate_calls.load(Ordering::SeqCst)
+    }
+
+    /// How many times the driver was asked to reload the page (`reload`).
+    pub fn reload_calls(&self) -> u32 {
+        self.reload_calls.load(Ordering::SeqCst)
     }
 
     /// Make the next `goto` fail the way the real driver's navigation deadline does: a
@@ -371,6 +378,11 @@ impl BrowserDriver for RecordingDriver {
             error.retryable = false;
             return Err(error);
         }
+        Ok(())
+    }
+
+    async fn reload(&self, _session: &BrowserSession, _ignore_cache: bool) -> QuarryResult<()> {
+        self.reload_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 

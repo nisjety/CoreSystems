@@ -183,3 +183,11 @@ These reasons come from `POST /v1/scrape` (and the stream, where noted). The sta
 | `action_failed` | 502 `DRIVER_FAILED` | an action failed under `abort`; `details.action_index` and `details.action_type` name it and `details.actions` lists every outcome in order | read `details.actions` (each entry's `error`); earlier clicks or writes may already have happened, so do not replay the list blindly |
 
 Field errors (400, in `errors[]`, not in `details.reason`): `feature_disabled`, `action_denied`, `unknown_action_type`, `invalid_action`, `too_many_actions`, `too_many_captures`, `too_many`, `unsupported_format`, `selector_too_long`, `text_too_long`. Each carries a path and never a value.
+
+## 403 `FORBIDDEN`: an action an agent may not take (WS9.B, D2-012)
+
+The agent is the one the verified token gives (a service principal, or a person's token that says `agent`), on the step route, its `interact` alias, the browser socket's `action` message (an error frame with the same `code` and `details`) and the attached delegate lane. Nothing is consumed: no budget step, no approval, no receipt. Not retryable by the same caller.
+
+| reason | `details.denied_action` | meaning | what a caller does |
+|---|---|---|---|
+| `agent_reload_denied` | `reload` | a page reload proposed by an agent; reload is a person's action | navigate to the URL instead, or leave it to the person |

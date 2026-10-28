@@ -201,6 +201,27 @@ pub(super) fn deny_raw_script(action: &AgentAction, run_id: &str) -> QuarryResul
     Ok(())
 }
 
+/// Refuse a page reload when the verified initiator is an agent (WS9.B, D2-012): a person's
+/// reload goes through, an agent's never does, before anything is consumed (no approval, no
+/// budget step, no receipt). The initiator is the one `derive_initiator` gave from the
+/// token, so a hint cannot make an agent a person.
+pub(super) fn deny_agent_reload(
+    action: &AgentAction,
+    initiator: StepInitiator,
+    run_id: &str,
+) -> QuarryResult<()> {
+    if initiator == StepInitiator::Agent && matches!(action, AgentAction::Reload { .. }) {
+        tracing::warn!(
+            target: "quarry_edge::agent",
+            run_id,
+            action = "reload",
+            "page reload by an agent denied"
+        );
+        return Err(QuarryError::agent_reload_denied());
+    }
+    Ok(())
+}
+
 pub(super) fn require_action_capabilities(
     action: &AgentAction,
     capabilities: BrowserDriverCapabilities,
@@ -361,7 +382,7 @@ async fn record_takeover_skip(
 /// Order (pinned by `admission_order_is_pinned`):
 /// 1 the run is still live, 2 the caller owns it (done by the caller: it needs the
 /// lock-free `RunLive` or the entry), 3 control, 4 grant, 5 driver capabilities,
-/// 6 ephemeral tier, 7 raw script, 8 web policy (slot for WS7), 9 budget,
+/// 6 ephemeral tier, 7 raw script (and an agent's reload), 8 web policy (slot for WS7), 9 budget,
 /// 10 sensitive approval, 11 navigation domain, 12 navigation security.
 pub(super) async fn admit_action(
     state: &AppState,
@@ -412,6 +433,7 @@ pub(super) async fn admit_action(
     }
     // 7. raw script
     deny_raw_script(action, &entry.run_id.to_string())?;
+    deny_agent_reload(action, input.initiator.class, &entry.run_id.to_string())?;
     // 8. web policy (WS7.D): the run's resolved decision. Before the budget and the one-shot
     // approval, so a refusal consumes neither.
     crate::agent_policy_gate::gate_policy(state, &handle.live, entry.zdr.is_active(), action)?;
