@@ -93,6 +93,8 @@ Two policies are pinned in `policy` and need an owner:
   so a Space with ZDR policy changes nothing in chat; `d_space_zdr_not_applied_org_off` pins that,
   so applying it later is a deliberate change of that row.
 
+**MCP goldens.** Two goldens hold the rule that an `mcp__` tool is never offered, executed or observed under zero retention. They are not rows of this matrix: its loaders reject unknown fields in every plane that reads it (the consumers are listed in `scripts/tests/zdr-contract-sync.test.sh`), and MCP follows from the enforcement decision rather than being an input to it. Each golden lives in the plane that owns the MCP gate and drives every `enforcement_rows` row of that plane's vendored copy through the real decision and gate: `apps/Model Plane/rust/services/execution-core/tests/zdr_mcp_golden.rs` (`mcp_tools_under_zdr_not_offered_not_executed`, through `runtime_loop::execute_step`) and `apps/Model Plane/rust/services/model-gateway/tests/zdr_mcp_observation_golden.rs` (`mcp_tool_observation_under_zdr`, through the MCP proxy contract and the observation gate). Neither edits this matrix or its pins. Two rows, where the gateway's answer on the plain route differs from the matrix, are pinned by name in the observation golden until an owner decides them.
+
 ## connection-zdr-capabilities.json
 
 One row per `(provider_key, auth_mode)` that has been assessed; anything else is the `fallback`
