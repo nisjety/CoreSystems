@@ -7,9 +7,11 @@ set -euo pipefail
 # nats.Bind(stream,durable) — they bind to PRE-EXISTING streams + durable push
 # consumers and never create them (their per-user NATS creds can't). This script
 # creates that topology with the observability-provisioner-application principal.
-# Idempotent: re-running is safe (skips anything already present). Run after a
-# fresh app-nats volume (the JetStream state lives in the app-nats-data volume;
-# a container recreate keeps it, a volume wipe loses it).
+# Idempotent: re-running is safe. Resources already present are left alone unless
+# they differ from audit-core's values for them (see the sections below); those are
+# converged in place and never deleted. Run after a fresh app-nats volume (the
+# JetStream state lives in the app-nats-data volume; a container recreate keeps it,
+# a volume wipe loses it).
 #
 #   apps/Application Plane> ./scripts/provision-jetstream.sh
 #
@@ -29,8 +31,16 @@ ip="_INBOX.PROVISIONER_APPLICATION"
 
 nb() { docker run --rm --network "$net" natsio/nats-box:latest \
   sh -c "nats --server '$srv' --inbox-prefix='$ip' --timeout=20s $*" 2>&1; }
+# nats prints durations in nanoseconds (336 h is 1209600000000000, 30 s is 30000000000).
+# A value matches only as a whole number: the next character must not be a digit (or
+# the line must end), so 10000000 does not match 1000000.
+json_has() { grep -Eq "\"$2\": ?$3([^0-9]|$)" <<<"$1"; }
 
 echo "== streams =="
+# Runtime streams take audit-core's values (its ProvisionApplicationRuntime, via
+# ensureRuntimeStream: 14 d, 1,000,000 messages), which that provisioner converges on
+# every run. The two must agree or each undoes the other, so an existing stream with
+# other values is converged in place with stream edit. Nothing is deleted.
 # name:subjects
 for spec in \
   "VEREVON_APPLICATION:verevon.application.>" \
@@ -38,11 +48,20 @@ for spec in \
   "VEREVON_MODEL:verevon.model.>"; do
   name=${spec%%:*}; subj=${spec##*:}
   if nb "stream info $name" | grep -q "Information for Stream"; then
-    echo "  = $name (exists)"
+    info=$(nb "stream info $name --json" 2>/dev/null) || info=""
+    if json_has "$info" max_age 1209600000000000 && json_has "$info" max_msgs 1000000; then
+      echo "  = $name (exists)"
+    else
+      nb "stream edit $name --max-age=336h --max-msgs=1000000 --force" >/dev/null \
+        || { echo "could not converge $name" >&2; exit 1; }
+      echo "  ~ $name (max-age 336h, max-msgs 1000000)"
+    fi
   else
     nb "stream add $name --subjects='$subj' --storage=file --retention=limits \
-      --discard=old --max-msgs=-1 --max-bytes=-1 --max-age=72h --dupe-window=2m \
-      --replicas=1 --defaults" >/dev/null && echo "  + $name ($subj)"
+      --discard=old --max-msgs=1000000 --max-bytes=-1 --max-age=336h --dupe-window=2m \
+      --replicas=1 --defaults" >/dev/null \
+      || { echo "could not create $name" >&2; exit 1; }
+    echo "  + $name ($subj)"
   fi
 done
 
@@ -81,6 +100,44 @@ done
 
 echo "== consumers (stream durable filter deliver) =="
 # stream|durable|filter|deliver-subject   (deliver-group == durable)
+# Shared durables: audit-core's Control provisioner (ProvisionApplicationRuntime,
+# applicationPushConsumer) converges these with ack-wait 30 s and max-deliver 5, and
+# refuses an existing durable whose max-deliver or ack-wait differs. So they are
+# created with those values here too, and an existing one is converged in place with
+# consumer edit. A durable is never deleted and re-added: that loses its delivery
+# position. notification-core-conversation-followed-message is created by the Control
+# provisioner as well, so it is listed here with the same values.
+# scripts/tests/audit-stream-contract-test.sh pins these values against provisioner.go.
+ensure_shared_consumer() {
+  local stream=$1 durable=$2 filter=$3 deliver=$4 info
+  if nb "consumer info $stream $durable" | grep -q "Information for Consumer"; then
+    info=$(nb "consumer info $stream $durable --json" 2>/dev/null) || info=""
+    if json_has "$info" max_deliver 5 && json_has "$info" ack_wait 30000000000; then
+      echo "  = $stream/$durable (exists)"
+    else
+      nb "consumer edit $stream $durable --max-deliver=5 --wait=30s --force" >/dev/null \
+        || { echo "could not converge $stream/$durable" >&2; exit 1; }
+      echo "  ~ $stream/$durable (max-deliver 5, ack-wait 30s)"
+    fi
+  else
+    nb "consumer add $stream $durable --filter='$filter' --target='$deliver' \
+      --deliver-group='$durable' --ack=explicit --wait=30s --max-deliver=5 \
+      --deliver=all --replay=instant --defaults" >/dev/null \
+      || { echo "could not create $stream/$durable" >&2; exit 1; }
+    echo "  + $stream/$durable"
+  fi
+}
+while IFS='|' read -r stream durable filter deliver; do
+  [[ -z "$stream" ]] && continue
+  ensure_shared_consumer "$stream" "$durable" "$filter" "$deliver"
+done <<'SHARED'
+VEREVON_INGESTION|conversation-core-webhook-received|verevon.ingestion.integration.webhook_received|_VEREVON.APPLICATION.DELIVER.conversation.webhook-received
+VEREVON_MODEL|conversation-core-model-action-proposed|verevon.model.action.proposed|_VEREVON.APPLICATION.DELIVER.conversation.model-action-proposed
+VEREVON_APPLICATION|conversation-core-ai-action-executor|verevon.application.conversation.ai_action.reviewed|_VEREVON.APPLICATION.DELIVER.conversation.ai-action-reviewed
+VEREVON_APPLICATION|insight-core-metric-subscriber|verevon.application.>|_VEREVON.APPLICATION.DELIVER.insight.metrics
+VEREVON_APPLICATION|notification-core-conversation-followed-message|verevon.application.conversation.message.received|_VEREVON.APPLICATION.DELIVER.notification.conversation-followed-message
+SHARED
+# Created here only (no Control owner): the defaults stay, so no max-deliver is set.
 while IFS='|' read -r stream durable filter deliver; do
   [[ -z "$stream" ]] && continue
   if nb "consumer info $stream $durable" | grep -q "Information for Consumer"; then
@@ -88,15 +145,12 @@ while IFS='|' read -r stream durable filter deliver; do
   else
     nb "consumer add $stream $durable --filter='$filter' --target='$deliver' \
       --deliver-group='$durable' --ack=explicit --deliver=all --replay=instant \
-      --defaults" >/dev/null && echo "  + $stream/$durable"
+      --defaults" >/dev/null \
+      || { echo "could not create $stream/$durable" >&2; exit 1; }
+    echo "  + $stream/$durable"
   fi
-done <<'CONSUMERS'
-VEREVON_INGESTION|conversation-core-webhook-received|verevon.ingestion.integration.webhook_received|_VEREVON.APPLICATION.DELIVER.conversation.webhook-received
-VEREVON_MODEL|conversation-core-model-action-proposed|verevon.model.action.proposed|_VEREVON.APPLICATION.DELIVER.conversation.model-action-proposed
-VEREVON_APPLICATION|conversation-core-ai-action-executor|verevon.application.conversation.ai_action.reviewed|_VEREVON.APPLICATION.DELIVER.conversation.ai-action-reviewed
-VEREVON_APPLICATION|insight-core-metric-subscriber|verevon.application.>|_VEREVON.APPLICATION.DELIVER.insight.metrics
+done <<'LOCAL'
 VEREVON_INGESTION|insight-core-ingestion-subscriber|verevon.ingestion.>|_VEREVON.APPLICATION.DELIVER.insight.ingestion
-VEREVON_APPLICATION|notification-core-conversation-followed-message|verevon.application.conversation.message.received|_VEREVON.APPLICATION.DELIVER.notification.conversation-followed-message
-CONSUMERS
+LOCAL
 
 echo "done."
