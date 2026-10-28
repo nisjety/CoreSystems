@@ -129,6 +129,37 @@ fn do_attachments_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
     get(DO_ATTACHMENTS_VAR).is_some_and(|value| value.trim() == "true")
 }
 
+/// The switch that lets a scoped thread's follow-up turns retrieve under the Space decision the BFF
+/// attaches to `space_append_context` (WS18-S2). Opt-in: only the literal `true` enables it. Off, a
+/// follow-up reads no retrieval decision and keeps today's unscoped retrieval. The BFF's own switch
+/// cannot stand in for this one, because an absent token and an empty one both decode to "".
+const SPACE_APPEND_RETRIEVAL_VAR: &str = "MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL";
+
+fn space_append_retrieval_enabled() -> bool {
+    space_append_retrieval_enabled_with(&|key| std::env::var(key).ok())
+}
+
+fn space_append_retrieval_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(SPACE_APPEND_RETRIEVAL_VAR).is_some_and(|value| value == "true")
+}
+
+/// The Space retrieval decision a turn's grounding is scoped by. A scoped thread's first message
+/// carries `space_context`; a later one carries `space_append_context`, which is read only while the
+/// switch is on. An empty token is the BFF's FORBIDDEN answer, which `retrieval::scoped_retrieval_token`
+/// suppresses rather than letting the search run organisation-wide.
+fn space_retrieval_decision<'a>(
+    space_context: Option<&'a crate::session_flow::ThreadSpaceContext>,
+    space_append_context: Option<&'a crate::session_flow::ThreadSpaceContext>,
+    append_enabled: bool,
+) -> Option<&'a str> {
+    let context = if append_enabled {
+        space_context.or(space_append_context)
+    } else {
+        space_context
+    };
+    context.map(|context| context.retrieval_decision_token.as_str())
+}
+
 /// The attachments a Do run carries, as `RunAttachment`s: files (staged read-only for the
 /// run's `code_interpreter` calls) and images (parts of every inference round), decoded once,
 /// measured and hashed, files first. Nothing is dropped: an attachment that cannot be carried
@@ -1391,9 +1422,11 @@ pub async fn invoke_stream_sse(
                 &req.content,
                 data_plane_mode.clone(),
                 sovereign_retrieval,
-                req.space_context
-                    .as_ref()
-                    .map(|context| context.retrieval_decision_token.as_str()),
+                space_retrieval_decision(
+                    req.space_context.as_ref(),
+                    req.space_append_context.as_ref(),
+                    space_append_retrieval_enabled(),
+                ),
             )
             .await
             {
@@ -2213,9 +2246,11 @@ pub async fn invoke_stream_sse(
                     &req.content,
                     data_plane_mode.clone(),
                     sovereign_retrieval,
-                    req.space_context
-                        .as_ref()
-                        .map(|context| context.retrieval_decision_token.as_str()),
+                    space_retrieval_decision(
+                        req.space_context.as_ref(),
+                        req.space_append_context.as_ref(),
+                        space_append_retrieval_enabled(),
+                    ),
                 )
                 .await
                 {
@@ -2252,9 +2287,11 @@ pub async fn invoke_stream_sse(
                     &req.content,
                     data_plane_mode.clone(),
                     sovereign_retrieval,
-                    req.space_context
-                        .as_ref()
-                        .map(|context| context.retrieval_decision_token.as_str()),
+                    space_retrieval_decision(
+                        req.space_context.as_ref(),
+                        req.space_append_context.as_ref(),
+                        space_append_retrieval_enabled(),
+                    ),
                 )
                 .await
                 {
@@ -2678,10 +2715,12 @@ pub async fn invoke_stream_sse(
     // owns, never sending the answer to an external engine unasked.
     let verify_bearer = data_plane_bearer.clone();
     let verify_sovereign = sovereign_retrieval;
-    let verify_space_decision = req
-        .space_context
-        .as_ref()
-        .map(|context| context.retrieval_decision_token.clone());
+    let verify_space_decision = space_retrieval_decision(
+        req.space_context.as_ref(),
+        req.space_append_context.as_ref(),
+        space_append_retrieval_enabled(),
+    )
+    .map(str::to_owned);
     let verify_web_allowed =
         crate::verification::may_escalate_to_web(tool_defs.iter().map(|tool| &tool.name));
     let structured_output_schema = req.structured_output_schema.clone().unwrap_or_default();
@@ -21261,6 +21300,84 @@ mod do_attachment_tests {
         assert!(do_attachments_enabled_with(&|key| {
             (key == "CHAT_DO_ATTACHMENTS_ENABLED").then(|| " true ".to_owned())
         }));
+    }
+
+    #[test]
+    fn the_space_append_retrieval_switch_is_on_only_for_the_literal_true() {
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some(" true"),
+            Some("yes"),
+            Some("false"),
+        ] {
+            let value = value.map(str::to_owned);
+            assert!(
+                !space_append_retrieval_enabled_with(&|_| value.clone()),
+                "{value:?}"
+            );
+        }
+        assert!(space_append_retrieval_enabled_with(&|key| {
+            (key == SPACE_APPEND_RETRIEVAL_VAR).then(|| "true".to_owned())
+        }));
+    }
+
+    fn space_decision(retrieval_token: &str) -> crate::session_flow::ThreadSpaceContext {
+        crate::session_flow::ThreadSpaceContext {
+            space_id: "room-1".to_owned(),
+            space_decision_ref: "decision-1".to_owned(),
+            recipient_audience_ref: "audience-1".to_owned(),
+            recipient_audience_revision: 1,
+            recipient_audience_hash: "sha256:audience-1".to_owned(),
+            privacy_policy_ref: "privacy-1".to_owned(),
+            authority_revision: 1,
+            resource_authorization_ref: "resource-1".to_owned(),
+            space_decision_token: "space-token".to_owned(),
+            retrieval_decision_token: retrieval_token.to_owned(),
+            action_schema_hash: "sha256:schema".to_owned(),
+            payload_digest: "sha256:payload".to_owned(),
+            idempotency_key: "idem-1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_space_append_turn_retrieves_with_the_space_decision() {
+        let append = space_decision("append-retrieval-token");
+        assert_eq!(
+            space_retrieval_decision(None, Some(&append), true),
+            Some("append-retrieval-token")
+        );
+    }
+
+    #[test]
+    fn a_forbidden_append_decision_is_passed_empty_so_retrieval_is_suppressed() {
+        let append = space_decision("");
+        assert_eq!(space_retrieval_decision(None, Some(&append), true), Some(""));
+    }
+
+    #[test]
+    fn a_follow_up_keeps_todays_unscoped_retrieval_while_the_switch_is_off() {
+        let append = space_decision("append-retrieval-token");
+        assert_eq!(space_retrieval_decision(None, Some(&append), false), None);
+    }
+
+    #[test]
+    fn a_first_turn_decision_wins_and_non_space_turns_stay_unscoped() {
+        let first = space_decision("first-retrieval-token");
+        let append = space_decision("append-retrieval-token");
+        for enabled in [false, true] {
+            assert_eq!(
+                space_retrieval_decision(Some(&first), None, enabled),
+                Some("first-retrieval-token")
+            );
+            assert_eq!(
+                space_retrieval_decision(Some(&first), Some(&append), enabled),
+                Some("first-retrieval-token")
+            );
+            assert_eq!(space_retrieval_decision(None, None, enabled), None);
+        }
     }
 
     #[test]

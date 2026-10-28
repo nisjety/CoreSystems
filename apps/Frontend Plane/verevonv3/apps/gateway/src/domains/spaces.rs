@@ -169,7 +169,7 @@ pub(crate) async fn inject_personal_thread_context(
             .get("token")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let context = json!({
+        let mut context = json!({
             "space_id": required_decision_string(decision, "space_ref")?,
             "space_decision_ref": required_decision_string(decision, "decision_ref")?,
             "recipient_audience_ref": required_decision_string(decision, "recipient_audience_ref")?,
@@ -185,6 +185,18 @@ pub(crate) async fn inject_personal_thread_context(
         });
         if token.trim().is_empty() {
             return Err(invalid_decision());
+        }
+        if space_append_retrieval_enabled() {
+            let retrieval_token = space_retrieval_token(
+                state,
+                org_id,
+                &actor,
+                &space_ref,
+                "space-retrieval-append",
+                counter,
+            )
+            .await?;
+            context["retrieval_decision_token"] = json!(retrieval_token);
         }
         object.insert("space_append_context".to_owned(), context);
         return Ok(());
@@ -251,38 +263,9 @@ pub(crate) async fn inject_personal_thread_context(
     // an outage must never be silently treated as "retrieval is fine, just
     // not entitled" — see scoped_retrieval_token's own contract in
     // model-gateway/src/retrieval.rs.
-    let retrieval_url = format!(
-        "{}/api/v1/internal/spaces/retrieval-decision",
-        state.user_core_url
-    );
-    let (retrieval_status, Json(retrieval_response)) = proxy_json(
-        state,
-        Method::POST,
-        &retrieval_url,
-        Some(json!({
-            "space_ref": space_ref,
-            "idempotency_key": format!("space-retrieval-{}-{counter}", unix_nanos()),
-        })),
-        Some(org_id),
-        Some(&actor),
-        None,
-    )
-    .await;
-    let retrieval_token = if retrieval_status == StatusCode::FORBIDDEN {
-        String::new()
-    } else if !retrieval_status.is_success() {
-        return Err((retrieval_status, Json(retrieval_response)));
-    } else {
-        let retrieval_token = crate::envelope::unwrap_data(&retrieval_response)
-            .get("token")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        if retrieval_token.trim().is_empty() {
-            return Err(invalid_decision());
-        }
-        retrieval_token
-    };
+    let retrieval_token =
+        space_retrieval_token(state, org_id, &actor, &space_ref, "space-retrieval", counter)
+            .await?;
     let context = json!({
         "space_id": required_decision_string(decision, "space_ref")?,
         "space_decision_ref": required_decision_string(decision, "decision_ref")?,
@@ -303,6 +286,59 @@ pub(crate) async fn inject_personal_thread_context(
     }
     object.insert("space_context".to_owned(), context);
     Ok(())
+}
+
+/// GATEWAY_SPACE_APPEND_RETRIEVAL (WS18-S2). Read strictly and per request: only
+/// the literal `true` makes a follow-up turn fetch its own retrieval decision, so
+/// every other value leaves the follow-up exactly as it was.
+fn space_append_retrieval_enabled() -> bool {
+    std::env::var("GATEWAY_SPACE_APPEND_RETRIEVAL").is_ok_and(|value| value == "true")
+}
+
+/// Asks Control for the retrieval authority of one scoped turn. A FORBIDDEN answer
+/// is a decline, not an outage: it yields an empty token, which the gateway
+/// suppresses so the turn is answered without organisation documents. Any other
+/// failure fails the turn, because an outage must never read as "not entitled".
+async fn space_retrieval_token(
+    state: &AppState,
+    org_id: &str,
+    actor: &ActionActor,
+    space_ref: &str,
+    key_prefix: &str,
+    counter: u64,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    let url = format!(
+        "{}/api/v1/internal/spaces/retrieval-decision",
+        state.user_core_url
+    );
+    let (status, Json(response)) = proxy_json(
+        state,
+        Method::POST,
+        &url,
+        Some(json!({
+            "space_ref": space_ref,
+            "idempotency_key": format!("{key_prefix}-{}-{counter}", unix_nanos()),
+        })),
+        Some(org_id),
+        Some(actor),
+        None,
+    )
+    .await;
+    if status == StatusCode::FORBIDDEN {
+        return Ok(String::new());
+    }
+    if !status.is_success() {
+        return Err((status, Json(response)));
+    }
+    let token = crate::envelope::unwrap_data(&response)
+        .get("token")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if token.trim().is_empty() {
+        return Err(invalid_decision());
+    }
+    Ok(token)
 }
 
 /// Resolves a browser-selected personal Space into the initial, short-lived
@@ -5810,6 +5846,145 @@ mod tests {
         );
         assert!(request.headers.get("x-delegation-signature").is_some());
         assert!(outbound.get("space_ref").is_none());
+    }
+
+    /// One follow-up turn of a room thread. Control answers the append decision and
+    /// the retrieval decision with the given replies; the helper returns the outcome,
+    /// the outbound body and the requests Control received.
+    async fn follow_up_turn(
+        retrieval: ResponseTemplate,
+    ) -> (
+        Result<(), axum::http::StatusCode>,
+        Value,
+        Vec<wiremock::Request>,
+    ) {
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-append-decision"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"token": "append-token", "decision": {
+                    "space_ref": "room-1", "decision_ref": "append-decision-1",
+                    "recipient_audience_ref": "audience-2", "recipient_audience_revision": 4,
+                    "recipient_audience_hash": "sha256:audience-2", "privacy_policy_ref": "privacy-1",
+                    "authority_revision": 8, "resource_authorization_ref": "resource-1",
+                    "action_schema_hash": "sha256:thread-append-v1", "payload_digest": "sha256:append-payload",
+                    "idempotency_key": "append-1"
+                }}
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/retrieval-decision"))
+            .respond_with(retrieval)
+            .mount(&user_core)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = user_core.uri();
+        let mut outbound = json!({
+            "content": "and the second one?", "thread_id": "thread-1", "space_ref": "room-1",
+            "idempotency_key": "append-1"
+        });
+
+        let outcome = inject_personal_thread_context(
+            &state,
+            &authenticated_user(),
+            "org-1",
+            &mut outbound,
+        )
+        .await
+        .map_err(|(status, _)| status);
+        let received = user_core
+            .received_requests()
+            .await
+            .expect("Control requests");
+        (outcome, outbound, received)
+    }
+
+    #[tokio::test]
+    async fn a_scoped_append_turn_carries_the_retrieval_decision() {
+        // Serialized: reads a process-global env switch and service URLs that sibling tests mutate.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        std::env::set_var("GATEWAY_SPACE_APPEND_RETRIEVAL", "true");
+        let (outcome, outbound, received) = follow_up_turn(ResponseTemplate::new(200).set_body_json(
+            json!({"data": {"token": "append-retrieval-token"}}),
+        ))
+        .await;
+        std::env::remove_var("GATEWAY_SPACE_APPEND_RETRIEVAL");
+
+        outcome.expect("a follow-up with retrieval authority is accepted");
+        assert_eq!(
+            outbound["space_append_context"]["retrieval_decision_token"],
+            "append-retrieval-token"
+        );
+        let request = received
+            .iter()
+            .find(|request| request.url.path() == "/api/v1/internal/spaces/retrieval-decision")
+            .expect("retrieval decision request");
+        let body: Value = serde_json::from_slice(&request.body).expect("retrieval JSON");
+        assert_eq!(body["space_ref"], "room-1");
+        assert!(body["idempotency_key"]
+            .as_str()
+            .is_some_and(|key| key.starts_with("space-retrieval-append-")));
+    }
+
+    #[tokio::test]
+    async fn a_forbidden_retrieval_decision_on_append_yields_an_empty_token_not_an_unscoped_call() {
+        // Serialized: reads a process-global env switch and service URLs that sibling tests mutate.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        std::env::set_var("GATEWAY_SPACE_APPEND_RETRIEVAL", "true");
+        let (outcome, outbound, _received) = follow_up_turn(ResponseTemplate::new(403).set_body_json(
+            json!({"error": "current retrieval authority required"}),
+        ))
+        .await;
+        std::env::remove_var("GATEWAY_SPACE_APPEND_RETRIEVAL");
+
+        outcome.expect("a denied retrieval entitlement must not fail a follow-up");
+        // The key stays and is empty: the gateway suppresses grounding for an empty
+        // token, where an absent key would mean an organisation-wide search.
+        assert_eq!(
+            outbound["space_append_context"]["retrieval_decision_token"],
+            ""
+        );
+        assert_eq!(
+            outbound["space_append_context"]["space_decision_token"],
+            "append-token"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retrieval_decision_outage_fails_the_follow_up() {
+        // Serialized: reads a process-global env switch and service URLs that sibling tests mutate.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        std::env::set_var("GATEWAY_SPACE_APPEND_RETRIEVAL", "true");
+        let (outcome, _outbound, _received) = follow_up_turn(ResponseTemplate::new(503).set_body_json(
+            json!({"error": "Space authority repository unavailable"}),
+        ))
+        .await;
+        std::env::remove_var("GATEWAY_SPACE_APPEND_RETRIEVAL");
+
+        assert!(
+            outcome.is_err(),
+            "an outage must fail the follow-up, not degrade it silently"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_follow_up_without_the_switch_asks_control_for_no_retrieval_decision() {
+        // Serialized: reads a process-global env switch and service URLs that sibling tests mutate.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        std::env::remove_var("GATEWAY_SPACE_APPEND_RETRIEVAL");
+        let (outcome, outbound, received) = follow_up_turn(ResponseTemplate::new(200).set_body_json(
+            json!({"data": {"token": "unused"}}),
+        ))
+        .await;
+
+        outcome.expect("the follow-up is accepted as it was before");
+        assert!(outbound["space_append_context"]
+            .get("retrieval_decision_token")
+            .is_none());
+        assert!(received.iter().all(|request| {
+            request.url.path() != "/api/v1/internal/spaces/retrieval-decision"
+        }));
     }
 
     #[tokio::test]
