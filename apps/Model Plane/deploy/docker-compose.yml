@@ -222,6 +222,8 @@ services:
       # works with whichever provider key is set (Anthropic-only, OpenAI-only,
       # or both). Set DEFAULT_MODEL to pin a specific model org-wide.
       DEFAULT_MODEL: ${DEFAULT_MODEL:-}
+      # Title, follow-up and judge calls; empty = gpt-4o-mini. On an Anthropic-only chain set claude-haiku-5-5.
+      MODEL_GATEWAY_AUX_MODEL: ${MODEL_GATEWAY_AUX_MODEL:-}
       RATE_LIMIT_RPM: "100"
       # Resume buffer for chat streams (chat gap closure I3). With it the frames
       # a turn has already sent are kept in the model plane's Dragonfly, so a

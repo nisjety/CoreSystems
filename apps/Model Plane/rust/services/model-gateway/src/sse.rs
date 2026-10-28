@@ -853,6 +853,60 @@ mod subscription_route_tests {
 }
 
 #[cfg(test)]
+mod aux_model_tests {
+    use super::*;
+
+    #[test]
+    fn aux_model_from_is_trimmed_and_blank_or_unset_keeps_the_default() {
+        assert_eq!(aux_model_from(None), "gpt-4o-mini");
+        assert_eq!(aux_model_from(Some("")), "gpt-4o-mini");
+        assert_eq!(aux_model_from(Some(" \t ")), "gpt-4o-mini");
+        assert_eq!(aux_model_from(Some("claude-haiku-5-5")), "claude-haiku-5-5");
+        assert_eq!(aux_model_from(Some("  claude-haiku-5-5\n")), "claude-haiku-5-5");
+    }
+
+    #[test]
+    fn aux_model_reaches_the_title_follow_up_and_judge_requests() {
+        // A metered turn: all three auxiliary calls run on the resolved model, each
+        // under its own request-id suffix.
+        let metered = InferRequest {
+            model: "claude-sonnet-5-5".into(),
+            ..Default::default()
+        };
+        let snippets = vec!["A retrieved passage.".to_owned()];
+        let requests = [
+            title_request(&metered, "req-1", "org-1", "question", "answer"),
+            follow_ups_request(&metered, "req-1", "org-1", "question", "answer"),
+            verification_judge_request(&metered, "req-1", "org-1", "question", "answer", &snippets, false),
+        ];
+        let ids: Vec<&str> = requests.iter().map(|request| request.request_id.as_str()).collect();
+        assert_eq!(ids, ["req-1-title", "req-1-follow-ups", "req-1-verify"]);
+        for request in &requests {
+            assert_eq!(request.model, aux_model(), "{} runs on the auxiliary model", request.request_id);
+        }
+        // The judge inherits the turn's retention posture; the title and the
+        // follow-ups only ever carry non-ZDR exchange content.
+        assert!(verification_judge_request(&metered, "req-1", "org-1", "question", "answer", &snippets, true).zdr);
+        assert!(!requests[0].zdr && !requests[1].zdr && !requests[2].zdr);
+
+        // On a subscription turn the auxiliary calls keep the turn's own model whatever
+        // the setting says: they must never spend another provider's quota.
+        let subscription = InferRequest {
+            model: "gpt-5.6-terra".into(),
+            provider_hint: "openai-codex-subscription".into(),
+            subscription_connection_id: "connection".into(),
+            ..Default::default()
+        };
+        assert_eq!(title_request(&subscription, "req-2", "org-1", "question", "answer").model, "gpt-5.6-terra");
+        assert_eq!(follow_ups_request(&subscription, "req-2", "org-1", "question", "answer").model, "gpt-5.6-terra");
+        assert_eq!(
+            verification_judge_request(&subscription, "req-2", "org-1", "question", "answer", &snippets, false).model,
+            "gpt-5.6-terra"
+        );
+    }
+}
+
+#[cfg(test)]
 mod agent_route_tests {
     use super::*;
     use prost::Message as _;
@@ -8589,8 +8643,9 @@ async fn direct_infer_turn(
         .map(|response| DirectAnswer::from_response(response.into_inner(), model))
 }
 
-/// Model for the thread-title summarization: a **pinned** cheap non-reasoning
-/// model, deliberately *not* the `verevon-budget` tier it used to name.
+/// Model for the auxiliary calls (the thread title, the follow-up chips and the
+/// source judge): a **pinned** cheap non-reasoning model, deliberately *not* the
+/// `verevon-budget` tier it used to name.
 ///
 /// A tier is the wrong dependency for a micro-call with a fixed token budget.
 /// `verevon-budget` is resolved by inference-core's intent layer, which re-routes
@@ -8609,10 +8664,14 @@ async fn direct_infer_turn(
 /// only the `verevon-*` names as modes), so the budget below is honest and the
 /// behaviour no longer depends on how much the user happened to type.
 ///
-/// `gpt-4o-mini` specifically: inference-core's designated cheap fallback
-/// (`intent::CHEAP_FALLBACK`), always in the deployed chat roster, and already
-/// the model behind every title this feature has ever actually shown.
-const TITLE_MODEL: &str = "gpt-4o-mini";
+/// `gpt-4o-mini` is the default: inference-core's designated cheap fallback
+/// (`intent::CHEAP_FALLBACK`), and the model behind every title this feature has
+/// shown. A deployment whose inference chain does not serve it sets
+/// `MODEL_GATEWAY_AUX_MODEL` to a model the chain does serve (see [`aux_model`]).
+/// Without that, all three calls fail on every turn and their output is dropped.
+const AUX_MODEL_DEFAULT: &str = "gpt-4o-mini";
+/// The operator setting that replaces [`AUX_MODEL_DEFAULT`] for all three calls.
+const AUX_MODEL_VAR: &str = "MODEL_GATEWAY_AUX_MODEL";
 /// Hard ceiling on the title inference. The title arrives after the answer is
 /// already on screen, but it still holds the terminal `done` frame back — so a
 /// slow summarizer must degrade to "no title" rather than a visible stall.
@@ -8622,7 +8681,7 @@ const TITLE_MODEL: &str = "gpt-4o-mini";
 /// and the broken calls were never timing out — they returned *early* and
 /// empty. Raising this would push `done` later for every user and buy nothing.
 const TITLE_GENERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
-/// Output budget for a 3–6 word title. Honest now that [`TITLE_MODEL`] spends
+/// Output budget for a 3–6 word title. Honest now that the auxiliary model spends
 /// its budget on visible text instead of hidden reasoning: 24 tokens is
 /// live-proven sufficient — it is the budget that produced the titles that did
 /// work, on the same model this now pins.
@@ -8635,17 +8694,16 @@ const TITLE_ANSWER_SNIPPET_CHARS: usize = 2000;
 /// How much of the user question the title prompt sees.
 const TITLE_QUESTION_SNIPPET_CHARS: usize = 1000;
 
-/// Same pinned-model/timeout/snippet posture as [`TITLE_MODEL`] and friends — a
-/// composer suggestion never justifies a premium model or a visible stall
-/// either, and it was starved by the same tier indirection: on a short exchange
-/// this call also resolved to reasoning-model `gpt-5-nano` and came back HTTP
-/// 200 with no content, so the chips silently never rendered.
-const FOLLOW_UPS_MODEL: &str = "gpt-4o-mini";
+// Same pinned-model/timeout/snippet posture as the title call — a composer
+// suggestion never justifies a premium model or a visible stall either, and it
+// was starved by the same tier indirection: on a short exchange this call also
+// resolved to reasoning-model `gpt-5-nano` and came back HTTP 200 with no
+// content, so the chips silently never rendered.
 /// Also left at 4s: measured at ~1.4s on the pinned model, and — like the title
 /// above — the broken calls returned early and empty rather than timing out.
 const FOLLOW_UPS_GENERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 /// Output budget for up to 3 short questions, one per line. Live-proven at this
-/// value on [`FOLLOW_UPS_MODEL`] (three full Norwegian suggestions), and honest
+/// value on the pinned model (three full Norwegian suggestions), and honest
 /// now that no part of it is spent on hidden reasoning tokens.
 const FOLLOW_UPS_MAX_TOKENS: i32 = 96;
 /// Longest sanitized suggestion emitted to clients, in characters.
@@ -8663,11 +8721,10 @@ const FOLLOW_UPS_QUESTION_SNIPPET_CHARS: usize = 1000;
 /// not).
 const FOLLOW_UPS_MIN_CONFIDENCE: f64 = 0.15;
 
-/// Same pinned-cheap-model posture as the title and follow-up calls: judging
-/// whether five snippets back one claim is not work that justifies a premium
-/// model, and a tier indirection here would resolve to a reasoning model that
-/// returns empty (the failure that silently broke both of those).
-const VERIFICATION_JUDGE_MODEL: &str = "gpt-4o-mini";
+// Same pinned-cheap-model posture as the title and follow-up calls: judging
+// whether five snippets back one claim is not work that justifies a premium
+// model, and a tier indirection here would resolve to a reasoning model that
+// returns empty (the failure that silently broke both of those).
 /// The judge holds the turn's `usage` frame back, so it must degrade to "not
 /// confirmed" rather than stall. One word out of a short prompt lands well
 /// inside this.
@@ -8675,6 +8732,65 @@ const VERIFICATION_JUDGE_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// One word. Budgeted a little above it so a model that insists on punctuation
 /// or a leading space still emits the word itself.
 const VERIFICATION_JUDGE_MAX_TOKENS: i32 = 8;
+
+/// The model the auxiliary calls use. It is read from the environment once per
+/// process, so every auxiliary call in the process agrees on it and the
+/// environment is not consulted on each request.
+fn aux_model() -> &'static str {
+    static MODEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MODEL
+        .get_or_init(|| aux_model_from(std::env::var(AUX_MODEL_VAR).ok().as_deref()))
+        .as_str()
+}
+
+/// The model a raw `MODEL_GATEWAY_AUX_MODEL` value selects: the trimmed value, or
+/// [`AUX_MODEL_DEFAULT`] when it is unset or blank. Kept free of the environment
+/// so the parsing can be tested directly.
+fn aux_model_from(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or(AUX_MODEL_DEFAULT)
+        .to_owned()
+}
+
+/// The source judge's request: one classification over the snippets, carried on
+/// the turn's subscription when it has one, as every auxiliary call is.
+fn verification_judge_request(
+    route: &InferRequest,
+    request_id: &str,
+    org_id: &str,
+    question: &str,
+    answer: &str,
+    snippets: &[String],
+    zdr: bool,
+) -> InferRequest {
+    subscription_scoped_request(
+        InferRequest {
+            request_id: format!("{request_id}-verify"),
+            org_id: org_id.to_owned(),
+            model: aux_model().to_owned(),
+            provider_hint: String::new(),
+            messages: vec![ChatMessage {
+                compaction_summary: String::new(),
+                role: "user".to_owned(),
+                content: crate::verification::entailment_prompt(question, answer, snippets),
+                name: String::new(),
+            }],
+            // A classification, not a composition: the same snippets must
+            // produce the same verdict twice.
+            temperature: 0.0,
+            max_tokens: VERIFICATION_JUDGE_MAX_TOKENS,
+            structured_output_schema: String::new(),
+            // Carries the answer and retrieved source text, so it inherits
+            // the turn's retention posture rather than assuming the title
+            // path's non-ZDR shortcut.
+            zdr,
+            ..Default::default()
+        },
+        route,
+    )
+}
 
 /// Ask whether the retrieved sources actually back the answer.
 ///
@@ -8702,28 +8818,7 @@ async fn judge_sources(
     let response = tokio::time::timeout(
         VERIFICATION_JUDGE_TIMEOUT,
         client.infer(authenticated_inference_request(
-            subscription_scoped_request(InferRequest {
-                request_id: format!("{request_id}-verify"),
-                org_id: org_id.to_owned(),
-                model: VERIFICATION_JUDGE_MODEL.to_owned(),
-                provider_hint: String::new(),
-                messages: vec![ChatMessage {
-                    compaction_summary: String::new(),
-                    role: "user".to_owned(),
-                    content: crate::verification::entailment_prompt(question, answer, snippets),
-                    name: String::new(),
-                }],
-                // A classification, not a composition: the same snippets must
-                // produce the same verdict twice.
-                temperature: 0.0,
-                max_tokens: VERIFICATION_JUDGE_MAX_TOKENS,
-                structured_output_schema: String::new(),
-                // Carries the answer and retrieved source text, so it inherits
-                // the turn's retention posture rather than assuming the title
-                // path's non-ZDR shortcut.
-                zdr,
-                ..Default::default()
-            }, route),
+            verification_judge_request(route, request_id, org_id, question, answer, snippets, zdr),
             inference_bearer,
         )),
     )
@@ -8801,6 +8896,41 @@ async fn resample_answer(
     samples
 }
 
+/// The thread-title request: one bounded, non-streaming user turn on the
+/// auxiliary model, carried on the turn's subscription when it has one.
+fn title_request(
+    route: &InferRequest,
+    request_id: &str,
+    org_id: &str,
+    user_content: &str,
+    assistant_answer: &str,
+) -> InferRequest {
+    subscription_scoped_request(
+        InferRequest {
+            request_id: format!("{request_id}-title"),
+            org_id: org_id.to_owned(),
+            model: aux_model().to_owned(),
+            provider_hint: String::new(),
+            messages: vec![ChatMessage {
+                compaction_summary: String::new(),
+                role: "user".to_owned(),
+                content: thread_title_prompt(user_content, assistant_answer),
+                name: String::new(),
+            }],
+            // Low temperature: titles should be consistent in style across
+            // threads, not creative.
+            temperature: 0.2,
+            max_tokens: TITLE_MAX_TOKENS,
+            structured_output_schema: String::new(),
+            // The call site skips title generation entirely for ZDR turns;
+            // this request only ever carries non-ZDR exchange content.
+            zdr: false,
+            ..Default::default()
+        },
+        route,
+    )
+}
+
 /// Summarize a thread's first exchange into a short sidebar title.
 ///
 /// Trace-free by design: a single bounded, non-streaming inference with no
@@ -8819,27 +8949,7 @@ async fn generate_thread_title(
     let response = tokio::time::timeout(
         TITLE_GENERATION_TIMEOUT,
         client.infer(authenticated_inference_request(
-            subscription_scoped_request(InferRequest {
-                request_id: format!("{request_id}-title"),
-                org_id: org_id.to_owned(),
-                model: TITLE_MODEL.to_owned(),
-                provider_hint: String::new(),
-                messages: vec![ChatMessage {
-                    compaction_summary: String::new(),
-                    role: "user".to_owned(),
-                    content: thread_title_prompt(user_content, assistant_answer),
-                    name: String::new(),
-                }],
-                // Low temperature: titles should be consistent in style across
-                // threads, not creative.
-                temperature: 0.2,
-                max_tokens: TITLE_MAX_TOKENS,
-                structured_output_schema: String::new(),
-                // The call site skips title generation entirely for ZDR turns;
-                // this request only ever carries non-ZDR exchange content.
-                zdr: false,
-                ..Default::default()
-            }, route),
+            title_request(route, request_id, org_id, user_content, assistant_answer),
             inference_bearer,
         )),
     )
@@ -8856,7 +8966,7 @@ async fn generate_thread_title(
             if content.trim().is_empty() {
                 tracing::warn!(
                     %request_id,
-                    model = TITLE_MODEL,
+                    model = aux_model(),
                     max_tokens = TITLE_MAX_TOKENS,
                     "thread title inference succeeded but returned empty content"
                 );
@@ -8887,6 +8997,40 @@ fn thread_title_prompt(user_content: &str, assistant_answer: &str) -> String {
     )
 }
 
+/// The follow-up suggestion request: one bounded, non-streaming user turn on the
+/// auxiliary model, carried on the turn's subscription when it has one.
+fn follow_ups_request(
+    route: &InferRequest,
+    request_id: &str,
+    org_id: &str,
+    user_content: &str,
+    assistant_answer: &str,
+) -> InferRequest {
+    subscription_scoped_request(
+        InferRequest {
+            request_id: format!("{request_id}-follow-ups"),
+            org_id: org_id.to_owned(),
+            model: aux_model().to_owned(),
+            provider_hint: String::new(),
+            messages: vec![ChatMessage {
+                compaction_summary: String::new(),
+                role: "user".to_owned(),
+                content: follow_ups_prompt(user_content, assistant_answer),
+                name: String::new(),
+            }],
+            temperature: 0.4,
+            max_tokens: FOLLOW_UPS_MAX_TOKENS,
+            structured_output_schema: String::new(),
+            // The call site never reaches here for a ZDR turn (ZDR takes
+            // `zdr_direct_stream`); this request only ever carries
+            // non-ZDR exchange content.
+            zdr: false,
+            ..Default::default()
+        },
+        route,
+    )
+}
+
 /// Generate 2-3 short follow-up questions the user might ask next, in the
 /// conversation's own language. Same posture as [`generate_thread_title`]:
 /// a single bounded, non-streaming, trace-free inference call — no
@@ -8906,26 +9050,7 @@ async fn generate_follow_ups(
     let response = tokio::time::timeout(
         FOLLOW_UPS_GENERATION_TIMEOUT,
         client.infer(authenticated_inference_request(
-            subscription_scoped_request(InferRequest {
-                request_id: format!("{request_id}-follow-ups"),
-                org_id: org_id.to_owned(),
-                model: FOLLOW_UPS_MODEL.to_owned(),
-                provider_hint: String::new(),
-                messages: vec![ChatMessage {
-                    compaction_summary: String::new(),
-                    role: "user".to_owned(),
-                    content: follow_ups_prompt(user_content, assistant_answer),
-                    name: String::new(),
-                }],
-                temperature: 0.4,
-                max_tokens: FOLLOW_UPS_MAX_TOKENS,
-                structured_output_schema: String::new(),
-                // The call site never reaches here for a ZDR turn (ZDR takes
-                // `zdr_direct_stream`); this request only ever carries
-                // non-ZDR exchange content.
-                zdr: false,
-                ..Default::default()
-            }, route),
+            follow_ups_request(route, request_id, org_id, user_content, assistant_answer),
             inference_bearer,
         )),
     )
@@ -8939,7 +9064,7 @@ async fn generate_follow_ups(
             if content.trim().is_empty() {
                 tracing::warn!(
                     %request_id,
-                    model = FOLLOW_UPS_MODEL,
+                    model = aux_model(),
                     max_tokens = FOLLOW_UPS_MAX_TOKENS,
                     "follow-up suggestion inference succeeded but returned empty content"
                 );
