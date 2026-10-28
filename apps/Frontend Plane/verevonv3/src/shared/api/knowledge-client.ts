@@ -731,6 +731,8 @@ export type CrawlWorkflowEvent = {
   total?: number
   /** WS14.S3: pages the edge refused (robots or scope), from `run_*` payloads. */
   pagesBlocked?: number
+  /** WS14.S4: the part of `pagesBlocked` the edge refused under robots.txt (`pages_blocked_robots`). */
+  pagesBlockedByRobots?: number
   /** WS14.S3: links the crawl scope refused, from `run_*` payloads. */
   linksDenied?: number
   /** WS14.S3: denial counts by code (`denials.counts`), from `run_*` payloads. */
@@ -885,6 +887,7 @@ function normalizeCrawlEvent(event: string | undefined, data: string): CrawlWork
       ?? numberField(record, 'total')
     // WS14.S3: the scope summary of a terminal event. Absent for a legacy crawl.
     const pagesBlocked = numberField(payload, 'pages_blocked')
+    const pagesBlockedByRobots = numberField(payload, 'pages_blocked_robots')
     const linksDenied = numberField(payload, 'links_denied')
     const denialCounts = denialCountsField(payload)
 
@@ -910,6 +913,7 @@ function normalizeCrawlEvent(event: string | undefined, data: string): CrawlWork
       ...(pagesFailed !== undefined ? { pagesFailed } : {}),
       ...(total !== undefined ? { total } : {}),
       ...(pagesBlocked !== undefined ? { pagesBlocked } : {}),
+      ...(pagesBlockedByRobots !== undefined ? { pagesBlockedByRobots } : {}),
       ...(linksDenied !== undefined ? { linksDenied } : {}),
       ...(denialCounts ? { denialCounts } : {}),
     }

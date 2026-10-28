@@ -98,6 +98,7 @@ import {
   type ScrapeBlock,
   type ScrapePreview,
 } from './knowledge-preview'
+import { robotsBlockedText } from './knowledge-robots'
 
 type IngestMode = 'link' | 'crawl' | 'products'
 type IngestKind = 'link' | 'crawl' | 'upload'
@@ -127,6 +128,8 @@ type IngestJob = {
   label: string
   /** Pages fetched, surfaced from the crawl's run_completed event. */
   pages?: number
+  /** Pages the crawl's robots.txt gate refused (WS14.S4), from the run_completed event. */
+  pagesBlockedByRobots?: number
   progress?: number
   status: string
 }
@@ -326,6 +329,7 @@ export function KnowledgeComposer(props: {
         ...(event.progress !== undefined ? { progress: event.progress } : {}),
         ...(event.status ? { status: event.status } : {}),
         ...(event.pagesVisited !== undefined ? { pages: event.pagesVisited } : {}),
+        ...(event.pagesBlockedByRobots !== undefined ? { pagesBlockedByRobots: event.pagesBlockedByRobots } : {}),
         // Real Data Plane ingest proof/failure — independent of quarry's own
         // run status, so a crawl can't read "Indexed" off scrape completion
         // alone. Latched (never cleared) so one written page still counts
@@ -1790,6 +1794,11 @@ function IngestJobRow(props: { job: IngestJob }) {
         <span class="dashboard-knowledge-composer__job-detail">
           {kindLabel()} · {props.job.error ?? (running() ? props.job.detail : terminalDetail(props.job, i18n))}
         </span>
+        <Show when={(props.job.pagesBlockedByRobots ?? 0) > 0}>
+          <span class="dashboard-knowledge-composer__job-robots">
+            {robotsBlockedText(props.job.pagesBlockedByRobots, (no, en) => i18n.tr(no, en))}
+          </span>
+        </Show>
         <Show when={progress() !== null}>
           <span class="dashboard-knowledge-composer__job-progress">
             <span style={{ width: `${progress() ?? 0}%` }} />

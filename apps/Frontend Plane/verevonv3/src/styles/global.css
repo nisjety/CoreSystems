@@ -10524,6 +10524,11 @@ h3 {
   font-size: 12px;
 }
 
+.dashboard-knowledge-composer__job-robots {
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
 .dashboard-knowledge-composer__job-progress {
   display: block;
   width: min(180px, 100%);
