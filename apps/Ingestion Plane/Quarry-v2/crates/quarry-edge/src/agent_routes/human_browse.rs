@@ -154,6 +154,20 @@ pub(super) fn counts_against_step_budget(
         || budget.is_some_and(|budget| budget.class == crate::budget::RunClass::Agent)
 }
 
+/// Whether the takeover rule (7d78ab2e8) is what spared this step from the budget: a
+/// person's step during a takeover on a run whose class is the agent's, which without the
+/// takeover would count (R-8). The takeover counter reads this, so the metric measures
+/// exactly the use the exemption lets through unmetered (TAKEOVER-BUDGET, X-12 shadow review).
+pub(super) fn takeover_exempted_step(
+    initiator: StepInitiator,
+    takeover: bool,
+    budget: Option<&crate::budget::RunBudget>,
+) -> bool {
+    takeover
+        && counts_against_step_budget(initiator, false, budget)
+        && !counts_against_step_budget(initiator, true, budget)
+}
+
 /// What a step writes to the receipt store (WS8.B). A ZDR run writes nothing, as
 /// before. A person's step on a non-ZDR run is kept as the configured mode says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,6 +327,22 @@ mod tests {
         let agent = run_budget(crate::budget::RunClass::Agent);
         assert!(!counts_against_step_budget(StepInitiator::Human, true, Some(&agent)));
         assert!(!counts_against_step_budget(StepInitiator::Human, true, None));
+    }
+
+    #[test]
+    fn the_takeover_counter_reads_only_a_step_the_takeover_rule_spared() {
+        let agent = run_budget(crate::budget::RunClass::Agent);
+        let interactive = run_budget(crate::budget::RunClass::Interactive);
+        // A person's takeover step on an agent-class run: spared by the takeover rule.
+        assert!(takeover_exempted_step(StepInitiator::Human, true, Some(&agent)));
+        // The same person's step without the takeover counts (R-8): nothing to meter.
+        assert!(!takeover_exempted_step(StepInitiator::Human, false, Some(&agent)));
+        // On a person's own run (or with budgets off) a person's step is exempt anyway:
+        // the takeover did not change the outcome, so it is not metered as takeover use.
+        assert!(!takeover_exempted_step(StepInitiator::Human, true, Some(&interactive)));
+        assert!(!takeover_exempted_step(StepInitiator::Human, true, None));
+        // An agent's step is never spared by a takeover.
+        assert!(!takeover_exempted_step(StepInitiator::Agent, true, Some(&agent)));
     }
 
     #[test]

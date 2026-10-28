@@ -276,6 +276,18 @@ pub fn record_agent_step(action: &str, ok: bool, elapsed: Duration) {
     .record(elapsed.as_secs_f64());
 }
 
+/// One step a person took while holding an agent-class run's browser (a takeover), which
+/// the step budget does not count (7d78ab2e8; plan R-8, WS8.F). `quarry_agent_takeover_exempt_steps_total`
+/// is how many; the histogram's `_sum` is the seconds those steps ran, its `_count` equals
+/// the counter. No label: a run id would be unbounded, and the per-run view is the run's
+/// receipts (each takeover step is a `human` receipt under its control epoch). Read by the
+/// X-12 shadow review so unmetered takeover use is visible (TAKEOVER-BUDGET).
+pub fn record_takeover_exempt_step(elapsed: Duration) {
+    metrics::counter!("quarry_agent_takeover_exempt_steps_total").increment(1);
+    metrics::histogram!("quarry_agent_takeover_exempt_step_duration_seconds")
+        .record(elapsed.as_secs_f64());
+}
+
 /// A cache lookup. `cache` is `page` or `search`; `outcome` is `hit`, `miss` or
 /// `error` (backend or decode failure, served as a miss). WS6.I.
 pub fn record_cache(cache: &'static str, outcome: &'static str) {
@@ -342,6 +354,15 @@ fn describe_all() {
     describe_counter!(
         "quarry_agent_budget_exhausted_total",
         "Agent runs that reached a budget bound, by dimension, class and mode (shadow = would have been refused)."
+    );
+    describe_counter!(
+        "quarry_agent_takeover_exempt_steps_total",
+        "Steps a person took during a takeover of an agent-class run; the step budget does not count them."
+    );
+    describe_histogram!(
+        "quarry_agent_takeover_exempt_step_duration_seconds",
+        Unit::Seconds,
+        "How long those takeover steps ran (the _sum is the seconds of unmetered takeover use)."
     );
     describe_counter!(
         "quarry_agent_run_starts_total",

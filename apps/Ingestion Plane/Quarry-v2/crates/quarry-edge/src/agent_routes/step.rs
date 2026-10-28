@@ -82,6 +82,12 @@ pub async fn step(
             admitted.takeover,
             entry.budget.as_ref(),
         );
+    // TAKEOVER-BUDGET: a person's takeover step the budget does not count is metered apart.
+    let takeover_exempt = super::human_browse::takeover_exempted_step(
+        admitted.initiator,
+        admitted.takeover,
+        entry.budget.as_ref(),
+    );
 
     let req = AgentActionRequest {
         run_id: entry.run_id.clone(),
@@ -128,6 +134,9 @@ pub async fn step(
         step_result.is_ok(),
         step_started.elapsed(),
     );
+    if takeover_exempt {
+        crate::metrics::record_takeover_exempt_step(step_started.elapsed());
+    }
     let mut entry = handle.entry.lock().await;
     let (obs, cost_source) = match step_result {
         Ok(obs) => {
@@ -259,6 +268,12 @@ pub(super) async fn execute_ws_action(
             admitted.takeover,
             entry.budget.as_ref(),
         );
+    // TAKEOVER-BUDGET: a person's takeover step the budget does not count is metered apart.
+    let takeover_exempt = super::human_browse::takeover_exempted_step(
+        admitted.initiator,
+        admitted.takeover,
+        entry.budget.as_ref(),
+    );
     let req = AgentActionRequest {
         run_id: entry.run_id.clone(),
         lease_id: entry.lease.lease_id.clone(),
@@ -297,6 +312,9 @@ pub(super) async fn execute_ws_action(
         step_result.is_ok(),
         step_started.elapsed(),
     );
+    if takeover_exempt {
+        crate::metrics::record_takeover_exempt_step(step_started.elapsed());
+    }
     let mut entry = handle.entry.lock().await;
     let observation = match step_result {
         Ok(observation) => {
