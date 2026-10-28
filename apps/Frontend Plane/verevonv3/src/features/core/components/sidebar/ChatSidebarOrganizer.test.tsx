@@ -43,6 +43,61 @@ beforeEach(() => {
 })
 afterEach(cleanup)
 
+describe('chat organizer star and unread', () => {
+  const pair = [
+    { threadId: 'thread-a', title: 'Planning', preview: 'A draft', updatedAt: '2026-09-28T12:00:00Z' },
+    { threadId: 'thread-b', title: 'Research', preview: 'Notes', updatedAt: '2026-09-27T12:00:00Z' },
+  ]
+  function mountWith(extra: { starredThreadIds?: ReadonlySet<string>; unreadThreadIds?: ReadonlySet<string> }) {
+    return render(() => (
+      <ChatSidebarOrganizer
+        sessions={pair}
+        loading={false}
+        onNewChat={() => {}}
+        renderRow={(item) => <span>{item.title}</span>}
+        {...extra}
+      />
+    ))
+  }
+
+  it('shows an unread dot only for a thread holding a reply the owner has not read', () => {
+    mountWith({ unreadThreadIds: new Set(['thread-b']) })
+    flush()
+    const dots = screen.getAllByRole('img', { name: 'Unread reply' })
+    expect(dots).toHaveLength(1)
+    expect(dots[0]?.closest('.chat-organizer__draggable')?.textContent).toContain('Research')
+  })
+
+  it('shows no unread dot when every thread has been read', () => {
+    mountWith({ unreadThreadIds: new Set() })
+    flush()
+    expect(screen.queryByRole('img', { name: 'Unread reply' })).toBeNull()
+  })
+
+  it('narrows the list to starred threads and clears the filter again', () => {
+    mountWith({ starredThreadIds: new Set(['thread-a']) })
+    flush()
+    expect(screen.getByText('Research')).toBeTruthy()
+    const toggle = screen.getByRole('button', { name: 'Starred' })
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(toggle)
+    flush()
+    expect(toggle.getAttribute('aria-pressed')).toBe('true')
+    expect(screen.queryByText('Research')).toBeNull()
+    expect(screen.getByText('Planning')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /Clear filters/ }))
+    flush()
+    expect(screen.getByText('Research')).toBeTruthy()
+  })
+
+  it('hides the Starred filter when the caller passes no starred set', () => {
+    mountWith({})
+    flush()
+    expect(screen.queryByRole('button', { name: 'Starred' })).toBeNull()
+    expect(screen.getByText('Research')).toBeTruthy()
+  })
+})
+
 describe('chat organizer interactions', () => {
   it('creates a project and switches the view atomically, preserving it after remount', async () => {
     const first = mount()

@@ -1167,6 +1167,11 @@ message ListThreadsRequest {
   // Which archive state to list. Unspecified lists the active threads, the
   // listing as it was before archiving existed.
   ArchiveFilter archived = 10;
+  // Optional. When true, only the owner's starred threads are listed. The filter
+  // stays inside the owner-bound query and pages on the same cursor as the
+  // ordinary listing, so a starred page never skips a starred thread beyond the
+  // first page.
+  bool starred_only = 11;
 }
 
 // Which archive state a ListThreads call returns. Values are prefixed because
@@ -1223,6 +1228,18 @@ message ThreadSummary {
 
   // Set when the owner archived the thread; absent for an active thread.
   google.protobuf.Timestamp archived_at = 15;
+
+  // Whether the owner starred the thread. Presentation state, like `pinned`.
+  bool starred = 20;
+
+  // Whether the thread has an assistant message later than the owner's last read
+  // of it. This is the one unread definition (build plan DEC-11); WS16 consumes
+  // it and must not derive a second one.
+  bool unread = 21;
+
+  // The owner's last read of the thread. Mark-read sets it to now; mark-unread
+  // moves it to one microsecond before the newest assistant message.
+  google.protobuf.Timestamp last_read_at = 22;
 }
 
 message ListThreadsResponse {
@@ -1254,6 +1271,16 @@ message UpdateThreadPresentationRequest {
   // column, only the persona TEXT (a different, unconditional layer) fires
   // on a ZDR turn by default.
   optional bool persona_enabled = 6;
+  // Optional star state. Omission leaves it unchanged, the same tri-state
+  // contract as `pinned` above. Starring writes no conversation text, so a ZDR
+  // caller may set it.
+  optional bool starred = 7;
+  // Optional unread state. false marks the thread read now; true marks it unread
+  // by moving the read marker to one microsecond before the newest assistant
+  // message, and changes nothing when the thread has no assistant message.
+  // Omission leaves it unchanged. A ZDR caller may set it for the same reason as
+  // `starred`.
+  optional bool unread = 8;
   // Optional archive state. Only `false` is honoured here: it restores an
   // archived thread to ordinary history. Archiving goes through ArchiveThread,
   // which writes the THREAD_ARCHIVED evidence event. Omission leaves it

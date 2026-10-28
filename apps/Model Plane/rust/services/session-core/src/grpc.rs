@@ -2018,9 +2018,13 @@ async fn append_scheduled_result_in_tx(
     .map_err(|e| Status::internal(e.to_string()))?;
 
     // The list's paging key moves with the result, as it does for a chat append,
-    // so a scheduled answer lifts its thread to the top of the list.
+    // so a scheduled answer lifts its thread to the top of the list. The result is
+    // an assistant message, so the thread is also unread until its owner reads it.
     sqlx::query(
-        "UPDATE threads SET last_activity_at = GREATEST(last_activity_at, $2) WHERE id = $1",
+        "UPDATE threads
+         SET last_activity_at = GREATEST(last_activity_at, $2),
+             last_assistant_at = clock_timestamp()
+         WHERE id = $1",
     )
     .bind(thread_id)
     .bind(now)
@@ -3487,12 +3491,18 @@ pub(crate) async fn append_message_in_tx(
 
     // The list's paging key, written in the same transaction as the message so
     // the cursor moves exactly when the message does. Non-owner Space appends
-    // come through here too.
+    // come through here too. A reply also stamps the assistant clock, which is
+    // what makes the thread unread (WS17 S7). clock_timestamp() orders that stamp
+    // against a concurrent mark-read, since both lock this row.
     sqlx::query(
-        "UPDATE threads SET last_activity_at = GREATEST(last_activity_at, $2) WHERE id = $1",
+        "UPDATE threads
+         SET last_activity_at = GREATEST(last_activity_at, $2),
+             last_assistant_at = CASE WHEN $3 THEN clock_timestamp() ELSE last_assistant_at END
+         WHERE id = $1",
     )
     .bind(&req.thread_id)
     .bind(now)
+    .bind(req.role == "assistant")
     .execute(&mut **tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
@@ -7710,27 +7720,37 @@ impl SessionCore for SessionService {
             };
             // One extra row tells the caller whether another page exists without
             // a second count query.
-            let mut rows: Vec<(
-                String,
-                String,
-                DateTime<Utc>,
-                Option<String>,
-                Option<String>,
-                Option<DateTime<Utc>>,
-                DateTime<Utc>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<DateTime<Utc>>,
-                String,
-                String,
-                bool,
-                Option<DateTime<Utc>>,
-            )> = sqlx::query_as(
+            // A named row rather than a tuple: the star and unread columns take the
+            // row past the sixteen fields sqlx implements a tuple for.
+            #[derive(sqlx::FromRow)]
+            struct ThreadListRow {
+                id: String,
+                session_key: String,
+                created_at: DateTime<Utc>,
+                title: Option<String>,
+                preview: Option<String>,
+                pinned_at: Option<DateTime<Utc>>,
+                last_activity_at: DateTime<Utc>,
+                space_id: Option<String>,
+                latest_run_id: Option<String>,
+                latest_run_status: Option<String>,
+                latest_run_updated_at: Option<DateTime<Utc>>,
+                origin: String,
+                user_id: String,
+                persona_enabled: bool,
+                archived_at: Option<DateTime<Utc>>,
+                starred: bool,
+                unread: bool,
+                last_read_at: DateTime<Utc>,
+            }
+            let mut rows: Vec<ThreadListRow> = sqlx::query_as(
                 "WITH page AS (
                     SELECT t.id, t.session_key, t.created_at, t.presentation_title,
                            t.presentation_preview, t.pinned_at, t.last_activity_at, t.space_id,
-                           t.origin, t.user_id, t.persona_enabled, t.archived_at
+                           t.origin, t.user_id, t.persona_enabled, t.archived_at,
+                           (t.starred_at IS NOT NULL) AS starred,
+                           (t.last_assistant_at IS NOT NULL AND t.last_assistant_at > t.last_read_at) AS unread,
+                           t.last_read_at
                     FROM threads t
                     WHERE t.org_id = $1
                       AND ($6::BIGINT IS NULL
@@ -7741,6 +7761,7 @@ impl SessionCore for SessionService {
                       AND (NULLIF($5, '') IS NULL OR t.origin = $5)
                       AND (NULLIF($7, '') IS NULL OR t.id = $7)
                       AND ($11 = 'all' OR (($11 = 'archived') = (t.archived_at IS NOT NULL)))
+                      AND (NOT $12::BOOLEAN OR t.starred_at IS NOT NULL)
                       AND ($8::BOOLEAN IS NULL
                            OR ((t.pinned_at IS NOT NULL), t.last_activity_at, t.id)
                               < ($8::BOOLEAN, $9::TIMESTAMPTZ, $10::TEXT))
@@ -7762,7 +7783,10 @@ impl SessionCore for SessionService {
                     page.origin,
                     page.user_id,
                     page.persona_enabled,
-                    page.archived_at
+                    page.archived_at,
+                    page.starred,
+                    page.unread,
+                    page.last_read_at
                  FROM page
                  LEFT JOIN LATERAL (
                     SELECT content
@@ -7798,6 +7822,7 @@ impl SessionCore for SessionService {
             .bind(cursor_activity)
             .bind(cursor_thread_id)
             .bind(archive_state)
+            .bind(req.starred_only)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| {
@@ -7808,9 +7833,9 @@ impl SessionCore for SessionService {
             let has_more = rows.len() > page_size;
             let next_cursor = match rows.get(page_size - 1) {
                 Some(last) if has_more => encode_thread_cursor(&ThreadCursor {
-                    pinned: last.5.is_some(),
-                    last_activity_at: last.6,
-                    thread_id: last.0.clone(),
+                    pinned: last.pinned_at.is_some(),
+                    last_activity_at: last.last_activity_at,
+                    thread_id: last.id.clone(),
                 }),
                 _ => String::new(),
             };
@@ -7819,7 +7844,27 @@ impl SessionCore for SessionService {
             let threads = rows
                 .into_iter()
                 .map(
-                    |(thread_id, session_key, created_at, title, preview, pinned_at, last_activity_at, space_id, latest_run_id, latest_run_status, latest_run_updated_at, origin, owner_subject_id, persona_enabled, archived_at)| {
+                    |row| {
+                        let ThreadListRow {
+                            id: thread_id,
+                            session_key,
+                            created_at,
+                            title,
+                            preview,
+                            pinned_at,
+                            last_activity_at,
+                            space_id,
+                            latest_run_id,
+                            latest_run_status,
+                            latest_run_updated_at,
+                            origin,
+                            user_id: owner_subject_id,
+                            persona_enabled,
+                            archived_at,
+                            starred,
+                            unread,
+                            last_read_at,
+                        } = row;
                         let fallback_title = if session_key.trim().is_empty() {
                             "Verevon Chat"
                         } else {
@@ -7845,6 +7890,9 @@ impl SessionCore for SessionService {
                             owner_subject_id,
                             persona_enabled,
                             archived_at: archived_at.map(to_proto_timestamp),
+                            starred,
+                            unread,
+                            last_read_at: Some(to_proto_timestamp(last_read_at)),
                         }
                     },
                 )
@@ -7869,7 +7917,7 @@ impl SessionCore for SessionService {
             let caller = identity(&request)?;
             authorize_owner_housekeeping(&caller, "session:write")?;
             let req = request.into_inner();
-            // Owner decision 17: the presentation controls (pinned, persona) are the owner's under every
+            // Owner decision 17: the presentation controls (pinned, persona, star, unread) are the owner's under every
             // posture. Title and preview are conversation text, which a ZDR credential never persists.
             if caller.zdr() && (req.title.is_some() || req.preview.is_some()) {
                 return Err(Refusal::DURABLE_MUTATION_FORBIDDEN
@@ -7892,6 +7940,8 @@ impl SessionCore for SessionService {
                 && req.persona_enabled.is_none()
                 && req.archived.is_none()
                 && req.memory_mode.is_none()
+                && req.starred.is_none()
+                && req.unread.is_none()
             {
                 return Err(Status::invalid_argument(
                     "at least one presentation field is required",
@@ -7953,7 +8003,16 @@ impl SessionCore for SessionService {
                      persona_enabled = CASE WHEN $10 THEN $11 ELSE persona_enabled END,
                      archived_at = CASE WHEN $12 THEN NULL ELSE archived_at END,
                      memory_mode = CASE WHEN $13 THEN $14 ELSE memory_mode END,
-                     memory_resumed_at = CASE WHEN $13 AND memory_mode = 'off' AND $14 = 'inherit' THEN clock_timestamp() ELSE memory_resumed_at END
+                     memory_resumed_at = CASE WHEN $13 AND memory_mode = 'off' AND $14 = 'inherit' THEN clock_timestamp() ELSE memory_resumed_at END,
+                     starred_at = CASE
+                         WHEN $15 THEN CASE WHEN $16 THEN COALESCE(starred_at, clock_timestamp()) ELSE NULL END
+                         ELSE starred_at
+                     END,
+                     last_read_at = CASE
+                         WHEN $17 AND NOT $18 THEN clock_timestamp()
+                         WHEN $17 AND last_assistant_at IS NOT NULL THEN last_assistant_at - interval '1 microsecond'
+                         ELSE last_read_at
+                     END
                  WHERE id = $1 AND org_id = $2 AND (archived_at IS NULL OR $12)
                  RETURNING id, user_id",
             )
@@ -7974,6 +8033,10 @@ impl SessionCore for SessionService {
             .bind(restores)
             .bind(memory_mode.is_some())
             .bind(memory_mode.map_or("inherit", |mode| mode.as_str()))
+            .bind(req.starred.is_some())
+            .bind(req.starred.unwrap_or_default())
+            .bind(req.unread.is_some())
+            .bind(req.unread.unwrap_or_default())
             .fetch_optional(&mut *tx)
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
@@ -8003,6 +8066,8 @@ impl SessionCore for SessionService {
                 "persona_enabled": req.persona_enabled,
                 "archived": req.archived,
                 "memory_mode": memory_mode.map(|mode| mode.as_str()),
+                "starred": req.starred,
+                "unread": req.unread,
             }))
             .bind(now)
             .bind(&req.org_id)
@@ -19180,6 +19245,291 @@ mod thread_list_db_tests {
         assert_eq!(active.threads.len(), 1);
         assert_eq!(active.threads[0].thread_id, archived_id);
         assert!(active.threads[0].archived_at.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn unread_flips_on_assistant_append_and_clears_on_read() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("unread-test-{suffix}");
+        let user = "unread-user";
+        let thread_id = format!("{suffix}-u1");
+        seed_thread(&pool, &org, user, &thread_id, 1, false, false).await;
+        let svc = service(pool.clone());
+        let append = |role: &'static str| {
+            let mut request = Request::new(pb::AppendMessageRequest {
+                thread_id: thread_id.clone(),
+                role: role.into(),
+                content: format!("{role} text"),
+                ..Default::default()
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::user_for_test(&org, user));
+            svc.append_message(request)
+        };
+        let set_unread = |value: bool| {
+            let mut request = Request::new(pb::UpdateThreadPresentationRequest {
+                org_id: org.clone(),
+                thread_id: thread_id.clone(),
+                unread: Some(value),
+                ..Default::default()
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::user_for_test(&org, user));
+            svc.update_thread_presentation(request)
+        };
+        async fn is_unread(svc: &SessionService, org: &str, user: &str) -> bool {
+            list(svc, org, user, pb::ListThreadsRequest::default())
+                .await
+                .threads[0]
+                .unread
+        }
+
+        append("user").await.expect("user message");
+        assert!(
+            !is_unread(&svc, &org, user).await,
+            "a user message alone leaves the thread read"
+        );
+        append("assistant").await.expect("assistant reply");
+        assert!(
+            is_unread(&svc, &org, user).await,
+            "a reply that arrives makes the thread unread"
+        );
+        set_unread(false).await.expect("mark read");
+        assert!(
+            !is_unread(&svc, &org, user).await,
+            "viewing the thread clears the dot"
+        );
+
+        append("user").await.expect("second user message");
+        assert!(
+            !is_unread(&svc, &org, user).await,
+            "a later user message does not make it unread"
+        );
+        append("assistant").await.expect("second reply");
+        assert!(
+            is_unread(&svc, &org, user).await,
+            "a second reply is unread again"
+        );
+        set_unread(false).await.expect("mark read again");
+        set_unread(true).await.expect("mark unread");
+        assert!(
+            is_unread(&svc, &org, user).await,
+            "mark unread reopens the newest reply"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn mark_unread_noop_without_assistant() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("unread-noop-test-{suffix}");
+        let user = "unread-noop-user";
+        let thread_id = format!("{suffix}-n1");
+        seed_thread(&pool, &org, user, &thread_id, 1, false, false).await;
+        let svc = service(pool.clone());
+        let before = list(&svc, &org, user, pb::ListThreadsRequest::default())
+            .await
+            .threads[0]
+            .last_read_at;
+        let mut request = Request::new(pb::UpdateThreadPresentationRequest {
+            org_id: org.clone(),
+            thread_id: thread_id.clone(),
+            unread: Some(true),
+            ..Default::default()
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test(&org, user));
+        svc.update_thread_presentation(request)
+            .await
+            .expect("mark unread on a thread with no reply is accepted");
+        let after = list(&svc, &org, user, pb::ListThreadsRequest::default()).await;
+        assert!(
+            !after.threads[0].unread,
+            "without a reply there is nothing unread"
+        );
+        assert_eq!(
+            after.threads[0].last_read_at, before,
+            "the read marker does not move"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn starred_filter() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("starred-test-{suffix}");
+        let user = "starred-user";
+        let starred_id = format!("{suffix}-s1");
+        let plain_id = format!("{suffix}-s2");
+        seed_thread(&pool, &org, user, &starred_id, 2, false, false).await;
+        seed_thread(&pool, &org, user, &plain_id, 1, false, false).await;
+        let svc = service(pool.clone());
+        let star = |thread: String, value: bool| {
+            let mut request = Request::new(pb::UpdateThreadPresentationRequest {
+                org_id: org.clone(),
+                thread_id: thread,
+                starred: Some(value),
+                ..Default::default()
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::user_for_test(&org, user));
+            svc.update_thread_presentation(request)
+        };
+        let starred_only = pb::ListThreadsRequest {
+            starred_only: true,
+            ..Default::default()
+        };
+
+        star(starred_id.clone(), true).await.expect("star");
+        let only = list(&svc, &org, user, starred_only.clone()).await;
+        assert_eq!(only.threads.len(), 1);
+        assert_eq!(only.threads[0].thread_id, starred_id);
+        assert!(only.threads[0].starred);
+        let all = list(&svc, &org, user, pb::ListThreadsRequest::default()).await;
+        assert_eq!(
+            all.threads.len(),
+            2,
+            "the filter narrows the listing, not the store"
+        );
+        assert!(all
+            .threads
+            .iter()
+            .all(|thread| thread.starred == (thread.thread_id == starred_id)));
+
+        star(starred_id.clone(), false).await.expect("unstar");
+        assert!(list(&svc, &org, user, starred_only)
+            .await
+            .threads
+            .is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn star_and_unread_follow_zdr_posture_and_title_is_refused() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("star-zdr-test-{suffix}");
+        let user = "star-zdr-user";
+        let thread_id = format!("{suffix}-z1");
+        seed_thread(&pool, &org, user, &thread_id, 1, false, false).await;
+        let svc = service(pool.clone());
+        let zdr = |request: pb::UpdateThreadPresentationRequest| {
+            let mut request = Request::new(pb::UpdateThreadPresentationRequest {
+                org_id: org.clone(),
+                thread_id: thread_id.clone(),
+                ..request
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::user_for_test_with_zdr(&org, user, true));
+            svc.update_thread_presentation(request)
+        };
+
+        zdr(pb::UpdateThreadPresentationRequest {
+            starred: Some(true),
+            ..Default::default()
+        })
+        .await
+        .expect("a ZDR owner may star a thread");
+        zdr(pb::UpdateThreadPresentationRequest {
+            unread: Some(false),
+            ..Default::default()
+        })
+        .await
+        .expect("a ZDR owner may mark a thread read");
+        let refused = zdr(pb::UpdateThreadPresentationRequest {
+            title: Some("kept?".into()),
+            ..Default::default()
+        })
+        .await
+        .expect_err("a title is conversation text and is refused under ZDR");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+
+        let listed = list(
+            &svc,
+            &org,
+            user,
+            pb::ListThreadsRequest {
+                starred_only: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(listed.threads.len(), 1, "the star written under ZDR is kept");
+        let (title,): (Option<String>,) =
+            sqlx::query_as("SELECT presentation_title FROM threads WHERE id = $1")
+                .bind(&thread_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(title.is_none(), "a refused title is not persisted");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn pin_survives_archive_restore_and_star_writes() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("pin-star-test-{suffix}");
+        let user = "pin-star-user";
+        let thread_id = format!("{suffix}-p1");
+        seed_thread(&pool, &org, user, &thread_id, 1, true, false).await;
+        let svc = service(pool.clone());
+        let update = |request: pb::UpdateThreadPresentationRequest| {
+            let mut request = Request::new(pb::UpdateThreadPresentationRequest {
+                org_id: org.clone(),
+                thread_id: thread_id.clone(),
+                ..request
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::user_for_test(&org, user));
+            svc.update_thread_presentation(request)
+        };
+
+        let mut archive = Request::new(pb::ArchiveThreadRequest {
+            org_id: org.clone(),
+            thread_id: thread_id.clone(),
+        });
+        archive
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test(&org, user));
+        svc.archive_thread(archive).await.expect("archive");
+        update(pb::UpdateThreadPresentationRequest {
+            archived: Some(false),
+            ..Default::default()
+        })
+        .await
+        .expect("restore");
+        update(pb::UpdateThreadPresentationRequest {
+            starred: Some(true),
+            ..Default::default()
+        })
+        .await
+        .expect("star");
+        update(pb::UpdateThreadPresentationRequest {
+            starred: Some(false),
+            unread: Some(true),
+            ..Default::default()
+        })
+        .await
+        .expect("unstar and mark unread");
+
+        let listed = list(&svc, &org, user, pb::ListThreadsRequest::default()).await;
+        assert_eq!(listed.threads.len(), 1);
+        assert!(
+            listed.threads[0].pinned,
+            "archiving, restoring and star or unread writes leave the pin in place"
+        );
+        assert!(listed.threads[0].archived_at.is_none());
     }
 
     #[tokio::test]

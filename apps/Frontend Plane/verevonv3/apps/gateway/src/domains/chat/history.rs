@@ -71,6 +71,14 @@ struct ChatThreadSummary {
     /// threads by default; the archive surface reads this to label them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     archived_at: Option<String>,
+    /// Session Core owns star state and returns it with the thread summary, as it
+    /// owns `pinned`. The Starred filter and the star control read it.
+    #[serde(default)]
+    starred: bool,
+    /// Whether the thread holds a reply the owner has not read (build plan DEC-11).
+    /// Session Core owns it; the sidebar dot reads it.
+    #[serde(default)]
+    unread: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +136,7 @@ pub(crate) struct ThreadListQuery {
     cursor: Option<String>,
     limit: Option<usize>,
     archived: Option<String>,
+    starred_only: Option<bool>,
 }
 
 /// What one ListThreads call asks Model Gateway for. `limit` is the page size.
@@ -136,6 +145,7 @@ struct ThreadListRequest<'a> {
     limit: usize,
     archived: Option<&'a str>,
     thread_id: Option<&'a str>,
+    starred_only: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -192,6 +202,10 @@ struct DurableThreadSummary {
     latest_run_updated_at: Option<String>,
     #[serde(default, alias = "archivedAt")]
     archived_at: String,
+    #[serde(default)]
+    starred: bool,
+    #[serde(default)]
+    unread: bool,
 }
 
 pub(super) async fn list_threads(
@@ -221,6 +235,7 @@ pub(super) async fn list_threads(
             .clamp(1, THREAD_PAGE_SIZE),
         archived,
         thread_id: None,
+        starred_only: query.starred_only.unwrap_or(false),
     };
     let (sessions, next_cursor) =
         match fetch_durable_threads(&state, &user, &headers, request).await {
@@ -378,6 +393,58 @@ pub(crate) async fn save_thread(
     .into_response()
 }
 
+/// Star and unread state from the sidebar. The body carries the two flags only,
+/// so this route cannot reach the title, preview or pin. An omitted flag is left
+/// as it is; a body with neither is refused.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ThreadFlagsRequest {
+    #[serde(default)]
+    starred: Option<bool>,
+    #[serde(default)]
+    unread: Option<bool>,
+}
+
+pub(crate) async fn update_thread_flags(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+    Json(body): Json<ThreadFlagsRequest>,
+) -> Response {
+    if let Err(response) = scope_for(&state, &user).await {
+        return response;
+    }
+    let thread_id = normalize_id(&thread_id);
+    if thread_id.is_empty() {
+        return bad_request("thread_id is required.");
+    }
+    if body.starred.is_none() && body.unread.is_none() {
+        return bad_request("starred or unread is required.");
+    }
+    if let Err(response) = update_durable_thread_flags(
+        &state,
+        &user,
+        &headers,
+        &thread_id,
+        body.starred,
+        body.unread,
+    )
+    .await
+    {
+        return response;
+    }
+    let session = match read_durable_thread(&state, &user, &headers, &thread_id).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return thread_not_found(),
+        Err(response) => return response,
+    };
+    Json(ok(ThreadResponse {
+        session,
+        transcript: None,
+    }))
+    .into_response()
+}
+
 pub(crate) async fn delete_thread(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -400,6 +467,7 @@ pub(crate) async fn delete_thread(
         limit: THREAD_PAGE_SIZE,
         archived: None,
         thread_id: None,
+        starred_only: false,
     };
     let (sessions, _) = match fetch_durable_threads(&state, &user, &headers, request).await {
         Ok(page) => page,
@@ -594,6 +662,7 @@ async fn read_durable_thread(
         limit: 1,
         archived: Some("all"),
         thread_id: Some(thread_id),
+        starred_only: false,
     };
     let (sessions, _) = fetch_durable_threads(state, user, headers, request).await?;
     Ok(chat_history_sessions(sessions)
@@ -611,6 +680,9 @@ fn durable_thread_list_url(base: &str, request: &ThreadListRequest<'_>) -> Strin
     }
     if let Some(archived) = request.archived {
         params.push(format!("archived={}", urlencoding::encode(archived)));
+    }
+    if request.starred_only {
+        params.push("starred_only=true".to_owned());
     }
     format!("{base}/v1/threads?{}", params.join("&"))
 }
@@ -640,6 +712,8 @@ fn durable_to_summary(item: DurableThreadSummary, now: &str) -> Option<ChatThrea
         latest_run_status: item.latest_run_status,
         latest_run_updated_at: item.latest_run_updated_at,
         archived_at: Some(item.archived_at.trim().to_owned()).filter(|value| !value.is_empty()),
+        starred: item.starred,
+        unread: item.unread,
     })
 }
 
@@ -656,6 +730,53 @@ pub(crate) async fn update_durable_presentation(
     pinned: Option<bool>,
     persona_enabled: Option<bool>,
 ) -> Result<(), Response> {
+    post_durable_presentation(
+        state,
+        user,
+        headers,
+        thread_id,
+        json!({
+            "title": title,
+            "preview": preview,
+            "pinned": pinned,
+            // model-gateway's `UpdateThreadPresentationBody` is
+            // `#[serde(rename_all = "camelCase", deny_unknown_fields)]` —
+            // this key must be camelCase, unlike the single-word fields
+            // above where snake_case and camelCase happen to coincide.
+            "personaEnabled": persona_enabled,
+        }),
+    )
+    .await
+}
+
+/// Star and unread state, written through the same Session Core presentation
+/// call. An omitted flag is left as it is, so this never touches the title,
+/// preview or pin.
+pub(crate) async fn update_durable_thread_flags(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    thread_id: &str,
+    starred: Option<bool>,
+    unread: Option<bool>,
+) -> Result<(), Response> {
+    post_durable_presentation(
+        state,
+        user,
+        headers,
+        thread_id,
+        json!({ "starred": starred, "unread": unread }),
+    )
+    .await
+}
+
+async fn post_durable_presentation(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    thread_id: &str,
+    body: Value,
+) -> Result<(), Response> {
     let token = shared::model_token(state, user, headers).await;
     let session_token = shared::required_session_token(state, user, headers)
         .await
@@ -669,16 +790,7 @@ pub(crate) async fn update_durable_presentation(
         state,
         Method::POST,
         &url,
-        Some(json!({
-            "title": title,
-            "preview": preview,
-            "pinned": pinned,
-            // model-gateway's `UpdateThreadPresentationBody` is
-            // `#[serde(rename_all = "camelCase", deny_unknown_fields)]` —
-            // this key must be camelCase, unlike the single-word fields
-            // above where snake_case and camelCase happen to coincide.
-            "personaEnabled": persona_enabled,
-        })),
+        Some(body),
         token.as_deref(),
         Some(&session_token),
         user,
@@ -1195,6 +1307,8 @@ mod tests {
                 latest_run_status: String::new(),
                 latest_run_updated_at: None,
                 archived_at: String::new(),
+                starred: false,
+                unread: false,
             },
             now,
         )
@@ -1214,6 +1328,8 @@ mod tests {
                 latest_run_status: String::new(),
                 latest_run_updated_at: None,
                 archived_at: String::new(),
+                starred: false,
+                unread: false,
             },
             now,
         )
@@ -1252,6 +1368,8 @@ mod tests {
                     latest_run_status: String::new(),
                     latest_run_updated_at: None,
                     archived_at: String::new(),
+                    starred: false,
+                    unread: false,
                 },
                 now,
             )
@@ -1295,6 +1413,8 @@ mod tests {
                 latest_run_status: String::new(),
                 latest_run_updated_at: None,
                 archived_at: String::new(),
+                starred: false,
+                unread: false,
             },
             now,
         )
@@ -1320,6 +1440,8 @@ mod tests {
                 latest_run_status: "awaiting_approval".to_owned(),
                 latest_run_updated_at: Some("2026-08-11T11:00:00Z".to_owned()),
                 archived_at: String::new(),
+                starred: false,
+                unread: false,
             },
             "2026-08-11T12:00:00Z",
         )
@@ -1736,6 +1858,44 @@ mod thread_paging_tests {
     use super::*;
 
     #[test]
+    fn durable_summary_carries_star_and_unread_and_the_starred_filter_is_forwarded() {
+        let summary = durable_to_summary(
+            DurableThreadSummary {
+                thread_id: "thread-star".to_owned(),
+                title: "Kept".to_owned(),
+                preview: String::new(),
+                updated_at: "2026-10-28T10:00:00Z".to_owned(),
+                created_at: "2026-10-28T09:00:00Z".to_owned(),
+                pinned: false,
+                persona_enabled: true,
+                space_id: String::new(),
+                origin: "chat".to_owned(),
+                latest_run_id: String::new(),
+                latest_run_status: String::new(),
+                latest_run_updated_at: None,
+                archived_at: String::new(),
+                starred: true,
+                unread: true,
+            },
+            "2026-10-28T11:00:00Z",
+        )
+        .expect("a thread with an id is listed");
+        assert!(summary.starred);
+        assert!(summary.unread);
+        let url = durable_thread_list_url(
+            "http://model-gateway",
+            &ThreadListRequest {
+                cursor: None,
+                limit: 50,
+                archived: None,
+                thread_id: None,
+                starred_only: true,
+            },
+        );
+        assert!(url.ends_with("&starred_only=true"));
+    }
+
+    #[test]
     fn read_durable_thread_url_addresses_one_thread_by_id_beyond_the_page() {
         let url = durable_thread_list_url(
             "http://model-gateway",
@@ -1744,6 +1904,7 @@ mod thread_paging_tests {
                 limit: 1,
                 archived: Some("all"),
                 thread_id: Some("thread-81"),
+                starred_only: false,
             },
         );
         assert_eq!(
@@ -1763,6 +1924,7 @@ mod thread_paging_tests {
                 limit: 1,
                 archived: Some("all"),
                 thread_id: Some("thread-81"),
+                starred_only: false,
             },
         );
         assert!(url.contains("thread_id=thread-81"));
@@ -1778,6 +1940,7 @@ mod thread_paging_tests {
                 limit: 50,
                 archived: None,
                 thread_id: None,
+                starred_only: false,
             },
         );
         assert_eq!(

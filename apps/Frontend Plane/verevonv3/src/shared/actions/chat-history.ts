@@ -15,6 +15,7 @@ export const chatHistoryActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('thread.fork'), threadId, fromMessageId: messageId, title: z.string().trim().max(96).optional() }),
   z.object({ type: z.literal('thread.star'), threadId, starred: z.boolean() }),
   z.object({ type: z.literal('thread.mark_unread'), threadId }),
+  z.object({ type: z.literal('thread.mark_read'), threadId }),
   z.object({ type: z.literal('thread.search'), query: z.string().trim().min(1).max(200), threadId: threadId.optional() }),
   z.object({ type: z.literal('message.switch_version'), threadId, messageId, index: z.number().int().min(0).max(100) }),
   // A rewind moves the active leaf and deletes nothing, but it still changes

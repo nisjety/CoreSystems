@@ -26,12 +26,17 @@ export function ChatSidebarOrganizer(props: {
   onLoadMore?: () => void
   /** Opens a server search hit's thread, which may sit beyond the loaded page. */
   onOpenSearchHit?: (threadId: string) => void
+  /** Threads the owner starred. The Starred filter narrows the loaded chats to these. */
+  starredThreadIds?: ReadonlySet<string>
+  /** Threads holding a reply the owner has not read; each one shows an unread dot. */
+  unreadThreadIds?: ReadonlySet<string>
 }) {
   const i18n = useI18n()
   const session = getSession()
   const scope = createMemo(() => chatOrganizationStorageKey(session.user?.id, session.activeOrg?.id))
   const [organization, setOrganization] = createSignal(emptyChatOrganization())
   const [query, setQuery] = createSignal('')
+  const [starredOnly, setStarredOnly] = createSignal(false)
   const [searchOpen, setSearchOpen] = createSignal(false)
   const [serverHits, setServerHits] = createSignal<ChatSearchHit[]>([])
   const [serverStatus, setServerStatus] = createSignal<ChatSearchStatus>('idle')
@@ -204,7 +209,12 @@ export function ChatSidebarOrganizer(props: {
     if (key) saveChatOrganization(key, next)
     setOrganization(next)
   }
-  const matches = createMemo(() => selectOrganizedChats(props.sessions, organization(), query()))
+  const matches = createMemo(() => {
+    const source = starredOnly()
+      ? props.sessions.filter((item) => props.starredThreadIds?.has(item.threadId))
+      : props.sessions
+    return selectOrganizedChats(source, organization(), query())
+  })
   const groups = createMemo<ChatGroup[]>(() => {
     const staticState = organization()
     const rows = matches()
@@ -275,7 +285,11 @@ export function ChatSidebarOrganizer(props: {
         <div class="chat-organizer__search"><Search size={15} /><input ref={searchInput} type="search" role="combobox" maxlength="200" aria-expanded={serverHits().length ? 'true' : 'false'} aria-autocomplete="list" aria-controls={serverHits().length ? searchListboxId(SEARCH_ID_PREFIX) : undefined} aria-activedescendant={serverHits().length && activeHit() >= 0 ? searchOptionId(SEARCH_ID_PREFIX, activeHit()) : undefined} aria-label={i18n.tr('Søk i samtaler', 'Search chats')} placeholder={i18n.tr('Søk i samtaler …', 'Search chats…')} value={query()} onInput={(event) => setSearchText(event.currentTarget.value)} onKeyDown={onSearchKeyDown} /><button type="button" aria-label={i18n.tr('Lukk samtalesøk', 'Close chat search')} onClick={() => { setSearchText(''); setSearchOpen(false) }}><X size={14} /></button></div>
       </Show>
       <a href="/chat" link class="core-chat-sidebar__new" onClick={() => props.onNewChat()}><MessageSquarePlus size={17} />{i18n.tr('Ny samtale', 'New chat')}</a>
-      <Show when={organization().view.filter !== 'all' || query().trim()}><button type="button" class="chat-organizer__clear-filter" onClick={() => { setSearchText(''); updateView({ filter: 'all' }) }}>{i18n.tr('Fjern filtre', 'Clear filters')} · {matches().length}<X size={12} /></button></Show>
+      {/* Shown only once the caller passes the starred set; without it the filter would empty the list. */}
+      <Show when={props.starredThreadIds}>
+        <button type="button" class="chat-organizer__starred-toggle" aria-pressed={starredOnly() ? 'true' : 'false'} onClick={() => setStarredOnly((on) => !on)}>{i18n.tr('Stjernemerkede', 'Starred')}</button>
+      </Show>
+      <Show when={organization().view.filter !== 'all' || query().trim() || starredOnly()}><button type="button" class="chat-organizer__clear-filter" onClick={() => { setSearchText(''); setStarredOnly(false); updateView({ filter: 'all' }) }}>{i18n.tr('Fjern filtre', 'Clear filters')} · {matches().length}<X size={12} /></button></Show>
       <Show when={searchOpen() && query().trim().length >= SEARCH_MIN_CHARS}>
         <ChatSearchResults idPrefix={SEARCH_ID_PREFIX} hits={serverHits()} status={serverStatus()} activeIndex={activeHit()} onOpen={openSearchHit} onActiveChange={(index) => setActiveHit(index)} />
       </Show>
@@ -299,6 +313,9 @@ export function ChatSidebarOrganizer(props: {
                     data-dragged={draggedThreadId() === item.threadId ? 'true' : undefined}
                     title={canDrag() ? i18n.tr('Dra til et prosjekt eller Nylige. Du kan også bruke Flytt til prosjekt i menyen.', 'Drag to a project or Recent. You can also use Move to project in the menu.') : undefined}
                     onDragStart={(event) => startDrag(event, item)} onDragEnd={endDrag}>
+                    <Show when={props.unreadThreadIds?.has(item.threadId)}>
+                      <span class="chat-organizer__unread" role="img" aria-label={i18n.tr('Ulest svar', 'Unread reply')} title={i18n.tr('Et svar du ikke har lest', 'A reply you have not read')} style={{ display: 'inline-block', width: '0.5rem', height: '0.5rem', 'border-radius': '999px', background: 'currentColor', 'flex-shrink': '0' }} />
+                    </Show>
                     {props.renderRow(item, () => beginMove(item))}
                   </div>
                 )}</For>

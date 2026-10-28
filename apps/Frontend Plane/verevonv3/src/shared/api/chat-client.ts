@@ -845,6 +845,14 @@ export type ChatThreadSession = {
   origin?: string
   /** Set when the owner archived the thread. Absent for an active thread. */
   archivedAt?: string
+  /** Whether the owner starred the thread. Server-owned, like `pinned`. */
+  starred?: boolean
+  /**
+   * Whether the thread holds a reply the owner has not read yet. The one unread
+   * definition (build plan DEC-11): the server compares the newest assistant reply
+   * with the owner's last read, and the client never derives its own.
+   */
+  unread?: boolean
 }
 
 export type ChatThreadTranscriptSnapshot = {
@@ -2557,11 +2565,12 @@ export type ChatThreadArchiveFilter = 'active' | 'archived' | 'all'
  * not reconcile local copies: a single page is never the whole listing.
  */
 export async function listChatThreadsPage(
-  options: { cursor?: string; archived?: ChatThreadArchiveFilter } = {},
+  options: { cursor?: string; archived?: ChatThreadArchiveFilter; starredOnly?: boolean } = {},
 ): Promise<ChatThreadPage> {
   const params = new URLSearchParams()
   if (options.cursor) params.set('cursor', options.cursor)
   if (options.archived) params.set('archived', options.archived)
+  if (options.starredOnly) params.set('starred_only', 'true')
   const query = params.toString()
   const raw = await requestJson<unknown>(`/api/v1/chat/threads${query ? `?${query}` : ''}`)
   applyRetentionFrom(raw)
@@ -2669,6 +2678,44 @@ async function postChatThreadArchiveState(
     raw = await requestJson<unknown>(
       `/api/v1/chat/threads/${encodeURIComponent(threadId)}/${verb}`,
       { method: 'POST' },
+    )
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null
+    throw error
+  }
+  applyRetentionFrom(raw)
+  return normalizeChatThreadSession(objectValue(raw)?.session)
+}
+
+/**
+ * Star or unstar a thread, or mark it read or unread. Each call writes only the
+ * flag it names, so the server leaves the title, preview and pin alone. Null when
+ * the server no longer has the thread as one the caller owns.
+ */
+export async function setChatThreadStarred(threadId: string, starred: boolean): Promise<ChatThreadSession | null> {
+  parseChatHistoryAction({ type: 'thread.star', threadId, starred })
+  return postChatThreadFlags(threadId, { starred })
+}
+
+export async function markChatThreadUnread(threadId: string): Promise<ChatThreadSession | null> {
+  parseChatHistoryAction({ type: 'thread.mark_unread', threadId })
+  return postChatThreadFlags(threadId, { unread: true })
+}
+
+export async function markChatThreadRead(threadId: string): Promise<ChatThreadSession | null> {
+  parseChatHistoryAction({ type: 'thread.mark_read', threadId })
+  return postChatThreadFlags(threadId, { unread: false })
+}
+
+async function postChatThreadFlags(
+  threadId: string,
+  flags: { starred?: boolean; unread?: boolean },
+): Promise<ChatThreadSession | null> {
+  let raw: unknown
+  try {
+    raw = await requestJson<unknown>(
+      `/api/v1/chat/threads/${encodeURIComponent(threadId)}/flags`,
+      { method: 'PUT', body: JSON.stringify(flags) },
     )
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) return null
@@ -2921,6 +2968,8 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
     ...(latestRunUpdatedAt ? { latestRunUpdatedAt } : {}),
     spaceRef: str(item.spaceRef) ?? str(item.space_ref),
     origin: str(item.origin),
+    ...(item.starred === true ? { starred: true } : {}),
+    ...(item.unread === true ? { unread: true } : {}),
     ...(archivedAt ? { archivedAt } : {}),
   }
 }

@@ -9514,6 +9514,9 @@ struct ListThreadsQuery {
     thread_id: Option<String>,
     /// `active` (the default), `archived` or `all`.
     archived: Option<String>,
+    /// Lists only the owner's starred threads. Session Core applies the filter
+    /// inside the owner-bound query, so a starred listing pages like any other.
+    starred_only: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -9547,6 +9550,11 @@ struct ThreadSummaryResponse {
     /// Set when the owner archived the thread; omitted for an active thread.
     #[serde(skip_serializing_if = "String::is_empty")]
     archived_at: String,
+    /// Whether the owner starred the thread.
+    starred: bool,
+    /// Whether the thread has a reply the owner has not read yet. This is the one
+    /// unread definition (build plan DEC-11); the sidebar dot reads it as is.
+    unread: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -9572,6 +9580,13 @@ struct UpdateThreadPresentationBody {
     /// archiving goes through `POST /v1/threads/{id}/archive`.
     #[serde(default)]
     archived: Option<bool>,
+    /// Star state. `None` leaves it as it is.
+    #[serde(default)]
+    starred: Option<bool>,
+    /// Unread state: `false` marks the thread read, `true` marks it unread.
+    /// `None` leaves it as it is.
+    #[serde(default)]
+    unread: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -9764,6 +9779,7 @@ async fn list_threads(
                 cursor: query.cursor.unwrap_or_default(),
                 thread_id: query.thread_id.unwrap_or_default(),
                 archived: archived as i32,
+                starred_only: query.starred_only.unwrap_or(false),
             },
             &bearer,
         )?)
@@ -9793,6 +9809,8 @@ async fn list_threads(
             owner_subject_id: thread.owner_subject_id,
             persona_enabled: thread.persona_enabled,
             archived_at: timestamp_to_rfc3339(thread.archived_at),
+            starred: thread.starred,
+            unread: thread.unread,
         })
         .collect();
 
@@ -9834,6 +9852,8 @@ async fn update_thread_presentation(
                 pinned: body.pinned,
                 persona_enabled: body.persona_enabled,
                 archived: body.archived,
+                starred: body.starred,
+                unread: body.unread,
                 memory_mode: None,
             },
             &bearer,
@@ -10654,6 +10674,7 @@ async fn create_memory(
                 org_id: claims.org_id.clone(),
                 user_id: claims.user_id.clone(),
                 memory_id: String::new(),
+                origin: String::new(),
             },
             &bearer,
         )?)

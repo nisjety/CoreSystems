@@ -75,6 +75,7 @@ import {
   listChatThreadEvents,
   getThreadMessages,
   getChatThread,
+  markChatThreadRead,
   pagedTranscriptEnabled,
   parallelThreadLoadEnabled,
   approvePlan,
@@ -598,6 +599,14 @@ export function useChatController() {
   // that would be exactly the leak this marker exists to prevent. In-memory
   // only, like `temporaryThreadIds`; a reload re-derives it from the listing.
   const [foreignOriginThreadIds, setForeignOriginThreadIds] = createSignal<ReadonlySet<string>>(new Set())
+  /**
+   * Clears the unread dot for a durable thread the owner is reading. Best effort: a
+   * failed write leaves the dot as it was, to clear on the next read.
+   */
+  const markThreadRead = (threadId: string | null | undefined) => {
+    if (!threadId || isTemporaryThread(threadId) || isForeignOriginThread(threadId) || isSupportChatThread(threadId)) return
+    void markChatThreadRead(threadId).catch(() => undefined)
+  }
   const isForeignOriginThread = (threadId: string | null | undefined): boolean =>
     Boolean(threadId) && foreignOriginThreadIds().has(threadId as string)
   const markThreadForeignOrigin = (threadId: string) => {
@@ -1259,6 +1268,8 @@ export function useChatController() {
       ? null
       : await (transcriptRequest ?? getChatThreadTranscript(threadId).catch(() => null))
     if (seq !== threadLoadSequence) return
+    // Opening an unread thread reads it. A read thread needs no write, so opening one never adds an event.
+    if (session?.unread) markThreadRead(threadId)
     // Session Core's transcript is authoritative for message text, but it is
     // intentionally envelope-only: it does not store the browser's rich
     // presentation projection (task steps, tool calls, citations, artifacts,
@@ -3146,6 +3157,8 @@ export function useChatController() {
             // again as an ordinary turn.
             if (projection.accepts()) resendUntakenQueuedInputs()
             updateLocalRunHint(activeThreadId, 'completed', state.turns.find((turn) => turn.id === assistantId)?.runId)
+            // Mark read at stream end, not per delta, and only while the owner is still on this thread.
+            if (projection.accepts()) markThreadRead(activeThreadId)
             addAnswerVerificationStep(assistantId, turnTitle, tools.includes('search') || tools.includes('research'))
             // Proof is committed after the run settles. Read the server-owned
             // bundle once it is available so effectful turns become immutable
