@@ -44,6 +44,7 @@ These are the approved defaults of the build plan (its open questions were appro
 - Fetch `/robots.txt` for each origin over `https`, then `http` only if `https` fails. The fetch goes through the same SSRF guard and DNS pinning as page fetches. The current `ReqwestRobotsFetcher` is not used as written: it has no SSRF guard and fails open on 5xx and transport errors.
 - Status codes: 2xx parses the body. 404, 403 and 410 mean no rules (allow all). 5xx and timeouts are "unreachable" and follow `QUARRY_EDGE__ROBOTS_UNREACHABLE` (`disallow` by default).
 - Group selection follows RFC 9309: the most specific user-agent group, then `*`. `Allow` and `Disallow` use longest-match.
+- The parser strips a leading UTF-8 BOM, keeps a user-agent list open across blank lines and `Crawl-delay` lines, and ends it at an empty `Allow:` like any rule (RFC 9309 sections 2.2 and 2.2.4).
 - `Crawl-delay` raises the per-host interval up to `QUARRY_CRAWL_DELAY_MAX_S` (10 s by default, ceiling 60 s).
 - Cache: `QUARRY_ROBOTS_CACHE_MAX_ENTRIES` (10,000) and `QUARRY_ROBOTS_FETCH_TIMEOUT_S` (8).
 - Modes: `QUARRY_EDGE__CRAWL_ROBOTS` is `observe` first. In `observe`, denials are counted and reported and no page is dropped.
