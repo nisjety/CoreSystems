@@ -110,7 +110,7 @@ fn token(case: &str) -> String {
 /// The golden case `case`, freshly timed, with `extra_scopes` added to its `scopes` claim.
 /// No golden case carries the profile import scope (no production token does, WS17.P0), so
 /// a test of the profile save asks for it here instead of editing the golden.
-fn token_with_scopes(case: &str, extra_scopes: &[&str]) -> String {
+pub fn token_with_scopes(case: &str, extra_scopes: &[&str]) -> String {
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 
     let golden: Value = serde_json::from_str(GOLDEN).expect("golden is JSON");
