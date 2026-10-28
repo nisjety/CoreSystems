@@ -1,0 +1,17 @@
+# D2-B-adr6-proof: findings I did not fix
+
+Scope: the ADR-6 proof (decision 3.8, list B item 13). Nothing here changes a flag; the flags stay where the owner put them. Each item says who decides or fixes it.
+
+1. **The planned location of `scrape_actions_live` differs from the built one.** The WS13.5 detail of `docs/plans/quarry-browser-build-plan-2026-10-14.md` (around line 2466) names `CHROMIUMOXIDE_TEST=1 cargo test -p quarry-runtime --features chromiumoxide scrape_actions_live`, with three runtime-level tests (`click_then_extract_sees_the_post_click_dom`, `egress_policy_still_denies_offhost_after_actions`, `action_screenshot_is_the_same_page_as_the_markdown`) on a wiremock loopback origin with an "egress test seam". None of those test names, and no such seam, exists in `crates`, `docs` or `scripts` (grep, this session). This unit built the lane decision 3.8 step 3 asks for: `tests/scrape_actions_live.rs`, through the real edge, against a fixture host. The runtime-level lane is not written. `docs/RUNBOOKS.md` (around lines 1636 and 1701) and `docs/SCRAPE_CAPTURE.md` (around line 100) still describe the runtime lane. RUNBOOKS is shared and append-only, so I did not edit it. Owner: the plan and the docs owner.
+
+2. **The live lane has never run.** Four assumptions are unproven until the first stack run: (a) an `<img>` a click appends is intercepted and counted in `blocked_requests` (check 8); (b) the screenshot action returns an inline PNG under ZDR with `QUARRY_EDGE__SCRAPE_CAPTURE=on` (check 9); (c) 1.5 s is enough for the first actions request to take the heavy permit before the second one arrives (check 11; if it is flaky, poll for the 429 instead of sleeping); (d) a `write` into `#search` does not navigate (check 10). Owner: the stack session.
+
+3. **The actions branch of the blocked count has no unit test.** The `browser_driver` test module has no double that runs actions (`CaptureMock` supports captures only), so the wiring added in `9c548a823` is covered by check 8 alone. Owner: whoever next touches the runtime action tests.
+
+4. **No principal holds `scrape:interact`.** No golden case and no registry row carries it, which decision 3.8 also says. So `on` admits no service principal in practice. The real-token test grants the scope only through a test-minted token (`token_with_scopes`). Giving it to a real principal is a Control Plane decision; decision 3.8 names Control Plane and counsel before any production use.
+
+5. **`user` mode is checked with real tokens for two things only:** a user token is admitted, and a service principal with `scrape:interact` is refused. The per-org entitlement and the billing meter (decision 3.8 option C) are not built and are not part of this proof.
+
+6. **Stack traps are in the progress file, not in the code.** The first live run may fail an assertion for a reason I could not see without a real page. The assertions come from the contract (`docs/CONTRACTS.md` section 10), decision 3.8 and the code paths named in the commits. None was adjusted to match a result, because none has a result yet.
+
+7. **Commit trailer.** The commits of this unit end with `Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>`, the attribution rule of this session. The workflow text asked for `Claude Opus 5.5` and called it the owner's convention. That convention is not in `CLAUDE.md` or the memory, so I followed the session rule. The owner should say which trailer this repo uses.
