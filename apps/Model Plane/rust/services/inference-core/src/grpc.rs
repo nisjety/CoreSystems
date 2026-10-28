@@ -944,6 +944,7 @@ impl InferenceCore for InferenceService {
                     summary: item.summary,
                     raw_json: item.raw_json,
                     content_safety_json: item.content_safety_json,
+                    injection_json: item.injection_json,
                 })
                 .collect(),
             model_used: result.model_used,

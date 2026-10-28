@@ -2473,6 +2473,67 @@ fn normalize_tool_query(query: &str) -> String {
         .join(" ")
 }
 
+/// The screening decision for one external tool result: the provenance the model is
+/// shown, and whether the payload is withheld from it.
+struct ExternalScreen {
+    provenance: crate::moderation::ToolProvenance,
+    withheld: bool,
+}
+
+/// Screen one external tool result. With `CONTENT_SAFETY_SEMANTIC_INLINE` on, a turn
+/// with a delegated inference bearer and a call budget goes through
+/// [`screen_external_inline`] (WS26-S6). Every other turn takes the framed path
+/// unchanged, so the switch off is byte-identical to before.
+#[allow(clippy::too_many_arguments)]
+async fn assess_external_payload(
+    state: &AppState,
+    tool_name: &str,
+    text: &str,
+    capability_bearer: Option<&str>,
+    inference_bearer: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    zdr: bool,
+    classifier_budget: Option<&crate::semantic_screening::ClassifierBudget>,
+) -> ExternalScreen {
+    match classifier_budget {
+        Some(budget)
+            if !inference_bearer.trim().is_empty()
+                && crate::semantic_screening::inline_enabled() =>
+        {
+            screen_external_inline(
+                state,
+                tool_name,
+                text,
+                capability_bearer,
+                inference_bearer,
+                org_id,
+                user_id,
+                run_id,
+                zdr,
+                budget,
+            )
+            .await
+        }
+        _ => ExternalScreen {
+            provenance: assess_external_payload_framed(
+                state,
+                tool_name,
+                text,
+                capability_bearer,
+                inference_bearer,
+                org_id,
+                user_id,
+                run_id,
+                zdr,
+            )
+            .await,
+            withheld: false,
+        },
+    }
+}
+
 /// [`crate::moderation::ToolProvenance::assess`] plus the out-of-band semantic
 /// shadow pass, for the three arms that ingest untrusted external page text:
 /// `web_search`, `fetch_url` and `browser_agent`.
@@ -2497,7 +2558,7 @@ fn normalize_tool_query(query: &str) -> String {
 /// stricter, because an absent capability bearer fails closed to screening
 /// always on.
 #[allow(clippy::too_many_arguments)]
-async fn assess_external_payload(
+async fn assess_external_payload_framed(
     state: &AppState,
     tool_name: &str,
     text: &str,
@@ -2542,6 +2603,105 @@ async fn assess_external_payload(
     )
     .await;
     provenance
+}
+
+/// The inline injection pass for one external result (WS26-S6). One capability-core
+/// read decides the mode. `frame` hands the payload to the same sampled shadow pass as
+/// before, on that read. `tighten` and `enforce` run the inline classifier under the
+/// loop's call budget, and `enforce` may withhold the payload from the model.
+#[allow(clippy::too_many_arguments)]
+async fn screen_external_inline(
+    state: &AppState,
+    tool_name: &str,
+    text: &str,
+    capability_bearer: Option<&str>,
+    inference_bearer: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    zdr: bool,
+    budget: &crate::semantic_screening::ClassifierBudget,
+) -> ExternalScreen {
+    let (deterministic, defense) = crate::moderation::screen_tool_payload_with_policy(
+        text,
+        &state.screening_semaphore,
+        &state.http_client,
+        &state.capability_core_base_url,
+        capability_bearer,
+    )
+    .await;
+    let trust = crate::moderation::TrustClass::classify(tool_name);
+    if defense.mode == crate::moderation::ScreeningMode::Frame {
+        let provenance = crate::moderation::ToolProvenance {
+            trust,
+            screening: deterministic,
+        };
+        // The shadow handle is dropped on purpose: the task detaches, and the turn
+        // never waits on it, as in `assess_external_payload_framed`.
+        let _shadow = crate::semantic_screening::spawn_semantic_shadow(
+            tool_name,
+            text,
+            &provenance,
+            state.screening_semaphore.clone(),
+            state.http_client.clone(),
+            state.capability_core_base_url.clone(),
+            capability_bearer.map(str::to_owned),
+            crate::semantic_screening::GrpcContentSafetyClassifier {
+                client: state.inference_client.clone(),
+                bearer: inference_bearer.to_owned(),
+                org_id: org_id.to_owned(),
+                request_id: run_id.to_owned(),
+            },
+            state.publisher.clone(),
+            org_id,
+            user_id,
+            run_id,
+            zdr,
+            crate::semantic_screening::semantic_sample_rate(),
+        );
+        return ExternalScreen {
+            provenance,
+            withheld: false,
+        };
+    }
+    let classifier = crate::semantic_screening::GrpcInjectionClassifier {
+        client: state.inference_client.clone(),
+        bearer: inference_bearer.to_owned(),
+        org_id: org_id.to_owned(),
+        request_id: format!("screen:{run_id}"),
+        model: crate::semantic_screening::injection_model().to_owned(),
+    };
+    let screen = crate::semantic_screening::enforce_screen(
+        text,
+        trust,
+        deterministic,
+        zdr,
+        defense.mode,
+        defense.fail_mode,
+        budget,
+        crate::semantic_screening::semantic_deadline(),
+        &state.screening_semaphore,
+        &classifier,
+    )
+    .await;
+    if let Some(envelope) =
+        crate::security_events::enforced_envelope_for(&screen, org_id, user_id, run_id, tool_name, zdr)
+    {
+        let publisher = state.publisher.clone();
+        let subject = mp_events::subjects::security_subject(org_id);
+        tokio::spawn(async move {
+            if let Err(error) = publisher.publish(&subject, &envelope).await {
+                tracing::warn!(%error, "semantic enforcement event not published");
+            }
+        });
+    }
+    ExternalScreen {
+        provenance: crate::moderation::ToolProvenance {
+            trust,
+            screening: screen.screening,
+        },
+        withheld: screen.withhold,
+    }
 }
 
 /// `mp_gateway_tool_screening_total`: one count per tool result the security audit sees, by trust
@@ -2620,7 +2780,7 @@ pub async fn dispatch_tool(
         conversation, data_plane_bearer, execution_bearer, inference_bearer,
         session_bearer, capability_bearer, zdr, sovereign_required,
         allow_paid_providers, call, ingestion_bearer, sandbox_bearer, None,
-        data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(),
+        data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(), None,
     ).await
 }
 
@@ -2649,6 +2809,9 @@ async fn dispatch_tool_with_cost(
     data_plane_mode: Option<String>,
     // The turn's validated attached files; read by `code_interpreter` only.
     attachments: &crate::turn_attachments::ValidatedAttachments,
+    // The loop's call budget for the inline injection pass (WS26-S6). `None` where no
+    // inline pass can run: a direct dispatch, or a web call with no inference bearer.
+    classifier_budget: Option<&crate::semantic_screening::ClassifierBudget>,
 ) -> ToolOutcome {
     if !inline_tool_allowed(&call.name) {
         return err_outcome(
@@ -3050,7 +3213,7 @@ async fn dispatch_tool_with_cost(
                     // (url/title/snippet), never a page body, so there is no
                     // separate pre-truncation step to screen ahead of —
                     // `output` here already IS the complete payload.
-                    let provenance = assess_external_payload(
+                    let ExternalScreen { provenance, withheld } = assess_external_payload(
                         state,
                         &call.name,
                         &output,
@@ -3062,8 +3225,18 @@ async fn dispatch_tool_with_cost(
                         // A ZDR or waived turn carries a Data Plane retention mode and sends no derived
                         // content-safety pass to a processor.
                         zdr || data_plane_mode.is_some(),
+                        classifier_budget,
                     )
                     .await;
+                    if withheld {
+                        return ToolOutcome {
+                            call_id: call.id.clone(),
+                            name: call.name.clone(),
+                            output: crate::semantic_screening::withheld_output(&call.name, &provenance, None),
+                            provenance,
+                            error: None,
+                        };
+                    }
                     // Over the inline bound, the hits are parked whole when extended parking is
                     // on; the handle is the model's way to read the rest by `result_query`.
                     let output = match park_extended_result(
@@ -3182,7 +3355,7 @@ async fn dispatch_tool_with_cost(
                     // `MAX_FETCH_CHARS` head is exactly the middle-of-payload
                     // gap this closes: an injection planted past the first
                     // 4,000 characters must still be seen.
-                    let provenance = assess_external_payload(
+                    let ExternalScreen { provenance, withheld } = assess_external_payload(
                         state,
                         &call.name,
                         &body,
@@ -3192,8 +3365,22 @@ async fn dispatch_tool_with_cost(
                         user_id,
                         run_id,
                         zdr || data_plane_mode.is_some(),
+                        classifier_budget,
                     )
                     .await;
+                    if withheld {
+                        return ToolOutcome {
+                            call_id: call.id.clone(),
+                            name: call.name.clone(),
+                            output: crate::semantic_screening::withheld_output(
+                                &call.name,
+                                &provenance,
+                                Some(r.final_url.as_str()),
+                            ),
+                            provenance,
+                            error: None,
+                        };
+                    }
                     // Under `RESULT_HANDLES_EXTENDED` the complete screened page is parked, so
                     // the part past the cut is reachable by `result_query` range. The first
                     // 4,000 characters stay inline either way.
@@ -3281,7 +3468,7 @@ async fn dispatch_tool_with_cost(
                             // browser drove a live untrusted page, so a
                             // planted instruction past MAX_FETCH_CHARS must
                             // still be caught.
-                            let provenance = assess_external_payload(
+                            let ExternalScreen { provenance, withheld } = assess_external_payload(
                                 state,
                                 &call.name,
                                 content,
@@ -3291,8 +3478,22 @@ async fn dispatch_tool_with_cost(
                                 user_id,
                                 run_id,
                                 zdr || data_plane_mode.is_some(),
+                                classifier_budget,
                             )
                             .await;
+                            if withheld {
+                                return ToolOutcome {
+                                    call_id: call.id.clone(),
+                                    name: call.name.clone(),
+                                    output: crate::semantic_screening::withheld_output(
+                                        &call.name,
+                                        &provenance,
+                                        (!target_url.is_empty()).then_some(target_url.as_str()),
+                                    ),
+                                    provenance,
+                                    error: None,
+                                };
+                            }
                             let out = serde_json::json!({
                                 "content": truncate_chars(content, MAX_FETCH_CHARS),
                                 "confidence": v.get("confidence").cloned().unwrap_or(serde_json::Value::Null),
@@ -4279,6 +4480,7 @@ async fn dispatch_audited_tool(
     read_deadline: Option<tokio::time::Instant>,
     data_plane_mode: Option<String>,
     attachments: &crate::turn_attachments::ValidatedAttachments,
+    classifier_budget: Option<&crate::semantic_screening::ClassifierBudget>,
 ) -> Result<ToolOutcome, &'static str> {
     if session_bearer.is_empty() {
         return Err("tool audit credential unavailable");
@@ -4346,6 +4548,7 @@ async fn dispatch_audited_tool(
                 cost_bearer,
                 data_plane_mode.clone(),
                 attachments,
+                classifier_budget,
             )
             .await;
             let should_retry = attempt < crate::tool_retry::MAX_TOOL_ATTEMPTS
@@ -4490,6 +4693,7 @@ pub(crate) async fn dispatch_web_tool_audited(
         // Web tools only: code_interpreter, the sole reader of attached files, is
         // unreachable from this path.
         &crate::turn_attachments::ValidatedAttachments::none(),
+        None,
     )
     .await
 }
@@ -5625,6 +5829,9 @@ pub async fn run_forced_web_search_for_model(
         data_plane_mode,
         // A forced `web_search` only: no sandbox call is reachable from here.
         &crate::turn_attachments::ValidatedAttachments::none(),
+        // No inline pass here: the forced search passes an empty inference bearer, and
+        // `assess_external_payload` runs the inline pass only with one.
+        None,
     )
     .await?;
     // Gate BEFORE anything is emitted: the citations are built from the surviving
@@ -7033,6 +7240,11 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     // At most once per turn, before the first model round: a new note's
     // source or a scoped revision's document (`sole_artifact_prefetch`).
     let mut sole_artifact_prefetched = false;
+    // The inline injection pass's call budget for the whole turn (WS26-S6). It sits
+    // above the rounds, so the cap holds across every round, not per round.
+    let classifier_budget = crate::semantic_screening::ClassifierBudget::new(
+        crate::semantic_screening::semantic_max_calls_per_run(),
+    );
     // Rounds that reached the model, for the turn's timing spans.
     let mut rounds_started: u32 = 0;
 
@@ -7666,6 +7878,8 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         let dispatch_started = timing.map(crate::turn_timing::TurnTiming::now_ms);
         // A shared reference, so each per-call future copies it rather than moving the turn's value.
         let data_plane_mode_ref = &data_plane_mode;
+        // The same, for the turn's classifier budget: each per-call future copies the reference.
+        let classifier_budget_ref = &classifier_budget;
         let dispatched = futures::future::join_all(prepared.into_iter().map(
             |(call, is_duplicate, is_truncated)| async move {
                 if !offered_tools.iter().any(|tool| tool.name == call.name) {
@@ -7718,6 +7932,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     validation_deadline.filter(|_| stops_at_validation_deadline(&call.name)),
                     data_plane_mode_ref.clone(),
                     attachments,
+                    Some(classifier_budget_ref),
                 )
                 .await
             },

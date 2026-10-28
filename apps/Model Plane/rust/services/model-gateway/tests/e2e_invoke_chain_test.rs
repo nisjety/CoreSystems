@@ -710,6 +710,7 @@ impl InferenceCore for MockOk {
                 summary: String::new(),
                 raw_json: "{}".into(),
                 content_safety_json: String::new(),
+                injection_json: String::new(),
             }],
             model_used: "mock-language".into(),
             provider_used: "mock".into(),

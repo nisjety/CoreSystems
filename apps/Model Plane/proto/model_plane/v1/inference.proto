@@ -1412,6 +1412,13 @@ message LanguageAnalysisResult {
   // "violence":0..1,"self_harm":0..1,"sexual":0..1}}. Empty otherwise.
   // capability-core safety_policies (kind=content_safety) own the thresholds.
   string content_safety_json = 13;
+
+  // Prompt-injection verdict JSON for operation="prompt_injection":
+  // {"flagged":bool,"categories":{"instruction_override":0..1,"role_impersonation":0..1,
+  // "exfiltration_request":0..1,"tool_use_request":0..1,"hidden_text":0..1}}. Empty otherwise.
+  // The gateway only ever reads it tighten-only (WS26-S6): a flag can promote a clean
+  // result, nothing can demote one. Owner: WS26 S6.
+  string injection_json = 14;
 }
 
 // AnalyzeLanguageResponse — language analytics results and serving metadata.
