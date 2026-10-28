@@ -1,6 +1,6 @@
 # Space depth pass A: fix order, and the UI parity track (2026-10-28)
 
-Inputs: `space-w1-report.md` (clusters), `space-depth-register-w1.md`, `space-w1-live-proof.md`, and a code check of each item below. Nothing here starts Wave 2. Branch `space`, nothing pushed.
+Updated later on 2026-10-28 (items 2 and 3 fixed, U2 done). Inputs: `space-w1-report.md` (clusters), `space-depth-register-w1.md`, `space-w1-live-proof.md`, and a code check of each item below. Nothing here starts Wave 2. Branch `space`, nothing pushed.
 
 ## 1. What is already fixed (commits c453d629c, 739b510ed)
 
@@ -20,8 +20,8 @@ Size: XS under an hour, S a few hours, M a day or more.
 | # | Item | Evidence | Size | Why this position |
 |---|---|---|---|---|
 | 1 | Done: SPA blockers (above) | unit tests, screenshots | done | The headline flow could not send. |
-| 2 | People-search SQL: `searchPeopleSQL` never references `$2` but `callerID` is bound as `$2`, so Postgres cannot type it (SQLSTATE 42P18) | `people.go:108-192`; all 5 directory live tests fail with this error | XS | The "add a member" picker fails 100% on real Postgres; one-line fix (drop the bind, renumber). |
-| 3 | `message_search` has no `post_kind` predicate: `m.role IN ('user','assistant')` returns human posts, and the recall flag `$9` only excludes ZDR threads | `message_search.rs:56-77` (cluster 3, now confirmed in code; callers still to check) | S | Plan M1-S1 requires that model recall returns zero posts. Add the predicate for recall mode, bind `post_kind` in the v1 digest (D1-073), test on Postgres. |
+| 2 | DONE (50be21db0). People-search SQL: `searchPeopleSQL` never referenced `$2` but `callerID` was bound as `$2`, so Postgres could not type it (SQLSTATE 42P18) | the 5 directory live tests failed with this error; now all 6 pass on Postgres, plus a DB-free test that every placeholder is referenced | XS | The "add a member" picker failed 100% on a real database. |
+| 3 | DONE (db4a9c4b1), and smaller than first written. `SEARCH_SQL` had no `post_kind` predicate, but recall is confined to the owner's unscoped threads (room posts cannot exist there) and the only caller uses the UI purpose, so this was a latent gap for the planned recall tool, not an active leak. Recall now excludes `post_kind = 'post'`; UI search still finds posts | 16 message_search tests pass on Postgres, incl. a new one that seeds a turn and a post | S | Defence in depth for the recall tool and any future Space-scoped model search. Still open from cluster 3: bind `post_kind` in the v1 digest (D1-073), the in-tx gate's second-caller risk, and the member INSERT never run on Postgres. |
 | 4 | Cluster 1, ZDR on Space writes: observe mode stores posts, two model-gateway store-routes unguarded, 8 routes without a surface-registry row | W1 report; live proof showed the ZDR happy path only | M | Privacy. The live tour covered posts, stream and artifacts; these are the remaining paths. |
 | 5 | Boot guards from the live proof: F10 (convex-core image bakes `startup.sh`) and F11 (a decision key id mismatch shows up as a generic 403) | live-proof findings | S | Both cost hours on the private stack. Make a key-id mismatch a loud boot error in session, capability and orchestrator cores; add the convex-core rebuild to the deploy checklist. |
 | 6 | F3: reverting 0044 fails once 0072 is installed (its triggers depend on `runs.retention_class`) | DB tier; `revert/0044` drops the column, `revert/0072` already exists | S | Rare path, but a rollback that fails when needed is dangerous. Make the 0044 revert drop the 0072 triggers first (or document and test the order). |
@@ -43,10 +43,10 @@ What the room looked like before, against the three references:
 | Header wrapped to 3 lines beside the thread pane; room name vanished on a phone | all | no | Done (U1) |
 | Room pulse plus thread pane squeezed the feed to 480 px (three columns) | one contextual right pane | no | Done (U1) |
 | Viewer avatar read "S(" | initials | no | Done (U1) |
-| Each post card repeats the whole thread inline, then the pane repeats it again | Slack: root message plus "N replies" and who replied | no | Next (U2): collapse a card to root plus reply summary, open the pane for the rest |
+| Each post card repeated the whole thread inline, then the pane repeated it again | Slack: root message plus "N replies" and who replied; Teams: collapsed replies | no | Done (U2): root message plus one reply-summary row (distinct repliers' avatars, count, latest reply, how long ago) that opens the pane |
 | No time beside a message (only the card footer has a date) | all three | yes: transcript turns carry no `created_at` | U3, needs a gateway/session-core field |
 | Same author, consecutive turns repeat avatar and name | Slack, Teams group them | no | U3 |
-| First post of a card shows a generic chat icon, replies show initials | consistent initials avatars | no | U2 |
+| First post of a card showed a generic chat icon, replies showed initials | consistent initials avatars | no | Done (U2) |
 | No "new messages" divider, only a per-card "Ny" badge | Slack, Teams | no | U3 |
 | Header has no member avatars or count; editing the name sits in the header | Slack, Teams: member stack, details panel | no | U4: member stack, move edit into a details panel |
 | Composer has no toolbar | Slack, Teams: format, attach, emoji, mention | attach and emoji: yes (WS12, WS14) | Out of scope now; mention and slash exist |
@@ -56,4 +56,4 @@ What the room looked like before, against the three references:
 | On a phone the shell opens its sidebar drawer over the room on first visit | Slack and Teams show the room | no, but it is the shared shell | Logged; the default should be closed on a room route |
 | Dark mode and the 4 other tabs not yet reviewed | - | no | U4 |
 
-Order: U2 (feed model and avatars) before U3 (time, grouping, divider, needs the `created_at` field) before U4 (header and details). Reactions, edit/delete, attachments and DMs stay with WS12 to WS15, which are not Wave 1.
+Order: U2 is done; U3 (time, grouping, divider, needs the `created_at` field) before U4 (header and details). Disk note: C: is at 98% (21 GB free); Docker's build cache holds about 21 GB that `docker builder prune` would free, and the worktree cargo targets (`C:/dev/space-target-*`) are large. Reactions, edit/delete, attachments and DMs stay with WS12 to WS15, which are not Wave 1.
