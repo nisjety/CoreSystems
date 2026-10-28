@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -128,5 +129,31 @@ func TestSearchPeopleWithoutAnOrgOrCallerIsNotInOrg(t *testing.T) {
 func TestDirectoryLimitsMatchThePlan(t *testing.T) {
 	if DefaultPeopleLimit != 20 || MaxPeopleLimit != 50 || MaxQueryRunes != 100 {
 		t.Fatalf("limits drifted: default=%d max=%d q=%d", DefaultPeopleLimit, MaxPeopleLimit, MaxQueryRunes)
+	}
+}
+
+// A bound parameter the SQL never references cannot be typed by Postgres (SQLSTATE 42P18), and no
+// stubbed test notices. The search statement must use every placeholder from $1 to its last, so the
+// bind list in SearchPeople can never carry a stray value again.
+func TestSearchPeopleSQLReferencesEveryPlaceholderInOrder(t *testing.T) {
+	seen := map[int]bool{}
+	highest := 0
+	for _, m := range regexp.MustCompile(`\$(\d+)`).FindAllStringSubmatch(searchPeopleSQL, -1) {
+		n := 0
+		for _, c := range m[1] {
+			n = n*10 + int(c-'0')
+		}
+		seen[n] = true
+		if n > highest {
+			highest = n
+		}
+	}
+	if highest != 9 {
+		t.Fatalf("search SQL's highest placeholder is $%d; SearchPeople binds 9 values", highest)
+	}
+	for n := 1; n <= highest; n++ {
+		if !seen[n] {
+			t.Errorf("placeholder $%d is never referenced; Postgres cannot type an unreferenced parameter", n)
+		}
 	}
 }

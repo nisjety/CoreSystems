@@ -105,26 +105,30 @@ func escapeLike(s string) string {
 	return r.Replace(s)
 }
 
+// Parameters: $1 org, $2 contains pattern, $3 prefix pattern, $4 excluded Space ('' for none),
+// $5 whether a cursor is applied, $6..$8 the cursor (rank, lower name, id), $9 page size + 1.
+// Every placeholder must appear in the text: Postgres cannot type a bound parameter that is never
+// referenced (SQLSTATE 42P18), which is what an unused caller-id bind used to cause here.
 const searchPeopleSQL = `
 SELECT id, name, email, rank, lname FROM (
   SELECT u.id AS id, u.name AS name, u.email AS email, lower(u.name) AS lname,
-         CASE WHEN $3::text = '' THEN 0
-              WHEN u.name ILIKE $4::text OR u.email ILIKE $4::text THEN 0
+         CASE WHEN $2::text = '' THEN 0
+              WHEN u.name ILIKE $3::text OR u.email ILIKE $3::text THEN 0
               ELSE 1 END AS rank
     FROM user_org_memberships m
     JOIN users u ON u.id = m.user_id
    WHERE m.org_id = $1
      AND m.status = 'active'
      AND u.status = 'active'
-     AND ($3::text = '' OR u.name ILIKE $3::text OR u.email ILIKE $3::text)
-     AND NOT ($5::text <> '' AND EXISTS (
+     AND ($2::text = '' OR u.name ILIKE $2::text OR u.email ILIKE $2::text)
+     AND NOT ($4::text <> '' AND EXISTS (
            SELECT 1 FROM space_memberships sm
-            WHERE sm.space_ref = $5::text AND sm.subject_type = 'user'
+            WHERE sm.space_ref = $4::text AND sm.subject_type = 'user'
               AND sm.subject_id = u.id AND sm.active = TRUE))
 ) ranked
-WHERE (NOT $6::boolean OR (rank, lname, id) > ($7::int, $8::text, $9::text))
+WHERE (NOT $5::boolean OR (rank, lname, id) > ($6::int, $7::text, $8::text))
 ORDER BY rank, lname, id
-LIMIT $10`
+LIMIT $9`
 
 const callerScopeSQL = `
 SELECT
@@ -189,7 +193,7 @@ func (s *Store) SearchPeople(ctx context.Context, q PeopleQuery) (PeopleResult, 
 		contains, prefix = "%"+escaped+"%", escaped+"%"
 	}
 	rows, err := s.db.Pool.Query(ctx, searchPeopleSQL,
-		orgID, callerID, contains, prefix, exclude, hasCursor, cursor.Rank, cursor.LName, cursor.ID, limit+1)
+		orgID, contains, prefix, exclude, hasCursor, cursor.Rank, cursor.LName, cursor.ID, limit+1)
 	if err != nil {
 		return PeopleResult{}, fmt.Errorf("directory: search people: %w", err)
 	}
