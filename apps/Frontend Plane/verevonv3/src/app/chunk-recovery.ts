@@ -26,12 +26,37 @@ const chunkRecoveryDisabled = () => import.meta.env.VITE_CHUNK_RECOVERY_DISABLED
 
 const guards = new Set<() => boolean>()
 const [noticeVisible, setNoticeVisible] = createSignal(false)
+// Set once this page has asked the browser to reload. The page is leaving from
+// then on, so AppShell draws nothing for a failure that happens in the meantime.
+let reloadStarted = false
 
 /** Whether the notice that a newer build is available is showing. */
 export const staleBuildNotice = noticeVisible
 
 /** Hide the notice (the user chose to keep working on the old build). */
 export const dismissStaleBuildNotice = () => setNoticeVisible(false)
+
+/** Whether this page has started its automatic reload (see installChunkRecovery). */
+export const chunkReloadStarted = (): boolean => reloadStarted
+
+/** Lowercase, because the browsers do not agree on the capital letter of their wording. */
+const CHUNK_LOAD_FAILURES = [
+  'failed to fetch dynamically imported module', // Chromium
+  'error loading dynamically imported module', // Firefox
+  'importing a module script failed', // Safari
+  'unable to preload css for', // Vite, for a stylesheet that the replaced build removed
+]
+
+/**
+ * Whether an error is a lazy chunk that could not be fetched: the failure a replaced
+ * build leaves behind. Vite's failed CSS preload counts too.
+ */
+export function isChunkLoadError(error: unknown): boolean {
+  const raw = typeof error === 'string' ? error : (error as { message?: unknown } | null | undefined)?.message
+  if (typeof raw !== 'string') return false
+  const message = raw.toLowerCase()
+  return CHUNK_LOAD_FAILURES.some((failure) => message.includes(failure))
+}
 
 /**
  * Register a check that is true while the page holds state a reload would lose
@@ -95,6 +120,7 @@ export function installChunkRecovery(reload: () => void = () => window.location.
       return
     }
     event.preventDefault()
+    reloadStarted = true
     reload()
   }
   window.addEventListener('vite:preloadError', onPreloadError)

@@ -17,11 +17,15 @@ import { expect, test, type Page } from '@playwright/test'
 const RELOAD_KEY = 'verevon.chunk-reload.v1'
 const NOTICE = '[data-testid="stale-build-notice"]'
 
-/** Count main-frame navigations from here on (the first load is already counted). */
+/**
+ * Count main-frame document loads from here on: the visit and every reload. `framenavigated` would also
+ * count the router's same-document replace on boot (measured 2026-10-28: three events for two loads), so
+ * the document requests are counted instead.
+ */
 const countNavigations = (page: Page) => {
   const counter = { count: 0 }
-  page.on('framenavigated', (frame) => {
-    if (frame === page.mainFrame()) counter.count += 1
+  page.on('request', (request) => {
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) counter.count += 1
   })
   return counter
 }
