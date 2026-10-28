@@ -339,6 +339,9 @@ services:
       # literal `true` turns it on. Roll out in this order: inference-core adapter flags on first, then this switch. With
       # this on and the adapter flags off, a deep request sends budget 0 and a level nothing renders (no thinking).
       MODEL_GATEWAY_EFFORT_LADDER: ${MODEL_GATEWAY_EFFORT_LADDER:-false}
+      # WS27-S5: a ZDR answer's usage frame states its cost in-stream, numbers only, nothing stored (no ledger row, no usage
+      # envelope). Off by default; only the literal `true` turns it on. Turning it on is an owner call (DEC-18(d)).
+      MODEL_GATEWAY_ZDR_STREAM_COST: ${MODEL_GATEWAY_ZDR_STREAM_COST:-false}
       # WS04-S4: read the plan grant from session-core so a Do run started on another replica carries the rung. On by default
       # since the WS04-S9 proof; only the literal `true` turns it on. Deploy session-core first so migration 0050 has applied;
       # false keeps the in-memory grants (kept as the rollback path).
@@ -930,6 +933,10 @@ services:
       # SESSION_CORE_SERVICE_ID/SESSION_CORE_SERVICE_API_KEY already set above.
       MEMORY_GROUNDING_ENABLED: ${MEMORY_GROUNDING_ENABLED:-0}
       MEMORY_GROUNDING_MODEL: ${MEMORY_GROUNDING_MODEL:-claude-haiku-4-5}
+      # WS26-S4: one content policy on every memory write (instruction markers, hidden characters, secret shapes, and
+      # org scope only for origin `user`). `off` by default; `report` counts refusals and still writes, `enforce` refuses.
+      # Only those two exact words turn it on. The rollout default and the enforce date are the owner's call.
+      CONTENT_WRITE_POLICY: ${CONTENT_WRITE_POLICY:-off}
       CONTEXT_RECENT_MESSAGES: "20"
       COMPACTION_THRESHOLD: "80000"
       # P0.4 residency: region stamped onto every run record at StartRun.

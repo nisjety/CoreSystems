@@ -10674,7 +10674,8 @@ async fn create_memory(
                 org_id: claims.org_id.clone(),
                 user_id: claims.user_id.clone(),
                 memory_id: String::new(),
-                origin: String::new(),
+                // The person's own write behind verified user claims (WS26-S4).
+                origin: "user".to_owned(),
             },
             &bearer,
         )?)

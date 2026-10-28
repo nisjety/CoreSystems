@@ -41,6 +41,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/chat/threads/{thread_id}/unarchive",
             post(history::unarchive_thread),
         )
+        // Star and read/unread state; session-core owns both (WS17-S7).
+        .route(
+            "/api/v1/chat/threads/{thread_id}/flags",
+            put(history::update_thread_flags),
+        )
         .route(
             "/api/v1/chat/stream/resume/{request_id}",
             get(streams::resume_stream),

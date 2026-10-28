@@ -453,7 +453,13 @@ type IndexMemoryRequest struct {
 	// correlate the same logical memory across the durable index and the
 	// semantic backend so a later DeleteMemory(memory_id) removes both. When
 	// empty the backend assigns its own id.
-	MemoryId      string `protobuf:"bytes,6,opt,name=memory_id,json=memoryId,proto3" json:"memory_id,omitempty"`
+	MemoryId string `protobuf:"bytes,6,opt,name=memory_id,json=memoryId,proto3" json:"memory_id,omitempty"`
+	// Who asked for this write, for the content policy (WS26-S4): "user" (the
+	// person, through the app), "model_tool" (save_memory), "delegation" (a
+	// subagent's outcome) or "workflow" (an orchestrator write). Empty, and any
+	// other value, is read as "model_tool", so only "user" may write org-wide
+	// memory.
+	Origin        string `protobuf:"bytes,7,opt,name=origin,proto3" json:"origin,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -526,6 +532,13 @@ func (x *IndexMemoryRequest) GetUserId() string {
 func (x *IndexMemoryRequest) GetMemoryId() string {
 	if x != nil {
 		return x.MemoryId
+	}
+	return ""
+}
+
+func (x *IndexMemoryRequest) GetOrigin() string {
+	if x != nil {
+		return x.Origin
 	}
 	return ""
 }
@@ -1454,14 +1467,15 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\auser_id\x18\a \x01(\tR\x06userId\x12@\n" +
 	"\n" +
 	"provenance\x18\b \x01(\x0e2 .model_plane.v1.MemoryProvenanceR\n" +
-	"provenance\"\xae\x01\n" +
+	"provenance\"\xc6\x01\n" +
 	"\x12IndexMemoryRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x14\n" +
 	"\x05topic\x18\x02 \x01(\tR\x05topic\x12\x18\n" +
 	"\acontent\x18\x03 \x01(\tR\acontent\x12\x15\n" +
 	"\x06org_id\x18\x04 \x01(\tR\x05orgId\x12\x17\n" +
 	"\auser_id\x18\x05 \x01(\tR\x06userId\x12\x1b\n" +
-	"\tmemory_id\x18\x06 \x01(\tR\bmemoryId\"}\n" +
+	"\tmemory_id\x18\x06 \x01(\tR\bmemoryId\x12\x16\n" +
+	"\x06origin\x18\a \x01(\tR\x06origin\"}\n" +
 	"\x13IndexMemoryResponse\x12\x1b\n" +
 	"\tmemory_id\x18\x01 \x01(\tR\bmemoryId\x12\x1a\n" +
 	"\bdegraded\x18\x02 \x01(\bR\bdegraded\x12-\n" +
