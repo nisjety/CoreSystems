@@ -395,6 +395,25 @@ services:
       # on restricted content until an EU/ZDR-compliant provider exists.
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-cohere}
       QDRANT_COLLECTION: ${QDRANT_COLLECTION:-dataplane_knowledge_embedv4}
+      # Z-41 — egress attestation for ZDR-restricted content (src/egress_attestation.rs). Attestation is
+      # data, never code. Empty (the default) attests nothing: a ZDR query then answers from text search
+      # only, with a notice, and the embedding guards refuse before any network call. Set the six fields
+      # of ONE Azure resource together, through the release path only. Each field set is checked at boot
+      # and a refusal is logged; nothing here stops the engine. AZURE_COHERE_ZDR covers the Cohere
+      # Embed v4 Foundry resource (query embedding and rerank, each on its own endpoint). AZURE_OPENAI_ZDR
+      # covers the Azure OpenAI resource behind the direct embedding path.
+      AZURE_COHERE_ZDR_RESOURCE_ID: ${AZURE_COHERE_ZDR_RESOURCE_ID:-}
+      AZURE_COHERE_ZDR_APPROVAL_REF: ${AZURE_COHERE_ZDR_APPROVAL_REF:-}
+      AZURE_COHERE_ZDR_EFFECTIVE_DATE: ${AZURE_COHERE_ZDR_EFFECTIVE_DATE:-}
+      AZURE_COHERE_ZDR_REVIEW_BY: ${AZURE_COHERE_ZDR_REVIEW_BY:-}
+      AZURE_COHERE_ZDR_REVIEWER: ${AZURE_COHERE_ZDR_REVIEWER:-}
+      AZURE_COHERE_ZDR_DIGEST: ${AZURE_COHERE_ZDR_DIGEST:-}
+      AZURE_OPENAI_ZDR_RESOURCE_ID: ${AZURE_OPENAI_ZDR_RESOURCE_ID:-}
+      AZURE_OPENAI_ZDR_APPROVAL_REF: ${AZURE_OPENAI_ZDR_APPROVAL_REF:-}
+      AZURE_OPENAI_ZDR_EFFECTIVE_DATE: ${AZURE_OPENAI_ZDR_EFFECTIVE_DATE:-}
+      AZURE_OPENAI_ZDR_REVIEW_BY: ${AZURE_OPENAI_ZDR_REVIEW_BY:-}
+      AZURE_OPENAI_ZDR_REVIEWER: ${AZURE_OPENAI_ZDR_REVIEWER:-}
+      AZURE_OPENAI_ZDR_DIGEST: ${AZURE_OPENAI_ZDR_DIGEST:-}
       MODEL_PLANE_AI_CORE_GRPC_URL: ${MODEL_PLANE_AI_CORE_GRPC_URL:-http://inference-core:9092}
       MODEL_PLANE_EMBEDDING_PROVIDER: ${MODEL_PLANE_EMBEDDING_PROVIDER:-azure_openai}
       MODEL_PLANE_EMBEDDING_TIMEOUT_MS: ${MODEL_PLANE_EMBEDDING_TIMEOUT_MS:-30000}
@@ -536,6 +555,40 @@ services:
       # only symptom was rerank_score: 0.0 everywhere). At 50, each query is
       # exactly one provider call and one comparable scoring pass.
       RERANK_TOP_K: ${RERANK_TOP_K:-50}
+      # CR-T15 — RERANK_INPUT_INCLUDE_CONTEXT: 0 (default) sends the raw chunk text to the reranker; 1 sends each
+      # chunk with its context in force ahead of it. Enable only on the eval evidence (eval-variant-cell.sh
+      # rerank-ctx); a malformed value reads as 0 and is logged at boot. Recreate retrieval-engine to change it.
+      RERANK_INPUT_INCLUDE_CONTEXT: ${RERANK_INPUT_INCLUDE_CONTEXT:-0}
+      # QB-T08 — POST /v1/rerank (Quarry option B): a paid, service-only rerank of caller-supplied
+      # candidates through the Azure Cohere deployment above. DARK until the owner's switch is set AND
+      # the processor is approved (counsel's Art. 28 confirmation). Every switch below is read at boot:
+      # change one, then recreate retrieval-engine. The runbook is docs/web-rerank-v1.md.
+      # DEPLOY ORDER (owner ruling 2026-10-12): quarry-edge's rerank client (QB-T09) must not ship before
+      # WEB_RERANK_ENABLED=1 is live here, WEB_RERANK_PROCESSOR_APPROVED=true is live here (only after
+      # counsel's Art. 28 sign-off), and the data:rerank grant for
+      # quarry-edge is live in auth-service. Before that, every non-ZDR search from quarry-edge is skipped
+      # or degraded, is never cached, and pays the search providers again. The read-only check is
+      # bash "apps/Data Plane v2/scripts/qb-preflight.sh" --live --ship-qb-t09.
+      # WEB_RERANK_ENABLED=0 is the kill switch: the route answers skipped/disabled with no provider call.
+      WEB_RERANK_ENABLED: ${WEB_RERANK_ENABLED:-0}
+      WEB_RERANK_PROCESSOR_APPROVED: ${WEB_RERANK_PROCESSOR_APPROVED:-false}
+      WEB_RERANK_ALLOWED_SERVICES: ${WEB_RERANK_ALLOWED_SERVICES:-service:quarry-edge}
+      # An alert threshold, never a stop (owner default D-E): exceeding it logs and counts, calls go on.
+      WEB_RERANK_DAILY_UNIT_BUDGET: ${WEB_RERANK_DAILY_UNIT_BUDGET:-10000}
+      # Per-org admission for the route (token bucket shared through Dragonfly).
+      DPV2_WEB_RERANK_RATE_LIMIT_PER_ORG_RPS: ${DPV2_WEB_RERANK_RATE_LIMIT_PER_ORG_RPS:-5}
+      DPV2_WEB_RERANK_RATE_LIMIT_PER_ORG_BURST: ${DPV2_WEB_RERANK_RATE_LIMIT_PER_ORG_BURST:-10}
+      # Provider capacity of THIS replica, shared by tenant retrieval and the route. At 0 (the default)
+      # tenant retrieval is unbounded and the route has no capacity, so it answers misconfigured while
+      # switched on. The route needs MAX_INFLIGHT above 2 and RPS above 0. MAX_INFLIGHT also bounds tenant
+      # calls (they share its permit pool); RPS never refuses a tenant call. Both stay at 0 until the owner
+      # enables the route.
+      RERANK_PROVIDER_MAX_INFLIGHT: ${RERANK_PROVIDER_MAX_INFLIGHT:-0}
+      RERANK_PROVIDER_RPS: ${RERANK_PROVIDER_RPS:-0}
+      RERANK_PROVIDER_TENANT_WAIT_MS: ${RERANK_PROVIDER_TENANT_WAIT_MS:-1000}
+      RERANK_BREAKER_FAILURES: ${RERANK_BREAKER_FAILURES:-5}
+      RERANK_BREAKER_WINDOW_SECS: ${RERANK_BREAKER_WINDOW_SECS:-30}
+      RERANK_BREAKER_OPEN_SECS: ${RERANK_BREAKER_OPEN_SECS:-30}
       # Membership authorization is always strict. Retrieval uses its registered
       # service credential only to mint an org-bound, short-lived
       # aud=control-policy bearer, then calls the versioned decision endpoint.

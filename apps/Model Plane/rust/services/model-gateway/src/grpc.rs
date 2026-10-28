@@ -278,12 +278,13 @@ fn authorize_rpc<T: TenantScopedRequest>(
 #[allow(clippy::result_large_err)]
 fn require_explicit_zdr_contract(
     identity: &VerifiedIdentity,
-    operation: &'static str,
+    feature: &'static str,
 ) -> Result<(), Status> {
-    if identity.effective_zdr(false) {
-        return Err(Status::failed_precondition(format!(
-            "{operation} is unavailable under zero-retention policy until its downstream contract carries ZDR"
-        )));
+    if identity.zdr_for(&crate::zdr_posture::Route::plain(false))? {
+        return Err(
+            mp_contracts::zdr_refusal::Refusal::feature_not_supported(feature)
+                .grpc_status(tonic::Code::FailedPrecondition),
+        );
     }
     Ok(())
 }
@@ -687,7 +688,11 @@ impl ModelGateway for GatewayService {
         let started = std::time::Instant::now();
         let identity = authorize_rpc(&request, RpcAccess::Invoke)?;
         let mut req = request.into_inner();
-        req.zdr = identity.effective_zdr(req.zdr);
+        req.zdr = identity.zdr_for(&crate::zdr_posture::Route::named(
+            Some(req.provider.as_str()),
+            Some(req.subscription_connection_id.as_str()),
+            req.zdr,
+        ))?;
         let content = req.content.trim().to_owned();
         if content.is_empty() {
             return Err(Status::invalid_argument("content must not be empty"));
@@ -897,7 +902,11 @@ impl ModelGateway for GatewayService {
     ) -> Result<Response<Self::InvokeStreamStream>, Status> {
         let identity = authorize_rpc(&request, RpcAccess::Invoke)?;
         let mut req = request.into_inner();
-        req.zdr = identity.effective_zdr(req.zdr);
+        req.zdr = identity.zdr_for(&crate::zdr_posture::Route::named(
+            Some(req.provider.as_str()),
+            Some(req.subscription_connection_id.as_str()),
+            req.zdr,
+        ))?;
         let content = req.content.trim().to_owned();
         if content.is_empty() {
             return Err(Status::invalid_argument("content must not be empty"));
@@ -1232,7 +1241,7 @@ impl ModelGateway for GatewayService {
     ) -> Result<Response<WebSearchResponse>, Status> {
         let identity = authorize_rpc(&request, RpcAccess::Tool)?;
         let mut req = request.into_inner();
-        req.zdr = identity.effective_zdr(req.zdr);
+        req.zdr = identity.zdr_for(&crate::zdr_posture::Route::plain(req.zdr))?;
         tools::handle_web_search(&self.state, req)
             .await
             .map(Response::new)
@@ -1775,7 +1784,7 @@ impl ModelGateway for GatewayService {
         request: Request<ProxyMcpToolRequest>,
     ) -> Result<Response<ProxyMcpToolResponse>, Status> {
         let identity = authorize_rpc(&request, RpcAccess::Tool)?;
-        require_explicit_zdr_contract(&identity, "MCP execution")?;
+        require_explicit_zdr_contract(&identity, "mcp_execution")?;
         if !identity.is_service() {
             return Err(Status::permission_denied(
                 "MCP execution is restricted to the governed execution service",
@@ -1993,7 +2002,7 @@ impl ModelGateway for GatewayService {
         request: Request<ExecuteCommandRequest>,
     ) -> Result<Response<ExecuteCommandResponse>, Status> {
         let identity = authorize_rpc(&request, RpcAccess::Tool)?;
-        require_explicit_zdr_contract(&identity, "command execution")?;
+        require_explicit_zdr_contract(&identity, "command_execution")?;
         let bearer = forwarded_authorization(&request);
         let req = request.into_inner();
         // capability-core's exec contract takes flat string args; the gateway's
@@ -2322,7 +2331,7 @@ impl ModelGateway for GatewayService {
         request: Request<TextToSpeechRequest>,
     ) -> Result<Response<TextToSpeechResponse>, Status> {
         let identity = authorize_rpc(&request, RpcAccess::Invoke)?;
-        require_explicit_zdr_contract(&identity, "speech synthesis")?;
+        require_explicit_zdr_contract(&identity, "speech_synthesis")?;
         let req = request.into_inner();
         let request_id = request_id_or_new(&req.request_id);
         let resp = self
@@ -2340,7 +2349,7 @@ impl ModelGateway for GatewayService {
                 language: String::new(),
                 // Always false past the guard above; carried so inference-core
                 // applies the same posture if that guard is ever relaxed.
-                zdr: identity.effective_zdr(false),
+                zdr: identity.zdr_for(&crate::zdr_posture::Route::plain(false))?,
             })?)
             .await?
             .into_inner();
@@ -2358,7 +2367,7 @@ impl ModelGateway for GatewayService {
         request: Request<SpeechToTextRequest>,
     ) -> Result<Response<SpeechToTextResponse>, Status> {
         let identity = authorize_rpc(&request, RpcAccess::Invoke)?;
-        require_explicit_zdr_contract(&identity, "speech transcription")?;
+        require_explicit_zdr_contract(&identity, "speech_transcription")?;
         let req = request.into_inner();
         let request_id = request_id_or_new(&req.request_id);
         let resp = self
@@ -2375,7 +2384,7 @@ impl ModelGateway for GatewayService {
                 language: req.language,
                 // Always false past the guard above; carried so inference-core
                 // applies the same posture if that guard is ever relaxed.
-                zdr: identity.effective_zdr(false),
+                zdr: identity.zdr_for(&crate::zdr_posture::Route::plain(false))?,
             })?)
             .await?
             .into_inner();
@@ -2468,7 +2477,7 @@ impl ModelGateway for GatewayService {
     ) -> Result<Response<FetchResponse>, Status> {
         let identity = authorize_rpc(&request, RpcAccess::Tool)?;
         let mut req = request.into_inner();
-        req.zdr = identity.effective_zdr(req.zdr);
+        req.zdr = identity.zdr_for(&crate::zdr_posture::Route::plain(req.zdr))?;
         if !self.state.quarry.available() {
             return Err(Status::unimplemented("quarry edge not configured"));
         }
@@ -2510,7 +2519,13 @@ impl ModelGateway for GatewayService {
     ) -> Result<Response<ExtractStructuredResponse>, Status> {
         let identity = authorize_rpc(&request, RpcAccess::Invoke)?;
         let mut req = request.into_inner();
-        req.zdr = identity.effective_zdr(req.zdr);
+        // The provider is part of the route: a subscription provider named here is a connection route,
+        // so a ZDR token is refused on it, and a waiver (which binds one connection) is refused too.
+        req.zdr = identity.zdr_for(&crate::zdr_posture::Route::named(
+            Some(req.provider.as_str()),
+            None,
+            req.zdr,
+        ))?;
         if !self.state.quarry.available() {
             return Err(Status::unimplemented("quarry edge not configured"));
         }

@@ -94,6 +94,8 @@ import {
 import { speechPlayer } from "@/features/voice/speech-playback";
 import { PendingChatLaunchError, writePendingChatLaunch } from "@/features/chat/lib/pending-chat-launch";
 import { ScheduleDialog } from "@/features/chat/components/ScheduleDialog";
+import { ChatWorkPeriodPicker } from "@/features/chat/components/ChatWorkPeriodPicker";
+import type { ChatWorkPeriod } from "@/shared/actions/chat-work-period";
 import { prepareChatAttachments } from "@/features/chat/lib/prepare-chat-attachments";
 import {
 	extractChatDocument,
@@ -847,6 +849,8 @@ export function DashboardComposer(props: {
      */
     retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope;
     onRetrievalScopeChange?: (value: import('@/shared/actions/chat-source-scope').RetrievalScope) => void;
+	workPeriod?: ChatWorkPeriod;
+	onWorkPeriodChange?: (value: ChatWorkPeriod) => void;
 	/** Calm, conversation-first presentation used by the dedicated chat page. */
 	appearance?: "chat" | "default";
 	/** Compact Home dock; only changes the input's initial presentation. */
@@ -3428,6 +3432,9 @@ export function DashboardComposer(props: {
 								</span>
 							</button>
 							<div class="dashboard-composer-toolbar__divider" />
+							<Show when={props.appearance === "chat" && props.workPeriod && props.onWorkPeriodChange}>
+								<ChatWorkPeriodPicker value={props.workPeriod!} onChange={props.onWorkPeriodChange!} />
+							</Show>
 							<ComposerIconButton
 								active={suggestionsOpen()}
 								label={i18n.tr("Forslag", "Suggestions")}

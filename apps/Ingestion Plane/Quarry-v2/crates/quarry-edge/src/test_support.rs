@@ -123,6 +123,7 @@ pub fn test_state(static_driver: Arc<dyn Driver>) -> AppState {
         page_title_enricher: None,
         service_token_provider: None,
         answer_pipeline: None,
+        model_plane: Default::default(),
         local_index: None,
         usage: Arc::new(NoopUsageMeter),
         policy: RunPolicy::default(),

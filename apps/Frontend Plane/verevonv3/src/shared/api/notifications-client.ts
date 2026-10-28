@@ -2,13 +2,17 @@ import { requestJson } from './http'
 
 export interface Notification {
   id: string
-  userId: string
-  type: string
+  organization_id: string
+  recipient_id: string
+  event_type: string
+  channel: string
   title: string
-  body?: string
+  body: string
   read: boolean
-  createdAt: string
-  metadata?: Record<string, unknown>
+  archived: boolean
+  submitted_at: string
+  cta_href?: string
+  payload?: Record<string, unknown>
 }
 
 export interface UnreadCount {
@@ -21,8 +25,8 @@ export interface NotificationPreference {
   enabled: boolean
 }
 
-export function listNotifications(): Promise<Notification[]> {
-  return requestJson<Notification[]>('/api/v1/notifications')
+export function listNotifications(signal?: AbortSignal): Promise<Notification[]> {
+  return requestJson<Notification[]>('/api/v1/notifications', { signal })
 }
 
 export function getUnreadCount(): Promise<UnreadCount> {

@@ -154,7 +154,7 @@ export function DashboardImageCard(props: {
           <a href={props.card.href} link class="block">
             <div class="verevon-dashboard-card-media">
               <img
-                src={props.card.image ?? '/imagens/arched-corridor-1.jpeg'}
+                src={props.card.image ?? `${import.meta.env.BASE_URL}imagens/arched-corridor-1.jpeg`}
                 alt={title()}
                 loading={aboveFold() ? 'eager' : 'lazy'}
                 class="dashboard-card-image"

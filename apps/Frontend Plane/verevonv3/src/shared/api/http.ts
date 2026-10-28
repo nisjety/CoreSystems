@@ -19,12 +19,18 @@ export const SESSION_EXPIRED_EVENT = 'verevon:session-expired'
 export class ApiError extends Error {
   readonly status: number
   readonly code: string | null
+  /**
+   * The feature a zero-retention refusal names (`zdr_feature_not_supported`),
+   * by its key, when the body carries one. Null otherwise.
+   */
+  readonly feature: string | null
 
-  constructor(message: string, status: number, code: string | null) {
+  constructor(message: string, status: number, code: string | null, feature: string | null = null) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
+    this.feature = feature
   }
 }
 
@@ -49,8 +55,13 @@ function applyDevAuth(headers: Headers): void {
  *    `{ error, code: "no_speech_detected" }`, keep their top-level code
  *  - Better Auth passthrough:   `{ code, message }` (auth routes are proxied
  *    verbatim by the gateway, so the SPA sees Better Auth's native shape)
+ * A zero-retention refusal also names its feature (`error.feature`, a key); it
+ * is returned only when present, so every other error keeps its exact shape.
  */
-export function extractError(body: unknown, status: number): { code: string | null; message: string } {
+export function extractError(
+  body: unknown,
+  status: number,
+): { code: string | null; message: string; feature?: string } {
   if (body && typeof body === 'object') {
     const record = body as Record<string, unknown>
 
@@ -63,6 +74,7 @@ export function extractError(body: unknown, status: number): { code: string | nu
       return {
         code: typeof e.code === 'string' ? e.code : null,
         message: typeof e.message === 'string' && e.message.trim() ? e.message : `Request failed (${status})`,
+        ...(typeof e.feature === 'string' && e.feature.trim() ? { feature: e.feature } : {}),
       }
     }
 
@@ -92,7 +104,7 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
   const body = (await response.json().catch(() => null)) as Envelope<T> | Record<string, unknown> | null
 
   if (!response.ok) {
-    const { code, message } = extractError(body, response.status)
+    const { code, message, feature } = extractError(body, response.status)
     // A failed sign-in or 2FA challenge is an expected credential error and
     // must remain on its form. Other gateway `unauthorized` responses mean the
     // existing browser session is no longer accepted, so leaving the user on a
@@ -105,7 +117,7 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
     ) {
       window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT))
     }
-    throw new ApiError(message, response.status, code)
+    throw new ApiError(message, response.status, code, feature ?? null)
   }
 
   return unwrap(body as Envelope<T>)
@@ -137,8 +149,8 @@ export async function requestForm<T>(
   const body = (await response.json().catch(() => null)) as Envelope<T> | Record<string, unknown> | null
 
   if (!response.ok) {
-    const { code, message } = extractError(body, response.status)
-    throw new ApiError(message, response.status, code)
+    const { code, message, feature } = extractError(body, response.status)
+    throw new ApiError(message, response.status, code, feature ?? null)
   }
 
   return unwrap(body as Envelope<T>)

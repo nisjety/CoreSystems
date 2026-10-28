@@ -6,6 +6,7 @@ import { getSession } from '@/shared/session/session-store'
 import type { ChatOrganizationAction } from '@/shared/actions/chat-organization'
 import { applyChatOrganizationAction, chatDateGroup, chatOrganizationStorageKey, emptyChatOrganization, readChatOrganization, saveChatOrganization, selectOrganizedChats } from '@/features/chat/lib/chat-organization'
 import type { ChatThreadHistoryItem } from '@/features/chat/lib/chat-thread-history'
+import { ChatWorkLinks } from './ChatWorkLinks'
 import './chat-sidebar-organizer.css'
 
 type DialogMode = { kind: 'create' } | { kind: 'project'; id: string } | { kind: 'move'; thread: ChatThreadHistoryItem }
@@ -208,6 +209,7 @@ export function ChatSidebarOrganizer(props: {
         <div class="chat-organizer__search"><Search size={15} /><input ref={searchInput} type="search" aria-label={i18n.tr('Søk i samtaler', 'Search chats')} placeholder={i18n.tr('Søk i samtaler …', 'Search chats…')} value={query()} onInput={(event) => setQuery(event.currentTarget.value)} /><button type="button" aria-label={i18n.tr('Lukk samtalesøk', 'Close chat search')} onClick={() => { setQuery(''); setSearchOpen(false) }}><X size={14} /></button></div>
       </Show>
       <a href="/chat" link class="core-chat-sidebar__new" onClick={() => props.onNewChat()}><MessageSquarePlus size={17} />{i18n.tr('Ny samtale', 'New chat')}</a>
+      <ChatWorkLinks />
       <Show when={organization().view.filter !== 'all' || query().trim()}><button type="button" class="chat-organizer__clear-filter" onClick={() => { setQuery(''); updateView({ filter: 'all' }) }}>{i18n.tr('Fjern filtre', 'Clear filters')} · {matches().length}<X size={12} /></button></Show>
       <nav class="chat-organizer__list core-chat-sidebar__sessions" aria-label={i18n.tr('Chat-samtaler', 'Chat conversations')}>
         <Show when={!props.loading} fallback={<p class="chat-organizer__empty">{i18n.tr('Laster samtaler …', 'Loading chats…')}</p>}>

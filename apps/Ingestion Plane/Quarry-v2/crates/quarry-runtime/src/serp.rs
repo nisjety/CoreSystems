@@ -18,6 +18,7 @@ use std::time::Duration;
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 
 use crate::fusion::RRF_K;
+use crate::rerank::{RerankEpoch, RerankReport};
 use crate::smart_router::QueryIntent;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -88,7 +89,8 @@ pub struct SearchOptions {
     /// to an external paid SERP SaaS provider (Brave, Serper) — sending it
     /// there is a disclosure `SmartSearchRouter` must refuse regardless of
     /// the operator-wide `zero_saas_search` config toggle. In-infra providers
-    /// (Tantivy, Stract, SearXNG, Data Plane) are unaffected. Defaults to
+    /// (Tantivy, Stract, SearXNG) are unaffected. The Data Plane vector leg is skipped
+    /// too (QB-T10): a zdr request makes no embedding call. Defaults to
     /// `false`; callers with a real per-request ZDR signal (the edge's
     /// `/v1/search`, `/v1/answer`, `/v1/answer/stream` handlers) must set it
     /// explicitly rather than relying on `..Default::default()`.
@@ -284,6 +286,26 @@ fn searxng_safesearch(safe_search: bool) -> &'static str {
 #[async_trait]
 pub trait SearchProvider: Send + Sync {
     async fn search(&self, query: &str, opts: &SearchOptions) -> QuarryResult<Vec<SearchResult>>;
+
+    /// `search`, plus what the rerank step did. A provider whose chain has no
+    /// rerank step reports `rerank-not-configured`, which the edge cache stores
+    /// as it is. A reranking wrapper overrides this with the outcome the cache
+    /// rule keys on. A wrapper that forwards to an inner provider must forward
+    /// this method too, or the report is lost on the way out.
+    async fn search_with_report(
+        &self,
+        query: &str,
+        opts: &SearchOptions,
+    ) -> QuarryResult<(Vec<SearchResult>, RerankReport)> {
+        Ok((self.search(query, opts).await?, RerankReport::default()))
+    }
+
+    /// The rerank configuration this chain searches under. The edge cache folds
+    /// it into the key, so changing it makes earlier entries unreachable.
+    fn rerank_epoch(&self) -> RerankEpoch {
+        RerankEpoch::default()
+    }
+
     fn name(&self) -> &str;
 }
 
@@ -1057,6 +1079,37 @@ mod tests {
         body_json, header, method, path as wpath, query_param, query_param_is_missing,
     };
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A provider whose chain has no rerank step reports the default: the status
+    /// the edge cache stores as it is, under the empty epoch.
+    #[tokio::test]
+    async fn search_with_report_defaults_to_rerank_not_configured() {
+        struct Plain;
+        #[async_trait]
+        impl SearchProvider for Plain {
+            async fn search(
+                &self,
+                _q: &str,
+                _o: &SearchOptions,
+            ) -> QuarryResult<Vec<SearchResult>> {
+                Ok(vec![SearchResult {
+                    url: "https://a.example".into(),
+                    rank: 1,
+                    ..Default::default()
+                }])
+            }
+            fn name(&self) -> &str {
+                "plain"
+            }
+        }
+        let (results, report) = Plain
+            .search_with_report("q", &SearchOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(report, RerankReport::default());
+        assert_eq!(Plain.rerank_epoch(), RerankEpoch::default());
+    }
 
     #[tokio::test]
     async fn brave_returns_ranked_results() {

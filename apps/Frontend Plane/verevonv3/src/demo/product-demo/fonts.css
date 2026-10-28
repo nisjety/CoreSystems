@@ -1,0 +1,23 @@
+/*
+ * Self-hosted fonts of the demo. Nothing is loaded from a third-party host.
+ * Geist is OFL 1.1 (fonts/OFL.txt). Geist Mono is not vendored yet: until
+ * fonts/GeistMono-Variable.woff2 is added, 'Geist Mono' falls back to the system
+ * monospace stack from global.css. To add it, copy the face below and uncomment it.
+ */
+@font-face {
+  font-family: 'Geist';
+  src: url('./fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/*
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('./fonts/GeistMono-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+*/

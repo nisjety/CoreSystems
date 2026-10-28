@@ -25,10 +25,12 @@ use serde::{Deserialize, Serialize};
 
 use quarry_runtime::answer::{AnswerRequest, Citation, MarkdownFetcher, SimpleHttpMarkdownFetcher};
 use quarry_runtime::mp_client::{ModelPlaneClient, ModelPlaneInvokeRequest};
+use quarry_runtime::rerank::{RerankEpoch, RerankReport, RerankStatus};
 use quarry_runtime::serp::{
     ImageResult, SearXNGImages, SearXNGVideos, SearchOptions, SearchResult, VideoResult,
 };
 use quarry_runtime::smart_router::{classify_intent, QueryIntent};
+use quarry_runtime::vector_index::{VectorHit, VectorOutcome, VectorQuery};
 
 use crate::state::AppState;
 
@@ -39,15 +41,21 @@ const ANSWER_TOP_K: usize = 5;
 /// Max chars of a fetched page used as the find-similar query seed. The whole
 /// page would bloat the embedding call; the lead is the strongest signal.
 const SIMILAR_SEED_MAX_CHARS: usize = 2_000;
+/// The score kind the Data Plane's cross-encoder produces (`rerank-v1`). A caller opts in to it.
+const CROSS_ENCODER_V1: &str = "cross_encoder.v1";
+/// Every score kind the edge can emit. Any other name in `score_kinds` is refused.
+const SCORE_KINDS: &[&str] = &[CROSS_ENCODER_V1];
 
 #[derive(Debug, Deserialize)]
 pub struct SearchRequest {
     pub query: String,
     /// Zero Data Retention: bypass caches and durable content-bearing events.
     /// The request can only raise the posture: a user of a ZDR organisation
-    /// runs as ZDR whatever this says (see `Claims::zdr_floor`).
+    /// runs as ZDR whatever this says (see `Claims::zdr_floor`). Absent means
+    /// `false` for a user. A service caller must send it (`ZDR_REQUIRED`): its
+    /// own token's `zdr` claim is never read, so its body is its posture.
     #[serde(default)]
-    pub zdr: bool,
+    pub zdr: Option<bool>,
     /// Per-request permission to dispatch the paid external SERP providers
     /// (Brave, Serper) — money and egress, so it is a permission the caller
     /// has to assert, never an inference from anything else on the request.
@@ -132,6 +140,12 @@ pub struct SearchRequest {
     /// `allow_paid_providers` above, where the same treatment would be wrong.
     #[serde(default)]
     pub intent: Option<String>,
+    /// The score kinds the caller accepts on the results. Empty (the default) means
+    /// the order only: no score reaches the wire. `cross_encoder.v1` asks for the Data
+    /// Plane's cross-encoder scores on a reranked result set, and the response then
+    /// names the kind in `score_kind`. An unknown kind is refused, not ignored.
+    #[serde(default)]
+    pub score_kinds: Vec<String>,
     /// Optional client-supplied request ID for tracing.
     #[serde(default)]
     #[allow(dead_code)] // scaffolding: wired in follow-up
@@ -161,6 +175,14 @@ pub struct SearchResponse {
     /// Present when `facets=true` — result aggregations by host (desc count).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub facets: Option<Vec<FacetCount>>,
+    /// The kind of the scores on `results`. Present only when the caller asked for
+    /// that kind in `score_kinds` and the rerank was applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score_kind: Option<&'static str>,
+    /// What the rerank step did for these results. Absent when no rerank step is
+    /// wired in, so a deployment without reranking keeps the response it had.
+    #[serde(skip_serializing_if = "RerankReport::is_not_configured")]
+    pub rerank: RerankReport,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -193,6 +215,11 @@ struct CachedSearch {
     answer: Option<String>,
     #[serde(default)]
     citations: Option<Vec<Citation>>,
+    /// The rerank outcome the entry was written with, so a hit reports the same
+    /// status as the miss that filled it. Entries from before the field existed
+    /// read back as `rerank-not-configured`.
+    #[serde(default)]
+    rerank: RerankReport,
 }
 
 // ── intent hint + source-quality observability (unit-tested) ────────────────
@@ -511,9 +538,20 @@ pub(crate) fn build_search_options(
 /// `intent` is present because it steers which engines the router dispatches:
 /// omitting it would let a `research` request be served the cached result set
 /// of a `navigational` one for the same query string.
-pub(crate) fn params_signature(opts: &SearchOptions, include_answer: bool) -> String {
+///
+/// `rerank` is the epoch the provider chain searches under. An entry written
+/// under one rerank configuration must not be served under another.
+///
+/// The paid-provider permission enters through paid_allowed: paid providers change
+/// which results come back, so a request that may not use them must not read an
+/// entry that a request which may has written.
+pub(crate) fn params_signature(
+    opts: &SearchOptions,
+    include_answer: bool,
+    rerank: &RerankEpoch,
+) -> String {
     format!(
-        "l={}|c={:?}|lg={:?}|s={}|t={:?}|tr={:?}|x={}|a={}|inc={:?}|exc={:?}|i={}",
+        "l={}|c={:?}|lg={:?}|s={}|t={:?}|tr={:?}|x={}|a={}|inc={:?}|exc={:?}|i={}|pp={}|rr={}",
         opts.limit,
         opts.country,
         opts.language,
@@ -525,7 +563,40 @@ pub(crate) fn params_signature(opts: &SearchOptions, include_answer: bool) -> St
         opts.include_domains,
         opts.exclude_domains,
         opts.intent.map(intent_label).unwrap_or("none"),
+        opts.paid_allowed(),
+        rerank.signature(),
     )
+}
+
+/// Whether a search outcome may be written to the edge cache. Only outcomes that
+/// are final for the epoch in the key are stored. A `degraded` or `skipped`
+/// rerank is a transient state of the reranker, and caching it would pin
+/// unreranked results for the whole TTL after the reranker recovered. A ZDR
+/// request never writes.
+pub(crate) fn cacheable_search(zdr: bool, rerank: &RerankReport) -> bool {
+    !zdr && rerank.status.is_cacheable()
+}
+
+/// What the caller may see of the scores, and the kind the response names. A score reaches the
+/// wire only for a caller that asked for its kind in `score_kinds`, and only on a reranked set
+/// (`applied`). Every other caller gets the order alone, so the scores that a relevance gate
+/// reads are never a surprise. Returns the kind to report, if any. Pure, so the policy is tested
+/// apart from the route.
+pub(crate) fn apply_score_policy(
+    results: &mut [SearchResult],
+    rerank: &RerankReport,
+    score_kinds: &[String],
+) -> Option<&'static str> {
+    let asked = score_kinds.iter().any(|kind| kind == CROSS_ENCODER_V1);
+    if asked && rerank.status == RerankStatus::Applied {
+        return Some(CROSS_ENCODER_V1);
+    }
+    // Every other outcome carries the order alone: a caller that did not ask gets no score, and a
+    // caller that asked gets none from a rerank that did not apply (shadow, skipped or degraded).
+    for result in results.iter_mut() {
+        result.score = None;
+    }
+    None
 }
 
 /// Aggregate results by host into descending-count facets (ties broken by host
@@ -622,10 +693,38 @@ pub async fn search(
     };
 
     let effective_query = apply_exact_match(&req.query, req.exact_match);
-    // The body flag, raised (never lowered) by the token's ZDR floor for a user
-    // of a ZDR org. A service caller's posture is the body flag alone: see
-    // `Claims::zdr_floor` for why its token claim is not read.
-    let zdr = claims.effective_zdr(req.zdr);
+    // A service caller states its posture in the body. Its token's `zdr` claim is a
+    // property of its registry row, not of this run (see `Claims::zdr_floor`), so an
+    // omitted flag would silently run as non-ZDR. It is refused, never defaulted.
+    if claims.is_service() && req.zdr.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: "zdr must be sent by a service caller: true or false".into(),
+                code: "ZDR_REQUIRED".into(),
+                hint: None,
+            }),
+        )
+            .into_response();
+    }
+    if req
+        .score_kinds
+        .iter()
+        .any(|kind| !SCORE_KINDS.contains(&kind.as_str()))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: "score_kinds names a score kind this edge does not produce".into(),
+                code: "SCORE_KIND_UNSUPPORTED".into(),
+                hint: Some("supported: cross_encoder.v1".into()),
+            }),
+        )
+            .into_response();
+    }
+    // The body flag, raised (never lowered) by the token's ZDR floor for a user of a
+    // ZDR org. A service caller's posture is the body flag alone (see above).
+    let zdr = claims.effective_zdr(req.zdr.unwrap_or(false));
 
     // Caller intent hint — forwarded to the router through `SearchOptions`.
     // The rule classifier is still run here, against the *effective* query
@@ -667,7 +766,10 @@ pub async fn search(
     // re-applied per request so those variants share one entry. The org_id
     // segment is a hard tenant-isolation boundary. Billing + events still fire
     // on a hit (below) — only the expensive provider + synthesis are skipped.
-    let params_sig = params_signature(&opts, req.include_answer);
+    // The rerank epoch is part of the key: an entry written under one rerank
+    // configuration is unreachable under another.
+    let rerank_epoch = provider.rerank_epoch();
+    let params_sig = params_signature(&opts, req.include_answer, &rerank_epoch);
     let cache_key = crate::cache::SearchCache::key(&claims.org_id, &effective_query, &params_sig);
     let scache = state.redis.clone().map(crate::cache::SearchCache::new);
     let from_cache: Option<CachedSearch> = if zdr {
@@ -679,10 +781,10 @@ pub async fn search(
         }
     };
 
-    let (results, answer, citations, provider_name, cache_hit) = match from_cache {
-        Some(c) => (c.results, c.answer, c.citations, c.provider, true),
-        None => match provider.search(&effective_query, &opts).await {
-            Ok(results) => {
+    let (results, answer, citations, provider_name, rerank, cache_hit) = match from_cache {
+        Some(c) => (c.results, c.answer, c.citations, c.provider, c.rerank, true),
+        None => match provider.search_with_report(&effective_query, &opts).await {
+            Ok((results, rerank)) => {
                 let provider_name = provider.name().to_string();
 
                 // One `search.upstream` event per upstream call, emitted only
@@ -725,7 +827,8 @@ pub async fn search(
                 };
 
                 // Write-back (best-effort). Cache failures never fail the request.
-                if !zdr {
+                // Only final outcomes are stored, see `cacheable_search`.
+                if cacheable_search(zdr, &rerank) {
                     if let Some(c) = &scache {
                         let ttl = crate::cache::search_ttl_secs(
                             req.topic.as_deref(),
@@ -737,6 +840,7 @@ pub async fn search(
                             results: results.clone(),
                             answer: answer.clone(),
                             citations: citations.clone(),
+                            rerank: rerank.clone(),
                         };
                         if let Err(e) = c.put_with_ttl(&cache_key, &payload, ttl).await {
                             tracing::warn!(error = %e, "search cache: put failed");
@@ -744,7 +848,7 @@ pub async fn search(
                     }
                 }
 
-                (results, answer, citations, provider_name, false)
+                (results, answer, citations, provider_name, rerank, false)
             }
             Err(e) => {
                 // Emitted before the early returns below, because a chain that
@@ -791,8 +895,24 @@ pub async fn search(
 
     // Result diversity: demote host crowding so one domain can't monopolise the
     // visible results (applied outermost — after the provider merge + any rerank).
-    let (results, demoted_by_host_cap) = diversify_results(results);
+    let (mut results, demoted_by_host_cap) = diversify_results(results);
     let count = results.len();
+
+    // The score policy (see `apply_score_policy`). The rerank outcome is logged for each
+    // response that has one: its outcome and reason, never the query.
+    let score_kind = apply_score_policy(&mut results, &rerank, &req.score_kinds);
+    if !rerank.is_not_configured() {
+        tracing::info!(
+            outcome = rerank.status.label(),
+            reason = rerank.reason.as_deref().unwrap_or("none"),
+            profile = rerank.profile.as_deref().unwrap_or("none"),
+            score_kind = score_kind.unwrap_or("none"),
+            cache_hit = cache_hit,
+            zdr = zdr,
+            hits = count,
+            "search.rerank"
+        );
+    }
 
     // Source-quality telemetry. This is the shape of what the caller actually
     // got, per engine — the signal the CAPTCHA/rate-limit audit had to curl the
@@ -936,6 +1056,8 @@ pub async fn search(
             citations,
             context,
             facets,
+            score_kind,
+            rerank,
         }),
     )
         .into_response()
@@ -1204,6 +1326,23 @@ pub struct SimilarRequest {
     pub limit: Option<u32>,
 }
 
+/// Find-similar hits as results, in the Data Plane's order. Quarry does not rank by
+/// the Data Plane's per-candidate scores, so a neighbour carries no score.
+fn similar_results(hits: Vec<VectorHit>) -> Vec<SearchResult> {
+    hits.into_iter()
+        .enumerate()
+        .map(|(i, h)| SearchResult {
+            url: h.url,
+            title: h.title,
+            snippet: h.snippet,
+            rank: (i as u32) + 1,
+            provider: "similar".into(),
+            score: None,
+            ..Default::default()
+        })
+        .collect()
+}
+
 /// Truncate a seed to the embedding budget on a char boundary.
 fn truncate_seed(seed: &str) -> String {
     let seed = seed.trim();
@@ -1217,7 +1356,7 @@ fn truncate_seed(seed: &str) -> String {
 ///
 /// Delegates to the Data Plane vector index (Qdrant). Org-scoped via the JWT.
 /// Returns 501 when no Data Plane is configured. Results reuse `SearchResponse`
-/// (`provider: "similar"`, each hit's `score` set from the vector distance).
+/// (`provider: "similar"`, in the Data Plane's order, with no score).
 pub async fn similar(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -1244,7 +1383,7 @@ pub async fn similar(
                 error: "find-similar requires a Data Plane vector index".into(),
                 code: "UNSUPPORTED".into(),
                 hint: Some(
-                    "set DATA_PLANE_URL (QUARRY_EDGE__DATA_PLANE_URL) in edge config".into(),
+                    "set QUARRY_EDGE__DATA_PLANE_URL and QUARRY_EDGE__VECTOR_RETRIEVAL=true in edge config".into(),
                 ),
             }),
         )
@@ -1269,8 +1408,23 @@ pub async fn similar(
     };
 
     let limit = req.limit.unwrap_or(10).clamp(1, 50) as usize;
-    let hits = match vector.retrieve(&claims.org_id, &seed, limit).await {
-        Ok(h) => h,
+    // The request has no `zdr` field, so the run's posture is the token's floor alone.
+    let query = VectorQuery {
+        org_id: &claims.org_id,
+        query: &seed,
+        zdr: claims.effective_zdr_mode(None),
+        limit,
+    };
+    let (hits, leg_ran) = match vector.retrieve(&query).await {
+        Ok(VectorOutcome::Hits(hits)) => (hits, true),
+        Ok(VectorOutcome::Skipped(reason)) => {
+            // Posture or budget kept the leg from running: there are no neighbours to return.
+            tracing::info!(
+                marker = reason.marker(),
+                "find-similar: the vector leg did not run"
+            );
+            (Vec::new(), false)
+        }
         Err(e) => {
             let status = match e.code.http_status() {
                 400 => StatusCode::BAD_REQUEST,
@@ -1293,37 +1447,28 @@ pub async fn similar(
         }
     };
 
-    let results: Vec<SearchResult> = hits
-        .into_iter()
-        .enumerate()
-        .map(|(i, h)| SearchResult {
-            url: h.url,
-            title: h.title,
-            snippet: h.snippet,
-            rank: (i as u32) + 1,
-            provider: "similar".into(),
-            score: Some(h.score),
-            ..Default::default()
-        })
-        .collect();
+    let results = similar_results(hits);
     let count = results.len();
 
-    // Meter one unit (same as a search query) so find-similar is billed.
-    let run_id: quarry_core::ids::kinds::RunKind = quarry_core::ids::Id::new();
-    state
-        .usage
-        .meter(quarry_runtime::UsageEvent::new(
-            run_id.to_string(),
-            claims.org_id.clone(),
-            quarry_runtime::usage_metrics::SEARCH_QUERY,
-            1.0,
-            serde_json::json!({
-                "user_id": claims.user_id,
-                "kind": "similar",
-                "result_count": count,
-            }),
-        ))
-        .await;
+    // Meter one unit (same as a search query) for a call that ran the leg. A call the
+    // posture or the budget kept from running returned nothing, so it is not billed.
+    if leg_ran {
+        let run_id: quarry_core::ids::kinds::RunKind = quarry_core::ids::Id::new();
+        state
+            .usage
+            .meter(quarry_runtime::UsageEvent::new(
+                run_id.to_string(),
+                claims.org_id.clone(),
+                quarry_runtime::usage_metrics::SEARCH_QUERY,
+                1.0,
+                serde_json::json!({
+                    "user_id": claims.user_id,
+                    "kind": "similar",
+                    "result_count": count,
+                }),
+            ))
+            .await;
+    }
 
     (
         StatusCode::OK,
@@ -1336,6 +1481,8 @@ pub async fn similar(
             citations: None,
             context: None,
             facets: None,
+            score_kind: None,
+            rerank: RerankReport::default(),
         }),
     )
         .into_response()
@@ -1412,14 +1559,19 @@ struct RawSuggestions {
 }
 
 /// `POST /v1/search/suggest` — Model-Plane-backed spelling correction + related
-/// queries. Degrade-safe: returns an empty `200` when no Model Plane is wired or
-/// the call/parse fails, so the search UX never breaks on suggestions.
+/// queries. Degrade-safe: returns an empty `200` when `QUARRY_EDGE__SEARCH_SUGGEST` is off
+/// (QB-T17), no Model Plane is wired, or the call/parse fails, so the search UX never breaks
+/// on suggestions.
 pub async fn suggest(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<SuggestRequest>,
 ) -> impl IntoResponse {
     let query = req.query.trim();
+    // QB-T17: off unless QUARRY_EDGE__SEARCH_SUGGEST is on and a model path exists.
+    if !state.model_plane.search_suggest {
+        return (StatusCode::OK, Json(SuggestResponse::default()));
+    }
     let Some(mp_url) = state.model_plane_url.as_deref().filter(|s| !s.is_empty()) else {
         return (StatusCode::OK, Json(SuggestResponse::default()));
     };
@@ -1531,6 +1683,69 @@ fn strip_json_fences(body: &str) -> &str {
         .map(|rest| rest.trim().trim_end_matches("```").trim())
         .unwrap_or(trimmed);
     inner
+}
+
+/// QB-T17: the suggestion route's Model Plane switch.
+#[cfg(test)]
+mod model_plane_switch_tests {
+    use super::*;
+    use crate::test_support::{claims_for_org, test_state, StubDriver};
+    use quarry_runtime::service_tokens::{AuthCoreServiceTokenProvider, SharedServiceTokenProvider};
+    use std::sync::Arc;
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// With `QUARRY_EDGE__SEARCH_SUGGEST` off, `POST /v1/search/suggest` answers its empty 200
+    /// without a mint and without a Model Plane call: the registry refuses that call, so none is made.
+    #[tokio::test]
+    async fn suggest_makes_no_model_plane_call_while_its_switch_is_off() {
+        let auth_core = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "header.payload.signature",
+                "expiresInSeconds": 300
+            })))
+            .mount(&auth_core)
+            .await;
+        let model_plane = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&model_plane)
+            .await;
+        let provider: SharedServiceTokenProvider = Arc::new(
+            AuthCoreServiceTokenProvider::new(auth_core.uri(), "credential-long-enough").unwrap(),
+        );
+        let state = AppState {
+            model_plane_url: Some(model_plane.uri()),
+            service_token_provider: Some(provider),
+            ..test_state(StubDriver::ok())
+        };
+
+        let response = suggest(
+            State(state),
+            axum::Extension(claims_for_org("org_suggest")),
+            axum::Json(SuggestRequest {
+                query: "wire query".into(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body, serde_json::json!({ "related_queries": [] }));
+        assert!(
+            auth_core.received_requests().await.unwrap().is_empty(),
+            "no token is minted while the switch is off"
+        );
+        assert!(
+            model_plane.received_requests().await.unwrap().is_empty(),
+            "no Model Plane call is made while the switch is off"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1669,7 +1884,10 @@ mod tests {
         // so "absent" is the case that has to be closed.
         let req = search_request(serde_json::json!({ "query": "rust" }));
         assert!(!req.allow_paid_providers);
-        assert!(!req.zdr);
+        assert_eq!(
+            req.zdr, None,
+            "absent is not sent: the token's floor decides for a user"
+        );
     }
 
     #[test]
@@ -1704,7 +1922,12 @@ mod tests {
             "zdr": true,
         }));
         let claims = crate::test_support::claims_for_org("org_alpha");
-        let opts = build_search_options(&req, "org_alpha", claims.effective_zdr(req.zdr), None);
+        let opts = build_search_options(
+            &req,
+            "org_alpha",
+            claims.effective_zdr(req.zdr.unwrap_or(false)),
+            None,
+        );
         assert!(
             !opts.allow_paid_providers,
             "a ZDR request must never carry paid permission to the router"
@@ -1719,7 +1942,12 @@ mod tests {
             "allow_paid_providers": true,
         }));
         let claims = crate::test_support::claims_for_org("org_alpha");
-        let opts = build_search_options(&req, "org_alpha", claims.effective_zdr(req.zdr), None);
+        let opts = build_search_options(
+            &req,
+            "org_alpha",
+            claims.effective_zdr(req.zdr.unwrap_or(false)),
+            None,
+        );
         assert!(opts.allow_paid_providers);
         assert!(opts.paid_allowed());
     }
@@ -1734,7 +1962,12 @@ mod tests {
         let mut claims = crate::test_support::claims_for_org("org_alpha");
         claims.principal_type = Some("user".into());
         claims.zdr = Some(true);
-        let opts = build_search_options(&req, "org_alpha", claims.effective_zdr(req.zdr), None);
+        let opts = build_search_options(
+            &req,
+            "org_alpha",
+            claims.effective_zdr(req.zdr.unwrap_or(false)),
+            None,
+        );
         assert!(opts.zdr);
         assert!(!opts.allow_paid_providers);
         assert!(!opts.paid_allowed());
@@ -1753,7 +1986,12 @@ mod tests {
         claims.principal_type = Some("service".into());
         claims.service_id = Some("service:model-gateway".into());
         claims.zdr = Some(true);
-        let opts = build_search_options(&req, "org_alpha", claims.effective_zdr(req.zdr), None);
+        let opts = build_search_options(
+            &req,
+            "org_alpha",
+            claims.effective_zdr(req.zdr.unwrap_or(false)),
+            None,
+        );
         assert!(!opts.zdr);
         assert!(opts.allow_paid_providers);
     }
@@ -1780,38 +2018,22 @@ mod tests {
         let research = build_search_options(&req, "org_alpha", false, Some(QueryIntent::Research));
         let navigational =
             build_search_options(&req, "org_alpha", false, Some(QueryIntent::Navigational));
+        let epoch = RerankEpoch::default();
+        let sig = |opts: &SearchOptions| params_signature(opts, false, &epoch);
 
         // Two requests that differ only by intent get different engines and so
         // must not be able to read each other's cached results.
-        assert_ne!(
-            params_signature(&research, false),
-            params_signature(&navigational, false)
-        );
-        assert_ne!(
-            params_signature(&research, false),
-            params_signature(&none, false)
-        );
+        assert_ne!(sig(&research), sig(&navigational));
+        assert_ne!(sig(&research), sig(&none));
         // The separation has to survive into the key itself, not just the sig.
         assert_ne!(
-            crate::cache::SearchCache::key(
-                "org_alpha",
-                "rust",
-                &params_signature(&research, false)
-            ),
-            crate::cache::SearchCache::key(
-                "org_alpha",
-                "rust",
-                &params_signature(&navigational, false)
-            ),
+            crate::cache::SearchCache::key("org_alpha", "rust", &sig(&research)),
+            crate::cache::SearchCache::key("org_alpha", "rust", &sig(&navigational)),
         );
         // ...and identical requests must still collide, or nothing ever hits.
-        assert_eq!(
-            params_signature(&research, false),
-            params_signature(
-                &build_search_options(&req, "org_alpha", false, Some(QueryIntent::Research)),
-                false
-            )
-        );
+        let research_again =
+            build_search_options(&req, "org_alpha", false, Some(QueryIntent::Research));
+        assert_eq!(sig(&research), sig(&research_again));
     }
 
     #[tokio::test]
@@ -2220,6 +2442,7 @@ mod tests {
             results: vec![r("https://ssb.example/kommunefakta", "K", "s")],
             answer: Some("Oslo har 729 437 innbyggere.".into()),
             citations: Some(vec![citation_with_figure()]),
+            rerank: RerankReport::default(),
         };
         let wire = serde_json::to_string(&payload).unwrap();
         let back: CachedSearch = serde_json::from_str(&wire).unwrap();
@@ -2249,11 +2472,237 @@ mod tests {
             }]),
             context: None,
             facets: None,
+            score_kind: None,
+            rerank: RerankReport::default(),
         };
         let wire = serde_json::to_string(&response).unwrap();
         assert!(
             !wire.contains("structured"),
             "the new channel must be invisible when a page had none: {wire}"
         );
+    }
+
+    #[test]
+    fn only_final_search_outcomes_are_written_to_the_cache() {
+        let applied = RerankReport::applied(Some("web-v1".into()));
+        assert!(cacheable_search(false, &applied));
+        assert!(cacheable_search(false, &RerankReport::default()));
+        // Transient rerank states are answered live and never replayed.
+        for transient in [
+            RerankReport::skipped("disabled", None),
+            RerankReport::skipped("circuit_open", None),
+            RerankReport::degraded("provider_error", None),
+        ] {
+            assert!(
+                !cacheable_search(false, &transient),
+                "{transient:?} must not be cached"
+            );
+        }
+        // ZDR never writes, whatever the outcome.
+        assert!(!cacheable_search(true, &applied));
+        assert!(!cacheable_search(true, &RerankReport::default()));
+    }
+
+    #[test]
+    fn the_rerank_epoch_is_part_of_the_cache_signature() {
+        let req = search_request(serde_json::json!({ "query": "rust" }));
+        let opts = build_search_options(&req, "org_alpha", false, None);
+        let on = RerankEpoch {
+            profile: Some("web-v1".into()),
+            enabled: true,
+            shadow: false,
+            top_n: 10,
+        };
+        let epochs = [
+            RerankEpoch::default(),
+            on.clone(),
+            RerankEpoch {
+                top_n: 20,
+                ..on.clone()
+            },
+            RerankEpoch {
+                shadow: true,
+                ..on.clone()
+            },
+            RerankEpoch {
+                profile: Some("web-v2".into()),
+                ..on.clone()
+            },
+        ];
+        let sigs: Vec<String> = epochs
+            .iter()
+            .map(|e| params_signature(&opts, false, e))
+            .collect();
+        for (i, a) in sigs.iter().enumerate() {
+            for b in &sigs[i + 1..] {
+                assert_ne!(a, b, "two rerank epochs share a signature: {a}");
+            }
+        }
+        // Identical epochs still collide, or nothing ever hits.
+        assert_eq!(
+            params_signature(&opts, false, &on),
+            params_signature(&opts, false, &on.clone()),
+        );
+    }
+
+    #[test]
+    fn paid_permission_participates_in_the_cache_signature() {
+        // Paid providers change which results come back, so a request that may
+        // not use them must not read an entry that a request which may has written.
+        let closed = SearchOptions::default();
+        let open = SearchOptions {
+            allow_paid_providers: true,
+            ..SearchOptions::default()
+        };
+        let epoch = RerankEpoch::default();
+        let sig_closed = params_signature(&closed, false, &epoch);
+        let sig_open = params_signature(&open, false, &epoch);
+        assert_ne!(sig_closed, sig_open);
+    }
+
+    #[test]
+    fn cached_entries_written_before_the_report_still_deserialize() {
+        // No `rerank` key: the entry reads back as `rerank-not-configured`. Such
+        // entries are unreachable once the epoch is in the key, but they must
+        // still parse rather than fail the read.
+        let old = r#"{"provider":"fake","results":[]}"#;
+        let back: CachedSearch = serde_json::from_str(old).unwrap();
+        assert_eq!(back.rerank, RerankReport::default());
+        assert!(back.answer.is_none());
+        assert!(back.citations.is_none());
+    }
+
+    #[test]
+    fn a_cache_hit_replays_the_report_it_was_written_with() {
+        let applied = RerankReport::applied(Some("web-v1".into()));
+        let payload = CachedSearch {
+            provider: "fake".into(),
+            results: vec![r("https://x.com/a", "A", "s")],
+            answer: None,
+            citations: None,
+            rerank: applied.clone(),
+        };
+        let wire = serde_json::to_string(&payload).unwrap();
+        let back: CachedSearch = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back.rerank, applied);
+    }
+
+    #[test]
+    fn similar_hits_keep_the_data_planes_order_and_carry_no_score() {
+        let hits = vec![
+            VectorHit {
+                url: "https://x.test/a".into(),
+                title: Some("A".into()),
+                snippet: None,
+                document_id: None,
+            },
+            VectorHit {
+                url: "https://x.test/b".into(),
+                title: None,
+                snippet: Some("b".into()),
+                document_id: None,
+            },
+        ];
+        let results = similar_results(hits);
+        assert_eq!(
+            results.iter().map(|r| r.rank).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(results[0].url, "https://x.test/a");
+        assert!(results
+            .iter()
+            .all(|r| r.score.is_none() && r.provider == "similar"));
+    }
+
+    #[test]
+    fn the_rerank_report_is_absent_from_the_wire_unless_a_rerank_step_was_wired() {
+        let mut response = SearchResponse {
+            query: "oslo".into(),
+            provider: "fake".into(),
+            results: vec![],
+            count: 0,
+            answer: None,
+            citations: None,
+            context: None,
+            facets: None,
+            score_kind: None,
+            rerank: RerankReport::default(),
+        };
+        let wire = serde_json::to_string(&response).unwrap();
+        assert!(
+            !wire.contains("rerank"),
+            "not configured adds no field: {wire}"
+        );
+        response.rerank = RerankReport::applied(Some("web-v1".into()));
+        let wire = serde_json::to_string(&response).unwrap();
+        assert!(
+            wire.contains(r#""rerank":{"status":"applied","profile":"web-v1"}"#),
+            "{wire}"
+        );
+    }
+
+    #[test]
+    fn a_score_reaches_the_wire_only_for_a_caller_that_asked_for_its_kind() {
+        let applied = RerankReport::applied(Some("web-v1".into()));
+        let scored = SearchResult {
+            score: Some(0.9),
+            ..r("https://a.example/", "A", "s")
+        };
+        let mut asked = vec![scored.clone()];
+        let kind = apply_score_policy(&mut asked, &applied, &["cross_encoder.v1".to_owned()]);
+        assert_eq!(kind, Some("cross_encoder.v1"));
+        assert_eq!(asked[0].score, Some(0.9));
+
+        let mut default = vec![scored];
+        let kind = apply_score_policy(&mut default, &applied, &[]);
+        assert_eq!(kind, None);
+        assert!(
+            default.iter().all(|result| result.score.is_none()),
+            "the default is the order alone"
+        );
+    }
+
+    #[test]
+    fn the_score_kind_is_named_only_for_an_applied_rerank() {
+        let asked = ["cross_encoder.v1".to_owned()];
+        for report in [
+            RerankReport::skipped("zdr", Some("web-v1".into())),
+            RerankReport::degraded("timeout", Some("web-v1".into())),
+            RerankReport::shadow_of(&RerankReport::applied(None)),
+            RerankReport::default(),
+        ] {
+            let mut results = vec![SearchResult {
+                score: Some(0.5),
+                ..r("https://a.example/", "A", "s")
+            }];
+            assert_eq!(
+                apply_score_policy(&mut results, &report, &asked),
+                None,
+                "{report:?}"
+            );
+            assert!(
+                results.iter().all(|result| result.score.is_none()),
+                "a report that did not apply carries no score: {report:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_request_keeps_zdr_absent_and_reads_the_score_kinds() {
+        let absent = search_request(serde_json::json!({ "query": "rust" }));
+        assert_eq!(absent.zdr, None);
+        assert!(absent.score_kinds.is_empty());
+        let asked = search_request(serde_json::json!({
+            "query": "rust",
+            "zdr": false,
+            "score_kinds": ["cross_encoder.v1"],
+        }));
+        assert_eq!(asked.zdr, Some(false));
+        assert_eq!(asked.score_kinds, vec!["cross_encoder.v1".to_owned()]);
+    }
+
+    #[test]
+    fn the_only_score_kind_the_edge_produces_is_cross_encoder_v1() {
+        assert_eq!(SCORE_KINDS, &["cross_encoder.v1"]);
     }
 }

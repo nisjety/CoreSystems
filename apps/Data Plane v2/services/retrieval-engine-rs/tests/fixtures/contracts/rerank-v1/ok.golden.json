@@ -1,0 +1,28 @@
+{
+  "profile": "web-v1",
+  "reason": null,
+  "request_id": "rr-golden-ok1",
+  "results": [
+    {
+      "id": "doc-0",
+      "index": 0,
+      "score": 1.0,
+      "scored": true
+    },
+    {
+      "id": "doc-1",
+      "index": 1,
+      "score": 0.99,
+      "scored": true
+    },
+    {
+      "id": "doc-2",
+      "index": 2,
+      "score": 0.98,
+      "scored": true
+    }
+  ],
+  "status": "ok",
+  "truncated_ids": [],
+  "zdr_actions_applied": []
+}

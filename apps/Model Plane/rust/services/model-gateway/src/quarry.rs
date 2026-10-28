@@ -15,6 +15,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::quarry_auth::TokenProvider;
+use crate::relevance::{self, ScoreKind};
+use crate::relevance_calibration::{self, Calibration, CalibrationError};
 
 const SCRAPE_SCOPES: &[&str] = &["scrape:read"];
 const SEARCH_SCOPES: &[&str] = &["search:read"];
@@ -263,15 +265,18 @@ pub struct SearchResult {
     /// whether the hit was actually judged must read [`Self::relevance`]
     /// instead, where absent and zero are different values.
     pub score: f32,
-    /// Quarry's semantic-reranker relevance in `[0,1]`, or `None` when this hit
-    /// was not reranked.
+    /// Quarry's relevance judgement in `[0,1]`, or `None` when this hit was not
+    /// judged.
     ///
-    /// Quarry wraps its search provider in a `RerankingSearchProvider` that asks
-    /// the Model Plane to score how well each of the leading results answers the
-    /// query, and omits the field entirely otherwise — reranking is off for the
-    /// deployment, the Model Plane call failed (the reranker degrades to the
-    /// original order), or the hit fell outside the reranked head. Absent is
-    /// therefore "not judged", which is a different fact from "judged
+    /// Quarry reorders its results with the Data Plane's cross-encoder and, only
+    /// for a caller that asked for `cross_encoder.v1`, names that kind on the
+    /// answer. The raw cross-encoder score is not a relevance probability, so it
+    /// is read here only through its calibration table
+    /// ([`crate::relevance::provider_score_for_gate`]); without one it is absent. A
+    /// legacy answer's `score` is read as it always was. The field is omitted
+    /// entirely otherwise: reranking is off for the deployment, the rerank did not
+    /// apply (skipped, degraded or shadow), or the hit fell outside the reranked
+    /// head. Absent is therefore "not judged", which is a different fact from "judged
     /// irrelevant": collapsing the two into `0.0` (as [`Self::score`] must, for
     /// the proto) would let an unreranked response filter itself to nothing.
     /// [`crate::relevance`] depends on this distinction.
@@ -294,7 +299,92 @@ pub struct SearchResult {
     /// edge starts sending it the data is already here rather than being
     /// dropped on the floor by an older gateway.
     pub engines: Vec<String>,
+    /// The kind of the score on this hit, when the score was read through a calibration
+    /// (`cross_encoder.v1`). `None` for a legacy score and for an unjudged hit.
+    pub score_kind: Option<ScoreKind>,
     pub raw: Value,
+}
+
+impl SearchResult {
+    /// The score a consumer of this hit reads, or `None` when the hit was not judged.
+    ///
+    /// A legacy score of zero means "not judged", the rule the gate has always had, because the
+    /// flattened `score` is 0.0 whenever Quarry sent none. A calibrated cross-encoder score of zero
+    /// is a judgement that the hit is irrelevant, so it is kept.
+    #[must_use]
+    pub fn wire_score(&self) -> Option<f32> {
+        self.relevance
+            .filter(|score| *score > 0.0 || self.score_kind.is_some())
+    }
+}
+
+/// What the rerank step did for one `/v1/search` answer, as Quarry named it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RerankStatus {
+    /// The scores ordered the leading results.
+    Applied,
+    /// The reranker was not called, and the reason says why (`zdr`, `disabled`, ...).
+    Skipped,
+    /// The reranker was called and failed, so the results keep their order.
+    Degraded,
+    /// The reranker was called and measured, but the results keep their order.
+    Shadow,
+}
+
+impl RerankStatus {
+    /// The word Quarry uses for this status on the wire.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Skipped => "skipped",
+            Self::Degraded => "degraded",
+            Self::Shadow => "shadow",
+        }
+    }
+}
+
+/// A rerank step's report: its status, and the reason Quarry gave for it when it gave one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RerankOutcome {
+    pub status: RerankStatus,
+    pub reason: Option<String>,
+}
+
+/// A `/v1/search` answer: the results, and what the rerank step did to them.
+#[derive(Debug, Clone)]
+pub struct SearchReply {
+    pub results: Vec<SearchResult>,
+    /// `None` when the edge sent no rerank report, or said the rerank was not configured. Either
+    /// way the relevance gate has no rerank fact to report.
+    pub rerank: Option<RerankOutcome>,
+}
+
+/// One `web_search` hit as the tool loop and deep research read it back.
+#[must_use]
+pub fn web_search_item(result: &SearchResult, rerank: Option<&RerankOutcome>) -> Value {
+    let mut item = serde_json::json!({
+        "url": result.url, "title": result.title, "snippet": result.snippet
+    });
+    if let Some(score) = result.wire_score() {
+        item["score"] = serde_json::json!(score);
+    }
+    if !result.highlights.is_empty() {
+        item["highlights"] = serde_json::json!(result.highlights);
+    }
+    if result.rank > 0 {
+        item["rank"] = serde_json::json!(result.rank);
+    }
+    if !result.engines.is_empty() {
+        item["engines"] = serde_json::json!(result.engines);
+    }
+    if let Some(outcome) = rerank {
+        item["rerank_status"] = serde_json::json!(outcome.status.label());
+        if let Some(reason) = &outcome.reason {
+            item["rerank_reason"] = serde_json::json!(reason);
+        }
+    }
+    item
 }
 
 /// Projected `ScrapeResult`. Full envelope is kept under `raw` for
@@ -345,6 +435,9 @@ pub struct Client {
     base_url: String,
     auth: Auth,
     http: reqwest::Client,
+    /// The calibration that lets this gateway ask Quarry for cross-encoder scores. `None`, the
+    /// default, asks for none: Quarry then returns the order alone and no score reaches the gate.
+    cross_encoder: Option<Calibration>,
 }
 
 #[derive(Clone)]
@@ -384,7 +477,31 @@ impl Client {
             base_url: cfg.base_url.trim_end_matches('/').to_string(),
             auth: Auth::Static(cfg.token),
             http,
+            cross_encoder: None,
         }
+    }
+
+    /// Apply the boot-time cross-encoder decision (`VEREVON_RELEVANCE_CROSS_ENCODER_SCORES`).
+    ///
+    /// With the switch off this is a no-op, so the client asks Quarry for the order alone, as it
+    /// always has. With the switch on, the shipped calibration must be fitted; otherwise the boot is
+    /// refused.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a switch value that is neither on nor off, and a switch that is on against an
+    /// unfitted or invalid calibration artefact.
+    pub fn with_cross_encoder_scores_from_env(mut self) -> Result<Self, CalibrationError> {
+        self.cross_encoder = relevance_calibration::from_environment()?;
+        Ok(self)
+    }
+
+    /// Ask for cross-encoder scores against a given calibration. Test-only: production reaches it only
+    /// through [`Self::with_cross_encoder_scores_from_env`], which checks the shipped artefact.
+    #[cfg(test)]
+    pub(crate) fn with_cross_encoder_scores(mut self, calibration: Calibration) -> Self {
+        self.cross_encoder = Some(calibration);
+        self
     }
 
     /// Build the production client backed by Auth Core service-principal
@@ -406,6 +523,7 @@ impl Client {
             base_url: base_url.trim_end_matches('/').to_owned(),
             auth: Auth::ServicePrincipal(provider),
             http,
+            cross_encoder: None,
         })
     }
 
@@ -791,6 +909,28 @@ impl Client {
         zdr: bool,
         options: &SearchOptions,
     ) -> Result<Vec<SearchResult>, QuarryError> {
+        self.search_reply(query, limit, intent, org_id, zdr, options)
+            .await
+            .map(|reply| reply.results)
+    }
+
+    /// Call `/v1/search` and return the results with the rerank report Quarry sent.
+    ///
+    /// The request asks for cross-encoder scores only when this client holds a calibration, so a
+    /// gateway without one sends the legacy body and receives the order alone.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::search_with_options`].
+    pub async fn search_reply(
+        &self,
+        query: &str,
+        limit: i32,
+        intent: &str,
+        org_id: &str,
+        zdr: bool,
+        options: &SearchOptions,
+    ) -> Result<SearchReply, QuarryError> {
         #[derive(Serialize)]
         struct Body<'a> {
             query: &'a str,
@@ -803,6 +943,10 @@ impl Client {
             /// because, like `zdr`, it is a standing property of the caller
             /// that belongs on every request, not a per-query refinement.
             allow_paid_providers: bool,
+            /// The score kinds this gateway can read. Asked for only when it holds a calibration,
+            /// and skipped when empty, so the legacy body is unchanged.
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            score_kinds: Vec<&'static str>,
             // Everything below is additive and declared last so it is skipped
             // wholesale under a default `SearchOptions`: the body then carries
             // no query-shaping keys at all, which is what lets `search` stay a
@@ -841,6 +985,11 @@ impl Client {
             intent,
             zdr,
             allow_paid_providers: options.allow_paid_providers,
+            score_kinds: if self.cross_encoder.is_some() {
+                vec![ScoreKind::CrossEncoderV1.as_str()]
+            } else {
+                Vec::new()
+            },
             language: non_blank(options.language.as_ref()),
             country: non_blank(options.country.as_ref()),
             topic: non_blank(options.topic.as_ref()),
@@ -879,10 +1028,7 @@ impl Client {
             });
         }
         let payload: Value = serde_json::from_str(&raw)?;
-        Ok(extract_search_results(&payload)
-            .iter()
-            .map(project_search_result)
-            .collect())
+        Ok(reply_from_payload(&payload, self.cross_encoder.as_ref()))
     }
 }
 
@@ -947,8 +1093,60 @@ fn project_search_result(v: &Value) -> SearchResult {
             .unwrap_or(0),
         highlights: string_array(&obj, "highlights"),
         engines: string_array(&obj, "engines"),
+        score_kind: None,
         raw: Value::Object(obj),
     }
+}
+
+/// Read a whole `/v1/search` answer: its results, read through the score kind Quarry named, and its
+/// rerank report.
+///
+/// A score is read only when the rerank that produced it applied, or when the answer carries no rerank
+/// report at all (a legacy edge). A skipped, degraded or shadow rerank supplies no usable score, even if
+/// a misbehaving edge sent one, so the gate never judges on a score the rerank did not stand behind.
+fn reply_from_payload(payload: &Value, calibration: Option<&Calibration>) -> SearchReply {
+    let kind = payload.get("score_kind").and_then(Value::as_str);
+    let rerank = rerank_from_payload(payload.get("rerank"));
+    // A report this gateway does not name is neither an applied rerank nor a legacy answer, so no score
+    // is read from it. Only an answer that carries no report at all is read as a legacy answer.
+    let scores_trusted = match (rerank.as_ref(), payload.get("rerank")) {
+        (Some(outcome), _) => outcome.status == RerankStatus::Applied,
+        (None, report) => report.is_none(),
+    };
+    let results = extract_search_results(payload)
+        .iter()
+        .map(project_search_result)
+        .map(|mut result| {
+            let judged = if scores_trusted {
+                relevance::provider_score_for_gate(kind, result.relevance, calibration)
+            } else {
+                None
+            };
+            result.relevance = judged;
+            result.score = judged.unwrap_or(0.0);
+            result.score_kind = kind.and_then(ScoreKind::parse).filter(|_| judged.is_some());
+            result
+        })
+        .collect();
+    SearchReply { results, rerank }
+}
+
+/// The rerank report Quarry sent, or `None` for an absent report or the `rerank-not-configured`
+/// status, and for any status this gateway does not name.
+fn rerank_from_payload(report: Option<&Value>) -> Option<RerankOutcome> {
+    let report = report?.as_object()?;
+    let status = match report.get("status")?.as_str()? {
+        "applied" => RerankStatus::Applied,
+        "skipped" => RerankStatus::Skipped,
+        "degraded" => RerankStatus::Degraded,
+        "shadow" => RerankStatus::Shadow,
+        _ => return None,
+    };
+    let reason = report
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Some(RerankOutcome { status, reason })
 }
 
 fn project(requested: &str, data: &Value) -> ScrapeResult {
@@ -1205,6 +1403,7 @@ mod tests {
             base_url: quarry.uri(),
             auth: Auth::ServicePrincipal(provider),
             http: reqwest::Client::new(),
+            cross_encoder: None,
         };
 
         let result = client
@@ -1989,5 +2188,328 @@ mod tests {
             "the compat mirror is still 0.0 for the proto field"
         );
         assert!(results[0].highlights.is_empty());
+    }
+
+    // --- the score kind and the rerank report (QB-T12) ---------------------
+
+    fn calibration() -> Calibration {
+        Calibration::from_knots(&[(0.0, 0.0), (0.5, 0.4), (1.0, 1.0)]).expect("a valid table")
+    }
+
+    fn bare_result(url: &str) -> SearchResult {
+        project_search_result(&serde_json::json!({"url": url, "title": "T", "rank": 1}))
+    }
+
+    /// The response Quarry sends when a caller asked for `cross_encoder.v1` and the rerank applied:
+    /// the head carries `score`, the tail does not, and the response names the kind and the report.
+    /// Built from `quarry-edge`'s `SearchResponse` and `serp::SearchResult` serialisation. It is not a
+    /// captured live response; the live proof captures one.
+    fn applied_payload() -> Value {
+        serde_json::json!({
+            "query": "havvind utbygging",
+            "provider": "smart_router",
+            "results": [
+                {
+                    "url": "https://www.nve.no/nytt/rapport",
+                    "title": "Rapport 2026",
+                    "snippet": "Utbygging til havs.",
+                    "rank": 1,
+                    "provider": "searxng",
+                    "score": 0.91,
+                    "highlights": ["Utbygging til havs"],
+                    "engines": ["brave", "google"]
+                },
+                {
+                    "url": "https://www.nrk.no/nyhet",
+                    "title": "Nyhet",
+                    "snippet": "Om havvind.",
+                    "rank": 2,
+                    "provider": "searxng"
+                }
+            ],
+            "count": 2,
+            "score_kind": "cross_encoder.v1",
+            "rerank": {"status": "applied", "profile": "web-v1"}
+        })
+    }
+
+    /// A gateway that holds a calibration asks Quarry for the cross-encoder kind, and the body is the
+    /// legacy body plus that one key.
+    #[tokio::test]
+    async fn a_gateway_that_can_calibrate_asks_for_the_cross_encoder_kind() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .and(body_json(serde_json::json!({
+                "query": "kpi norge",
+                "limit": 5,
+                "intent": "research",
+                "zdr": false,
+                "allow_paid_providers": false,
+                "score_kinds": ["cross_encoder.v1"],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(search_ok()))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+
+        test_client(quarry.uri())
+            .with_cross_encoder_scores(calibration())
+            .search("kpi norge", 5, "research", "org-a", false)
+            .await
+            .expect("search succeeds");
+    }
+
+    #[test]
+    fn an_applied_reply_is_read_through_the_calibration() {
+        let table = calibration();
+        let reply = reply_from_payload(&applied_payload(), Some(&table));
+        let head = &reply.results[0];
+        assert_eq!(
+            head.relevance,
+            table.apply(0.91),
+            "the calibrated value, not the raw 0.91"
+        );
+        assert_eq!(head.score, table.apply(0.91).unwrap_or(0.0));
+        assert_eq!(head.score_kind, Some(ScoreKind::CrossEncoderV1));
+        let tail = &reply.results[1];
+        assert_eq!(tail.relevance, None, "the unreranked tail is not judged");
+        assert_eq!(tail.score_kind, None);
+        assert_eq!(
+            reply.rerank,
+            Some(RerankOutcome {
+                status: RerankStatus::Applied,
+                reason: None
+            })
+        );
+    }
+
+    /// A ZDR skip carries no score on any hit, and the reason is what the coverage line will name.
+    #[test]
+    fn a_skipped_zdr_reply_carries_no_score_and_says_why() {
+        let payload = serde_json::json!({
+            "query": "kpi",
+            "provider": "smart_router",
+            "results": [{"url": "https://www.ssb.no/kpi", "title": "KPI", "snippet": "x", "rank": 1, "provider": "searxng", "score": 0.9}],
+            "count": 1,
+            "rerank": {"status": "skipped", "reason": "zdr", "profile": "web-v1"}
+        });
+        let reply = reply_from_payload(&payload, Some(&calibration()));
+        assert_eq!(reply.results[0].relevance, None);
+        assert_eq!(reply.results[0].score_kind, None);
+        assert_eq!(
+            reply.rerank,
+            Some(RerankOutcome {
+                status: RerankStatus::Skipped,
+                reason: Some("zdr".to_owned())
+            })
+        );
+    }
+
+    #[test]
+    fn a_degraded_reply_keeps_the_order_and_says_why() {
+        let mut payload = applied_payload();
+        payload["rerank"] =
+            serde_json::json!({"status": "degraded", "reason": "timeout", "profile": "web-v1"});
+        payload
+            .as_object_mut()
+            .expect("object")
+            .remove("score_kind");
+        let reply = reply_from_payload(&payload, Some(&calibration()));
+        assert_eq!(
+            reply.results[0].relevance, None,
+            "a degraded rerank scores nothing"
+        );
+        assert_eq!(
+            reply.rerank,
+            Some(RerankOutcome {
+                status: RerankStatus::Degraded,
+                reason: Some("timeout".to_owned())
+            })
+        );
+    }
+
+    #[test]
+    fn a_shadow_reply_is_named_and_carries_no_score() {
+        let mut payload = applied_payload();
+        payload["rerank"] =
+            serde_json::json!({"status": "shadow", "reason": "would_apply", "profile": "web-v1"});
+        payload
+            .as_object_mut()
+            .expect("object")
+            .remove("score_kind");
+        let reply = reply_from_payload(&payload, Some(&calibration()));
+        assert_eq!(reply.results[0].relevance, None);
+        assert_eq!(
+            reply.rerank,
+            Some(RerankOutcome {
+                status: RerankStatus::Shadow,
+                reason: Some("would_apply".to_owned())
+            })
+        );
+    }
+
+    /// The legacy path: a response that names no score kind and no rerank report reads exactly as it
+    /// did before the score kind existed. The raw score is kept even when a table is present, because
+    /// the table applies only to the kind it was fitted for.
+    #[test]
+    fn a_legacy_reply_is_read_exactly_as_it_always_was() {
+        let payload = serde_json::json!({
+            "results": [
+                {"url": "https://a.no/", "title": "A", "rank": 1, "score": 0.7, "highlights": ["h"], "engines": ["brave", "google"]},
+                {"url": "https://b.no/", "title": "B", "rank": 2}
+            ],
+            "count": 2
+        });
+        let reply = reply_from_payload(&payload, Some(&calibration()));
+        assert_eq!(reply.results[0].relevance, Some(0.7));
+        assert!((reply.results[0].score - 0.7).abs() < f32::EPSILON);
+        assert_eq!(reply.results[0].score_kind, None);
+        assert_eq!(reply.results[1].relevance, None);
+        assert_eq!(reply.rerank, None);
+    }
+
+    /// A cross-encoder answer read with no table is absent. The raw score must never reach the gate;
+    /// the report, which is still true, is kept.
+    #[test]
+    fn a_cross_encoder_reply_without_a_table_is_absent() {
+        let reply = reply_from_payload(&applied_payload(), None);
+        assert_eq!(reply.results[0].relevance, None);
+        assert_eq!(reply.results[0].score_kind, None);
+        assert!(reply.results[0].score.abs() < f32::EPSILON);
+        assert_eq!(
+            reply.rerank.map(|outcome| outcome.status),
+            Some(RerankStatus::Applied)
+        );
+    }
+
+    #[test]
+    fn an_unknown_score_kind_is_never_consumed() {
+        let mut payload = applied_payload();
+        payload["score_kind"] = serde_json::json!("cross_encoder.v2");
+        let reply = reply_from_payload(&payload, Some(&calibration()));
+        assert_eq!(reply.results[0].relevance, None);
+        assert_eq!(reply.results[0].score_kind, None);
+    }
+
+    #[test]
+    fn a_rerank_status_this_gateway_does_not_name_is_no_signal() {
+        for status in ["rerank-not-configured", "partial"] {
+            let mut payload = applied_payload();
+            payload["rerank"] = serde_json::json!({"status": status});
+            assert_eq!(reply_from_payload(&payload, None).rerank, None, "{status}");
+        }
+        let mut payload = applied_payload();
+        payload.as_object_mut().expect("object").remove("rerank");
+        assert_eq!(
+            reply_from_payload(&payload, None).rerank,
+            None,
+            "an absent report"
+        );
+    }
+
+    /// A report this gateway does not name is not a legacy answer, so a score that came with it is not
+    /// read: the gate cannot tell whether the rerank behind the score stood.
+    #[test]
+    fn a_score_that_came_with_an_unnamed_rerank_report_is_not_read() {
+        for status in ["rerank-not-configured", "partial"] {
+            let mut payload = applied_payload();
+            payload
+                .as_object_mut()
+                .expect("object")
+                .remove("score_kind");
+            payload["rerank"] = serde_json::json!({"status": status});
+            let reply = reply_from_payload(&payload, Some(&calibration()));
+            assert_eq!(reply.results[0].relevance, None, "{status}");
+            assert_eq!(reply.results[0].score, 0.0, "{status}");
+        }
+    }
+
+    /// A calibrated zero is a judgement and reaches the gate as a score. A legacy zero is "not judged",
+    /// the rule the gate has always had.
+    #[test]
+    fn a_calibrated_zero_is_a_judgement_and_a_legacy_zero_is_not() {
+        let mut calibrated = bare_result("https://a.no/");
+        calibrated.relevance = Some(0.0);
+        calibrated.score_kind = Some(ScoreKind::CrossEncoderV1);
+        assert_eq!(calibrated.wire_score(), Some(0.0));
+
+        let mut legacy = bare_result("https://b.no/");
+        legacy.relevance = Some(0.0);
+        assert_eq!(legacy.wire_score(), None);
+
+        let mut legacy_judged = bare_result("https://c.no/");
+        legacy_judged.relevance = Some(0.3);
+        legacy_judged.score = 0.3;
+        assert_eq!(legacy_judged.wire_score(), Some(0.3));
+
+        assert_eq!(bare_result("https://d.no/").wire_score(), None);
+    }
+
+    /// The legacy hit keeps the keys it always had with the same values, and what carries nothing is
+    /// omitted, so the gate can tell "the provider said nothing" from "the provider said zero".
+    #[test]
+    fn a_legacy_web_search_item_keeps_its_keys_and_omits_what_carries_nothing() {
+        let payload = serde_json::json!({"results": [
+            {"url": "https://a.no/", "title": "A", "snippet": "S", "rank": 1, "score": 0.7, "highlights": ["h"], "engines": ["brave", "google"]},
+            {"url": "https://b.no/", "title": "B", "snippet": "", "score": 0.0}
+        ]});
+        let reply = reply_from_payload(&payload, None);
+        assert_eq!(
+            web_search_item(&reply.results[0], None),
+            serde_json::json!({
+                "url": "https://a.no/",
+                "title": "A",
+                "snippet": "S",
+                "rank": 1,
+                "score": 0.7_f32,
+                "highlights": ["h"],
+                "engines": ["brave", "google"]
+            })
+        );
+        assert_eq!(
+            web_search_item(&reply.results[1], None),
+            serde_json::json!({"url": "https://b.no/", "title": "B", "snippet": ""}),
+            "a legacy zero and an empty list are omitted"
+        );
+    }
+
+    #[test]
+    fn a_web_search_item_names_the_rerank_report_it_came_with() {
+        let result = bare_result("https://a.no/");
+        let skipped = RerankOutcome {
+            status: RerankStatus::Skipped,
+            reason: Some("zdr".to_owned()),
+        };
+        let item = web_search_item(&result, Some(&skipped));
+        assert_eq!(item["rerank_status"], "skipped");
+        assert_eq!(item["rerank_reason"], "zdr");
+
+        let shadow = RerankOutcome {
+            status: RerankStatus::Shadow,
+            reason: None,
+        };
+        let item = web_search_item(&result, Some(&shadow));
+        assert_eq!(item["rerank_status"], "shadow");
+        assert!(item.get("rerank_reason").is_none());
+        assert!(web_search_item(&result, None)
+            .get("rerank_status")
+            .is_none());
+    }
+
+    #[test]
+    fn a_calibrated_zero_reaches_the_gate_as_a_score() {
+        let mut result = bare_result("https://a.no/");
+        result.relevance = Some(0.0);
+        result.score_kind = Some(ScoreKind::CrossEncoderV1);
+        assert_eq!(web_search_item(&result, None)["score"], 0.0);
+    }
+
+    #[test]
+    fn the_rerank_words_are_the_words_quarry_sends() {
+        assert_eq!(RerankStatus::Applied.label(), "applied");
+        assert_eq!(RerankStatus::Skipped.label(), "skipped");
+        assert_eq!(RerankStatus::Degraded.label(), "degraded");
+        assert_eq!(RerankStatus::Shadow.label(), "shadow");
     }
 }

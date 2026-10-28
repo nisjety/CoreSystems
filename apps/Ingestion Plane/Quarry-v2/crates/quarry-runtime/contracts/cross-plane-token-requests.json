@@ -32,10 +32,9 @@
       "scopes": ["data:rerank"],
       "reason": "rank web search candidates",
       "granted": true,
-      "used_by": [],
-      "pending": "QB-T09 adds the Data Plane rerank client and its call site, then fills used_by and removes this field. The registry grant of data:rerank to quarry-edge is the Control Plane principal bundle (CP wave P1, QB-T01).",
+      "used_by": ["crates/quarry-runtime/src/rerank.rs"],
       "feature_flags": ["QUARRY_EDGE__DATA_PLANE_URL", "QUARRY_EDGE__SEMANTIC_RERANK"],
-      "notes": "Rerank of caller-supplied web candidates: POST /v1/rerank on the Data Plane (paid Azure Cohere). A request of its own on purpose: no other scope rides with data:rerank and no other row holds it. Never audience model-gateway: reranking uses neither the Model Plane nor a subscription."
+      "notes": "Rerank of caller-supplied web candidates: POST /v1/rerank on the Data Plane (paid Azure Cohere). A request of its own on purpose: no other scope rides with data:rerank and no other row holds it. Never audience model-gateway: reranking uses neither the Model Plane nor a subscription. The grant of data:rerank to quarry-edge on data-plane is in the checked-in Control Plane registry (apps/Control Plane/config/plane-service-principals.json, principal bundle P1, QB-T01), so the source is complete; Auth Core refuses this mint until that bundle is live in auth-service, and until then the search keeps its lexical order. apps/Data Plane v2/scripts/qb-preflight.sh --live --ship-qb-t09 checks the live grant and the Data Plane gate before QB-T09 ships."
     },
     {
       "name": "model-invoke",

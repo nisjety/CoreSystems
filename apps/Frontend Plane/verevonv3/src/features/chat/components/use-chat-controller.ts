@@ -3280,6 +3280,9 @@ export function useChatController() {
    *    (`failureAction`: wait for the usage-limit reset, reconnect, retry, or
    *    nothing) and, for a wait, when (`retryAt`). Nothing here retries: the
    *    retry control is the reader's, and it stays disabled until `retryAt`.
+   *  - a zero-retention refusal (`zdr_*`) is the turn's answer, with the words
+   *    and the action of the Model Plane catalogue (`zdr-refusals.ts`); it names
+   *    its feature, when it has one, so the reader sees what to turn off.
    */
   const settleServerFailure = (
     context: { assistantId: string; turnTitle: string; threadId: string },
@@ -3289,6 +3292,7 @@ export function useChatController() {
     const shown = streamFailurePresentation(failure.code, failure.message, i18n.tr, {
       retryAfterMs: failure.retryAfterMs,
       resetsAt: failure.resetsAt,
+      feature: failure.feature,
       locale: i18n.locale(),
       now: Date.now(),
     })

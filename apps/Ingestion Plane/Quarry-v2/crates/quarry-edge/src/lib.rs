@@ -15,6 +15,7 @@ pub mod graphql;
 pub mod handoff;
 pub mod internal_auth;
 pub mod map_routes;
+pub mod model_plane_gate;
 pub mod profile_routes;
 pub mod queue_routes;
 pub mod resource_routes;

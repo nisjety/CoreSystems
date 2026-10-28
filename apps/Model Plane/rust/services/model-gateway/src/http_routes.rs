@@ -821,17 +821,13 @@ fn should_resume_granted_approval(
 }
 
 fn require_non_zdr_durable_mutation(claims: &Claims) -> Result<(), HttpJsonError> {
-    if !claims.zdr {
+    let zdr = crate::zdr_posture::zdr_or_refuse(claims, &crate::zdr_posture::Route::plain(false))?;
+    if !zdr {
         return Ok(());
     }
     Err((
         StatusCode::PRECONDITION_FAILED,
-        Json(json!({
-            "error": {
-                "code": "zdr_durable_mutation_forbidden",
-                "message": "Zero Data Retention credentials cannot create, change, or delete durable state"
-            }
-        })),
+        Json(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN.json_body()),
     ))
 }
 
@@ -1401,6 +1397,9 @@ async fn approve_plan(
     Path(plan_id): Path<String>,
     Json(body): Json<TransitionPlanBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // Owner decision 17: approving a plan advances stored work. A ZDR credential is refused here, before
+    // anything runs; a waiver is checked against the plan's run receipt in Session Core.
+    crate::zdr_posture::continuation_gate(&claims)?;
     let target = parse_plan_state(&body.target_state)?;
     let resp = state
         .orchestration_client
@@ -1429,6 +1428,8 @@ async fn reject_plan(
     Path(plan_id): Path<String>,
     Json(body): Json<TransitionPlanBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // Owner decision 17: rejecting a plan advances stored work; see approve_plan.
+    crate::zdr_posture::continuation_gate(&claims)?;
     let resp = state
         .orchestration_client
         .clone()
@@ -1463,6 +1464,8 @@ async fn update_todo_status(
     Path(todo_id): Path<String>,
     Json(body): Json<TransitionTodoBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // Owner decision 17: a todo update advances stored work; see approve_plan.
+    crate::zdr_posture::continuation_gate(&claims)?;
     let target = parse_todo_state(&body.status)?;
     let resp = state
         .orchestration_client
@@ -1497,7 +1500,8 @@ async fn decide_approval(
     Path(approval_id): Path<String>,
     Json(body): Json<DecideApprovalBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    require_non_zdr_durable_mutation(&claims)?;
+    // Owner decision 17: deciding an approval advances the run it belongs to. See approve_plan.
+    crate::zdr_posture::continuation_gate(&claims)?;
     let target_state: ApprovalState = match body.decision.as_str() {
         "approve" => ApprovalState::Granted,
         "reject" => ApprovalState::Denied,
@@ -1605,7 +1609,8 @@ async fn cancel_run(
     session_bearer: VerifiedModelBearer,
     Path(run_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    if let Err(rejection) = require_non_zdr_durable_mutation(&claims) {
+    // Owner decision 17: a cancel is a change to a stored run. See approve_plan.
+    if let Err(rejection) = crate::zdr_posture::continuation_gate(&claims) {
         info!(run_id = %run_id, outcome = "zdr_rejected", "run cancel");
         return Err(rejection);
     }
@@ -1674,7 +1679,9 @@ async fn cancel_run(
                 "run_id": run_id,
                 "receipt_id": cancellation.receipt_id,
             }),
-            zdr: claims.zdr,
+            // The guard above answered every ZDR posture with a refusal, so a
+            // run-control event that reaches this line is persistent.
+            zdr: false,
         };
         if let Err(error) = state
             .publisher
@@ -1710,7 +1717,8 @@ async fn resume_run(
     session_bearer: VerifiedModelBearer,
     Path(run_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    require_non_zdr_durable_mutation(&claims)?;
+    // Owner decision 17: resuming a stored run is a continuation. See approve_plan.
+    crate::zdr_posture::continuation_gate(&claims)?;
     require_durable_run_owner(&state, &claims, &run_id, &session_bearer).await?;
     // Direct, immediate unblock only for a user-paused run. Approval-gated
     // work has no bare-resume path and remains in the descriptor quarantine.
@@ -1745,7 +1753,9 @@ async fn resume_run(
         user_id: claims.user_id.clone(),
         resource_ref: format!("run/{run_id}"),
         payload: serde_json::json!({ "run_id": run_id }),
-        zdr: claims.zdr,
+        // The guard above answered every ZDR posture with a refusal, so a
+        // run-control event that reaches this line is persistent.
+        zdr: false,
     };
     state
         .publisher
@@ -2019,6 +2029,11 @@ async fn browser_suggest_action(
     use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
 
     let request_id = new_ulid();
+    // A waived token names one connection, so it is refused here as a route mismatch (see `zdr_posture`).
+    crate::zdr_posture::zdr_or_refuse(
+        &claims,
+        &crate::zdr_posture::Route::named(req.provider.as_deref(), None, false),
+    )?;
     let visual_summary =
         browser_visual_summary(&state, &claims, &req, &request_id, &inference_bearer).await?;
     let evidence = browser_suggestion_prompt(&req, visual_summary.as_deref());
@@ -2088,6 +2103,13 @@ async fn browser_visual_summary(
     request_id: &str,
     inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<Option<String>, HttpJsonError> {
+    // The screenshot is analysed only as a persistent turn: AnalyzeImageRequest carries no ZDR flag,
+    // so a ZDR or waived posture skips the visual summary rather than send the image to a platform
+    // provider. The suggestion itself still runs (see `zdr_posture`).
+    match crate::zdr_posture::decide_for(claims, &crate::zdr_posture::Route::named(req.provider.as_deref(), None, false)) {
+        Ok(posture) if !posture.zdr() => {}
+        _ => return Ok(None),
+    }
     let Some(raw_base64) = req
         .screenshot_base64
         .as_deref()
@@ -2310,7 +2332,17 @@ async fn ai_chat(
     Json(req): Json<AiChatRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
     use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
-    let zdr = claims.effective_zdr(req.zdr);
+    // The posture of this turn, through the resolver: a ZDR turn that names the caller's own
+    // connection is refused here, typed, before any model call, and a waiver is honoured only on
+    // the connection it names (see `zdr_posture`). Without this, a connection id with no provider
+    // hint reached inference-core as "any provider", and the ZDR chain served the turn in place of
+    // the connection the caller selected.
+    let route = crate::zdr_posture::Route::named(
+        Some(req.provider.as_str()),
+        Some(req.subscription_connection_id.as_str()),
+        req.zdr,
+    );
+    let zdr = crate::zdr_posture::zdr_or_refuse(&claims, &route)?;
     let messages: Vec<ChatMessage> = req
         .messages
         .iter()
@@ -2485,7 +2517,10 @@ async fn recommend_plan(
     use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
 
     let locale = if req.locale == "en" { "en" } else { "nb" };
-    let zdr = claims.effective_zdr(requested_recommendation_zdr(&req.context));
+    let zdr = crate::zdr_posture::zdr_or_refuse(
+        &claims,
+        &crate::zdr_posture::Route::plain(requested_recommendation_zdr(&req.context)),
+    )?;
     let context_json = serde_json::to_string(&req.context).unwrap_or_else(|_| "{}".to_owned());
     let messages = vec![
         ChatMessage {
@@ -2617,7 +2652,10 @@ async fn ai_embeddings(
     inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiEmbeddingRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    let zdr = claims.effective_zdr(req.zdr);
+    let zdr = crate::zdr_posture::zdr_or_refuse(
+        &claims,
+        &crate::zdr_posture::Route::named(req.provider.as_deref(), None, req.zdr),
+    )?;
     let request_id = new_ulid();
     let resp = state
         .inference_client
@@ -2997,9 +3035,8 @@ async fn mcp_delete(
     headers: HeaderMap,
     Path(server_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    // Reject before ownership checks, Capability Core forwarding, or cache
-    // mutation; an issuer-ZDR principal may not change tool availability.
-    require_non_zdr_durable_mutation(&claims)?;
+    // Owner decision 17: removing a server is the owner's housekeeping under every posture. It sends no
+    // content, so a ZDR principal may remove one. The ownership checks below still decide who may.
     let is_admin = req_is_admin(&claims, &headers);
     if !state.ownership.can_modify(
         &claims.org_id,
@@ -3672,6 +3709,17 @@ async fn generate_image(
     inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<Json<Value>, HttpJsonError> {
     let request_id = new_ulid();
+    // Image generation is not a ZDR feature: a ZDR posture is refused before any model call, and a
+    // waived token (which names one connection) is refused as a route mismatch.
+    if crate::zdr_posture::zdr_or_refuse(
+        &claims,
+        &crate::zdr_posture::Route::named(req.provider.as_deref(), None, false),
+    )? {
+        return Err((
+            StatusCode::PRECONDITION_FAILED,
+            Json(mp_contracts::zdr_refusal::Refusal::feature_not_supported("image_generation").json_body()),
+        ));
+    }
     let prompt = req.prompt.or(req.input).unwrap_or_default();
     if prompt.trim().is_empty() {
         return Err((
@@ -3728,6 +3776,17 @@ async fn analyze_image(
     inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<Json<Value>, HttpJsonError> {
     let request_id = new_ulid();
+    // AnalyzeImageRequest carries no ZDR flag: a ZDR posture is refused as an attachment, and a
+    // waived token (one connection) as a route mismatch (see `zdr_posture`).
+    if crate::zdr_posture::zdr_or_refuse(
+        &claims,
+        &crate::zdr_posture::Route::named(req.provider.as_deref(), None, false),
+    )? {
+        return Err((
+            StatusCode::PRECONDITION_FAILED,
+            Json(mp_contracts::zdr_refusal::Refusal::feature_not_supported("attachments").json_body()),
+        ));
+    }
     let prompt = req
         .prompt
         .or(req.input)
@@ -3773,6 +3832,17 @@ async fn extract_image_text(
     req: AiImagesRequest,
     inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // ExtractImageTextRequest carries no ZDR flag: a ZDR posture is refused as an attachment, and a
+    // waived token (one connection) as a route mismatch (see `zdr_posture`).
+    if crate::zdr_posture::zdr_or_refuse(
+        &claims,
+        &crate::zdr_posture::Route::named(req.provider.as_deref(), None, false),
+    )? {
+        return Err((
+            StatusCode::PRECONDITION_FAILED,
+            Json(mp_contracts::zdr_refusal::Refusal::feature_not_supported("attachments").json_body()),
+        ));
+    }
     let request_id = new_ulid();
     let (image_url, image_data) =
         image_input(req.url, req.image_url, req.content_base64, req.image_base64)?;
@@ -3897,7 +3967,10 @@ async fn ai_dictate(
     use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
 
     let request_id = new_ulid();
-    let zdr = claims.effective_zdr(req.zdr);
+    let zdr = crate::zdr_posture::zdr_or_refuse(
+        &claims,
+        &crate::zdr_posture::Route::plain(req.zdr),
+    )?;
     let audio = STANDARD.decode(&req.audio_base64).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
@@ -4078,7 +4151,10 @@ async fn ai_speech(
     use base64::{engine::general_purpose::STANDARD, Engine as _};
 
     let request_id = new_ulid();
-    let zdr = claims.effective_zdr(req.zdr);
+    let zdr = crate::zdr_posture::zdr_or_refuse(
+        &claims,
+        &crate::zdr_posture::Route::named(req.provider.as_deref(), None, req.zdr),
+    )?;
     let operation = req
         .operation
         .as_deref()
@@ -4302,6 +4378,12 @@ async fn ai_translate(
         })
         .to_ascii_lowercase();
 
+    // Every operation but the language list sends the caller's text to a provider. Its posture is
+    // decided here, before any call, from the verified claims and the provider the request names.
+    if !matches!(operation.as_str(), "languages" | "list_languages") {
+        crate::zdr_posture::decide_content_route(&claims, req.provider.as_deref(), "translation")?;
+    }
+
     if matches!(operation.as_str(), "detect" | "detect_language") {
         return detect_text_language(
             state,
@@ -4372,6 +4454,7 @@ async fn ai_translate_detect(
     inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiTranslateRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    crate::zdr_posture::decide_content_route(&claims, req.provider.as_deref(), "translation")?;
     detect_text_language(
         state,
         claims.org_id,
@@ -4523,6 +4606,11 @@ async fn analyze_document_with_model(
     default_model: &str,
     inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<Json<Value>, HttpJsonError> {
+    crate::zdr_posture::decide_content_route(
+        &claims,
+        req.provider.as_deref(),
+        "document_analysis",
+    )?;
     let request_id = new_ulid();
     let (document_url, document_data) = document_input(
         req.url,
@@ -4675,6 +4763,11 @@ async fn analyze_language_with_operation(
     operation: &str,
     inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<Json<Value>, HttpJsonError> {
+    crate::zdr_posture::decide_content_route(
+        &claims,
+        req.provider.as_deref(),
+        "language_analysis",
+    )?;
     let request_id = new_ulid();
     let texts = language_texts(req.text, req.texts)?;
     let resp = state
@@ -4753,7 +4846,10 @@ async fn ai_documents(
     Json(req): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
     use mp_contracts::dataplane::documents_v2::CreateDocumentRequest;
-    if claims.effective_zdr(req["zdr"].as_bool().unwrap_or(false))
+    if crate::zdr_posture::zdr_or_refuse(
+        &claims,
+        &crate::zdr_posture::Route::plain(req["zdr"].as_bool().unwrap_or(false)),
+    )?
         || crate::dataplane::document_zdr_requested(
             false,
             req["zdr_classification"].as_str().unwrap_or(""),
@@ -4761,7 +4857,7 @@ async fn ai_documents(
     {
         return Err((
             StatusCode::PRECONDITION_FAILED,
-            Json(json!({ "error": "durable document ingest is unavailable under ZDR" })),
+            Json(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN.json_body()),
         ));
     }
     let request = crate::retrieval::authorize(
@@ -4807,6 +4903,7 @@ async fn ai_realtime(
     inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiRealtimeSessionRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    crate::zdr_posture::decide_content_route(&claims, req.provider.as_deref(), "realtime_voice")?;
     let request_id = new_ulid();
     let resp = state
         .inference_client
@@ -4886,6 +4983,7 @@ async fn ai_video_generate(
     inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiVideoGenerateRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    crate::zdr_posture::decide_content_route(&claims, req.provider.as_deref(), "video_generation")?;
     let request_id = new_ulid();
     let resp = state
         .inference_client
@@ -5786,6 +5884,12 @@ pub(crate) fn grpc_status_to_http(error: &tonic::Status) -> HttpJsonError {
         }
     };
 
+    // A typed ZDR refusal (inference-core's kind trailer, or an execution-core
+    // one) keeps its catalogue code, action and feature. Every other status keeps
+    // the flat `{"error": message}` body it always had.
+    if let Some(refusal) = mp_contracts::zdr_refusal::Refusal::from_status(error) {
+        return (status, Json(refusal.json_body()));
+    }
     (status, Json(json!({ "error": error.message() })))
 }
 
@@ -6540,7 +6644,9 @@ async fn ingest_feedback(
             "rating": rating.as_str(),
             "note": note,
         }),
-        zdr: claims.effective_zdr(false),
+        // The guard at the top of this handler answered every ZDR posture with a refusal,
+        // so the feedback event that reaches this line is persistent.
+        zdr: false,
     };
     state
         .publisher
@@ -7046,6 +7152,8 @@ async fn plan_approval(
     Json(body): Json<PlanApprovalRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
     use mp_contracts::autonomy::{label, rung_from_keyword, AutonomyEscalation};
+    // Owner decision 17: a plan approval advances the run. See approve_plan.
+    crate::zdr_posture::continuation_gate(&claims)?;
     use mp_contracts::model_plane::v1::{AutonomyRung, ExitPlanModeRequest, SetRunModeRequest};
 
     let bad_request = |message: String| -> HttpJsonError {
@@ -7314,6 +7422,11 @@ async fn invoke_queue_input(
 ) -> Response {
     use crate::queued_input::{EnqueueOutcome, MAX_QUEUED_CHARS, MAX_QUEUED_MESSAGES};
 
+    // Queued input changes a run's durable state: a ZDR or a waived token cannot do that.
+    if let Err(rejection) = require_non_zdr_durable_mutation(&claims) {
+        return rejection.into_response();
+    }
+
     // A mismatched claim is refused BEFORE the enqueue. Refusing afterwards
     // would leave a message that failed its authority check queued for delivery
     // anyway — the model would read it and the ledger would not have it.
@@ -7563,10 +7676,10 @@ async fn create_document(
             Json(serde_json::json!({"error": "content is required"})),
         ));
     }
-    if claims.effective_zdr(req.zdr) {
+    if crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(req.zdr))? {
         return Err((
             StatusCode::PRECONDITION_FAILED,
-            Json(serde_json::json!({"error": "durable document ingest is unavailable under ZDR"})),
+            Json(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN.json_body()),
         ));
     }
 
@@ -8688,6 +8801,7 @@ async fn create_memory(
     Json(body): Json<CreateMemoryBody>,
 ) -> Result<Json<CreateMemoryHttpResponse>, HttpJsonError> {
     use mp_contracts::model_plane::v1::IndexMemoryRequest;
+    require_non_zdr_durable_mutation(&claims)?;
 
     let thread_id = body.thread_id.trim();
     if thread_id.is_empty() {
@@ -8807,20 +8921,27 @@ async fn invoke(
     }
     let start = std::time::Instant::now();
 
-    // A token that says ZDR cannot be served on the user's own subscription
-    // connection: refuse, typed, before anything else is decided. This route
-    // already forwarded the connection to inference-core (which refused), so
-    // what it gains is the typed answer instead of a generic 502, and no
-    // inference call at all. The token's own claim decides; `normalize` has no
-    // claims. See `zdr_precheck`.
-    if let Some(refusal) = crate::zdr_precheck::refuse_subscription_under_token_zdr(&claims, &req) {
-        return Err(refusal.http().into());
+    // The turn's posture, decided once through the resolver before anything else: a ZDR token on
+    // the user's own connection is refused, typed, with no inference call; a waiver is honoured
+    // only on the connection it names; every other combination follows the posture matrix (see
+    // `zdr_posture`). The refusal is typed instead of the generic 502 the connection used to get.
+    let route = crate::zdr_posture::Route::named(
+        req.provider.as_deref(),
+        req.subscription_connection_id.as_deref(),
+        req.zdr,
+    );
+    let posture = match crate::zdr_posture::decide_for(&claims, &route) {
+        Ok(posture) => posture,
+        Err(refusal) => return Err(crate::zdr_posture::http(&refusal).into()),
+    };
+    if posture.is_waived() && (req.deep_research || req.generate_image) {
+        return Err(crate::zdr_posture::http(&mp_contracts::zdr_refusal::Refusal::WAIVER_ROUTE_MISMATCH).into());
     }
 
     // Normalize and validate the request
     let normalized = normalize::normalize(&req)?;
-    let effective_zdr = claims.effective_zdr(normalized.zdr);
-    let persistence = effective_invoke_persistence_plan(&claims, normalized.zdr);
+    let effective_zdr = posture.zdr();
+    let persistence = invoke_persistence_plan(effective_zdr);
     let capability_bearer = capability_bearer.map(|Extension(bearer)| bearer);
     let pii_redaction_required = crate::moderation::pii_redaction_required(
         &req.features,
@@ -8836,6 +8957,13 @@ async fn invoke(
     // idempotency registry, budget/session clients, event publisher, and any
     // response cache so request or response content cannot become durable.
     if !persistence.all_durable_effects_allowed() {
+        // What the persistence-free path cannot do is refused here, typed, before
+        // any model call (`zdr_features`); what it can do is honored below, with
+        // the same settings as the streaming path.
+        if let Some(refusal) = crate::zdr_features::refusal(&req) {
+            return Err(crate::zdr_precheck::http(&refusal).into());
+        }
+        let settings = crate::sse::zdr_turn_settings(&state, &req);
         let request_id = new_ulid();
         let user_content = if pii_redaction_required {
             crate::moderation::redact_pii(&normalized.content).0
@@ -8852,14 +8980,10 @@ async fn invoke(
                     model: normalized.model.clone(),
                     provider_hint: normalized.provider_hint.clone(),
                     subscription_connection_id: normalized.subscription_connection_id.clone(),
-                    messages: vec![mp_contracts::model_plane::v1::ChatMessage {
-                        compaction_summary: String::new(),
-                        role: "user".to_owned(),
-                        content: user_content,
-                        name: String::new(),
-                    }],
+                    messages: settings.messages(&user_content),
                     temperature: 0.7,
-                    max_tokens: 4096,
+                    max_tokens: settings.max_tokens,
+                    thinking_budget_tokens: settings.thinking_budget_tokens,
                     structured_output_schema: normalized
                         .structured_output_schema
                         .clone()
@@ -8876,7 +9000,14 @@ async fn invoke(
             .await
             .map_err(|error| {
                 // No run was prepared on this path, so there is nothing to
-                // terminalize; a typed refusal is still worded by its code.
+                // terminalize. A typed ZDR refusal from inference-core (the
+                // attestation gate) keeps its catalogue code and the 412 every
+                // ZDR precondition answers with. Without this it became a flat
+                // 502 that a client cannot match on.
+                if let Some(refusal) = mp_contracts::zdr_refusal::Refusal::from_status(&error) {
+                    let answer: InvokeError = crate::zdr_precheck::http(&refusal).into();
+                    return answer;
+                }
                 let subscription = crate::subscription_failure::on_route(
                     &error,
                     !normalized.subscription_connection_id.trim().is_empty(),
@@ -9321,9 +9452,6 @@ fn invoke_persistence_plan(zdr: bool) -> InvokePersistencePlan {
     }
 }
 
-fn effective_invoke_persistence_plan(claims: &Claims, request_zdr: bool) -> InvokePersistencePlan {
-    invoke_persistence_plan(claims.effective_zdr(request_zdr))
-}
 
 #[derive(Deserialize)]
 struct ToonEncodeRequest {
@@ -9468,13 +9596,18 @@ mod invoke_zdr_tests {
             scopes: Vec::new(),
             zdr: true,
             sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
             principal_type: Some("user".to_owned()),
             service_id: None,
             reason: None,
         };
 
+        assert!(crate::zdr_posture::decide_for(&claims, &crate::zdr_posture::Route::plain(false))
+            .expect("a ZDR token decides")
+            .zdr());
         assert_eq!(
-            effective_invoke_persistence_plan(&claims, false),
+            invoke_persistence_plan(true),
             InvokePersistencePlan::SuppressAllForZdr
         );
     }
@@ -9569,6 +9702,8 @@ mod approval_resume_auth_tests {
             scopes: Vec::new(),
             zdr: true,
             sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
             principal_type: Some("user".to_owned()),
             service_id: None,
             reason: None,
@@ -9602,6 +9737,8 @@ mod capability_contract_tests {
             scopes: Vec::new(),
             zdr,
             sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
             principal_type: Some("user".to_owned()),
             service_id: None,
             reason: None,
@@ -9946,6 +10083,8 @@ mod capability_contract_tests {
             scopes: vec!["mail-task:prepare-thread".to_owned()],
             zdr: false,
             sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
             principal_type: Some("service".to_owned()),
             service_id: Some("service:verevon-gateway".to_owned()),
             reason: Some("prepare a mail-task-origin thread".to_owned()),
@@ -10252,6 +10391,8 @@ mod run_owner_publish_tests {
             scopes: Vec::new(),
             zdr: false,
             sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
             principal_type: Some("user".to_owned()),
             service_id: None,
             reason: None,
@@ -11261,6 +11402,8 @@ mod speech_route_tests {
             scopes: Vec::new(),
             zdr,
             sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
             principal_type: Some("user".to_owned()),
             service_id: None,
             reason: None,

@@ -6,8 +6,8 @@ export default function robots(): MetadataRoute.Robots {
 		rules: [
 			{ userAgent: "GPTBot", disallow: "/" },
 			{ userAgent: "Google-Extended", disallow: "/" },
-			{ userAgent: "OAI-SearchBot", allow: "/" },
-			{ userAgent: "*", allow: "/" },
+			{ userAgent: "OAI-SearchBot", allow: "/", disallow: "/product-demo/" },
+			{ userAgent: "*", allow: "/", disallow: "/product-demo/" },
 		],
 		sitemap: new URL("/sitemap.xml", siteUrl).toString(),
 	};

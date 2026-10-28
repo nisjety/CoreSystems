@@ -765,3 +765,43 @@ describe('AgentRunConsole sub-agent timeline', () => {
     expect(item?.textContent).not.toContain('batch')
   })
 })
+
+describe('AgentRunConsole zero-retention refusal', () => {
+  beforeEach(() => {
+    mockStreamChat.mockReset()
+    mockStreamRunEvents.mockReset().mockImplementation(() => new Promise<void>(() => {}))
+    mockListApprovals.mockReset().mockResolvedValue([])
+    mockGetRun.mockReset().mockResolvedValue(null)
+    mockGetRunProofBundle.mockReset().mockResolvedValue(null)
+    mockListRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+    mockListSystemRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+    mockGetRunWatchStatus.mockReset().mockResolvedValue({ watching: false })
+  })
+
+  // A Do-mode run refused under zero retention: the console says so in the reader's
+  // language, names the feature and gives the way forward. The server's own text for
+  // it is English operator wording, and it is not shown.
+  it('shows the refusal in the reader language, with its feature, and not the server text', async () => {
+    mockStreamChat.mockImplementation((_request: unknown, handlers: ChatStreamHandlers) => {
+      void Promise.resolve().then(() => handlers.onError?.({
+        code: 'zdr_feature_not_supported',
+        message: 'Server operator text in English',
+        feature: 'agentic',
+      }))
+      return Promise.resolve()
+    })
+
+    const { container } = renderConsole()
+
+    fireEvent.input(screen.getByLabelText(/hva skal agenten gjøre/i), { target: { value: 'Book a shipment' } })
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: /kjør oppgave/i }))
+
+    await waitFor(() => {
+      expect(container.querySelector('.verevon-run-console__error')?.textContent).toContain('Utfør-modus')
+    })
+    const shown = container.querySelector('.verevon-run-console__error')?.textContent ?? ''
+    expect(shown).toContain('Slå av funksjonen og send på nytt.')
+    expect(shown).not.toContain('Server operator text')
+  })
+})

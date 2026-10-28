@@ -342,6 +342,30 @@ fn artifact_id_of(outcome: &ToolOutcome) -> Option<String> {
         })
 }
 
+/// Envelope key of a knowledge-search result whose retrieval answered in a reduced form (Z-41b). Its value is
+/// `{code, wording_key}`, both written from the catalogue in `retrieval_metadata`.
+const RETRIEVAL_NOTICE_KEY: &str = "retrieval_notice";
+
+/// The `retrieval_notice` event a tool result carries, when its retrieval answered in a reduced form (Z-41b).
+///
+/// Only a knowledge-search result can carry one, and only one written by the restrictive-turn branch of that
+/// arm. The turn emits the event where it emits the result, through the same sink, so a resumed stream
+/// replays it like every other frame.
+pub(crate) fn retrieval_notice_events(outcome: &ToolOutcome) -> Vec<ChatEvent> {
+    if outcome.name != "knowledge_search" || outcome.error.is_some() {
+        return Vec::new();
+    }
+    let Some(notice) = serde_json::from_str::<Value>(&outcome.output)
+        .ok()
+        .and_then(|envelope| envelope.get(RETRIEVAL_NOTICE_KEY).cloned())
+        .and_then(|entry| entry.get("code").and_then(Value::as_str).map(str::to_owned))
+        .and_then(|code| crate::retrieval_metadata::notice_for_code(&code))
+    else {
+        return Vec::new();
+    };
+    vec![ChatEvent::RetrievalNotice { notice }]
+}
+
 /// Harvests `artifact`/`attachment` events from a tool outcome and returns a
 /// compact, model-facing replacement for its output.
 ///
@@ -2204,7 +2228,7 @@ fn knowledge_search_request(
     org_id: &str,
     query: &str,
     top_k: i32,
-    zdr: bool,
+    zdr_mode: Option<String>,
     sovereign_required: bool,
 ) -> RetrieveRequest {
     RetrieveRequest {
@@ -2214,7 +2238,7 @@ fn knowledge_search_request(
         // Data Plane derives the viewer from the verified bearer. Caller-supplied
         // identity in the message is deliberately absent.
         user_id: None,
-        zdr_mode: crate::retrieval::data_plane_zdr_mode(zdr),
+        zdr_mode,
         // Always populated. Data Plane v2 reads an absent `sovereign_required`
         // as `true` (fail-closed), which its Azure-hosted embedding provider
         // cannot satisfy, so leaving this off is what made every
@@ -2460,6 +2484,7 @@ pub async fn dispatch_tool(
         conversation, data_plane_bearer, execution_bearer, inference_bearer,
         session_bearer, capability_bearer, zdr, sovereign_required,
         allow_paid_providers, call, ingestion_bearer, sandbox_bearer, None,
+        crate::retrieval::data_plane_zdr_mode(zdr, false),
     ).await
 }
 
@@ -2485,6 +2510,7 @@ async fn dispatch_tool_with_cost(
     ingestion_bearer: Option<&VerifiedIngestionBearer>,
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
     cost_bearer: Option<&str>,
+    data_plane_mode: Option<String>,
 ) -> ToolOutcome {
     if !inline_tool_allowed(&call.name) {
         return err_outcome(
@@ -2867,55 +2893,18 @@ async fn dispatch_tool_with_cost(
             // belongs to it.
             match state
                 .quarry
-                .search_with_options(&query, limit, &intent, org_id, zdr, &options)
+                .search_reply(&query, limit, &intent, org_id, zdr, &options)
                 .await
             {
-                Ok(results) => {
-                    let items: Vec<serde_json::Value> = results
+                Ok(reply) => {
+                    // Each hit carries the rerank report the edge sent for this search, so the
+                    // relevance gate can say in its coverage line what the reranker did. The keys
+                    // and the rule for omitting each one live with the projection, in
+                    // `crate::quarry::web_search_item`.
+                    let items: Vec<serde_json::Value> = reply
+                        .results
                         .iter()
-                        .map(|r| {
-                            let mut item = serde_json::json!({
-                                "url": r.url, "title": r.title, "snippet": r.snippet
-                            });
-                            // Quarry's semantic reranker scores only the leading
-                            // `top_n` hits, so ABSENT and ZERO mean different
-                            // things: unjudged vs judged-irrelevant. `score` has
-                            // already flattened `None` to 0.0 by this point (it
-                            // feeds a non-optional proto field), so emitting it
-                            // unconditionally would tell `relevance::assess`
-                            // that every unjudged hit scored zero — worse than
-                            // sending nothing, because the gate would trust it.
-                            // Omitting zero keeps the distinction: a real 0.0
-                            // simply falls through to the lexical + domain
-                            // signals, which is the correct treatment for a hit
-                            // the reranker never looked at.
-                            if r.score > 0.0 {
-                                item["score"] = serde_json::json!(r.score);
-                            }
-                            // The reranker's matched passages, and the position
-                            // the caller actually received the hit at. Both are
-                            // omitted when empty for the same reason as `score`:
-                            // an empty list and a `0` rank are "the provider said
-                            // nothing", not "nothing matched" and "ranked first".
-                            if !r.highlights.is_empty() {
-                                item["highlights"] = serde_json::json!(r.highlights);
-                            }
-                            if r.rank > 0 {
-                                item["rank"] = serde_json::json!(r.rank);
-                            }
-                            // Which of the edge's federated engines actually
-                            // returned this URL for this query. Omitted when
-                            // empty on the same principle as `score` above: an
-                            // absent list means the edge said nothing about
-                            // engines (it does not populate the field yet), not
-                            // that exactly one engine found the page — and
-                            // `relevance` scores an absent list as no signal
-                            // rather than as disagreement.
-                            if !r.engines.is_empty() {
-                                item["engines"] = serde_json::json!(r.engines);
-                            }
-                            item
-                        })
+                        .map(|r| crate::quarry::web_search_item(r, reply.rerank.as_ref()))
                         .collect();
                     let output = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned());
                     // Untruncated: web_search returns short structured hits
@@ -2931,7 +2920,9 @@ async fn dispatch_tool_with_cost(
                         org_id,
                         user_id,
                         run_id,
-                        zdr,
+                        // A ZDR or waived turn carries a Data Plane retention mode and sends no derived
+                        // content-safety pass to a processor.
+                        zdr || data_plane_mode.is_some(),
                     )
                     .await;
                     ToolOutcome {
@@ -3045,7 +3036,7 @@ async fn dispatch_tool_with_cost(
                         org_id,
                         user_id,
                         run_id,
-                        zdr,
+                        zdr || data_plane_mode.is_some(),
                     )
                     .await;
                     let out = serde_json::json!({
@@ -3121,7 +3112,7 @@ async fn dispatch_tool_with_cost(
                                 org_id,
                                 user_id,
                                 run_id,
-                                zdr,
+                                zdr || data_plane_mode.is_some(),
                             )
                             .await;
                             let out = serde_json::json!({
@@ -3355,7 +3346,8 @@ async fn dispatch_tool_with_cost(
             let top_k = i32::try_from(arg_i64(&call.arguments_json, "top_k").unwrap_or(5))
                 .unwrap_or(5)
                 .clamp(1, 20);
-            let request = knowledge_search_request(org_id, &query, top_k, zdr, sovereign_required);
+            let request =
+                knowledge_search_request(org_id, &query, top_k, data_plane_mode.clone(), sovereign_required);
             let request = match crate::retrieval::authorize(tonic::Request::new(request), bearer) {
                 Ok(request) => request,
                 Err(error) => {
@@ -3436,6 +3428,21 @@ async fn dispatch_tool_with_cost(
                                 serde_json::json!(metadata.zdr_actions_applied),
                             );
                         }
+                        // A reduced answer's notice (Z-41b) travels with the result to the turn, which
+                        // emits it as a typed event (`retrieval_notice_events`). The turn's mode decides what it
+                        // may state: a persistent turn is never told its answer was reduced, and a waived turn
+                        // only that it was, under the generic code.
+                        if let Some(notice) = metadata.notice.and_then(|notice| {
+                            crate::retrieval_metadata::notice_for_mode(notice, data_plane_mode.as_deref())
+                        }) {
+                            object.insert(
+                                RETRIEVAL_NOTICE_KEY.to_owned(),
+                                serde_json::json!({
+                                    "code": notice.code,
+                                    "wording_key": notice.wording_key,
+                                }),
+                            );
+                        }
                     }
                     let output =
                         serde_json::to_string(&envelope).unwrap_or_else(|_| "{}".to_owned());
@@ -3482,7 +3489,7 @@ async fn dispatch_tool_with_cost(
                     org_id,
                     &query,
                     arg_i64(&call.arguments_json, "limit"),
-                    zdr,
+                    data_plane_mode.clone(),
                 )
                 .await,
             )
@@ -3973,6 +3980,7 @@ async fn dispatch_audited_tool(
     // When set, the call (all of its attempts) stops here and fails. Only a
     // read in a source-bound phase gets one; see `stops_at_validation_deadline`.
     read_deadline: Option<tokio::time::Instant>,
+    data_plane_mode: Option<String>,
 ) -> Result<ToolOutcome, &'static str> {
     if session_bearer.is_empty() {
         return Err("tool audit credential unavailable");
@@ -4036,6 +4044,7 @@ async fn dispatch_audited_tool(
                 ingestion_bearer,
                 sandbox_bearer,
                 cost_bearer,
+                data_plane_mode.clone(),
             )
             .await;
             let should_retry = attempt < crate::tool_retry::MAX_TOOL_ATTEMPTS
@@ -4172,6 +4181,10 @@ pub(crate) async fn dispatch_web_tool_audited(
         None,
         // Research bounds its own pipeline; there is no draft deadline here.
         None,
+        // Web tools only (see this function's doc): no Data Plane retrieval is reachable from this path.
+        // Its callers are persistent or ZDR (deep research is refused on a waived turn at the stream entry),
+        // so the mode is the ZDR one or none, and the derived content-safety pass follows `zdr`.
+        crate::retrieval::data_plane_zdr_mode(zdr, false),
     )
     .await
 }
@@ -5164,6 +5177,7 @@ pub async fn run_forced_web_search(
     session_bearer: &str,
     capability_bearer: Option<&str>,
     zdr: bool,
+    data_plane_mode: Option<String>,
     base_messages: Vec<ChatMessage>,
     query: &str,
     sink: Option<&crate::sse_events::RichEventSink>,
@@ -5178,6 +5192,7 @@ pub async fn run_forced_web_search(
         session_bearer,
         capability_bearer,
         zdr,
+        data_plane_mode,
         // No requested model reaches this entry point, and an unknown tier is a
         // denied tier.
         "",
@@ -5211,6 +5226,7 @@ pub async fn run_forced_web_search_for_model(
     session_bearer: &str,
     capability_bearer: Option<&str>,
     zdr: bool,
+    data_plane_mode: Option<String>,
     requested_model: &str,
     base_messages: Vec<ChatMessage>,
     query: &str,
@@ -5281,6 +5297,9 @@ pub async fn run_forced_web_search_for_model(
         None,
         // Runs before any source-bound phase has started its deadline.
         None,
+        // The turn's own retention mode: a waived turn's derived pass is skipped (`reject`), a ZDR turn's
+        // too (`ephemeral`), and a persistent turn runs it as it always did (none).
+        data_plane_mode,
     )
     .await?;
     // Gate BEFORE anything is emitted: the citations are built from the surviving
@@ -5689,6 +5708,79 @@ fn grounding_label(grounded: Option<&grounding::GroundedSource>) -> String {
     }
 }
 
+/// The RERANK sentence of the relevance gate's coverage header, from the rerank report the Quarry edge
+/// put on each hit. `None` for a report the gate does not name, so the header is unchanged for it.
+fn rerank_gate_sentence(status: &str, reason: Option<&str>, any_scored: bool) -> Option<String> {
+    match status {
+        "applied" if any_scored => Some(
+            "RERANK: applied. Each hit the reranker scored carries its calibrated relevance; the hits \
+             it did not score are judged on their words alone."
+                .to_owned(),
+        ),
+        "applied" => Some(
+            "RERANK: applied to the order, but no scores reached this gate, so every hit is judged \
+             on its words alone."
+                .to_owned(),
+        ),
+        "skipped" => Some(format!(
+            "RERANK: skipped ({}). The search engine's order stands, and every hit is judged on its \
+             words alone.",
+            skipped_reason_words(reason)
+        )),
+        "degraded" => Some(format!(
+            "RERANK: failed ({}). The search engine's order stands, and every hit is judged on its \
+             words alone.",
+            failed_reason_words(reason)
+        )),
+        "shadow" => Some(
+            "RERANK: measured only (shadow mode). The search engine's order stands, and every hit is \
+             judged on its words alone."
+                .to_owned(),
+        ),
+        _ => None,
+    }
+}
+
+/// Why the reranker was not called, in words the model can repeat. The vocabulary is Quarry's closed
+/// set; an unnamed reason is said to be unnamed rather than guessed at.
+fn skipped_reason_words(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("zdr") => "zero data retention is on for this search, so the reranker was not called",
+        Some("disabled") => "the reranker is switched off",
+        Some("sovereign") => "a sovereign-data rule keeps this search away from the reranker",
+        Some("input_not_tenant") => "the search is not run for a tenant organisation",
+        Some("input_too_small") => "there were too few results to rerank",
+        Some("circuit_open") => "the reranker is paused after repeated failures",
+        _ => "the edge gave no reason",
+    }
+}
+
+/// Why the reranker was called and failed, in words the model can repeat.
+fn failed_reason_words(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("timeout") => "the reranker did not answer in time",
+        Some("provider_error") => "the reranker returned an error",
+        _ => "the reranker failed",
+    }
+}
+
+/// The status and reason of the rerank report the edge put on the hits of one `web_search` output.
+/// Every hit of one search carries the same report, so the first hit is read. `None` when no hit
+/// carries one, as with a legacy edge.
+fn rerank_report_of(outcome: &ToolOutcome) -> Option<(String, Option<String>)> {
+    if outcome.name != "web_search" || outcome.error.is_some() {
+        return None;
+    }
+    let items = serde_json::from_str::<Vec<Value>>(&outcome.output).ok()?;
+    let first = items.first()?;
+    let status = first.get("rerank_status")?.as_str()?.to_owned();
+    let reason = first
+        .get("rerank_reason")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Some((status, reason))
+}
+
 /// Rewrite a gated result set into the text the model reads.
 ///
 /// Filtering has to be VISIBLE. A silently shortened result list makes the model
@@ -5714,6 +5806,7 @@ fn gated_web_search_output(
     citations: &(Vec<usize>, Vec<(usize, String)>),
     fallback_used: bool,
     grounded: &BTreeMap<usize, grounding::GroundedSource>,
+    rerank_line: Option<&str>,
 ) -> String {
     let (citable, withheld) = citations;
     let found = hits.len();
@@ -5730,6 +5823,9 @@ fn gated_web_search_output(
          the citable hits do not contain the answer, say so or search again with a more specific \
          query — do not fall back to a set-aside hit.\n"
     );
+    if let Some(line) = rerank_line {
+        let _ = writeln!(out, "{line}\n");
+    }
     if fallback_used {
         let _ = writeln!(
             out,
@@ -5841,6 +5937,8 @@ struct ScoredWebSearch {
     verdicts: Vec<relevance::Verdict>,
     kept: Vec<usize>,
     fallback_used: bool,
+    /// The RERANK sentence for the coverage header, when the edge reported a rerank step.
+    rerank_line: Option<String>,
 }
 
 /// Score a parsed `web_search` result set. `None` when the outcome is not a
@@ -5876,11 +5974,16 @@ fn score_web_search_outcome(question: &str, outcome: &ToolOutcome) -> Option<Sco
         .filter_map(|(index, keep)| keep.then_some(index))
         .take(MAX_WEB_CITATIONS)
         .collect();
+    let rerank_line = rerank_report_of(outcome).and_then(|(status, reason)| {
+        let any_scored = hits.iter().any(|hit| hit.provider_score.is_some());
+        rerank_gate_sentence(&status, reason.as_deref(), any_scored)
+    });
     Some(ScoredWebSearch {
         hits,
         verdicts,
         kept,
         fallback_used: mask.fallback_used,
+        rerank_line,
     })
 }
 
@@ -6067,6 +6170,7 @@ fn finish_web_search_gate(
         &split,
         scored.fallback_used,
         grounded,
+        scored.rerank_line.as_deref(),
     );
     WebSearchGate {
         found: scored.hits.len(),
@@ -6262,6 +6366,7 @@ pub async fn run_tool_rounds(
     session_bearer: &str,
     capability_bearer: Option<&str>,
     zdr: bool,
+    data_plane_mode: Option<String>,
     // Jurisdiction posture for this turn's Data Plane retrievals — the axis
     // `zdr` does not cover. Resolved by the caller from its signed `sovereign`
     // claim and `min_privacy_tier` below (`mp_contracts::dataplane_posture`),
@@ -6298,6 +6403,7 @@ pub async fn run_tool_rounds(
         capability_bearer,
         None,
         zdr,
+        data_plane_mode,
         sovereign_required,
         min_privacy_tier,
         model,
@@ -6346,6 +6452,7 @@ pub async fn run_tool_rounds_for_model(
     capability_bearer: Option<&str>,
     cost_bearer: Option<&str>,
     zdr: bool,
+    data_plane_mode: Option<String>,
     sovereign_required: bool,
     min_privacy_tier: i32,
     // The model the tool-DECISION rounds run on, substitutions included.
@@ -7092,6 +7199,8 @@ pub async fn run_tool_rounds_for_model(
         }
         let offered_tools = &round_tools;
         let dispatch_started = timing.map(crate::turn_timing::TurnTiming::now_ms);
+        // A shared reference, so each per-call future copies it rather than moving the turn's value.
+        let data_plane_mode_ref = &data_plane_mode;
         let dispatched = futures::future::join_all(prepared.into_iter().map(
             |(call, is_duplicate, is_truncated)| async move {
                 if !offered_tools.iter().any(|tool| tool.name == call.name) {
@@ -7142,6 +7251,7 @@ pub async fn run_tool_rounds_for_model(
                     sandbox_bearer,
                     cost_bearer,
                     validation_deadline.filter(|_| stops_at_validation_deadline(&call.name)),
+                    data_plane_mode_ref.clone(),
                 )
                 .await
             },
@@ -7306,6 +7416,10 @@ pub async fn run_tool_rounds_for_model(
                     error: outcome.error.clone(),
                 })
                 .await;
+            // A reduced knowledge search says so to the user at the point its result is shown (Z-41b).
+            for notice_event in retrieval_notice_events(&outcome) {
+                events.push(notice_event).await;
+            }
             // A model-chosen web_search must populate the Sources tab exactly
             // like the forced pre-loop path does — the citations are what let
             // the user (and the verification step) see what grounded the answer.
@@ -9056,7 +9170,7 @@ mod tests {
     #[test]
     fn knowledge_search_always_declares_a_sovereignty_posture() {
         for sovereign in [false, true] {
-            let request = knowledge_search_request("org", "query", 5, false, sovereign);
+            let request = knowledge_search_request("org", "query", 5, None, sovereign);
             assert_eq!(
                 request.sovereign_required,
                 Some(sovereign),
@@ -9067,7 +9181,7 @@ mod tests {
 
     #[test]
     fn knowledge_search_is_claim_scoped_and_zdr_aware() {
-        let request = knowledge_search_request("org-from-claims", "query", 7, true, false);
+        let request = knowledge_search_request("org-from-claims", "query", 7, Some("ephemeral".to_owned()), false);
 
         assert_eq!(request.org_id, "org-from-claims");
         assert_eq!(request.query, "query");
@@ -9600,6 +9714,137 @@ mod tests {
             name: name.to_owned(),
             arguments_json: args_json.to_owned(),
         }
+    }
+
+    /// One knowledge search through the real dispatch, against a Data Plane double, on a turn of the given
+    /// retention posture. Returns the outcome and every `zdr_mode` the double received.
+    async fn knowledge_search_on_turn(
+        reply: crate::retrieval::notice_double::Reply,
+        zdr: bool,
+    ) -> (ToolOutcome, Vec<Option<String>>) {
+        use crate::retrieval::notice_double::NoticeDouble;
+        let double = NoticeDouble::new(reply);
+        let seen = double.clone();
+        let mut state = crate::state::AppState::new();
+        state.retrieval_client = double.client().await;
+        let bearer = crate::auth::VerifiedDataPlaneBearer::for_test("signed-user-jwt");
+        let call = tool_call("knowledge_search", r#"{"query":"refund policy"}"#);
+        let outcome = dispatch_tool(
+            &state,
+            "run_test",
+            "org_test",
+            "user_test",
+            "thread_test",
+            "",
+            &[],
+            "",
+            Some(&bearer),
+            None,
+            "",
+            "",
+            None,
+            zdr,
+            false,
+            false,
+            &call,
+            None,
+            None,
+        )
+        .await;
+        (outcome, seen.modes())
+    }
+
+    /// A knowledge search on a ZDR turn, answered in text search only because no ZDR-approved query embedding
+    /// route is attached, reaches the turn as exactly one typed `retrieval_notice`, and the model sees the same
+    /// typed code, never the Data Plane's sentence.
+    #[tokio::test]
+    async fn a_reduced_knowledge_search_on_a_zdr_turn_surfaces_one_typed_notice() {
+        let (outcome, modes) =
+            knowledge_search_on_turn(crate::retrieval::notice_double::Reply::Degraded, true).await;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert_eq!(modes, vec![Some("ephemeral".to_owned())]);
+        let events = retrieval_notice_events(&outcome);
+        assert_eq!(events.len(), 1, "one notice per reduced result");
+        assert!(
+            matches!(&events[0], ChatEvent::RetrievalNotice { notice } if notice.code == "zdr_dense_unavailable"),
+            "{events:?}"
+        );
+        assert_eq!(events[0].name(), "retrieval_notice");
+        assert!(
+            outcome.output.contains("zdr_dense_unavailable"),
+            "{}",
+            outcome.output
+        );
+        assert!(
+            !outcome.output.contains("Semantic search was not used"),
+            "the Data Plane sentence stays behind: {}",
+            outcome.output
+        );
+    }
+
+    /// The same reduced result on a persistent turn carries no notice, in the event or in the envelope the
+    /// model reads. A persistent turn is never told its answer was reduced under zero retention.
+    #[tokio::test]
+    async fn a_reduced_knowledge_search_on_a_persistent_turn_carries_no_notice() {
+        let (outcome, modes) =
+            knowledge_search_on_turn(crate::retrieval::notice_double::Reply::Degraded, false).await;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert_eq!(modes, vec![None]);
+        assert!(retrieval_notice_events(&outcome).is_empty());
+        assert!(
+            !outcome.output.contains("retrieval_notice"),
+            "{}",
+            outcome.output
+        );
+    }
+
+    /// An ordinary knowledge search on a ZDR turn, which the Data Plane did not reduce, carries no notice.
+    #[tokio::test]
+    async fn an_ordinary_zdr_knowledge_search_is_unchanged() {
+        let (outcome, _) =
+            knowledge_search_on_turn(crate::retrieval::notice_double::Reply::Ordinary, true).await;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert!(retrieval_notice_events(&outcome).is_empty());
+        assert!(
+            !outcome.output.contains("retrieval_notice"),
+            "{}",
+            outcome.output
+        );
+    }
+
+    /// Only a successful knowledge search can carry the event. A reason this gateway does not word is reported
+    /// as a reduction, never dropped.
+    #[test]
+    fn only_a_successful_knowledge_search_carries_the_notice_event() {
+        let envelope = |code: &str| {
+            format!(r#"{{"results":[],"retrieval_notice":{{"code":"{code}","wording_key":"x"}}}}"#)
+        };
+        let mut outcome = ToolOutcome {
+            call_id: "call-1".to_owned(),
+            name: "web_search".to_owned(),
+            output: envelope("zdr_dense_unavailable"),
+            error: None,
+            provenance: crate::moderation::ToolProvenance::unscreened("web_search", ""),
+        };
+        assert!(
+            retrieval_notice_events(&outcome).is_empty(),
+            "not a knowledge search"
+        );
+        outcome.name = "knowledge_search".to_owned();
+        assert_eq!(retrieval_notice_events(&outcome).len(), 1);
+        outcome.output = envelope("some_future_reason");
+        assert!(
+            matches!(
+                retrieval_notice_events(&outcome).as_slice(),
+                [ChatEvent::RetrievalNotice { notice }] if notice.code == "retrieval_reduced"
+            ),
+            "an unknown reason is still a reduction"
+        );
+        outcome.error = Some("knowledge_search failed".to_owned());
+        assert!(
+            retrieval_notice_events(&outcome).is_empty(),
+            "a failed search says nothing"
+        );
     }
 
     #[test]
@@ -11449,6 +11694,76 @@ mod tests {
             "web_search",
             serde_json::to_string(&items).expect("serialize hits"),
         )
+    }
+
+    // --- the rerank report in the coverage line (QB-T12) ----------------------
+
+    /// A skipped rerank is named in the gate header with its reason, so the model does not read
+    /// the search engine's order as a reranked one.
+    #[test]
+    fn a_skipped_rerank_is_named_in_the_gate_header_with_its_reason() {
+        let sentence =
+            rerank_gate_sentence("skipped", Some("zdr"), false).expect("a skipped rerank is named");
+        assert!(sentence.starts_with("RERANK: skipped"), "{sentence}");
+        assert!(sentence.contains("zero data retention"), "{sentence}");
+        assert!(sentence.contains("judged on its words alone"), "{sentence}");
+    }
+
+    #[test]
+    fn a_failed_rerank_is_named_as_failed_and_not_as_skipped() {
+        let sentence = rerank_gate_sentence("degraded", Some("timeout"), false)
+            .expect("a failed rerank is named");
+        assert!(sentence.starts_with("RERANK: failed"), "{sentence}");
+        assert!(sentence.contains("did not answer in time"), "{sentence}");
+        assert!(!sentence.contains("RERANK: skipped"), "{sentence}");
+    }
+
+    #[test]
+    fn an_applied_rerank_says_whether_any_score_reached_the_gate() {
+        let without = rerank_gate_sentence("applied", None, false).expect("applied is named");
+        assert!(without.contains("no scores reached this gate"), "{without}");
+        let with = rerank_gate_sentence("applied", None, true).expect("applied is named");
+        assert!(with.contains("calibrated"), "{with}");
+    }
+
+    #[test]
+    fn a_report_the_gate_does_not_name_adds_no_sentence() {
+        assert_eq!(
+            rerank_gate_sentence("rerank-not-configured", None, false),
+            None
+        );
+        assert_eq!(rerank_gate_sentence("partial", None, true), None);
+    }
+
+    /// End to end through the gate: a report on the hits reaches the model-facing header.
+    #[test]
+    fn the_gate_header_carries_the_rerank_report_the_hits_arrived_with() {
+        let mut outcome = web_search_outcome(&[(
+            "https://www.met.no/vaer/oslo",
+            "Været i Oslo",
+            "Værvarsel for Oslo i dag.",
+        )]);
+        let mut items: Vec<Value> = serde_json::from_str(&outcome.output).expect("items");
+        items[0]["rerank_status"] = serde_json::json!("skipped");
+        items[0]["rerank_reason"] = serde_json::json!("zdr");
+        outcome.output = serde_json::to_string(&items).expect("serialize");
+        let _ = gate_web_search_outcome("været i Oslo", &mut outcome);
+        assert!(
+            outcome.output.contains("RERANK: skipped"),
+            "{}",
+            outcome.output
+        );
+    }
+
+    #[test]
+    fn a_gate_header_without_a_rerank_report_is_unchanged() {
+        let mut outcome = web_search_outcome(&[(
+            "https://www.met.no/vaer/oslo",
+            "Været i Oslo",
+            "Værvarsel for Oslo i dag.",
+        )]);
+        let _ = gate_web_search_outcome("været i Oslo", &mut outcome);
+        assert!(!outcome.output.contains("RERANK"), "{}", outcome.output);
     }
 
     // --- fetch-then-answer wiring -------------------------------------------

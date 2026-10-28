@@ -47,6 +47,12 @@ Set the following environment variables:
 | `QUARRY_EDGE_ADDR` | `:8082` | HTTP listen address |
 | `QUARRY_EDGE_REDIS_URL` | — | Redis cache; disable cache when unset |
 | `DATA_PLANE_URL` | — | `http://documents-api-go:9001` for ingest path |
+| `QUARRY_EDGE__SEMANTIC_RERANK` | `false` (the Ingestion compose sets `0`; set `1` after the QB-T09 ship check passes) | Semantic rerank (option B): the Data Plane's `POST /v1/rerank` reorders the top results by a paid cross-encoder score. Needs `DATA_PLANE_URL` and the cross-plane tokens. Read the deploy order in `RUNBOOKS.md` (Semantic rerank) before it is on. |
+| `QUARRY_EDGE__SEMANTIC_RERANK_TOP_N` | `10` | Candidates reranked per search, 1 to 100. The rest of the results keep their order. |
+| `QUARRY_EDGE__RERANK_DEADLINE_MS` | `2000` | One rerank call's budget in milliseconds, clamped to 100 to 8000. A call that misses it keeps the search in its input order. |
+| `QUARRY_EDGE__RERANK_SHADOW` | `false` (the Ingestion compose sets `1` for the first deploy's smoke run) | The Data Plane is asked and its order measured, but results keep their order and carry no score. The smoke run ends with the post-proof flip to `0`. |
+| `QUARRY_EDGE__VECTOR_RETRIEVAL` | `false` | Kill switch for the Data Plane vector leg (`POST /v1/retrieve`) in hybrid search and find-similar. Off: search is lexical-only and find-similar answers 501. Turn it on only after the Data Plane has stamped and backfilled the quarry corpus (QB-M1b). Needs `DATA_PLANE_URL` and a service identity. |
+| `QUARRY_EDGE__VECTOR_RETRIEVAL_PER_ORG_HOURLY_BUDGET` | `600` | Vector calls one org may spend per hour, counted per process. Each call is one paid query embedding. `QUARRY_EDGE__ZERO_SAAS_SEARCH=1` (sovereign) turns the leg off, and a zero-retention run never sends it. Replaced by usage-ledger metering (DEF-QB-VECTOR-METERING). |
 | `QUARRY_EDGE__AUTH_CORE_URL` | `http://auth-core:3011` | Auth Core service-token issuer |
 | `QUARRY_EDGE__QUARRY_SERVICE_API_KEY` | — | Durable credential registered under fixed service id `quarry-edge`; required when a plane URL is set |
 | `QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS` | `false` | Local-only static-token compatibility; refused in production |
@@ -98,10 +104,26 @@ The agentic browser loop calls Model Plane's `/v1/invoke` for each step decision
 |-----|---------|-------|
 | `QUARRY_EDGE__MODEL_PLANE_URL` | — | Enables the hop (and every other Model Plane consumer). Unset → `title_source` is `html`/`host` only. |
 | `QUARRY_EDGE__PAGE_TITLE_MODEL` | `verevon-budget` | A Model Plane **routing alias** (`verevon-budget` = cheapest capable model via inference-core's `RoutingPolicy`; also `verevon-balance`, `verevon-genius`). Never a vendor model id. |
-| `QUARRY_EDGE__PAGE_TITLE_ENRICH` | `true` | Set `false` to keep extraction fully local. |
+| `QUARRY_EDGE__PAGE_TITLE_ENRICH` | `false` | Off by default (QB-T17): the hop needs a Model Plane path that the registry grants, and none exists yet. Set `true` only with that path; without it boot logs an error and extraction stays local. See the Model Plane switches below. |
 | `QUARRY_BROWSER_SETTLE_MS` | `3500` | Hydration settle budget for JS-shell pages fetched by the browser fallback (see `ONBOARDING_LIVE_CRAWL.md`). |
 
 Guards: 2 s time-box, 3 concurrent calls, 600 calls/hour per edge process, fingerprint-keyed cache, JSON-only reply validation. Any failure degrades to `title_source: "host"`; a page never fails because of the hop.
+
+### Model Plane switches (QB-T17)
+
+Every Quarry feature that calls the Model Plane is OFF by default. The cross-plane registry grants quarry-edge no model-gateway request yet: the manifest rows `model-invoke` and `model-audio` are `granted: false`, so Auth Core refuses each call with a 403. A switch set to `1` without a granted model path stays off, and boot logs an `ERROR` that names it. Its routes then answer unavailable (`501`, or an empty `200` for suggestions) and make no Model Plane call. Flip a switch only together with the registry grant. The org-bound, metered design for these features is `DEF-QB-T17-PART2` (owner and date not yet assigned).
+
+| Env | Default | Feature |
+|-----|---------|---------|
+| `QUARRY_EDGE__AUTOPROMPT` | `0` | Rewrites verbose Research/Comparative queries before fan-out. |
+| `QUARRY_EDGE__LLM_CLASSIFY_INTENT` | `0` | LLM intent classification of queries. |
+| `QUARRY_EDGE__PAGE_TITLE_ENRICH` | `0` | Page titles (see above). |
+| `QUARRY_EDGE__ANSWER_SYNTHESIS` | `0` | `POST /v1/answer` and `include_answer` on search. Also needs a SearchProvider. |
+| `QUARRY_EDGE__AI_FORMATS` | `0` | Structured extraction: `schema` on `POST /v1/extract`. |
+| `QUARRY_EDGE__SEARCH_SUGGEST` | `0` | `POST /v1/search/suggest`. |
+| `QUARRY_EDGE__MODEL_AUDIO` | `0` | `POST /v1/audio`. Needs the `model-audio` grant, not `model-invoke`. |
+
+The compose file reads each switch from the host environment as `QUARRY_EDGE_` followed by the name after `QUARRY_EDGE__` (for example `QUARRY_EDGE_ANSWER_SYNTHESIS`) and defaults it to `0`.
 
 ### Model Plane → Quarry (browser grants)
 

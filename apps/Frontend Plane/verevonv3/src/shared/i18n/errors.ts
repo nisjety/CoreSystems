@@ -9,6 +9,11 @@
 //
 // Convention: NEW codes get added here as they're identified as user-facing.
 // This is the seam — not a claim that every gateway code is covered yet.
+// The zero-retention refusals of the Model Plane catalogue are the exception:
+// their words live with the catalogue (shared/api/zdr-refusals.ts), so this seam
+// renders them from there.
+
+import { isZdrRefusalCode, zdrRefusalPresentation } from '@/shared/api/zdr-refusals'
 
 type ErrorCopy = { no: string; en: string }
 
@@ -182,6 +187,13 @@ export function translateApiError(
   fallback?: ErrorCopy,
 ): string {
   const code = typeof (err as ApiErrorLike)?.code === 'string' ? (err as { code: string }).code : null
+  // A zero-retention refusal of the Model Plane catalogue: its own words, with
+  // the feature it names (an ApiError carries it) and the next step.
+  if (code && isZdrRefusalCode(code)) {
+    const feature = (err as { feature?: unknown } | null | undefined)?.feature
+    const shown = zdrRefusalPresentation(code, typeof feature === 'string' ? feature : null, tr)
+    return shown.next === null ? shown.message : `${shown.message} ${shown.next}`
+  }
   const copy = (code && ERROR_COPY[code]) || fallback || GENERIC_FALLBACK
   return tr(copy.no, copy.en)
 }

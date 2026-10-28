@@ -539,7 +539,7 @@ export function KnowledgeComposer(props: {
     if (!canDiscover()) return
     const target = normalizeUrl(url())
     if (!target) {
-      setFormError(i18n.tr('Skriv inn en gyldig nettadresse, f.eks. vg.no eller https://coresystem.com.', 'Enter a valid web address, for example vg.no or https://coresystem.com.'))
+      setFormError(i18n.tr('Skriv inn en gyldig nettadresse, f.eks. nettsted.example eller https://nettsted.example.', 'Enter a valid web address, for example nettsted.example or https://nettsted.example.'))
       return
     }
     setFormError(null)
@@ -1169,7 +1169,7 @@ export function KnowledgeComposer(props: {
     if (!canSubmitUrl()) return
     const target = normalizeUrl(url())
     if (!target) {
-      setFormError(i18n.tr('Skriv inn en gyldig nettadresse, f.eks. vg.no eller https://coresystem.com.', 'Enter a valid web address, for example vg.no or https://coresystem.com.'))
+      setFormError(i18n.tr('Skriv inn en gyldig nettadresse, f.eks. nettsted.example eller https://nettsted.example.', 'Enter a valid web address, for example nettsted.example or https://nettsted.example.'))
       return
     }
     setFormError(null)
@@ -1752,9 +1752,9 @@ function terminalDetail(job: IngestJob, i18n: ReturnType<typeof useI18n>): strin
 }
 
 function knowledgeUrlPlaceholder(mode: IngestMode, i18n: ReturnType<typeof useI18n>): string {
-  if (mode === 'crawl') return i18n.tr('vg.no - crawl hele nettstedet', 'vg.no - crawl the full site')
-  if (mode === 'products') return i18n.tr('elkjop.no/.../mac - hent produkter fra siden', 'elkjop.no/.../mac - extract products from the page')
-  return i18n.tr('vg.no eller coresystem.com - skrap og forhåndsvis', 'vg.no or coresystem.com - scrape and preview')
+  if (mode === 'crawl') return i18n.tr('nettsted.example - crawl hele nettstedet', 'nettsted.example - crawl the full site')
+  if (mode === 'products') return i18n.tr('nettsted.example/.../produkt - hent produkter fra siden', 'nettsted.example/.../product - extract products from the page')
+  return i18n.tr('nettsted.example - skrap og forhåndsvis', 'nettsted.example - scrape and preview')
 }
 
 function knowledgeSubmitLabel(mode: IngestMode, i18n: ReturnType<typeof useI18n>): string {

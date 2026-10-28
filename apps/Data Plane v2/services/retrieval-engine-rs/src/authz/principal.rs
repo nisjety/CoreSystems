@@ -491,15 +491,14 @@ pub async fn guard_middleware(
     let status = response.status();
     let latency_ms = started.elapsed().as_millis() as u32;
 
-    // Audit-log append (best-effort).
-    let cause = if status.is_success() {
-        "ok"
-    } else if status.as_u16() == 403 {
-        "denied:downstream_forbidden"
-    } else if status.is_client_error() {
-        "error:client"
-    } else {
-        "error:server"
+    // Audit-log append (best-effort). A handler that knows its outcome names it on the
+    // response (`AuditCause`); otherwise the status decides.
+    let cause = match response.extensions().get::<crate::audit::AuditCause>() {
+        Some(named) => named.0,
+        None if status.is_success() => "ok",
+        None if status.as_u16() == 403 => "denied:downstream_forbidden",
+        None if status.is_client_error() => "error:client",
+        None => "error:server",
     };
     guard
         .audit

@@ -8,6 +8,7 @@ use tonic::transport::{Channel, Endpoint};
 use uuid::Uuid;
 
 use crate::config::Config;
+use crate::egress_attestation::{EgressAttestation, EmbedSurface};
 
 pub mod media;
 mod service_auth;
@@ -64,6 +65,8 @@ struct AzureOpenAiEmbeddingClient {
     endpoint: String,
     api_key: String,
     deployment: String,
+    /// Whether an egress attestation covers this route for ZDR content (Z-41). Off by default.
+    zdr_attested: bool,
 }
 
 /// Cohere Embed v4 (Azure AI Foundry) — dense **text** query embeddings.
@@ -82,6 +85,9 @@ struct CohereEmbeddingClient {
     /// MUST equal the indexing side's `EMBEDDING_DIMENSION`, or query vectors
     /// and stored vectors have different widths and Qdrant rejects the search.
     output_dimension: u32,
+    /// Whether an egress attestation covers this Foundry resource for ZDR content (Z-41).
+    /// Off by default: a ZDR call is then refused before the network.
+    zdr_attested: bool,
 }
 
 #[derive(Serialize)]
@@ -218,10 +224,11 @@ impl EmbeddingClient {
         }
         Ok(Self {
             inner: EmbeddingBackend::AzureOpenAi(AzureOpenAiEmbeddingClient {
-                http: Client::new(),
+                http: no_redirect_client("the direct-Azure embedding path")?,
                 endpoint: endpoint.trim_end_matches('/').to_string(),
                 api_key: api_key.to_string(),
                 deployment: deployment.to_string(),
+                zdr_attested: false,
             }),
         })
     }
@@ -243,14 +250,32 @@ impl EmbeddingClient {
             validate_matryoshka_dimension(output_dimension, "EMBEDDING_DIMENSION")?;
         Ok(Self {
             inner: EmbeddingBackend::Cohere(CohereEmbeddingClient {
-                http: Client::new(),
+                http: no_redirect_client("the Cohere Embed v4 text path")?,
                 endpoint: endpoint.trim_end_matches('/').to_string(),
                 api_key: api_key.to_string(),
                 model: model.to_string(),
                 api_version: api_version.to_string(),
                 output_dimension,
+                zdr_attested: false,
             }),
         })
+    }
+
+    /// Attaches the egress attestation (Z-41). Without one, every ZDR call on a direct route is
+    /// refused before the network. Model Plane routes take no attestation here: inference-core
+    /// decides for those, and refuses with `zdr_unavailable` when nothing is attested.
+    #[must_use]
+    pub fn with_egress_attestation(mut self, egress: &EgressAttestation) -> Self {
+        match &mut self.inner {
+            EmbeddingBackend::Cohere(client) => {
+                client.zdr_attested = egress.permits_embed(EmbedSurface::CohereFoundry);
+            }
+            EmbeddingBackend::AzureOpenAi(client) => {
+                client.zdr_attested = egress.permits_embed(EmbedSurface::AzureOpenAi);
+            }
+            EmbeddingBackend::ModelPlane(_) | EmbeddingBackend::DeterministicTest { .. } => {}
+        }
+        self
     }
 
     fn deterministic_test(dimension: usize) -> anyhow::Result<Self> {
@@ -475,11 +500,14 @@ impl AzureOpenAiEmbeddingClient {
     async fn embed_batch(&self, texts: &[String], zdr: bool) -> anyhow::Result<Vec<Vec<f32>>> {
         // ZDR egress guard: the direct-Azure path is a *retaining* provider, so
         // Zero-Data-Retention content must never leave on it. Fail closed BEFORE
-        // any network call rather than egress and hope. (An EU/ZDR embedding
-        // provider is a Phase-4 prerequisite; until then ZDR content has no
-        // compliant embedding path and must error here.)
-        if zdr {
-            anyhow::bail!("ZDR content must not egress to the direct-Azure embedding path");
+        // any network call rather than egress and hope. Only an egress attestation
+        // over this resource (Z-41) lets ZDR content through; the refusal is typed
+        // so a ZDR retrieval can degrade to lexical results instead of failing.
+        if zdr && !self.zdr_attested {
+            return Err(ZdrEgressRefused {
+                path: "the direct-Azure embedding path",
+            }
+            .into());
         }
 
         let url = format!(
@@ -539,8 +567,14 @@ impl CohereEmbeddingClient {
     async fn embed_batch(&self, texts: &[String], zdr: bool) -> anyhow::Result<Vec<Vec<f32>>> {
         // ZDR egress guard: Azure Foundry is a *retaining* provider (mirrors
         // the direct-Azure path and embedding-engine-rs's indexing-side twin).
-        if zdr {
-            anyhow::bail!("ZDR content must not egress to the Cohere Embed v4 text path");
+        // Fails closed BEFORE any network call unless an egress attestation covers
+        // this resource (Z-41). The typed refusal lets a ZDR retrieval degrade to
+        // lexical results instead of failing.
+        if zdr && !self.zdr_attested {
+            return Err(ZdrEgressRefused {
+                path: "the Cohere Embed v4 text path",
+            }
+            .into());
         }
 
         let url = format!(
@@ -618,6 +652,48 @@ impl CohereEmbeddingClient {
 
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Cohere text embed retries exhausted")))
     }
+}
+
+/// The HTTP client of a direct embedding route. It never follows a redirect: the route's API key
+/// rides on an `api-key` header that reqwest does not strip across hosts, and a 307 or 308 re-sends
+/// the body. Following one would hand the key and the query text to a host nobody attested.
+fn no_redirect_client(path: &str) -> anyhow::Result<Client> {
+    Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .with_context(|| format!("HTTP client for {path}"))
+}
+
+/// A query embedding the ZDR egress guard refused before any network call, because no egress
+/// attestation covers that route (Z-41). The orchestrator degrades a ZDR retrieval to lexical
+/// results on this refusal, and on no other error.
+#[derive(Debug, thiserror::Error)]
+#[error("ZDR content must not egress to {path}: no ZDR attestation covers it")]
+pub struct ZdrEgressRefused {
+    path: &'static str,
+}
+
+/// The Model Plane's trailer and value for "no route carries verified ZDR": inference-core's
+/// `PROVIDER_ERROR_KIND_TRAILER` and `PROVIDER_ERROR_ZDR_UNAVAILABLE`.
+const MODEL_PLANE_ERROR_KIND_TRAILER: &str = "x-mp-provider-error";
+const MODEL_PLANE_ZDR_UNAVAILABLE: &str = "zdr_unavailable";
+
+/// Whether an embedding error is a ZDR refusal: no attested route can take the content. The
+/// guard's own refusal and the Model Plane's `zdr_unavailable` both count, wherever they sit in
+/// the error chain. Any other error, a network or upstream fault included, is not one and stays
+/// fatal.
+#[must_use]
+pub fn is_zdr_refusal(error: &anyhow::Error) -> bool {
+    if error.downcast_ref::<ZdrEgressRefused>().is_some() {
+        return true;
+    }
+    error.downcast_ref::<tonic::Status>().is_some_and(|status| {
+        status
+            .metadata()
+            .get(MODEL_PLANE_ERROR_KIND_TRAILER)
+            .and_then(|value| value.to_str().ok())
+            == Some(MODEL_PLANE_ZDR_UNAVAILABLE)
+    })
 }
 
 fn sanitized_provider_status_error(provider: &str, status: reqwest::StatusCode) -> anyhow::Error {
@@ -1003,5 +1079,276 @@ mod tests {
         assert!(request.metadata().get("x-api-key").is_none());
         assert!(request.get_ref().zdr, "zdr=true must survive auth wrapping");
         assert_eq!(request.get_ref().org_id, "org-1");
+    }
+
+    /// An egress attestation resolved the real way, from configuration: an Azure Foundry Cohere
+    /// resource and an Azure OpenAI resource, each with a digest the runbook pipeline produces.
+    fn attested_egress() -> EgressAttestation {
+        let env: Vec<(String, String)> = [
+            ("DATABASE_URL", "postgres://test.invalid/test"),
+            ("QDRANT_URL", "http://test.invalid:6334"),
+            (
+                "COHERE_EMBED_V4_ENDPOINT",
+                "https://aquatiq-cohere.services.ai.azure.com",
+            ),
+            (
+                "RERANK_ENDPOINT",
+                "https://aquatiq-cohere.services.ai.azure.com",
+            ),
+            (
+                "AZURE_COHERE_ZDR_RESOURCE_ID",
+                "/subscriptions/0000/resourceGroups/rg-data/providers/Microsoft.CognitiveServices/accounts/aquatiq-cohere",
+            ),
+            ("AZURE_COHERE_ZDR_APPROVAL_REF", "MAM-2026-0042"),
+            ("AZURE_COHERE_ZDR_EFFECTIVE_DATE", "2026-06-01"),
+            ("AZURE_COHERE_ZDR_REVIEW_BY", "2027-06-01"),
+            ("AZURE_COHERE_ZDR_REVIEWER", "ima@aquatiq.com"),
+            (
+                "AZURE_COHERE_ZDR_DIGEST",
+                "b287e12686ffe907defa848e8887ed6389b8da3910041e5e8e6bd33ef368f76c",
+            ),
+            (
+                "AZURE_OPENAI_ENDPOINT",
+                "https://aquatiq-openai.openai.azure.com",
+            ),
+            (
+                "AZURE_OPENAI_ZDR_RESOURCE_ID",
+                "/subscriptions/0000/resourceGroups/rg-data/providers/Microsoft.CognitiveServices/accounts/aquatiq-openai",
+            ),
+            ("AZURE_OPENAI_ZDR_APPROVAL_REF", "MAM-2026-0043"),
+            ("AZURE_OPENAI_ZDR_EFFECTIVE_DATE", "2026-06-01"),
+            ("AZURE_OPENAI_ZDR_REVIEW_BY", "2027-06-01"),
+            ("AZURE_OPENAI_ZDR_REVIEWER", "ima@aquatiq.com"),
+            (
+                "AZURE_OPENAI_ZDR_DIGEST",
+                "430e27afd9a85197ae0ccce5ee90e63631c21ebf1911afce2f2e8e83bb8542ee",
+            ),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+        let cfg: Config = envy::from_iter(env).expect("configuration deserializes");
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 11).expect("static date");
+        let egress = EgressAttestation::from_config(&cfg, today);
+        assert!(
+            egress.problems().is_empty(),
+            "the fixture attestation must validate: {:?}",
+            egress.problems()
+        );
+        egress
+    }
+
+    /// Z-41: with no attestation a ZDR query is refused on both direct routes by the typed
+    /// refusal, before any network call. The orchestrator degrades on exactly this refusal.
+    #[tokio::test]
+    async fn unattested_zdr_queries_are_a_typed_refusal_on_both_direct_routes() {
+        let cohere = EmbeddingClient::cohere(
+            "http://127.0.0.1:1/unreachable",
+            "fake-key",
+            "Cohere-embed-4",
+            "2024-05-01-preview",
+            1536,
+        )
+        .expect("cohere client")
+        .with_egress_attestation(&EgressAttestation::default());
+        let err = cohere
+            .embed_query("org-1", "restricted", true)
+            .await
+            .expect_err("ZDR content must be refused without an attestation");
+        assert!(is_zdr_refusal(&err), "the refusal must be typed: {err:#}");
+
+        let azure = EmbeddingClient::azure_openai(
+            "http://127.0.0.1:1/unreachable",
+            "fake-key",
+            "text-embedding-3-large",
+        )
+        .expect("direct Azure client")
+        .with_egress_attestation(&EgressAttestation::default());
+        let err = azure
+            .embed_query("org-1", "restricted", true)
+            .await
+            .expect_err("ZDR content must be refused without an attestation");
+        assert!(is_zdr_refusal(&err), "the refusal must be typed: {err:#}");
+    }
+
+    /// Z-41: an attested route lets ZDR content through the guard, so the call reaches the provider
+    /// and fails there, on the network, never as a refusal. The attestation is the one resolved from
+    /// configuration. The client calls a closed local port, because the attested host cannot be
+    /// reached from a test; the guard reads only the attested flag, not the endpoint string.
+    #[tokio::test]
+    async fn an_attested_cohere_route_runs_the_zdr_call_instead_of_refusing_it() {
+        let cohere = EmbeddingClient::cohere(
+            "http://127.0.0.1:1/unreachable",
+            "fake-key",
+            "Cohere-embed-4",
+            "2024-05-01-preview",
+            1536,
+        )
+        .expect("cohere client")
+        .with_egress_attestation(&attested_egress());
+        let err = cohere
+            .embed_query("org-1", "restricted", true)
+            .await
+            .expect_err("the closed local port cannot answer");
+        assert!(
+            !is_zdr_refusal(&err),
+            "an attested route must not refuse: {err:#}"
+        );
+        assert!(
+            format!("{err:#}").contains("Cohere text embedding API call failed"),
+            "the call must have reached the provider path: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_attested_azure_openai_route_runs_the_zdr_call_instead_of_refusing_it() {
+        let azure = EmbeddingClient::azure_openai(
+            "http://127.0.0.1:1/unreachable",
+            "fake-key",
+            "text-embedding-3-large",
+        )
+        .expect("direct Azure client")
+        .with_egress_attestation(&attested_egress());
+        let err = azure
+            .embed_query("org-1", "restricted", true)
+            .await
+            .expect_err("the closed local port cannot answer");
+        assert!(
+            !is_zdr_refusal(&err),
+            "an attested route must not refuse: {err:#}"
+        );
+    }
+
+    /// Z-41: the Model Plane's `zdr_unavailable` refusal is a ZDR refusal wherever it sits in the
+    /// error chain. A failed precondition with another kind, or a plain network failure, is not.
+    #[test]
+    fn a_model_plane_zdr_refusal_is_recognised_through_the_error_chain() {
+        let mut refused =
+            tonic::Status::failed_precondition("no matching provider deployment has verified ZDR");
+        refused.metadata_mut().insert(
+            MODEL_PLANE_ERROR_KIND_TRAILER,
+            tonic::metadata::MetadataValue::from_static(MODEL_PLANE_ZDR_UNAVAILABLE),
+        );
+        let wrapped = anyhow::anyhow!(refused).context("model-plane embedding failed");
+        assert!(is_zdr_refusal(&wrapped), "{wrapped:#}");
+
+        let mut other_kind = tonic::Status::failed_precondition("residency");
+        other_kind.metadata_mut().insert(
+            MODEL_PLANE_ERROR_KIND_TRAILER,
+            tonic::metadata::MetadataValue::from_static("residency_violation"),
+        );
+        assert!(!is_zdr_refusal(&anyhow::anyhow!(other_kind)));
+
+        let plain = tonic::Status::failed_precondition("precondition failed");
+        assert!(!is_zdr_refusal(&anyhow::anyhow!(plain)));
+        assert!(!is_zdr_refusal(&anyhow::anyhow!("connection refused")));
+    }
+
+    /// Reads one request, head and body, so the answer is not cut short by a reset.
+    fn read_request(stream: &mut std::net::TcpStream) {
+        use std::io::Read;
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            match stream.read(&mut byte) {
+                Ok(1) => head.push(byte[0]),
+                _ => return,
+            }
+        }
+        let text = String::from_utf8_lossy(&head).to_ascii_lowercase();
+        let length = text
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        let mut body = vec![0u8; length];
+        let _ = stream.read_exact(&mut body);
+    }
+
+    /// Answers one request on `listener` with `response`, and counts the requests it receives.
+    fn serve_once(
+        listener: std::net::TcpListener,
+        response: String,
+        hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            read_request(&mut stream);
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+        });
+    }
+
+    /// Runs one direct route against a host that answers 307 with a second host as the location.
+    /// Returns the route's error and how many requests the second host received.
+    async fn redirect_probe(
+        make: impl FnOnce(&str) -> anyhow::Result<EmbeddingClient>,
+    ) -> (anyhow::Error, usize) {
+        use std::net::TcpListener;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+
+        let target = TcpListener::bind("127.0.0.1:0").expect("bind the redirect target");
+        let target_addr = target.local_addr().expect("target address");
+        let target_hits = Arc::new(AtomicUsize::new(0));
+        serve_once(
+            target,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                .to_owned(),
+            target_hits.clone(),
+        );
+
+        let origin = TcpListener::bind("127.0.0.1:0").expect("bind the configured host");
+        let origin_url = format!("http://{}", origin.local_addr().expect("origin address"));
+        serve_once(
+            origin,
+            format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{target_addr}/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            ),
+            Arc::new(AtomicUsize::new(0)),
+        );
+
+        let client = make(&origin_url).expect("the client builds");
+        let err = client
+            .embed_query("org-1", "public text", false)
+            .await
+            .expect_err("a 307 is a failure, not a followed redirect");
+        (err, target_hits.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// The direct routes never follow a redirect. reqwest's default would re-send the request, with
+    /// its `api-key` header and the query text, to the host a 307 names, which no attestation covers.
+    #[tokio::test]
+    async fn a_direct_cohere_route_does_not_follow_a_redirect() {
+        let (err, target_hits) = redirect_probe(|url| {
+            EmbeddingClient::cohere(
+                url,
+                "fake-key",
+                "Cohere-embed-4",
+                "2024-05-01-preview",
+                1536,
+            )
+        })
+        .await;
+        assert!(!is_zdr_refusal(&err), "{err:#}");
+        assert_eq!(
+            target_hits, 0,
+            "the redirect target received the request: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_direct_azure_openai_route_does_not_follow_a_redirect() {
+        let (err, target_hits) = redirect_probe(|url| {
+            EmbeddingClient::azure_openai(url, "fake-key", "text-embedding-3-large")
+        })
+        .await;
+        assert!(!is_zdr_refusal(&err), "{err:#}");
+        assert_eq!(
+            target_hits, 0,
+            "the redirect target received the request: {err:#}"
+        );
     }
 }

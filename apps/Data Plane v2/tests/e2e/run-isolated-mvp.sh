@@ -133,6 +133,9 @@ user_id="isolated-user-$(openssl rand -hex 8)"
 scopes="data:read,data:quality:admin,data:orchestrate,data:admin,data:search:rebuild,data:search:rebuild:approve,documents:read,documents:write,org:data:write_all,wiki.read,wiki.write"
 bearer=$(JWT_ISSUER="$AUTH_CORE_ISSUER" JWT_ORG_ID="$own_org" JWT_USER_ID="$user_id" JWT_SCOPES="$scopes" JWT_ZDR=true node "$FIXTURE" mint "$runtime_dir")
 durable_bearer=$(JWT_ISSUER="$AUTH_CORE_ISSUER" JWT_ORG_ID="$own_org" JWT_USER_ID="$user_id" JWT_SCOPES="$scopes" JWT_ZDR=false node "$FIXTURE" mint "$runtime_dir")
+# QB-T08: the quarry-edge service bearer of the matrix's service rows, with data:read only (so the rerank row
+# is "a service without the scope"). The fixture signs it with the key the data plane trusts; see fixture.mjs.
+service_bearer=$(JWT_ISSUER="$AUTH_CORE_ISSUER" JWT_ORG_ID="$own_org" JWT_SCOPES=data:read node "$FIXTURE" mint-service "$runtime_dir")
 
 snapshot_content() {
   "${compose[@]}" exec -T postgres psql -U dataplane -d dataplane -Atq -c \
@@ -303,6 +306,7 @@ DPV2_COMPOSE_PROJECT="$project" \
 DPV2_TEST_ORG_ID="$own_org" \
 DPV2_SPOOF_ORG_ID="$spoof_org" \
 DPV2_USER_BEARER="$bearer" \
+DPV2_SERVICE_BEARER="$service_bearer" \
 DPV2_QUALITY_BEARER="$bearer" \
 DPV2_QUICKWIT_ADMIN_BEARER="$bearer" \
 "$ROOT/scripts/auth-regression-matrix.sh"

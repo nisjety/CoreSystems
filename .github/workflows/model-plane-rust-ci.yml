@@ -118,6 +118,56 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --no-fail-fast
 
+  # Z-17: the retention receipt's Postgres contract tests (session-core,
+  # retention_receipt::db_tests, named zdr_receipt_*) are #[ignore]d because they
+  # need a database, so the job above never runs them. This job runs them against a
+  # real, migrated Postgres. REQUIRE_CONTRACT makes an absent DATABASE_URL a failure
+  # rather than a skip, and the count below fails the job if fewer tests ran than
+  # exist, so a filter that matches nothing cannot turn the job green.
+  session-core-receipts:
+    name: Session Core retention receipt (Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: session_core
+          POSTGRES_PASSWORD: session_core
+          POSTGRES_DB: session_core_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U session_core"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    defaults:
+      run:
+        working-directory: "apps/Model Plane/rust"
+    env:
+      CARGO_TERM_COLOR: always
+      DATABASE_URL: postgres://session_core:session_core@localhost:5432/session_core_test
+      REQUIRE_CONTRACT: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/Model Plane/rust -> target"
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "27.x"
+      - name: Run the receipt contract tests against a migrated database
+        run: |
+          set -euo pipefail
+          cargo test -p session-core --bin session-core zdr_receipt -- --ignored --test-threads=1 2>&1 | tee receipt-tests.log
+          passed=$(grep -oE "test result: ok\. [0-9]+ passed" receipt-tests.log | grep -oE "[0-9]+" | head -1)
+          if [ -z "$passed" ] || [ "$passed" -lt 8 ]; then
+            echo "expected at least 8 receipt contract tests to run, got ${passed:-0}"
+            exit 1
+          fi
+
 # Deliberately NOT in this workflow, so nobody mistakes its green for
 # coverage it does not provide:
 #

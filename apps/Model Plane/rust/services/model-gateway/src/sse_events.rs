@@ -100,6 +100,45 @@ impl ServedBy {
     }
 }
 
+/// How the answer's content was retained, as the posture the turn ran under
+/// decided it. It rides on the `usage` frame so the answer line can say what kind
+/// of turn produced the answer. A frame that asserts no retention omits the key,
+/// which is what every earlier payload does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetentionClass {
+    /// A persistence-free turn under a zero-data-retention request: the gateway
+    /// stores nothing of the turn, and inference-core served it only from a
+    /// provider with a verified ZDR contract.
+    Zdr,
+    /// A turn of a ZDR org on one user connection that cannot give zero retention,
+    /// under a waiver the user acknowledged. The turn is persistent for that
+    /// connection, and the frame says so and why.
+    ZdrWaived {
+        /// The resolver's reason (`connection_not_zdr_capable`).
+        reason: &'static str,
+    },
+}
+
+impl RetentionClass {
+    /// The wire value of the `retention_class` key.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Zdr => "zdr",
+            Self::ZdrWaived { .. } => "zdr_waived",
+        }
+    }
+
+    /// The wire value of the `retention_reason` key, for a class that carries a reason.
+    #[must_use]
+    pub const fn reason(self) -> Option<&'static str> {
+        match self {
+            Self::Zdr => None,
+            Self::ZdrWaived { reason } => Some(reason),
+        }
+    }
+}
+
 /// A rich chat-stream event beyond the plain text delta.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatEvent {
@@ -241,6 +280,9 @@ pub enum ChatEvent {
         /// where this layer saw no serving provider; the three keys are then
         /// omitted, so older clients and every earlier payload stay valid.
         served_by: Option<ServedBy>,
+        /// How the answer's content was retained, when the turn's posture is
+        /// known (see [`RetentionClass`]). `None` omits the key.
+        retention_class: Option<RetentionClass>,
     },
     /// Per-turn phase timing (Q14): ids, milliseconds and counts, never
     /// content. Emitted once, just before the terminal `done`, `error` or
@@ -316,6 +358,16 @@ pub enum ChatEvent {
     /// watching for it. Hiding it behind a feature family would reproduce the
     /// exact bug it exists to fix — a message that seems to have vanished.
     QueuedInput { messages: Vec<String> },
+    /// The turn's answer was produced in a reduced form, and the user must be told (Z-41b). Emitted once
+    /// per such answer, before the answer streams, and only on a turn whose retrieval was restrictive: a
+    /// ZDR answer whose query embedding had no ZDR-approved route answered from text search alone.
+    ///
+    /// A control event, deliberately ungated: a client that never opted into a feature family still has
+    /// to hear that its answer was reduced. The payload is the typed code and the key the client files its
+    /// wording under, never text, so no document content or Data Plane sentence can ride it.
+    RetrievalNotice {
+        notice: crate::retrieval_metadata::RetrievalNotice,
+    },
     /// Terminal control: generation stopped/cancelled by the user.
     Stopped { reason: String },
     /// Terminal control: a structured error (chat-parity §20). `code` is a
@@ -324,6 +376,13 @@ pub enum ChatEvent {
         code: String,
         message: String,
         retryable: bool,
+    },
+    /// Terminal control: a typed zero-data-retention refusal. The same `error`
+    /// frame as [`ChatEvent::Error`], carrying the catalogue's `action` and, when
+    /// the code takes one, the `feature` (`zdr_feature_not_supported`), so the
+    /// client can say what to change rather than repeat a sentence.
+    ZdrError {
+        refusal: mp_contracts::zdr_refusal::Refusal,
     },
     /// Terminal control: a ChatGPT-subscription refusal. The same `error`
     /// frame as [`ChatEvent::Error`], plus the content-free timing the SPA
@@ -375,8 +434,11 @@ impl ChatEvent {
             // The user typed this and is watching for it — gating it would
             // reproduce the vanishing-message bug it exists to fix.
             | ChatEvent::QueuedInput { .. }
+            // A reduced answer's notice (Z-41b) — a client that never opted in still has to hear it.
+            | ChatEvent::RetrievalNotice { .. }
             | ChatEvent::Stopped { .. }
             | ChatEvent::Error { .. }
+            | ChatEvent::ZdrError { .. }
             | ChatEvent::SubscriptionError { .. } => None,
         }
     }
@@ -415,8 +477,11 @@ impl ChatEvent {
             ChatEvent::FollowUps { .. } => "follow_ups",
             ChatEvent::PlanProposed { .. } => "plan_proposed",
             ChatEvent::QueuedInput { .. } => "queued_input",
+            ChatEvent::RetrievalNotice { .. } => "retrieval_notice",
             ChatEvent::Stopped { .. } => "stopped",
-            ChatEvent::Error { .. } | ChatEvent::SubscriptionError { .. } => "error",
+            ChatEvent::Error { .. }
+            | ChatEvent::ZdrError { .. }
+            | ChatEvent::SubscriptionError { .. } => "error",
         }
     }
 
@@ -520,6 +585,7 @@ impl ChatEvent {
                 latency_ms,
                 confidence,
                 served_by,
+                retention_class,
             } => {
                 let mut usage = json!({
                     "input_tokens": input_tokens,
@@ -535,6 +601,14 @@ impl ChatEvent {
                 // Optional, and per field: an empty value is left out.
                 if let Some(served_by) = served_by {
                     served_by.write_to(&mut usage);
+                }
+                // Optional, and only where the turn's retention is known.
+                if let Some(class) = retention_class {
+                    usage["retention_class"] = json!(class.as_str());
+                    // Optional, and only where the class carries a reason (a waiver does).
+                    if let Some(reason) = class.reason() {
+                        usage["retention_reason"] = json!(reason);
+                    }
                 }
                 usage
             }
@@ -594,6 +668,12 @@ impl ChatEvent {
             ChatEvent::QueuedInput { messages } => {
                 json!({ "messages": messages, "request_id": request_id })
             }
+            // The typed code and the wording key, and nothing else: see the variant's docs.
+            ChatEvent::RetrievalNotice { notice } => json!({
+                "code": notice.code,
+                "wording_key": notice.wording_key,
+                "request_id": request_id,
+            }),
             ChatEvent::Stopped { reason } => json!({ "reason": reason, "request_id": request_id }),
             ChatEvent::Error {
                 code,
@@ -605,6 +685,19 @@ impl ChatEvent {
                 "retryable": retryable,
                 "request_id": request_id,
             }),
+            ChatEvent::ZdrError { refusal } => {
+                let mut payload = json!({
+                    "code": refusal.code(),
+                    "message": refusal.message(),
+                    "retryable": refusal.retryable(),
+                    "action": refusal.action().as_str(),
+                    "request_id": request_id,
+                });
+                if let Some(feature) = refusal.feature() {
+                    payload["feature"] = json!(feature);
+                }
+                payload
+            }
             ChatEvent::SubscriptionError {
                 code,
                 message,
@@ -1379,6 +1472,7 @@ mod tests {
             latency_ms: 10,
             confidence: None,
             served_by: None,
+            retention_class: None,
         }
         .should_emit(&no_features));
         assert!(ChatEvent::Stopped {
@@ -1459,6 +1553,7 @@ mod tests {
             latency_ms: 5,
             confidence: Some(0.9),
             served_by: None,
+            retention_class: None,
         }
         .should_emit(&feats));
         // Not opted in:
@@ -1513,6 +1608,7 @@ mod tests {
             latency_ms: 880,
             confidence: Some(0.77),
             served_by: None,
+            retention_class: None,
         };
         assert_eq!(usage.name(), "usage");
         let p = usage.payload("req-1");
@@ -1576,6 +1672,7 @@ mod tests {
                 source_count: 1,
                 suggested_next_tools: Vec::new(),
                 zdr_actions_applied: Vec::new(),
+                notice: None,
                 facts: vec![crate::retrieval::GroundingFact {
                     knowledge_id: "kid-1".into(),
                     document_id: "doc-1".into(),
@@ -1639,6 +1736,7 @@ mod tests {
             latency_ms: 880,
             confidence: None,
             served_by: None,
+            retention_class: None,
         }
         .payload("req-2");
         assert_eq!(subscription["cost_usd"], 0.0);
@@ -1652,6 +1750,7 @@ mod tests {
             latency_ms: 880,
             confidence: None,
             served_by: None,
+            retention_class: None,
         }
         .payload("req-3");
         let mut keys: Vec<&str> = unestablished
@@ -1682,6 +1781,7 @@ mod tests {
             latency_ms: 700,
             confidence: None,
             served_by,
+            retention_class: None,
         }
         .payload("req-served")
     }
@@ -1790,6 +1890,72 @@ mod tests {
         assert_eq!(ServedBy::stamped("   ", "global", 2), None);
     }
 
+    /// A ZDR answer names the retention it was produced under, and an answer that
+    /// asserts none leaves the key out, so every earlier payload is unchanged.
+    #[test]
+    fn usage_names_its_retention_class_only_when_one_is_stamped() {
+        let zdr = ChatEvent::Usage {
+            input_tokens: 3,
+            output_tokens: 4,
+            cost_usd: None,
+            cost_basis: None,
+            latency_ms: 5,
+            confidence: None,
+            served_by: None,
+            retention_class: Some(RetentionClass::Zdr),
+        }
+        .payload("req-zdr");
+        assert_eq!(zdr["retention_class"], "zdr");
+        assert_eq!(RetentionClass::Zdr.as_str(), "zdr");
+
+        let unstamped = usage_with(None);
+        assert!(unstamped.get("retention_class").is_none(), "{unstamped}");
+    }
+
+    /// A waived turn states its class and the resolver's reason on the usage frame, so the answer
+    /// line can say the turn ran on one connection under a waiver, and why. A ZDR turn states no
+    /// reason, and a persistent turn states nothing.
+    #[test]
+    fn a_waived_usage_frame_states_its_class_and_reason() {
+        let waived = ChatEvent::Usage {
+            input_tokens: 3,
+            output_tokens: 4,
+            cost_usd: None,
+            cost_basis: None,
+            latency_ms: 5,
+            confidence: None,
+            served_by: None,
+            retention_class: Some(RetentionClass::ZdrWaived {
+                reason: "connection_not_zdr_capable",
+            }),
+        }
+        .payload("req-waived");
+        assert_eq!(waived["retention_class"], "zdr_waived");
+        assert_eq!(waived["retention_reason"], "connection_not_zdr_capable");
+        assert_eq!(
+            RetentionClass::ZdrWaived {
+                reason: "connection_not_zdr_capable",
+            }
+            .as_str(),
+            "zdr_waived"
+        );
+
+        let zdr = ChatEvent::Usage {
+            input_tokens: 3,
+            output_tokens: 4,
+            cost_usd: None,
+            cost_basis: None,
+            latency_ms: 5,
+            confidence: None,
+            served_by: None,
+            retention_class: Some(RetentionClass::Zdr),
+        }
+        .payload("req-zdr");
+        assert_eq!(zdr["retention_class"], "zdr");
+        assert!(zdr.get("retention_reason").is_none(), "{zdr}");
+        assert!(usage_with(None).get("retention_reason").is_none());
+    }
+
     /// `turn_timing` rides with `usage`: a client that did not ask for usage
     /// never sees it, live or on resume.
     #[test]
@@ -1807,6 +1973,7 @@ mod tests {
             latency_ms: 0,
             confidence: None,
             served_by: None,
+            retention_class: None,
         };
         assert_eq!(event.name(), "turn_timing");
         assert_eq!(event.family(), usage.family());
@@ -1825,6 +1992,40 @@ mod tests {
         assert_eq!(payload["request_id"], "req-t");
         assert_eq!(payload["outcome"], "completed");
         assert!(payload["phases"].is_array());
+    }
+
+    fn retrieval_notice() -> ChatEvent {
+        ChatEvent::RetrievalNotice {
+            notice: crate::retrieval_metadata::notice_for_code("zdr_dense_unavailable")
+                .expect("the ZDR notice is catalogued"),
+        }
+    }
+
+    /// The notice is a control event: a client that never opted into a feature family still hears that
+    /// its answer was reduced, exactly like a refusal does.
+    #[test]
+    fn a_reduced_answers_notice_reaches_a_client_that_opted_into_nothing() {
+        let event = retrieval_notice();
+        assert_eq!(event.name(), "retrieval_notice");
+        assert_eq!(event.family(), None);
+        for features in [families(&[]), families(&["citations", "usage", "tools"])] {
+            assert!(event.should_emit(&features), "{features:?}");
+        }
+    }
+
+    /// The payload is the typed code and its wording key, and nothing else a client could mistake for
+    /// content: no sentence, no document text, no Data Plane message.
+    #[test]
+    fn the_notice_payload_carries_only_the_code_and_its_wording_key() {
+        let payload = retrieval_notice().payload("req-n");
+        assert_eq!(
+            payload,
+            json!({
+                "code": "zdr_dense_unavailable",
+                "wording_key": "retrieval.zdr_dense_unavailable",
+                "request_id": "req-n",
+            })
+        );
     }
 }
 

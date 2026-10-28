@@ -27333,8 +27333,9 @@ body.verevon-chat-canvas-resizing * {
   gap: 8px;
 }
 
-/* The way out of a sign-in that must be renewed: the primary action. */
-.verevon-chat-error-notice__reconnect {
+/* The way out of a sign-in that must be renewed, or a connection to review: the primary action. */
+.verevon-chat-error-notice__reconnect,
+.verevon-chat-error-notice__connection {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -45925,7 +45926,8 @@ so it
 }
 
 .verevon-schedule-dialog__field input,
-.verevon-schedule-dialog__field select {
+.verevon-schedule-dialog__field select,
+.verevon-schedule-dialog__field textarea {
   border: 1px solid var(--verevon-border);
   border-radius: 10px;
   background: var(--verevon-surface);
@@ -45933,6 +45935,11 @@ so it
   color: var(--verevon-text);
   font: inherit;
   font-size: 14px;
+}
+
+.verevon-schedule-dialog__field textarea {
+  min-height: 88px;
+  resize: vertical;
 }
 
 .verevon-schedule-dialog__timezone-fixed {
@@ -47477,8 +47484,65 @@ so it
 
 .dashboard-composer-root--chat .dashboard-composer-toolbar__left {
   flex: 1 1 auto;
-  overflow: hidden;
+  min-width: 0;
+  overflow: visible;
 }
+
+.chat-work-period {
+  position: relative;
+  flex: 0 0 auto;
+  color: var(--verevon-e-muted);
+}
+
+.dashboard-composer-root--chat .verevon-composer-shell:has(.chat-work-period[open]) {
+  overflow: visible;
+}
+
+.chat-work-period > summary {
+  display: inline-flex;
+  min-height: 30px;
+  max-width: 150px;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  padding: 0 7px;
+  border-radius: 8px;
+  font-size: 10.5px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.chat-work-period > summary::-webkit-details-marker { display: none; }
+.chat-work-period > summary span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-work-period > summary:hover,
+.chat-work-period[open] > summary { background: var(--verevon-surface-soft); color: var(--verevon-j-text); }
+.chat-work-period > summary:focus-visible,
+.chat-work-period__menu :is(button, input):focus-visible { outline: 2px solid var(--verevon-accent-ink); outline-offset: 2px; }
+
+.chat-work-period__menu {
+  position: absolute;
+  z-index: 30;
+  bottom: calc(100% + 10px);
+  left: 0;
+  display: grid;
+  width: min(270px, calc(100vw - 44px));
+  gap: 2px;
+  padding: 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-i-surface);
+  box-shadow: var(--shadow-md);
+}
+
+.chat-work-period__menu p { margin: 0 0 7px; color: var(--verevon-e-subtle); font-size: 11px; line-height: 1.45; }
+.chat-work-period__menu > button { min-height: 31px; padding: 5px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--verevon-j-text); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.chat-work-period__menu > button:hover,
+.chat-work-period__menu > button[aria-pressed='true'] { background: var(--verevon-surface-soft); }
+.chat-work-period__custom { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--verevon-border); }
+.chat-work-period__custom label { display: grid; gap: 4px; color: var(--verevon-e-subtle); font-size: 11px; }
+.chat-work-period__custom input { width: 100%; min-width: 0; padding: 6px 5px; border: 1px solid var(--verevon-border); border-radius: 6px; background: transparent; color: var(--verevon-j-text); font: inherit; font-size: 11px; }
+.chat-work-period__custom button { grid-column: 1 / -1; min-height: 31px; border: 0; border-radius: 6px; background: var(--verevon-j-text); color: var(--verevon-i-surface); font: inherit; font-size: 11px; cursor: pointer; }
+.chat-work-period__custom button:disabled { opacity: .45; cursor: default; }
 
 .dashboard-composer-root--chat .dashboard-composer-toolbar__right {
   flex: 0 0 auto;
@@ -47586,10 +47650,165 @@ so it
 }
 
 .verevon-chat-empty__prompts {
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   max-width: 720px;
-  gap: 0;
-  margin-top: 20px;
+  margin: 12px auto 0;
+}
+
+.verevon-chat-empty__activity {
+  display: grid;
+  gap: 4px;
+  margin: 15px 0 0;
+}
+
+.verevon-chat-empty__activity-source {
+  min-width: 0;
+}
+
+.verevon-chat-empty__source-toggle {
+  display: flex;
+  width: 100%;
+  min-height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--verevon-e-muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+}
+
+.verevon-chat-empty__source-toggle--inbox {
+  color: var(--verevon-accent-ink);
+}
+
+.verevon-chat-empty__source-toggle:hover,
+.verevon-chat-empty__source-toggle:focus-visible {
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-chat-empty__source-toggle svg {
+  flex: 0 0 auto;
+  transition: transform 140ms ease;
+}
+
+.verevon-chat-empty__source-toggle[aria-expanded='false'] svg {
+  transform: rotate(-90deg);
+}
+
+.verevon-chat-empty__source-items {
+  display: grid;
+  gap: 1px;
+  padding-left: 8px;
+}
+
+.verevon-chat-empty__source-empty {
+  margin: 0;
+  padding: 8px 9px;
+  color: var(--verevon-e-subtle);
+  font-size: 11px;
+}
+
+.verevon-chat-empty__activity-item {
+  display: grid;
+  width: 100%;
+  gap: 3px;
+  min-height: 49px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--verevon-j-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 140ms ease;
+}
+
+.verevon-chat-empty__activity-item:hover,
+.verevon-chat-empty__activity-item:focus-visible {
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-chat-empty__activity :is(.verevon-chat-empty__activity-item, .verevon-chat-empty__source-toggle):focus-visible {
+  outline: 2px solid var(--verevon-accent-ink);
+  outline-offset: 2px;
+}
+
+.verevon-chat-empty__activity-item :is(strong, small) {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-chat-empty__activity-item strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.verevon-chat-empty__activity-item small {
+  color: var(--verevon-e-subtle);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.verevon-chat-empty__prompts .verevon-chat-empty__examples-toggle {
+  display: inline-flex;
+  width: auto;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--verevon-e-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.verevon-chat-empty__prompts .verevon-chat-empty__examples-toggle:hover,
+.verevon-chat-empty__prompts .verevon-chat-empty__examples-toggle:focus-visible {
+  color: var(--verevon-j-text);
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+}
+
+.dark .verevon-chat-empty__prompts .verevon-chat-empty__examples-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--verevon-e-muted);
+}
+
+.dark .verevon-chat-empty__prompts .verevon-chat-empty__examples-toggle:hover,
+.dark .verevon-chat-empty__prompts .verevon-chat-empty__examples-toggle:focus-visible {
+  background: transparent;
+  color: var(--verevon-j-text);
+}
+
+.verevon-chat-empty__examples-toggle[aria-expanded='true'] svg {
+  transform: rotate(90deg);
+}
+
+.verevon-chat-empty__prompt-list {
+  display: grid;
+  width: min(100%, 420px);
+  margin: 6px auto 0;
 }
 
 /* The suggested first move (plan item 17). A borderless row that reads as an
@@ -47630,24 +47849,16 @@ so it
   font-weight: 400;
 }
 
-.verevon-chat-empty__prompt-label {
-  margin-bottom: 5px;
-  color: var(--verevon-e-subtle);
-  font-size: 10.5px;
-  font-weight: 650;
-}
-
 .verevon-chat-empty__prompts .verevon-chat-starter {
   display: grid;
   width: 100%;
-  min-height: 56px;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
+  min-height: 49px;
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
-  gap: 12px;
   border: 0;
   border-radius: var(--chat-r-md, 12px);
   background: transparent;
-  padding: 12px 14px;
+  padding: 7px 9px;
   color: var(--verevon-e-muted);
   text-align: left;
   box-shadow: none;
@@ -47699,6 +47910,24 @@ so it
   line-height: 1.45;
   text-align: center;
 }
+
+.chat-utility-page { width: 100%; min-height: 100%; overflow-y: auto; padding: clamp(24px, 5vw, 56px); color: var(--verevon-j-text); }
+.chat-utility-page__inner { width: min(100%, 850px); margin: 0 auto; }
+.chat-utility-page__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 32px; }
+.chat-utility-page__header h1 { margin: 0 0 9px; font-family: var(--chat-font-display); font-size: clamp(27px, 3vw, 36px); font-weight: 500; }
+.chat-utility-page__header p { margin: 0; color: var(--verevon-e-muted); font-size: 13px; line-height: 1.5; }
+.chat-utility-page__header > :is(button, label) { flex: 0 0 auto; min-height: 32px; padding: 6px 10px; border: 1px solid var(--verevon-border); border-radius: 8px; background: transparent; color: var(--verevon-j-text); font: inherit; font-size: 12px; cursor: pointer; }
+.chat-utility-page__list { margin: 0; padding: 0; list-style: none; }
+.chat-utility-page__list li { padding: 17px 0; border-bottom: 1px solid var(--verevon-border); }
+.chat-utility-page__list li:first-child { border-top: 1px solid var(--verevon-border); }
+.chat-utility-page__list :is(li, button) > strong { display: block; font-size: 13px; font-weight: 650; }
+.chat-utility-page__list :is(li, button) > small { display: block; margin-top: 4px; color: var(--verevon-e-subtle); font-size: 11px; }
+.chat-utility-page__list li > p { max-width: 70ch; margin: 8px 0 0; color: var(--verevon-e-muted); font-size: 12px; line-height: 1.5; }
+.chat-utility-page__list button { width: 100%; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.chat-utility-page__list button:hover strong, .chat-utility-page__link:hover { text-decoration: underline; }
+.chat-utility-page__empty { padding: 24px 0; color: var(--verevon-e-muted); font-size: 13px; }
+.chat-utility-page__link { display: inline-block; margin-top: 22px; color: var(--verevon-j-text); font-size: 12px; }
+.chat-utility-page :is(button, a, input):focus-visible { outline: 2px solid var(--verevon-accent-ink); outline-offset: 2px; }
 
 /* Workspace tabs are local to the material being inspected. The conversation
    header now exposes one calm launcher instead of five competing destinations. */

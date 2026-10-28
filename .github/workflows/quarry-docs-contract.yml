@@ -1,0 +1,53 @@
+name: Quarry docs contract
+
+# Runs the Quarry docs-contract test (apps/Ingestion Plane/Quarry-v2/scripts/tests/docs-contract.test.mjs).
+# It reads the real files: the Ingestion compose's quarry-edge block, quarry-edge's rerank config and main,
+# the Quarry docs, README and OpenAPI, the cross-plane token-request manifest and the committed Control Plane
+# registry. It fails when a removed rerank identifier comes back, when a document describes the reranker as a
+# Model Plane caller, when a granted scope is missing from the docs or the registry, or when the OpenAPI stops
+# documenting the rerank wire. The paths below are the files it reads, so a compose-only or registry-only
+# change runs it too; the Quarry CI (quarry-v2-ci.yml) covers only Quarry-v2/**.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'apps/Ingestion Plane/Quarry-v2/docs/**'
+      - 'apps/Ingestion Plane/Quarry-v2/README.md'
+      - 'apps/Ingestion Plane/Quarry-v2/scripts/tests/**'
+      - 'apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/config.rs'
+      - 'apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs'
+      - 'apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/**'
+      - 'apps/Ingestion Plane/docker-compose.yml'
+      - 'apps/Control Plane/config/plane-service-principals.json'
+      - '.github/workflows/quarry-docs-contract.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/Ingestion Plane/Quarry-v2/docs/**'
+      - 'apps/Ingestion Plane/Quarry-v2/README.md'
+      - 'apps/Ingestion Plane/Quarry-v2/scripts/tests/**'
+      - 'apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/config.rs'
+      - 'apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs'
+      - 'apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/**'
+      - 'apps/Ingestion Plane/docker-compose.yml'
+      - 'apps/Control Plane/config/plane-service-principals.json'
+      - '.github/workflows/quarry-docs-contract.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  docs-contract:
+    name: Quarry docs contract (compose, config, docs, OpenAPI, token manifest, registry)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      # The test reads the files and asserts; a missing file fails it, nothing is skipped.
+      - name: Run the docs-contract test
+        run: node --test "apps/Ingestion Plane/Quarry-v2/scripts/tests/docs-contract.test.mjs"

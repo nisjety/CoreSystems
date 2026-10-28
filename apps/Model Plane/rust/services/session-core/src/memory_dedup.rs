@@ -792,6 +792,11 @@ async fn load_current_rows(pool: &PgPool) -> anyhow::Result<Vec<MemoryRow>> {
            AND m.review_state = 'accepted' \
            AND (m.expires_at IS NULL OR m.expires_at > now()) \
            AND NOT EXISTS ( \
+             SELECT 1 FROM runs wr \
+             WHERE wr.retention_class = 'zdr_waived' \
+               AND ('thread:' || wr.thread_id) = ANY(m.source_links) \
+           ) \
+           AND NOT EXISTS ( \
              SELECT 1 FROM forgotten_memory_ids f \
              WHERE f.org_id = m.org_id AND f.memory_id = m.id) \
          ORDER BY m.org_id, m.id",

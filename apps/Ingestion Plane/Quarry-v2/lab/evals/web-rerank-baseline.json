@@ -1,0 +1,23 @@
+{
+  "schema": "quarry-web-rerank-baseline-v1",
+  "state": "pending",
+  "description": "Pending: no measured baseline. The labels (OPS-LABEL) and three repeated live runs are needed; write-baseline pins the arm means, the tolerances and the calibration. Until then the gate reports pending and never pass.",
+  "serp_digest": null,
+  "labels_digest": null,
+  "acceptance": {
+    "min_ndcg_gain": 0.04,
+    "min_ci_lower": 0.0,
+    "category_max_drop": 0.03,
+    "added_p95_ms_max": 900.0,
+    "degraded_rate_max": 0.02,
+    "mde_max": 0.04,
+    "bootstrap_resamples": 10000,
+    "bootstrap_seed": 20261013,
+    "soak_calls": 200
+  },
+  "tolerances": null,
+  "metrics": null,
+  "noise": null,
+  "calibration": null,
+  "provenance": null
+}

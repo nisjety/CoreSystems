@@ -55,6 +55,8 @@ pub struct VerifiedIdentity {
     scopes: Arc<[String]>,
     kind: PrincipalKind,
     issuer_zdr: bool,
+    issuer_org_zdr: Option<bool>,
+    issuer_waiver: Option<crate::auth::ZdrWaiverClaim>,
     session_bearer: Option<Arc<str>>,
     inference_bearer: Option<Arc<str>>,
     execution_bearer: Option<Arc<str>>,
@@ -144,9 +146,36 @@ impl VerifiedIdentity {
         }
     }
 
-    #[must_use]
-    pub const fn effective_zdr(&self, request_zdr: bool) -> bool {
-        self.issuer_zdr || request_zdr
+    /// The resolver's view of this identity's verified retention claims.
+    fn posture_view(&self) -> mp_contracts::retention::ClaimsView<'_> {
+        crate::zdr_posture::view_of(
+            self.issuer_zdr,
+            self.issuer_org_zdr,
+            self.issuer_waiver.as_ref(),
+        )
+    }
+
+    /// This identity's posture for one request that names `route`, through the mp-contracts
+    /// resolver (`zdr_posture`).
+    ///
+    /// # Errors
+    /// The resolver's typed refusal.
+    pub fn posture(
+        &self,
+        route: &crate::zdr_posture::Route<'_>,
+    ) -> Result<crate::zdr_posture::TurnPosture, mp_contracts::zdr_refusal::Refusal> {
+        crate::zdr_posture::decide_views(&[self.posture_view()], route)
+    }
+
+    /// Whether a request that names `route` runs ZDR, or the typed refusal as its gRPC status.
+    ///
+    /// # Errors
+    /// The resolver's refusal, with its gRPC code.
+    #[allow(clippy::result_large_err)]
+    pub fn zdr_for(&self, route: &crate::zdr_posture::Route<'_>) -> Result<bool, Status> {
+        self.posture(route)
+            .map(|posture| posture.zdr())
+            .map_err(|refusal| refusal.grpc_status(crate::zdr_posture::grpc_code(&refusal)))
     }
 
     /// Build a session-core request only when an independently verified,
@@ -215,6 +244,8 @@ impl VerifiedIdentity {
             scopes: Arc::from([]),
             kind: PrincipalKind::User,
             issuer_zdr,
+            issuer_org_zdr: None,
+            issuer_waiver: None,
             session_bearer: None,
             inference_bearer: None,
             execution_bearer: None,
@@ -236,6 +267,8 @@ impl VerifiedIdentity {
             scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
             kind: PrincipalKind::Service,
             issuer_zdr,
+            issuer_org_zdr: None,
+            issuer_waiver: None,
             session_bearer: None,
             inference_bearer: None,
             execution_bearer: None,
@@ -290,10 +323,22 @@ pub fn authorize_request<T>(
         .cloned()
         .ok_or_else(|| Status::unauthenticated("verified caller identity required"))?;
     identity.authorize_org(org_id)?;
-    if identity.effective_zdr(false) && matches!(access, RpcAccess::Write | RpcAccess::Approval) {
-        return Err(Status::failed_precondition(
-            "durable mutation is disabled by zero-retention policy",
-        ));
+    // A durable write is never part of a model turn: its route is the plain one, so a waiver
+    // (which names a model route) is refused here as a route mismatch, and a ZDR identity is
+    // refused as a durable mutation, as it always was.
+    if matches!(access, RpcAccess::Write | RpcAccess::Approval) {
+        match identity.posture(&crate::zdr_posture::Route::plain(false)) {
+            Ok(posture) if posture.zdr() => {
+                return Err(
+                    mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                        .grpc_status(tonic::Code::FailedPrecondition),
+                );
+            }
+            Ok(_) => {}
+            Err(refusal) => {
+                return Err(refusal.grpc_status(crate::zdr_posture::grpc_code(&refusal)));
+            }
+        }
     }
     if identity.is_service() && !identity.has_scope(access.service_scope()) {
         return Err(Status::permission_denied("service scope required"));
@@ -325,8 +370,11 @@ struct Claims {
     reason: String,
     #[serde(default)]
     scopes: Vec<String>,
-    #[serde(default)]
     zdr: bool,
+    #[serde(default)]
+    org_zdr: Option<bool>,
+    #[serde(default)]
+    zdr_waiver: Option<crate::auth::ZdrWaiverClaim>,
 }
 
 pub(crate) struct AuthConfig {
@@ -479,6 +527,16 @@ impl JwtVerifier {
                 "delegated credential identity mismatch",
             ));
         }
+        // A user's bearers of one turn carry the ingress retention posture, as the
+        // HTTP verifier requires. A service principal's retention is per audience
+        // in the registry, so service bearers are not compared.
+        if ingress.kind == PrincipalKind::User
+            && (delegated.issuer_zdr != ingress.issuer_zdr
+                || delegated.issuer_waiver != ingress.issuer_waiver)
+        {
+            return Err(mp_contracts::zdr_refusal::Refusal::POSTURE_MISMATCH
+                .grpc_status(tonic::Code::PermissionDenied));
+        }
         Ok(Some(Arc::from(token)))
     }
 }
@@ -558,6 +616,8 @@ fn validate_identity(claims: Claims, leeway_secs: u64) -> Result<VerifiedIdentit
                 scopes,
                 kind: PrincipalKind::User,
                 issuer_zdr: claims.zdr,
+                issuer_org_zdr: claims.org_zdr,
+                issuer_waiver: claims.zdr_waiver.clone(),
                 session_bearer: None,
                 inference_bearer: None,
                 execution_bearer: None,
@@ -579,6 +639,8 @@ fn validate_identity(claims: Claims, leeway_secs: u64) -> Result<VerifiedIdentit
                 scopes,
                 kind: PrincipalKind::Service,
                 issuer_zdr: claims.zdr,
+                issuer_org_zdr: claims.org_zdr,
+                issuer_waiver: claims.zdr_waiver.clone(),
                 session_bearer: None,
                 inference_bearer: None,
                 execution_bearer: None,
@@ -674,7 +736,7 @@ mod tests {
         json!({
             "sub": "user-1", "iss": "auth-core", "aud": audience,
             "exp": now() + 3600, "iat": now() - 5, "nbf": now() - 5,
-            "org_id": "org-1", "user_id": "user-1", "principal_type": "user"
+            "org_id": "org-1", "user_id": "user-1", "principal_type": "user", "zdr": false
         })
     }
 
@@ -934,7 +996,9 @@ mod tests {
     #[test]
     fn issuer_zdr_is_monotonic_and_blocks_durable_mutation() {
         let identity = VerifiedIdentity::user_for_test("org-a", "user-a", true);
-        assert!(identity.effective_zdr(false));
+        assert!(identity
+            .zdr_for(&crate::zdr_posture::Route::plain(false))
+            .expect("a ZDR identity decides"));
         let mut request = Request::new(());
         request.extensions_mut().insert(identity);
         assert_eq!(
@@ -943,5 +1007,120 @@ mod tests {
                 .code(),
             tonic::Code::FailedPrecondition
         );
+    }
+
+    /// A service credential shaped as Auth Core mints one for the gateway's
+    /// service principal: `sub` and `service_id` both `service:<id>`, a reason,
+    /// no user.
+    fn service_claims(audience: &str, zdr: bool) -> Value {
+        json!({
+            "sub": "service:model-worker", "iss": "auth-core", "aud": audience,
+            "exp": now() + 3600, "iat": now() - 5, "nbf": now() - 5,
+            "org_id": "org-1", "principal_type": "service",
+            "service_id": "service:model-worker", "reason": "invoke bounded model primitive",
+            "scopes": ["models:invoke"], "zdr": zdr
+        })
+    }
+
+    #[tokio::test]
+    async fn zdr_claim_is_required_by_the_grpc_verifier() {
+        let verifier = test_verifier().await;
+        let mut without_claim = user_claims("model-gateway");
+        without_claim
+            .as_object_mut()
+            .expect("claims object")
+            .remove("zdr");
+        let mut request = Request::new(());
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {}", sign(&without_claim, "key-1"))
+                .parse()
+                .expect("metadata"),
+        );
+        assert_eq!(
+            verifier.intercept(request).unwrap_err().code(),
+            tonic::Code::Unauthenticated
+        );
+    }
+
+    #[tokio::test]
+    async fn delegated_user_credentials_must_match_the_ingress_posture() {
+        let verifier = test_verifier().await;
+
+        let mut zdr_session = user_claims("session-core");
+        zdr_session["zdr"] = json!(true);
+        let mut request = Request::new(());
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {}", sign(&user_claims("model-gateway"), "key-1"))
+                .parse()
+                .expect("metadata"),
+        );
+        request.metadata_mut().insert(
+            "x-session-authorization",
+            format!("Bearer {}", sign(&zdr_session, "key-1"))
+                .parse()
+                .expect("metadata"),
+        );
+        let refusal = verifier.intercept(request).unwrap_err();
+        assert_eq!(refusal.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            mp_contracts::zdr_refusal::Refusal::from_status(&refusal),
+            Some(mp_contracts::zdr_refusal::Refusal::POSTURE_MISMATCH)
+        );
+
+        let mut zdr_ingress = user_claims("model-gateway");
+        zdr_ingress["zdr"] = json!(true);
+        let mut request = Request::new(());
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {}", sign(&zdr_ingress, "key-1"))
+                .parse()
+                .expect("metadata"),
+        );
+        request.metadata_mut().insert(
+            "x-execution-authorization",
+            format!("Bearer {}", sign(&user_claims("execution-core"), "key-1"))
+                .parse()
+                .expect("metadata"),
+        );
+        let refusal = verifier.intercept(request).unwrap_err();
+        assert_eq!(refusal.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            mp_contracts::zdr_refusal::Refusal::from_status(&refusal),
+            Some(mp_contracts::zdr_refusal::Refusal::POSTURE_MISMATCH)
+        );
+    }
+
+    #[tokio::test]
+    async fn delegated_service_credentials_may_differ_in_posture_by_audience() {
+        let verifier = test_verifier().await;
+        let mut request = Request::new(());
+        request.metadata_mut().insert(
+            "authorization",
+            format!(
+                "Bearer {}",
+                sign(&service_claims("model-gateway", true), "key-1")
+            )
+            .parse()
+            .expect("metadata"),
+        );
+        request.metadata_mut().insert(
+            "x-inference-authorization",
+            format!(
+                "Bearer {}",
+                sign(&service_claims("inference-core", false), "key-1")
+            )
+            .parse()
+            .expect("metadata"),
+        );
+        let request = verifier
+            .intercept(request)
+            .expect("a service principal's posture is per audience and is not compared");
+        assert!(request
+            .extensions()
+            .get::<VerifiedIdentity>()
+            .expect("identity")
+            .is_service());
     }
 }

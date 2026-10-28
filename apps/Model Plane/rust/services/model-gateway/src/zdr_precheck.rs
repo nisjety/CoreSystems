@@ -1,5 +1,5 @@
-//! The gateway's answer to a turn that names the user's own model connection
-//! while the signed token says zero data retention (ZDR).
+//! The gateway's handling of a turn that names the user's own model connection, under zero data
+//! retention (ZDR).
 //!
 //! ## The defect this closes
 //!
@@ -12,93 +12,33 @@
 //! branch and called inference-core with the provider hint and the connection id
 //! replaced by empty strings. The user's choice vanished: the turn was served,
 //! or refused, on the default ZDR chain and nothing said their connection had
-//! not been used. The BFF hid it in steady state by forcing `zdr: true` into
-//! every body, which sends the turn to the generic refusal in `normalize`
-//! instead; a client that is not the BFF, or a window in which the BFF and Auth
-//! Core disagree about the organisation, did not get that cover.
+//! not been used.
 //!
-//! ## What this does
+//! ## What decides it now
 //!
-//! [`refuse_subscription_under_token_zdr`] is a pure function of the verified
-//! claims and the request. Both transports (`/v1/invoke/stream` and
-//! `/v1/invoke`) call it first, before normalisation, budget, a run or any
-//! model call, and a refusal it returns is final: one typed answer, no run, no
-//! provider touched. It deliberately lives outside `normalize`: normalisation
-//! reads the request only (it has no claims, and 38 tests call it that way), and
-//! the retention posture of a turn is the token's, never the body's.
+//! The posture of a turn is decided once, before normalisation, a run, a budget read or any model
+//! call, by `zdr_posture::decide`, which goes through the mp-contracts resolver (Z-15). A ZDR token
+//! on the user's own connection is refused there as `zdr_connection_not_acknowledged`, a waiver is
+//! honoured only on the connection it names, and every other combination follows the posture
+//! matrix. A body that says `zdr: false` cannot lower a token that says `true`.
 //!
-//! It reads the token's own `zdr` and nothing else. A body that says
-//! `zdr: false` cannot lower a token that says `true` (the flag can only raise
-//! the posture), and a body that says `zdr: true` on a token that does not is
-//! `normalize`'s to refuse, byte for byte as before. A caller whose token is not
-//! ZDR is never touched by anything in this file.
+//! This module keeps what the decision reads and what the persistence-free path forwards:
 //!
-//! The code is [`ZDR_CONNECTION_NOT_SUPPORTED`], the neutral catalogue code:
-//! nothing can be acknowledged yet, so the answer must not promise that
-//! something can. The resolver (Z-15) later splits this case into the codes of
-//! the posture matrix (`zdr_connection_not_acknowledged` once an
-//! acknowledgement path exists, `zdr_explicit_request_not_supported_by_connection`
-//! for Temporary chat); until then this is the one honest answer.
-//!
-//! [`ConnectionRoute`] is the backstop. Were the pre-check ever bypassed, the
-//! persistence-free branch forwards the user's connection route to
-//! inference-core instead of dropping it, and inference-core, which will not
-//! serve a connection without ZDR support under a ZDR request, refuses it. A
-//! platform provider hint keeps what it always did on this path (the default ZDR
-//! chain, filtered by attestation); what a ZDR turn that names a platform
-//! provider should do is the resolver's decision, not this stop-gap's.
+//! * [`names_user_connection`] recognises a request that names one of the caller's own model
+//!   connections, under every spelling inference-core accepts.
+//! * [`ConnectionRoute`] is the backstop. Were the decision ever bypassed, the persistence-free
+//!   branch forwards the user's connection route to inference-core instead of dropping it, and
+//!   inference-core refuses a connection without ZDR support under a ZDR request.
+//! * [`http`] is the unary answer to a typed refusal, in the shape `zdr_posture` defines.
 
 use axum::{http::StatusCode, Json};
-use serde_json::{json, Value};
+use mp_contracts::zdr_refusal::Refusal;
+use serde_json::Value;
 
-use crate::auth::Claims;
-use crate::http_routes::InvokeRequest;
-
-/// The stable code of this refusal (the Z-05a catalogue; also in the posture
-/// matrix vocabulary `refusal_codes`).
-pub const ZDR_CONNECTION_NOT_SUPPORTED: &str = "zdr_connection_not_supported";
-
-/// What the user is told. It states only what is true: nothing was sent to any
-/// model and no other model stood in. It names no way out, because none exists
-/// yet.
-const CONNECTION_NOT_SUPPORTED_MESSAGE: &str = "Zero data retention is on for this organisation, and the ChatGPT connection selected for this chat cannot provide it. The request was not sent to any model. No other model was used.";
-
-/// A refusal ready to be rendered by either transport.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ZdrRefusal {
-    /// Stable, matchable code.
-    pub code: &'static str,
-    /// Human-readable reason (English; clients word it by `code`).
-    pub message: &'static str,
-    /// Whether sending the same turn again could ever succeed.
-    pub retryable: bool,
-}
-
-impl ZdrRefusal {
-    /// A turn that names the user's own connection while ZDR applies.
-    pub const CONNECTION_NOT_SUPPORTED: Self = Self {
-        code: ZDR_CONNECTION_NOT_SUPPORTED,
-        message: CONNECTION_NOT_SUPPORTED_MESSAGE,
-        retryable: false,
-    };
-
-    /// The unary body, in the flat shape `/v1/invoke` already uses for its other
-    /// typed codes (`error` is the sentence, `code` the match key).
-    #[must_use]
-    pub fn body(&self) -> Value {
-        json!({
-            "error": self.message,
-            "code": self.code,
-            "retryable": self.retryable,
-        })
-    }
-
-    /// The unary answer. 412 is what every other ZDR precondition on this
-    /// gateway answers with (a failed-precondition from inference-core, the
-    /// durable-mutation guard, speech).
-    pub fn http(&self) -> (StatusCode, Json<Value>) {
-        (StatusCode::PRECONDITION_FAILED, Json(self.body()))
-    }
+/// The unary answer to a typed ZDR refusal. The status is `zdr_posture::http_status`'s:
+/// 403 for a refusal about credentials or routes, 412 for every other ZDR precondition.
+pub fn http(refusal: &Refusal) -> (StatusCode, Json<Value>) {
+    crate::zdr_posture::http(refusal)
 }
 
 /// Whether `provider` names the `ChatGPT` subscription route the way inference-core
@@ -122,27 +62,6 @@ pub fn names_user_connection(
 ) -> bool {
     provider.is_some_and(names_subscription_provider)
         || subscription_connection_id.is_some_and(|id| !id.trim().is_empty())
-}
-
-/// The refusal a turn gets when the token says ZDR and the request names the
-/// user's own connection; `None` for every other turn, which is then untouched.
-///
-/// Takes the verified [`Claims`] rather than a flag so no caller can hand it
-/// the wrong posture (the token's `zdr`, never `effective_zdr(req.zdr)`).
-#[must_use]
-pub fn refuse_subscription_under_token_zdr(
-    claims: &Claims,
-    req: &InvokeRequest,
-) -> Option<ZdrRefusal> {
-    if claims.zdr
-        && names_user_connection(
-            req.provider.as_deref(),
-            req.subscription_connection_id.as_deref(),
-        )
-    {
-        return Some(ZdrRefusal::CONNECTION_NOT_SUPPORTED);
-    }
-    None
 }
 
 /// The user-connection route the persistence-free path forwards to
@@ -180,53 +99,15 @@ impl ConnectionRoute {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The payload of a model-gateway token as Auth Core mints it, with `zdr`
-    /// present only when given, decoded by the same serde path the middleware
-    /// uses. No struct literal: whatever a token without the claim means is
-    /// decided by `Claims` itself, not by this test.
-    fn token_claims(zdr: Option<bool>) -> Claims {
-        let mut payload = json!({
-            "sub": "user-1",
-            "iss": "https://auth.test/model",
-            "aud": "model-gateway",
-            "exp": 4_102_444_800_i64,
-            "nbf": 1_700_000_000_i64,
-            "org_id": "org-1",
-            "user_id": "user-1",
-            "principal_type": "user",
-        });
-        if let Some(zdr) = zdr {
-            payload["zdr"] = json!(zdr);
-        }
-        serde_json::from_value(payload).expect("a minted token's payload is valid Claims")
-    }
+    use serde_json::json;
 
     /// A body as a client sends it, parsed the way the route parses it.
-    fn body(value: Value) -> InvokeRequest {
+    fn body(value: Value) -> crate::http_routes::InvokeRequest {
         serde_json::from_value(value).expect("a wire body parses")
     }
 
-    fn terra() -> InvokeRequest {
-        body(json!({
-            "content": "hello",
-            "model": "gpt-5.6-terra",
-            "provider": "openai-codex-subscription",
-            "subscription_connection_id": "conn-1",
-        }))
-    }
-
     #[test]
-    fn a_zdr_token_naming_the_subscription_is_refused() {
-        let refusal = refuse_subscription_under_token_zdr(&token_claims(Some(true)), &terra())
-            .expect("a ZDR token on the user's own connection is refused");
-        assert_eq!(refusal, ZdrRefusal::CONNECTION_NOT_SUPPORTED);
-        assert_eq!(refusal.code, "zdr_connection_not_supported");
-        assert!(!refusal.retryable);
-    }
-
-    #[test]
-    fn the_route_is_recognised_however_it_is_named() {
+    fn a_request_naming_the_subscription_or_a_connection_names_a_user_connection() {
         // inference-core reads a hint trimmed, case-insensitively, `_` as `-`,
         // with two aliases; the camelCase body alias carries a connection id.
         let namings = [
@@ -241,16 +122,19 @@ mod tests {
             json!({"content": "x", "provider": "azure-openai", "subscription_connection_id": "c"}),
         ];
         for naming in namings {
+            let req = body(naming.clone());
             assert!(
-                refuse_subscription_under_token_zdr(&token_claims(Some(true)), &body(naming.clone()))
-                    .is_some(),
+                names_user_connection(
+                    req.provider.as_deref(),
+                    req.subscription_connection_id.as_deref()
+                ),
                 "{naming}"
             );
         }
     }
 
     #[test]
-    fn a_zdr_token_that_names_no_connection_is_not_this_refusals_business() {
+    fn a_request_naming_no_connection_or_a_platform_provider_names_no_user_connection() {
         let unnamed = [
             json!({"content": "x"}),
             json!({"content": "x", "model": "gpt-5-mini"}),
@@ -265,96 +149,44 @@ mod tests {
             json!({"content": "x", "provider": "openai-codex"}),
         ];
         for request in unnamed {
+            let req = body(request.clone());
             assert!(
-                refuse_subscription_under_token_zdr(&token_claims(Some(true)), &body(request.clone()))
-                    .is_none(),
+                !names_user_connection(
+                    req.provider.as_deref(),
+                    req.subscription_connection_id.as_deref()
+                ),
                 "{request}"
             );
         }
     }
 
     #[test]
-    fn a_token_without_zdr_is_never_touched() {
-        // Present-and-false and absent are the same here: this reads the token's
-        // own claim and invents no posture.
-        for zdr in [Some(false), None] {
-            for request in [
-                terra(),
-                body(json!({"content": "x", "zdr": true, "provider": "openai-codex-subscription", "subscription_connection_id": "c"})),
-                body(json!({"content": "x"})),
-            ] {
-                assert_eq!(
-                    refuse_subscription_under_token_zdr(&token_claims(zdr), &request),
-                    None,
-                    "token zdr {zdr:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn the_body_can_raise_the_posture_but_never_lower_the_token() {
-        // `zdr: false` in the body on a ZDR token changes nothing.
-        let lowered = body(json!({
-            "content": "x", "zdr": false,
-            "provider": "openai-codex-subscription", "subscription_connection_id": "c",
-        }));
-        assert!(refuse_subscription_under_token_zdr(&token_claims(Some(true)), &lowered).is_some());
-        // `zdr: true` in the body on a token that is not ZDR is `normalize`'s to
-        // refuse, so this does not.
-        let raised = body(json!({
-            "content": "x", "zdr": true,
-            "provider": "openai-codex-subscription", "subscription_connection_id": "c",
-        }));
-        assert!(refuse_subscription_under_token_zdr(&token_claims(Some(false)), &raised).is_none());
-    }
-
-    /// The enforcement rows of the posture matrix that a single token and a
-    /// single route decide, and that this refusal can answer (the matrix is
-    /// evaluated whole by the resolver, Z-15). Each is (row id, token zdr,
-    /// provider, connection, refused here). Rows whose token is not ZDR are
-    /// the resolver's, never this refusal's.
-    #[test]
-    fn it_answers_the_matrix_rows_a_single_token_and_route_decide() {
-        let rows: [(&str, bool, &str, Option<&str>, bool); 8] = [
-            ("e_persistent_default_route", false, "", None, false),
-            ("e_persistent_subscription_route_unchanged", false, "openai-codex-subscription", Some("conn-1"), false),
-            ("e_zdr_default_route", true, "", None, false),
-            ("e_zdr_token_never_reaches_subscription", true, "openai-codex-subscription", Some("conn-1"), true),
-            ("e_zdr_token_subscription_explicit", true, "openai-codex-subscription", Some("conn-1"), true),
-            ("e_temporary_chat_refuses_subscription_org_off", false, "openai-codex-subscription", Some("conn-1"), false),
-            ("e_waiver_with_zdr_true", true, "openai-codex-subscription", Some("conn-1"), true),
-            ("e_waiver_platform_provider", false, "azure-openai", None, false),
-        ];
-        for (id, zdr, provider, connection, refused) in rows {
-            let mut wire = json!({"content": "x", "provider": provider});
-            if let Some(connection) = connection {
-                wire["subscription_connection_id"] = json!(connection);
-            }
-            assert_eq!(
-                refuse_subscription_under_token_zdr(&token_claims(Some(zdr)), &body(wire)).is_some(),
-                refused,
-                "{id}"
-            );
-        }
-    }
-
-    #[test]
     fn the_refusal_is_typed_final_and_promises_nothing_that_cannot_happen() {
-        let refusal = ZdrRefusal::CONNECTION_NOT_SUPPORTED;
-        let (status, Json(wire)) = refusal.http();
+        let refusal = Refusal::CONNECTION_NOT_SUPPORTED;
+        let (status, Json(wire)) = http(&refusal);
         assert_eq!(status, StatusCode::PRECONDITION_FAILED);
-        assert_eq!(wire["code"], "zdr_connection_not_supported");
-        assert_eq!(wire["retryable"], false);
-        assert_eq!(wire["error"], refusal.message);
+        assert_eq!(wire["error"]["code"], "zdr_connection_not_supported");
+        assert_eq!(wire["error"]["retryable"], false);
+        assert_eq!(wire["error"]["action"], "choose_another_model");
+        assert_eq!(wire["error"]["message"], refusal.message());
 
-        let message = refusal.message;
+        let message = refusal.message();
         assert!(message.contains("not sent to any model"), "{message}");
         assert!(message.contains("No other model was used"), "{message}");
         // Nothing can be acknowledged, consented to or waived yet, so the
         // sentence may not point at any of it.
-        for promise in ["acknowledge", "consent", "waive", "continue", "retry", "try again"] {
-            assert!(!message.to_lowercase().contains(promise), "{promise}: {message}");
+        for promise in [
+            "acknowledge",
+            "consent",
+            "waive",
+            "continue",
+            "retry",
+            "try again",
+        ] {
+            assert!(
+                !message.to_lowercase().contains(promise),
+                "{promise}: {message}"
+            );
         }
     }
 
@@ -381,7 +213,7 @@ mod tests {
 
     /// The ZDR branch must hand the route it was given to the inference call.
     /// The call itself cannot be reached through the HTTP surface while the
-    /// pre-check stands, so this reads the one place that matters: the
+    /// decision stands, so this reads the one place that matters: the
     /// persistence-free stream may not call `direct_infer` with a literal empty
     /// provider and connection again, which is the line the defect lived on.
     #[test]
@@ -394,10 +226,10 @@ mod tests {
         let end = tail.find("\n}\n").expect("the function ends");
         let function = &tail[..end];
         let call = function
-            .split("direct_infer(")
+            .split("direct_infer_turn(")
             .nth(1)
             .and_then(|rest| rest.split(')').next())
-            .expect("zdr_direct_stream calls direct_infer");
+            .expect("zdr_direct_stream calls direct_infer_turn");
         assert!(
             call.contains("&route.provider_hint")
                 && call.contains("&route.subscription_connection_id"),

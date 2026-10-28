@@ -204,3 +204,37 @@ describe('StepsPanel after a ChatGPT-subscription refusal', () => {
       .toBe('ChatGPT-planen har nådd bruksgrensen. Ingenting ble publisert.')
   })
 })
+
+describe('ErrorNotice for a zero-retention refusal', () => {
+  it('sends a connection the reader must review to the ChatGPT panel, beside a retry', () => {
+    const onRetry = vi.fn()
+    const { container } = render(() => (
+      <AnswerRegion
+        answer={{ state: 'failed', message: 'Tilkoblingen er ikke bekreftet.', action: 'open_integrations' }}
+        onRegenerate={onRetry}
+      />
+    ))
+    flush()
+    const link = container.querySelector<HTMLAnchorElement>('a.verevon-chat-error-notice__connection')
+    // The reader's own panel: the connection is theirs, and only they confirm it.
+    expect(link?.getAttribute('href')).toBe('/account#chatgpt-subscription')
+    expect(link?.textContent).toBe('Åpne ChatGPT-tilkoblingen')
+    expect(button(container)?.disabled).toBe(false)
+    expect(button(container)?.textContent).toBe('Prøv igjen')
+    fireEvent.click(button(container)!)
+    expect(onRetry).toHaveBeenCalledTimes(1)
+  })
+
+  it('names the connection in English to an English reader', () => {
+    window.localStorage.setItem(localeStorageKey, 'en')
+    const { container } = render(() => (
+      <I18nProvider>
+        <ErrorNotice message="x" action="open_integrations" onRetry={() => {}} />
+      </I18nProvider>
+    ))
+    flush()
+    expect(container.querySelector('a.verevon-chat-error-notice__connection')?.textContent).toBe(
+      'Open the ChatGPT connection',
+    )
+  })
+})

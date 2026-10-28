@@ -199,16 +199,42 @@ export function formatRelativeNorwegianTime(value: string): string {
   return `${Math.floor(deltaSeconds / 86400)}d siden`
 }
 
-export function weatherGlyph(condition: string): string {
+type WeatherCondition = { keywords: readonly string[]; glyph: string; label: string }
+
+/**
+ * Weather conditions by keyword: English, as the backend sends them, and
+ * Norwegian. The first row with a keyword in the text wins, so «lettskyet»
+ * (partly cloudy) is matched before «skyet» (cloudy). The English rows keep the
+ * precedence they always had.
+ */
+const weatherConditions: readonly WeatherCondition[] = [
+  { keywords: ['clear', 'klart'], glyph: '☀', label: 'Klart' },
+  { keywords: ['partly', 'lettskyet', 'delvis'], glyph: '⛅', label: 'Lettskyet' },
+  { keywords: ['cloud', 'skyet'], glyph: '☁', label: 'Skyet' },
+  { keywords: ['rain', 'regn'], glyph: '☔', label: 'Regn' },
+  { keywords: ['snow', 'snø'], glyph: '❄', label: 'Snø' },
+  { keywords: ['fog', 'tåke'], glyph: '〰', label: 'Tåke' },
+  { keywords: ['thunder', 'torden'], glyph: '⚡', label: 'Torden' },
+]
+
+function weatherConditionFor(condition: string): WeatherCondition | undefined {
   const lower = condition.toLowerCase()
-  if (lower.includes('clear')) return '☀'
-  if (lower.includes('partly')) return '⛅'
-  if (lower.includes('cloud')) return '☁'
-  if (lower.includes('rain')) return '☔'
-  if (lower.includes('snow')) return '❄'
-  if (lower.includes('fog')) return '〰'
-  if (lower.includes('thunder')) return '⚡'
-  return '○'
+  return weatherConditions.find((row) => row.keywords.some((keyword) => lower.includes(keyword)))
+}
+
+export function weatherGlyph(condition: string): string {
+  return weatherConditionFor(condition)?.glyph ?? '○'
+}
+
+/**
+ * The condition as a reader sees it. A Norwegian reader gets the Norwegian name
+ * of a known condition; any other reader, and any unknown condition, keeps the
+ * text the backend sent.
+ */
+export function weatherConditionLabel(condition: string, locale = 'no'): string {
+  const text = condition.trim()
+  if (!/^(nb|nn|no)(-|$)/i.test(locale)) return text
+  return weatherConditionFor(text)?.label ?? text
 }
 
 export function requestBrowserLocation(forceRefresh = false): Promise<BrowserLocationCoordinates | null> {

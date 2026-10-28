@@ -2494,9 +2494,13 @@ struct DelegatedUserTokens {
     execution: String,
 }
 
+/// The user bearers of one turn. Every bearer carries the same `zdr` as the
+/// turn's ingress token, because the gateway refuses a mixed set
+/// (`zdr_posture_mismatch`); the caller passes the ingress posture.
 async fn signed_delegated_user_tokens(
     org_id: &str,
     user_id: &str,
+    zdr: bool,
 ) -> (wiremock::MockServer, DelegatedUserTokens) {
     let dev_bypass = std::env::var("MODEL_GATEWAY_AUTH_DEV_BYPASS").ok();
     let now = token_now();
@@ -2510,7 +2514,7 @@ async fn signed_delegated_user_tokens(
             "org_id": org_id,
             "user_id": user_id,
             "principal_type": "user",
-            "zdr": true
+            "zdr": zdr
         })
     };
     let (jwks, inference) = signed_claims_token(claims("inference-core")).await;
@@ -2587,12 +2591,24 @@ fn with_delegated_user_tokens_without_data_plane(
     ))
 }
 
+/// Delegated user bearers for a non-ZDR turn. This is the posture of the dev
+/// bypass ingress (`zdr: false`) and of a non-ZDR signed ingress.
 async fn authenticated_user_router(
     app: Router,
     org_id: &str,
     user_id: &str,
 ) -> (Router, wiremock::MockServer) {
-    let (jwks, tokens) = signed_delegated_user_tokens(org_id, user_id).await;
+    let (jwks, tokens) = signed_delegated_user_tokens(org_id, user_id, false).await;
+    (with_delegated_user_tokens(app, tokens), jwks)
+}
+
+/// Delegated user bearers for a ZDR turn, whose signed ingress carries `zdr: true`.
+async fn authenticated_zdr_user_router(
+    app: Router,
+    org_id: &str,
+    user_id: &str,
+) -> (Router, wiremock::MockServer) {
+    let (jwks, tokens) = signed_delegated_user_tokens(org_id, user_id, true).await;
     (with_delegated_user_tokens(app, tokens), jwks)
 }
 
@@ -2900,7 +2916,7 @@ async fn ai_unary_routes_cannot_downgrade_signed_zdr_posture() {
     let (state, _) = make_state(client, session_client).await;
 
     let (app, _delegated_jwks) =
-        authenticated_user_router(build_router(state, None), "org-zdr", "user-zdr").await;
+        authenticated_zdr_user_router(build_router(state, None), "org-zdr", "user-zdr").await;
     call_zdr_unary_routes(app, &token, false).await;
 
     assert_eq!(
@@ -4054,8 +4070,9 @@ async fn invoke_stream_terminalizes_prepared_run_when_grounding_bearer_is_missin
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
     let (state, _publisher) = make_state(client, session_client).await;
+    // The dev bypass ingress is the non-ZDR posture, so its bearers are too.
     let (delegated_jwks, tokens) =
-        signed_delegated_user_tokens("org_placeholder", "user_placeholder").await;
+        signed_delegated_user_tokens("org_placeholder", "user_placeholder", false).await;
     let app = with_delegated_user_tokens_without_data_plane(build_router(state, None), tokens);
 
     let req = Request::builder()
@@ -6768,7 +6785,7 @@ async fn run_note_thread_turn_capturing(
         &serde_json::json!({
             "sub": "user_placeholder", "iss": TEST_AUTH_ISSUER, "aud": "capability-core",
             "exp": now + 300, "nbf": now - 5, "org_id": "org_placeholder",
-            "user_id": "user_placeholder", "principal_type": "user", "zdr": true
+            "user_id": "user_placeholder", "principal_type": "user", "zdr": false
         }),
         &zdr_route_test_keypair().0,
     );
@@ -9825,7 +9842,7 @@ async fn run_source_bound_subscription_turn(
         &serde_json::json!({
             "sub": "user_placeholder", "iss": TEST_AUTH_ISSUER, "aud": "capability-core",
             "exp": now + 300, "nbf": now - 5, "org_id": "org_placeholder",
-            "user_id": "user_placeholder", "principal_type": "user", "zdr": true
+            "user_id": "user_placeholder", "principal_type": "user", "zdr": false
         }),
         &zdr_route_test_keypair().0,
     );
@@ -9950,7 +9967,7 @@ async fn a_subscription_refusal_during_the_source_review_is_not_blamed_on_the_dr
         &serde_json::json!({
             "sub": "user_placeholder", "iss": TEST_AUTH_ISSUER, "aud": "capability-core",
             "exp": now + 300, "nbf": now - 5, "org_id": "org_placeholder",
-            "user_id": "user_placeholder", "principal_type": "user", "zdr": true
+            "user_id": "user_placeholder", "principal_type": "user", "zdr": false
         }),
         &zdr_route_test_keypair().0,
     );
@@ -10200,7 +10217,7 @@ async fn run_note_thread_turn_with_scripted_review(
         &serde_json::json!({
             "sub": "user_placeholder", "iss": TEST_AUTH_ISSUER, "aud": "capability-core",
             "exp": now + 300, "nbf": now - 5, "org_id": "org_placeholder",
-            "user_id": "user_placeholder", "principal_type": "user", "zdr": true
+            "user_id": "user_placeholder", "principal_type": "user", "zdr": false
         }),
         &zdr_route_test_keypair().0,
     );
@@ -10579,8 +10596,12 @@ async fn signed_turn(
     let (mock_session, session) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
     let (state, _publisher) = make_state(client, session_client).await;
-    let (app, _delegated_jwks) =
-        authenticated_user_router(build_router(state, None), "org-zdr", "user-zdr").await;
+    // The delegated bearers take the same posture as the signed ingress below.
+    let (app, _delegated_jwks) = if token_zdr {
+        authenticated_zdr_user_router(build_router(state, None), "org-zdr", "user-zdr").await
+    } else {
+        authenticated_user_router(build_router(state, None), "org-zdr", "user-zdr").await
+    };
     let request = Request::builder()
         .method("POST")
         .uri(uri)
@@ -10639,11 +10660,11 @@ async fn a_zdr_token_on_the_subscription_is_refused_on_the_stream_before_any_mod
     assert_eq!(turn.status, StatusCode::OK, "{}", turn.body);
     let errors = error_frames(&turn.body);
     assert_eq!(errors.len(), 1, "{}", turn.body);
-    assert_eq!(errors[0]["code"], "zdr_connection_not_supported", "{}", turn.body);
+    assert_eq!(errors[0]["code"], "zdr_connection_not_acknowledged", "{}", turn.body);
     assert_eq!(errors[0]["retryable"], false, "nothing about waiting changes this");
     let message = errors[0]["message"].as_str().unwrap_or_default();
     assert!(
-        message.contains("not sent") && message.contains("No other model was used"),
+        message.contains("not sent to any model"),
         "the user is told what did not happen: {message}"
     );
     assert!(
@@ -10684,10 +10705,10 @@ async fn a_zdr_token_on_the_subscription_is_refused_on_the_unary_route_with_a_ty
 
     assert_eq!(turn.status, StatusCode::PRECONDITION_FAILED, "{}", turn.body);
     let body: serde_json::Value = serde_json::from_str(&turn.body).expect("a JSON body");
-    assert_eq!(body["code"], "zdr_connection_not_supported", "{body}");
-    assert_eq!(body["retryable"], false, "{body}");
+    assert_eq!(body["error"]["code"], "zdr_connection_not_acknowledged", "{body}");
+    assert_eq!(body["error"]["retryable"], false, "{body}");
     assert!(
-        body["error"].as_str().is_some_and(|message| message.contains("No other model was used")),
+        body["error"]["message"].as_str().is_some_and(|message| message.contains("not sent to any model")),
         "{body}"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0, "no model call");
@@ -10719,7 +10740,7 @@ async fn a_zdr_token_is_refused_however_the_subscription_is_named() {
         .await;
         let errors = error_frames(&turn.body);
         assert_eq!(errors.len(), 1, "{provider:?}: {}", turn.body);
-        assert_eq!(errors[0]["code"], "zdr_connection_not_supported", "{provider:?}");
+        assert_eq!(errors[0]["code"], "zdr_connection_not_acknowledged", "{provider:?}");
         assert_eq!(calls.load(Ordering::SeqCst), 0, "{provider:?}: no model call");
     }
 }
@@ -10740,7 +10761,7 @@ async fn a_zdr_token_naming_only_a_connection_is_refused_too() {
     .await;
     let errors = error_frames(&turn.body);
     assert_eq!(errors.len(), 1, "{}", turn.body);
-    assert_eq!(errors[0]["code"], "zdr_connection_not_supported", "{}", turn.body);
+    assert_eq!(errors[0]["code"], "zdr_connection_not_acknowledged", "{}", turn.body);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
@@ -10792,4 +10813,237 @@ async fn a_zdr_token_without_a_connection_route_still_takes_the_zdr_path() {
     assert_eq!(sent[0].provider_hint, "");
     assert_eq!(sent[0].subscription_connection_id, "");
     assert_eq!(managed_start_count(&turn.session), 0, "the ZDR path prepares no run");
+}
+
+/// `/v1/ai/chat` is a non-persisting unary route that user and service tokens both
+/// reach. A ZDR token that names a connection with no provider hint used to reach
+/// the ZDR chain with the connection ignored, so an attested deployment would have
+/// served the turn in place of the caller's connection. It is now refused, typed,
+/// before any model is called; a token that is not ZDR keeps its connection.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_token_naming_only_a_connection_on_ai_chat_is_refused_before_any_model_is_called() {
+    let connection_only = serde_json::json!({
+        "messages": [{ "role": "user", "content": "hi" }],
+        "model": "gpt-5.6-terra",
+        "subscription_connection_id": "conn-1",
+    });
+    let (inference, calls, _) = counting_inference();
+    let refused = signed_turn("/v1/ai/chat", true, connection_only.clone(), inference).await;
+    assert_eq!(refused.status, StatusCode::PRECONDITION_FAILED, "{}", refused.body);
+    let body: serde_json::Value = serde_json::from_str(&refused.body).expect("a JSON body");
+    assert_eq!(body["error"]["code"], "zdr_connection_not_acknowledged", "{body}");
+    assert_eq!(body["error"]["retryable"], false, "{body}");
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "no model call");
+
+    let (inference, calls, requests) = counting_inference();
+    let allowed = signed_turn("/v1/ai/chat", false, connection_only, inference).await;
+    assert_eq!(allowed.status, StatusCode::OK, "{}", allowed.body);
+    let sent = requests.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "one model call");
+    assert_eq!(sent[0].subscription_connection_id, "conn-1");
+    assert!(!sent[0].zdr, "a non-ZDR call stays non-ZDR");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+/// The stream answers a ZDR turn that asks for web search with the typed feature
+/// refusal, before any model call. Before this the browse request was dropped:
+/// the answer came back with no search and no word about it.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_stream_turn_asking_for_web_search_is_refused_with_its_feature_and_no_model_call() {
+    let (inference, calls, requests) = counting_inference();
+    let turn = signed_turn(
+        "/v1/invoke/stream",
+        true,
+        serde_json::json!({ "content": "hi", "model": "mock", "browse_web": true }),
+        inference,
+    )
+    .await;
+    assert_eq!(turn.status, StatusCode::OK, "{}", turn.body);
+    let errors = error_frames(&turn.body);
+    assert_eq!(errors.len(), 1, "{}", turn.body);
+    assert_eq!(
+        errors[0]["code"], "zdr_feature_not_supported",
+        "{}",
+        turn.body
+    );
+    assert_eq!(errors[0]["feature"], "web_search", "{}", turn.body);
+    assert_eq!(errors[0]["action"], "turn_off_feature", "{}", turn.body);
+    assert_eq!(errors[0]["retryable"], false, "{}", turn.body);
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "no model call");
+    assert!(requests.lock().unwrap().is_empty(), "nothing reached inference-core");
+}
+
+/// The unary route refuses the same kind of request with the catalogue body (412,
+/// the feature named) and makes no model call.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_unary_turn_asking_for_plan_mode_is_refused_with_a_typed_body_and_no_model_call() {
+    let (inference, calls, requests) = counting_inference();
+    let turn = signed_turn(
+        "/v1/invoke",
+        true,
+        serde_json::json!({ "content": "hi", "model": "mock", "plan_mode": true }),
+        inference,
+    )
+    .await;
+    assert_eq!(turn.status, StatusCode::PRECONDITION_FAILED, "{}", turn.body);
+    let body: serde_json::Value = serde_json::from_str(&turn.body).expect("a JSON body");
+    assert_eq!(body["error"]["code"], "zdr_feature_not_supported", "{body}");
+    assert_eq!(body["error"]["feature"], "plan_mode", "{body}");
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "no model call");
+    assert!(requests.lock().unwrap().is_empty(), "nothing reached inference-core");
+}
+
+/// A ZDR unary turn that inference-core refuses at the attestation gate keeps its
+/// typed 412 body and the frozen `zdr_unavailable` code. Before this the unary
+/// route answered that refusal with a flat 502, which a client could not match.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_unary_turn_refused_at_the_attestation_gate_keeps_its_typed_body() {
+    let (mut inference, calls, _requests) = counting_inference();
+    inference.refusal = Some(MockRefusal {
+        at: RefusalPoint::Unary,
+        status: mp_contracts::zdr_refusal::Refusal::UNAVAILABLE
+            .grpc_status(tonic::Code::FailedPrecondition),
+    });
+    let turn = signed_turn(
+        "/v1/invoke",
+        true,
+        serde_json::json!({ "content": "hi", "model": "mock" }),
+        inference,
+    )
+    .await;
+    assert_eq!(turn.status, StatusCode::PRECONDITION_FAILED, "{}", turn.body);
+    let body: serde_json::Value = serde_json::from_str(&turn.body).expect("a JSON body");
+    assert_eq!(body["error"]["code"], "zdr_unavailable", "{body}");
+    assert_eq!(body["error"]["retryable"], false, "{body}");
+    assert_eq!(body["error"]["action"], "choose_another_model", "{body}");
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "the one call reached inference-core, which refused");
+}
+
+/// A ZDR unary turn answers under the organisation's instructions, the verbosity
+/// the caller chose, and the token ceiling the caller asked for. Before this the
+/// persistence-free path sent the bare question and dropped all three.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_unary_turn_answers_under_the_instructions_verbosity_and_ceiling_it_was_given() {
+    let (inference, _, requests) = counting_inference();
+    let turn = signed_turn(
+        "/v1/invoke",
+        true,
+        serde_json::json!({
+            "content": "hi",
+            "model": "mock",
+            "org_instructions": "Answer in Norwegian.",
+            "verbosity": "concise",
+            "max_tokens": 300,
+        }),
+        inference,
+    )
+    .await;
+    assert_eq!(turn.status, StatusCode::OK, "{}", turn.body);
+    let sent = requests.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "one model call");
+    let messages = &sent[0].messages;
+    assert_eq!(messages.len(), 2, "one system message, then the user's question");
+    assert_eq!(messages[0].role, "system", "the instructions go first");
+    assert!(messages[0].content.contains("Answer in Norwegian."), "{}", messages[0].content);
+    let directive = model_gateway::verbosity::directive("concise").expect("concise has a directive");
+    assert!(messages[0].content.contains(directive), "the verbosity directive is sent");
+    assert_eq!(messages[1].role, "user");
+    assert_eq!(sent[0].max_tokens, 300, "the caller's ceiling is honored");
+}
+
+/// The same honoring on the streaming route, which the chat uses.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_stream_turn_answers_under_the_organisation_instructions() {
+    let (inference, _, requests) = counting_inference();
+    let turn = signed_turn(
+        "/v1/invoke/stream",
+        true,
+        serde_json::json!({ "content": "hi", "model": "mock", "org_instructions": "Answer in Norwegian." }),
+        inference,
+    )
+    .await;
+    assert_eq!(turn.status, StatusCode::OK, "{}", turn.body);
+    let sent = requests.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "one model call");
+    assert_eq!(sent[0].messages[0].role, "system");
+    assert!(sent[0].messages[0].content.contains("Answer in Norwegian."));
+    assert_eq!(sent[0].messages.last().map(|m| m.role.as_str()), Some("user"));
+}
+
+/// The ZDR stream answers with its provenance. The inference call asks for ZDR, and
+/// with the `usage` opt-in exactly one `usage` frame sits after the answer and before
+/// `done`: it names the answer as zero-retention and carries counts, never answer
+/// text or a cost. Without the opt-in no `usage` frame is sent at all.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_stream_turn_frames_its_usage_before_done_only_when_asked_for() {
+    let (inference, _, requests) = counting_inference();
+    let turn = signed_turn(
+        "/v1/invoke/stream",
+        true,
+        serde_json::json!({ "content": "hi", "model": "mock", "features": ["usage"] }),
+        inference,
+    )
+    .await;
+    assert_eq!(turn.status, StatusCode::OK, "{}", turn.body);
+    let sent = requests.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "one model call");
+    assert!(sent[0].zdr, "the ZDR stream asks inference-core for ZDR");
+
+    let events: Vec<&str> = turn
+        .body
+        .lines()
+        .filter_map(|line| line.strip_prefix("event: "))
+        .collect();
+    assert_eq!(
+        events.iter().filter(|name| **name == "usage").count(),
+        1,
+        "{events:?}"
+    );
+    let last_chunk = events
+        .iter()
+        .rposition(|name| *name == "chunk")
+        .expect("answer chunks");
+    let usage_at = events
+        .iter()
+        .position(|name| *name == "usage")
+        .expect("a usage frame");
+    let done_at = events
+        .iter()
+        .rposition(|name| *name == "done")
+        .expect("a done frame");
+    assert!(last_chunk < usage_at && usage_at < done_at, "{events:?}");
+
+    let usage_data = turn
+        .body
+        .lines()
+        .skip_while(|line| *line != "event: usage")
+        .find_map(|line| line.strip_prefix("data: "))
+        .expect("the usage frame carries its data");
+    let usage: serde_json::Value = serde_json::from_str(usage_data).expect("usage is JSON");
+    assert_eq!(usage["retention_class"], "zdr", "{usage}");
+    assert_eq!(usage["input_tokens"], 1, "{usage}");
+    assert_eq!(usage["output_tokens"], 1, "{usage}");
+    assert!(usage["cost_usd"].is_null(), "{usage}");
+    assert!(
+        !usage_data.contains("hello"),
+        "the answer text stays out of usage: {usage}"
+    );
+
+    let (inference, _, _) = counting_inference();
+    let plain = signed_turn(
+        "/v1/invoke/stream",
+        true,
+        serde_json::json!({ "content": "hi", "model": "mock" }),
+        inference,
+    )
+    .await;
+    assert_eq!(plain.status, StatusCode::OK, "{}", plain.body);
+    assert!(!plain.body.contains("event: usage"), "{}", plain.body);
 }

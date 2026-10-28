@@ -149,6 +149,42 @@ legacy ports. Static credentials cannot perform delegated-user/grant mutation.
 Signed v2 Control read delegation is implemented/tested, but this remains source
 evidence rather than functional runtime acceptance.
 
+## 2026-10-11 Quarry option B: web rerank route (POST /v1/rerank), built dark
+
+`POST /v1/rerank` reranks candidates that a service supplies, through the paid Azure
+Cohere deployment the engine already uses. Only `service:quarry-edge` with scope
+`data:rerank` may call it. It is built and switched off: `WEB_RERANK_ENABLED=0`,
+`WEB_RERANK_PROCESSOR_APPROVED=false` and the provider capacity is 0, so no provider call
+can happen until the owner turns the route on. The runbook is
+[`docs/web-rerank-v1.md`](docs/web-rerank-v1.md).
+
+In the tree now: the route (`rerank_api`), the service route grant, the compose switches
+(retrieval-engine block), the OpenAPI contract (`/v1/rerank`), the matrix rows for the
+service principal, the isolated-stack quarry-edge row generated from the committed
+principal policy, the isolated MVP runner's service bearer (the fixture's `mint-service`, with
+`data:read` only), and the read-only pre-flight `scripts/qb-preflight.sh`.
+
+ZDR: no provider is attested for ZDR content, so every call whose effective ZDR is on is
+skipped (`zdr`). The attestation record belongs to the shared egress-attestation module
+(Z-41); this route has no attestation file of its own.
+
+Proven by contract tests (run, no live call): the compose defaults equal the code defaults;
+the OpenAPI parses and names the required `zdr_mode`; the matrix self-test encodes the five
+service rows (401, 403, 403, 403, 200); the isolated MVP runner's mint line and its hand-off to
+the matrix are present (checked statically), and the fixture's service token from that same
+mint command verifies under the fixture key with the quarry-edge claims and exactly
+`data:read`; the isolated registry row equals the committed row; the pre-flight offline
+checks pass.
+
+Not proven: no live run has happened. The live proofs (the matrix against an isolated
+project, one paid rerank call, a ZDR skip with zero provider calls) belong to the
+orchestrator. The real Auth Core mint of the quarry-edge token is exercised nowhere: the
+isolated real-authority stack has no org-core, so its directory-bound mint cannot succeed
+there. Open items, recorded in the runbook: no price sheet for Cohere rerank, no named
+quota owner for the shared deployment, and Quarry does not yet carry its
+`allow_third_party_processing` flag onto the search path (Quarry T09). The rerank event is schema version 1,
+and cost-core receives only version 2 usage rows, so a paid call is not yet in the cost-core ledger.
+
 ## 2026-10-06 Contextual retrieval: decided, partly in the tree, nothing deployed
 
 Contextual retrieval (a model-written situating context stored beside each chunk

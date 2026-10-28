@@ -1,0 +1,26 @@
+/*
+ * Interactive demo (stage 04): hides what a visitor must not reach from the real
+ * shell. Everything is scoped under the demo root class `.verevon-demo`, which
+ * src/demo/product-demo/main.tsx sets on <html>, so the normal product is unchanged.
+ * Selectors were checked against the source markup:
+ *  - .feedback-widget: FeedbackWidget.tsx («Meld friksjon»), rendered by CoreShell.tsx
+ *  - .chat-appearance-preview: ChatAppearancePreview.tsx («Utseende»). Development
+ *    builds only, so the demo build never shows it; the rule is a guard.
+ *  - «Språk» in the More panel: the Languages button in CoreNavbarMore.tsx (switches to English)
+ *  - «Språk» in the navbar: the Languages button in CoreNavbar.tsx, only in the non-refined
+ *    navigation branch, which the demo never takes; the rule is a guard.
+ *  - «Logg ut»: the LogOut item in CoreNavbarPanels.tsx (would clear the session)
+ *  - .session-loading__label: the loading label; the demo's own label is in DemoApp.tsx
+ */
+
+.verevon-demo .feedback-widget,
+.verevon-demo .chat-appearance-preview,
+.verevon-demo .core-navbar-more__panel > button:has(> .lucide-languages),
+.verevon-demo button:has(> .core-navbar__language),
+.verevon-demo .core-navbar-panel .verevon-menu-item:has(> .lucide-log-out) {
+  display: none !important;
+}
+
+.verevon-demo .session-loading__label {
+  visibility: hidden;
+}

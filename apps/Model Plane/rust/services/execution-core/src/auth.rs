@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
+use mp_contracts::retention::{
+    resolve_turn, ClaimsView, Resolution, RouteView, WaiverView, WAIVER_CONTRACT_VERSION,
+};
 use serde::Deserialize;
 use tokio::sync::{Mutex, RwLock};
 use tonic::{Request, Status};
@@ -76,6 +79,54 @@ struct Claims {
     #[serde(default)]
     scopes: Vec<String>,
     zdr: bool,
+    /// `org_zdr`: `true` when the caller's org is Zero Data Retention. Absent on
+    /// service tokens. Only a waiver reads it, and only as `Some(true)`.
+    #[serde(default)]
+    org_zdr: Option<bool>,
+    /// `zdr_waiver`: present only on a persistent user token of a ZDR org, bound
+    /// to one connection. Parsed and checked by [`parse_zdr_waiver`].
+    #[serde(default)]
+    zdr_waiver: Option<serde_json::Value>,
+}
+
+/// The connection-bound waiver a persistent user token of a ZDR org carries (Z-18).
+///
+/// Auth Core stamps it only when the org is ZDR and one user-owned connection that
+/// cannot give zero retention was acknowledged for the turn. It is read from the
+/// signed `zdr_waiver` claim, parsed and checked by the shared resolver
+/// (`mp_contracts::retention`), and is never built from a request field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ZdrWaiver {
+    version: u32,
+    provider: String,
+    connection_id: String,
+    ack_id: String,
+}
+
+impl ZdrWaiver {
+    /// The waiver contract version the token was minted under.
+    #[must_use]
+    pub const fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// The canonical provider the waiver binds.
+    #[must_use]
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// The one user connection the waiver binds.
+    #[must_use]
+    pub fn connection_id(&self) -> &str {
+        &self.connection_id
+    }
+
+    /// The acknowledgement the waiver rests on.
+    #[must_use]
+    pub fn ack_id(&self) -> &str {
+        &self.ack_id
+    }
 }
 
 /// Verified caller identity. The Execution Core ingress credential is never
@@ -85,6 +136,12 @@ pub struct AuthenticatedUser {
     pub org_id: String,
     pub user_id: String,
     pub zdr: bool,
+    /// The `org_zdr` claim: `Some(true)` when the caller's org is Zero Data
+    /// Retention, `None` when the token does not say (Z-18).
+    pub org_zdr: Option<bool>,
+    /// The waiver the token carries, when it carries one (Z-18). A run's route
+    /// and every delegated bearer are judged against it.
+    pub zdr_waiver: Option<ZdrWaiver>,
 }
 
 /// Verified service identity for the dedicated scheduled-step ingress.
@@ -144,9 +201,11 @@ impl DelegatedDataPlaneBearer {
     }
 }
 
-/// Opaque delegated session-core credential. Execution Core never treats it
-/// as local authority; it only forwards it to session-core, which independently
-/// verifies `aud=session-core` and pins resource ownership. Debug is redacted.
+/// Opaque delegated session-core credential. Execution Core does not treat it
+/// as local authority: `bind_session_bearer` checks its audience and that its
+/// retention posture is the caller's, then it is forwarded to session-core, which
+/// independently verifies `aud=session-core` and pins resource ownership. Debug
+/// is redacted.
 #[derive(Clone)]
 pub struct DelegatedSessionBearer(Arc<str>);
 
@@ -258,6 +317,8 @@ impl fmt::Debug for AuthenticatedUser {
             .field("org_id", &self.org_id)
             .field("user_id", &self.user_id)
             .field("zdr", &self.zdr)
+            .field("org_zdr", &self.org_zdr)
+            .field("zdr_waiver", &self.zdr_waiver.is_some())
             .finish()
     }
 }
@@ -269,6 +330,8 @@ impl AuthenticatedUser {
             org_id: org_id.to_owned(),
             user_id: user_id.to_owned(),
             zdr: false,
+            org_zdr: None,
+            zdr_waiver: None,
         }
     }
 
@@ -278,6 +341,48 @@ impl AuthenticatedUser {
             org_id: org_id.to_owned(),
             user_id: user_id.to_owned(),
             zdr,
+            org_zdr: None,
+            zdr_waiver: None,
+        }
+    }
+
+    /// A persistent caller of a ZDR org, bound to one connection by a waiver
+    /// (Z-18). The waiver is the one Auth Core stamps for that connection.
+    #[cfg(test)]
+    pub(crate) fn for_test_with_waiver(
+        org_id: &str,
+        user_id: &str,
+        connection_id: &str,
+        ack_id: &str,
+    ) -> Self {
+        Self {
+            org_id: org_id.to_owned(),
+            user_id: user_id.to_owned(),
+            zdr: false,
+            org_zdr: Some(true),
+            zdr_waiver: Some(ZdrWaiver {
+                version: mp_contracts::retention::WAIVER_CONTRACT_VERSION,
+                provider: mp_contracts::agentic_subscription::PROVIDER_ID.to_owned(),
+                connection_id: connection_id.to_owned(),
+                ack_id: ack_id.to_owned(),
+            }),
+        }
+    }
+
+    /// This caller's posture as the shared retention resolver reads it (Z-18).
+    #[must_use]
+    pub(crate) fn retention_claims(&self) -> mp_contracts::retention::ClaimsView<'_> {
+        mp_contracts::retention::ClaimsView {
+            zdr: self.zdr,
+            org_zdr: self.org_zdr,
+            waiver: self
+                .zdr_waiver
+                .as_ref()
+                .map(|waiver| mp_contracts::retention::WaiverView {
+                    version: waiver.version,
+                    provider: &waiver.provider,
+                    connection: &waiver.connection_id,
+                }),
         }
     }
 
@@ -426,13 +531,14 @@ impl JwtVerifier {
     ) -> Result<DelegatedInferenceBearer, Status> {
         let token = extract_metadata_bearer(request, "x-inference-authorization")?;
         let delegated = self.verify_user_token(token, "inference-core").await?;
-        if delegated.org_id != caller.org_id
-            || delegated.user_id != caller.user_id
-            || delegated.zdr != caller.zdr
-        {
+        if delegated.org_id != caller.org_id || delegated.user_id != caller.user_id {
             return Err(Status::permission_denied(
-                "delegated inference identity or retention posture does not match caller",
+                "delegated inference identity does not match caller",
             ));
+        }
+        if delegated.zdr != caller.zdr || delegated.zdr_waiver != caller.zdr_waiver {
+            return Err(mp_contracts::zdr_refusal::Refusal::POSTURE_MISMATCH
+                .grpc_status(tonic::Code::PermissionDenied));
         }
         Ok(DelegatedInferenceBearer(Arc::from(token)))
     }
@@ -453,13 +559,14 @@ impl JwtVerifier {
     ) -> Result<DelegatedBrowserBearer, Status> {
         let token = extract_metadata_bearer(request, "x-browser-authorization")?;
         let delegated = self.verify_user_token(token, "browser-broker").await?;
-        if delegated.org_id != caller.org_id
-            || delegated.user_id != caller.user_id
-            || delegated.zdr != caller.zdr
-        {
+        if delegated.org_id != caller.org_id || delegated.user_id != caller.user_id {
             return Err(Status::permission_denied(
-                "delegated browser identity or retention posture does not match caller",
+                "delegated browser identity does not match caller",
             ));
+        }
+        if delegated.zdr != caller.zdr || delegated.zdr_waiver != caller.zdr_waiver {
+            return Err(mp_contracts::zdr_refusal::Refusal::POSTURE_MISMATCH
+                .grpc_status(tonic::Code::PermissionDenied));
         }
         Ok(DelegatedBrowserBearer(Arc::from(token)))
     }
@@ -479,13 +586,14 @@ impl JwtVerifier {
     ) -> Result<DelegatedDataPlaneBearer, Status> {
         let token = extract_metadata_bearer(request, "x-data-plane-authorization")?;
         let delegated = self.verify_user_token(token, "data-plane").await?;
-        if delegated.org_id != caller.org_id
-            || delegated.user_id != caller.user_id
-            || delegated.zdr != caller.zdr
-        {
+        if delegated.org_id != caller.org_id || delegated.user_id != caller.user_id {
             return Err(Status::permission_denied(
-                "delegated Data Plane identity or retention posture does not match caller",
+                "delegated Data Plane identity does not match caller",
             ));
+        }
+        if delegated.zdr != caller.zdr || delegated.zdr_waiver != caller.zdr_waiver {
+            return Err(mp_contracts::zdr_refusal::Refusal::POSTURE_MISMATCH
+                .grpc_status(tonic::Code::PermissionDenied));
         }
         Ok(DelegatedDataPlaneBearer(Arc::from(token)))
     }
@@ -508,15 +616,46 @@ impl JwtVerifier {
     ) -> Result<DelegatedSandboxBearer, Status> {
         let token = extract_metadata_bearer(request, "x-sandbox-authorization")?;
         let delegated = self.verify_user_token(token, "sandbox-manager").await?;
-        if delegated.org_id != caller.org_id
-            || delegated.user_id != caller.user_id
-            || delegated.zdr != caller.zdr
-        {
+        if delegated.org_id != caller.org_id || delegated.user_id != caller.user_id {
             return Err(Status::permission_denied(
-                "delegated sandbox-manager identity or retention posture does not match caller",
+                "delegated sandbox-manager identity does not match caller",
             ));
         }
+        if delegated.zdr != caller.zdr || delegated.zdr_waiver != caller.zdr_waiver {
+            return Err(mp_contracts::zdr_refusal::Refusal::POSTURE_MISMATCH
+                .grpc_status(tonic::Code::PermissionDenied));
+        }
         Ok(DelegatedSandboxBearer(Arc::from(token)))
+    }
+
+    /// Bind the session-core bearer of a run to its caller (Z-18). Every user
+    /// bearer of one turn carries the same retention posture (matrix rule 1), and
+    /// the other delegated bearers are compared with the caller in this module.
+    /// Session-core judges its own bearer only, so without this check a run could
+    /// be recorded under one posture and served under another.
+    ///
+    /// # Errors
+    /// Returns an authentication or authorization status for a missing, invalid,
+    /// wrong-audience or identity-mismatched bearer, or one whose retention posture
+    /// or waiver differs from the caller's.
+    #[allow(clippy::result_large_err)]
+    pub async fn bind_session_bearer(
+        &self,
+        bearer: &DelegatedSessionBearer,
+        caller: &AuthenticatedUser,
+    ) -> Result<(), Status> {
+        let token = bearer.as_str();
+        let delegated = self.verify_user_token(token, "session-core").await?;
+        if delegated.org_id != caller.org_id || delegated.user_id != caller.user_id {
+            return Err(Status::permission_denied(
+                "delegated session identity does not match caller",
+            ));
+        }
+        if delegated.zdr != caller.zdr || delegated.zdr_waiver != caller.zdr_waiver {
+            return Err(mp_contracts::zdr_refusal::Refusal::POSTURE_MISMATCH
+                .grpc_status(tonic::Code::PermissionDenied));
+        }
+        Ok(())
     }
 
     async fn verify_user_token(
@@ -662,6 +801,78 @@ fn extract_metadata_bearer<'a, T>(
         .ok_or_else(|| Status::unauthenticated("verified delegated credential required"))
 }
 
+/// The wire shape of the `zdr_waiver` claim. Extra fields Auth Core may add (a
+/// digest, a decision id) are ignored; these four are required.
+#[derive(Debug, Deserialize)]
+struct WaiverClaim {
+    version: u32,
+    provider: String,
+    connection: String,
+    ack_id: String,
+}
+
+/// Parse and check the `zdr_waiver` claim of one verified user token (Z-18).
+///
+/// Absent or `null` is no waiver. Anything else must be a waiver the shared
+/// resolver accepts: a persistent token (`zdr` false) of a ZDR org (`org_zdr`
+/// true), bound to one provider and one connection, at the current contract
+/// version, with a non-empty acknowledgement id. A malformed claim, an unknown
+/// version or a waiver on a ZDR token is refused, never read as "no waiver": a
+/// token that silently dropped its waiver would be served as an ordinary turn of
+/// a ZDR org. session-core's `parse_zdr_waiver` judges the same claim the same way.
+#[allow(clippy::result_large_err)]
+fn parse_zdr_waiver(
+    zdr: bool,
+    org_zdr: Option<bool>,
+    claim: Option<&serde_json::Value>,
+) -> Result<Option<ZdrWaiver>, Status> {
+    let refused = || Status::unauthenticated("invalid user credential");
+    let Some(claim) = claim.filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let waiver: WaiverClaim = serde_json::from_value(claim.clone()).map_err(|_| refused())?;
+    if zdr || org_zdr != Some(true) {
+        return Err(refused());
+    }
+    // The shared resolver is the one definition of a valid waiver: resolving the
+    // waiver's own route must yield a waiver for exactly that connection.
+    let resolution = resolve_turn(
+        &[ClaimsView {
+            zdr: false,
+            org_zdr: Some(true),
+            waiver: Some(WaiverView {
+                version: waiver.version,
+                provider: waiver.provider.as_str(),
+                connection: waiver.connection.as_str(),
+            }),
+        }],
+        &RouteView {
+            provider: waiver.provider.as_str(),
+            connection: Some(waiver.connection.as_str()),
+            explicit_zdr: false,
+        },
+    );
+    if !matches!(resolution, Resolution::Waived { .. }) || waiver.version != WAIVER_CONTRACT_VERSION
+    {
+        return Err(refused());
+    }
+    for id in [&waiver.connection, &waiver.ack_id] {
+        if id.is_empty()
+            || id.len() > 128
+            || id.trim() != id.as_str()
+            || id.chars().any(char::is_control)
+        {
+            return Err(refused());
+        }
+    }
+    Ok(Some(ZdrWaiver {
+        version: waiver.version,
+        provider: waiver.provider,
+        connection_id: waiver.connection,
+        ack_id: waiver.ack_id,
+    }))
+}
+
 #[allow(clippy::result_large_err)]
 fn validate_user_claims(claims: Claims) -> Result<AuthenticatedUser, Status> {
     let is_user = claims.principal_type.as_deref().unwrap_or("user") == "user";
@@ -676,10 +887,18 @@ fn validate_user_claims(claims: Claims) -> Result<AuthenticatedUser, Status> {
     {
         return Err(Status::unauthenticated("invalid user credential"));
     }
+    let zdr_waiver = parse_zdr_waiver(claims.zdr, claims.org_zdr, claims.zdr_waiver.as_ref())?;
+    // The matrix's rule 3 (`e_org_zdr_without_waiver_is_not_persistent`): a
+    // persistent token of a ZDR org is served only under its waiver.
+    if !claims.zdr && claims.org_zdr == Some(true) && zdr_waiver.is_none() {
+        return Err(Status::unauthenticated("invalid user credential"));
+    }
     Ok(AuthenticatedUser {
         org_id: claims.org_id,
         user_id: claims.user_id,
         zdr: claims.zdr,
+        org_zdr: claims.org_zdr,
+        zdr_waiver,
     })
 }
 
@@ -699,6 +918,12 @@ fn validate_service_claims(claims: Claims) -> Result<AuthenticatedService, Statu
             .scopes
             .iter()
             .any(|scope| scope.is_empty() || scope.len() > 128 || scope.trim() != scope)
+        // A waiver is a decision about one human's connection: a service
+        // credential never carries one, whatever else it claims (Z-18).
+        || claims
+            .zdr_waiver
+            .as_ref()
+            .is_some_and(|waiver| !waiver.is_null())
     {
         return Err(Status::unauthenticated("invalid service credential"));
     }
@@ -1409,5 +1634,365 @@ mod tests {
         assert!(results.into_iter().all(|result| {
             result.expect_err("unknown key must fail").code() == tonic::Code::Unauthenticated
         }));
+    }
+
+    /// The claims of a persistent user token of a ZDR org, bound to one connection
+    /// by a waiver (Z-18). The audience is the one the test presents it for.
+    fn waived_claims(aud: &str) -> Value {
+        let mut value = claims();
+        value["aud"] = json!(aud);
+        value["zdr"] = json!(false);
+        value["org_zdr"] = json!(true);
+        value["zdr_waiver"] = json!({
+            "version": 1,
+            "provider": "openai-codex-subscription",
+            "connection": "conn-1",
+            "ack_id": "ack-1",
+        });
+        value
+    }
+
+    fn with_bearer(header: &'static str, token: &str) -> Request<()> {
+        let mut request = Request::new(());
+        request
+            .metadata_mut()
+            .insert(header, format!("Bearer {token}").parse().expect("metadata"));
+        request
+    }
+
+    #[tokio::test]
+    async fn a_zdr_waiver_is_read_from_a_persistent_token_of_a_zdr_org() {
+        let verifier = verifier("key-waiver").await;
+        let token = sign(&waived_claims("execution-core"), "key-waiver");
+        let user = verifier
+            .authenticate(&authenticated_request(&token))
+            .await
+            .expect("a waiver the matrix allows verifies");
+        assert!(!user.zdr, "a waiver rides a persistent token");
+        assert_eq!(user.org_zdr, Some(true));
+        let waiver = user.zdr_waiver.as_ref().expect("the waiver is carried");
+        assert_eq!(waiver.version(), 1);
+        assert_eq!(waiver.provider(), "openai-codex-subscription");
+        assert_eq!(waiver.connection_id(), "conn-1");
+        assert_eq!(waiver.ack_id(), "ack-1");
+        assert!(!format!("{user:?}").contains(&token));
+    }
+
+    /// Every waiver the matrix does not allow is refused, never read as "no
+    /// waiver": a token that silently dropped its waiver would be served as an
+    /// ordinary persistent turn of a ZDR org (`e_org_zdr_without_waiver_is_not_persistent`).
+    #[tokio::test]
+    async fn malformed_or_misplaced_zdr_waivers_are_refused_not_dropped() {
+        let verifier = verifier("key-waiver-refused").await;
+        let mut cases: Vec<(&str, Value)> = Vec::new();
+        cases.push(("unknown waiver version", {
+            let mut value = waived_claims("execution-core");
+            value["zdr_waiver"]["version"] = json!(2);
+            value
+        }));
+        cases.push(("a provider the waiver does not bind", {
+            let mut value = waived_claims("execution-core");
+            value["zdr_waiver"]["provider"] = json!("azure-openai");
+            value
+        }));
+        cases.push(("an empty connection", {
+            let mut value = waived_claims("execution-core");
+            value["zdr_waiver"]["connection"] = json!("");
+            value
+        }));
+        cases.push(("a padded connection", {
+            let mut value = waived_claims("execution-core");
+            value["zdr_waiver"]["connection"] = json!(" conn-1 ");
+            value
+        }));
+        cases.push(("a blank acknowledgement", {
+            let mut value = waived_claims("execution-core");
+            value["zdr_waiver"]["ack_id"] = json!("  ");
+            value
+        }));
+        cases.push(("a waiver that is not an object", {
+            let mut value = waived_claims("execution-core");
+            value["zdr_waiver"] = json!("conn-1");
+            value
+        }));
+        cases.push(("a waiver on a ZDR token", {
+            let mut value = waived_claims("execution-core");
+            value["zdr"] = json!(true);
+            value
+        }));
+        cases.push(("a waiver in an org that is not ZDR", {
+            let mut value = waived_claims("execution-core");
+            value["org_zdr"] = json!(false);
+            value
+        }));
+        cases.push(("a waiver with no org_zdr claim", {
+            let mut value = waived_claims("execution-core");
+            value.as_object_mut().expect("object").remove("org_zdr");
+            value
+        }));
+        cases.push(("a persistent token of a ZDR org with no waiver", {
+            let mut value = waived_claims("execution-core");
+            value.as_object_mut().expect("object").remove("zdr_waiver");
+            value
+        }));
+        cases.push(("a malformed waiver in an org that is not ZDR", {
+            let mut value = waived_claims("execution-core");
+            value["org_zdr"] = json!(false);
+            value["zdr_waiver"] = json!("conn-1");
+            value
+        }));
+        for (label, value) in cases {
+            let token = sign(&value, "key-waiver-refused");
+            assert_eq!(
+                verifier
+                    .authenticate(&authenticated_request(&token))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::Unauthenticated,
+                "{label}"
+            );
+        }
+    }
+
+    /// A waiver is a decision about one human's connection: a service credential
+    /// never carries one, whatever else it claims.
+    #[tokio::test]
+    async fn a_waiver_never_rides_a_service_credential() {
+        let verifier = verifier("key-waiver-service").await;
+        let now = now();
+        let token = sign(
+            &json!({
+                "sub": "service:orchestrator-core",
+                "iss": "auth-core",
+                "aud": "execution-core",
+                "exp": now + 3600,
+                "nbf": now - 5,
+                "org_id": "org-1",
+                "service_id": "service:orchestrator-core",
+                "principal_type": "service",
+                "scopes": ["model:schedule:step"],
+                "zdr": false,
+                "org_zdr": true,
+                "zdr_waiver": {
+                    "version": 1,
+                    "provider": "openai-codex-subscription",
+                    "connection": "conn-1",
+                    "ack_id": "ack-1",
+                },
+            }),
+            "key-waiver-service",
+        );
+        assert_eq!(
+            verifier
+                .authenticate_scheduled_step(&authenticated_request(&token))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+    }
+
+    /// Every delegated bearer of a run carries the caller's own waiver. A bearer
+    /// for another connection, or a persistent bearer with no waiver, is a
+    /// posture mismatch on every audience (`e_bearers_waived_for_different_connections`
+    /// and the mixed-set rows of the matrix).
+    #[tokio::test]
+    async fn delegated_bearers_must_carry_the_same_waiver_as_the_caller() {
+        let verifier = verifier("key-waiver-delegated").await;
+        let caller = verifier
+            .authenticate(&authenticated_request(&sign(
+                &waived_claims("execution-core"),
+                "key-waiver-delegated",
+            )))
+            .await
+            .expect("the waived caller verifies");
+
+        let same_for = |aud: &str| sign(&waived_claims(aud), "key-waiver-delegated");
+        let other_for = |aud: &str| {
+            let mut value = waived_claims(aud);
+            value["zdr_waiver"]["connection"] = json!("conn-2");
+            sign(&value, "key-waiver-delegated")
+        };
+        let bare_for = |aud: &str| {
+            let mut value = claims();
+            value["aud"] = json!(aud);
+            value["zdr"] = json!(false);
+            sign(&value, "key-waiver-delegated")
+        };
+
+        // Inference.
+        verifier
+            .authenticate_delegated_inference(
+                &with_bearer("x-inference-authorization", &same_for("inference-core")),
+                &caller,
+            )
+            .await
+            .expect("the same waiver is accepted");
+        for token in [other_for("inference-core"), bare_for("inference-core")] {
+            assert_eq!(
+                verifier
+                    .authenticate_delegated_inference(
+                        &with_bearer("x-inference-authorization", &token),
+                        &caller
+                    )
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::PermissionDenied,
+                "inference"
+            );
+        }
+        // Browser broker.
+        verifier
+            .authenticate_delegated_browser(
+                &with_bearer("x-browser-authorization", &same_for("browser-broker")),
+                &caller,
+            )
+            .await
+            .expect("the same waiver is accepted");
+        for token in [other_for("browser-broker"), bare_for("browser-broker")] {
+            assert_eq!(
+                verifier
+                    .authenticate_delegated_browser(
+                        &with_bearer("x-browser-authorization", &token),
+                        &caller
+                    )
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::PermissionDenied,
+                "browser"
+            );
+        }
+        // Data Plane.
+        verifier
+            .authenticate_delegated_data_plane(
+                &with_bearer("x-data-plane-authorization", &same_for("data-plane")),
+                &caller,
+            )
+            .await
+            .expect("the same waiver is accepted");
+        for token in [other_for("data-plane"), bare_for("data-plane")] {
+            assert_eq!(
+                verifier
+                    .authenticate_delegated_data_plane(
+                        &with_bearer("x-data-plane-authorization", &token),
+                        &caller
+                    )
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::PermissionDenied,
+                "data-plane"
+            );
+        }
+        // Sandbox manager.
+        verifier
+            .authenticate_delegated_sandbox_manager(
+                &with_bearer("x-sandbox-authorization", &same_for("sandbox-manager")),
+                &caller,
+            )
+            .await
+            .expect("the same waiver is accepted");
+        for token in [other_for("sandbox-manager"), bare_for("sandbox-manager")] {
+            assert_eq!(
+                verifier
+                    .authenticate_delegated_sandbox_manager(
+                        &with_bearer("x-sandbox-authorization", &token),
+                        &caller
+                    )
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::PermissionDenied,
+                "sandbox"
+            );
+        }
+    }
+
+    async fn bind_session(
+        verifier: &JwtVerifier,
+        token: &str,
+        caller: &AuthenticatedUser,
+    ) -> Result<(), Status> {
+        let bearer = DelegatedSessionBearer(Arc::from(token));
+        verifier.bind_session_bearer(&bearer, caller).await
+    }
+
+    /// The session bearer of a run is a user bearer of the same turn. It must carry
+    /// the caller's own zdr and waiver, and its audience must be session-core, as the
+    /// matrix requires of every bearer of a turn (`e_mixed_waiver_and_zdr_bearers`,
+    /// `e_bearers_waived_for_different_connections`).
+    #[tokio::test]
+    async fn session_bearer_must_carry_the_same_waiver_as_the_caller() {
+        let verifier = verifier("key-waiver-session").await;
+        let caller = verifier
+            .authenticate(&authenticated_request(&sign(
+                &waived_claims("execution-core"),
+                "key-waiver-session",
+            )))
+            .await
+            .expect("the waived caller verifies");
+
+        let same = sign(&waived_claims("session-core"), "key-waiver-session");
+        bind_session(&verifier, &same, &caller)
+            .await
+            .expect("a session bearer with the same waiver is accepted");
+
+        let mut other = waived_claims("session-core");
+        other["zdr_waiver"]["connection"] = json!("conn-2");
+        let mut zdr = waived_claims("session-core");
+        zdr["zdr"] = json!(true);
+        zdr.as_object_mut().expect("object").remove("zdr_waiver");
+        let mut bare = claims();
+        bare["aud"] = json!("session-core");
+        bare["zdr"] = json!(false);
+        for (label, value) in [
+            ("another connection's waiver", other),
+            ("a ZDR session", zdr),
+            ("no waiver", bare),
+        ] {
+            let token = sign(&value, "key-waiver-session");
+            assert_eq!(
+                bind_session(&verifier, &token, &caller)
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::PermissionDenied,
+                "{label}"
+            );
+        }
+
+        // A persistent caller with no waiver is bound by the zdr claim alone.
+        let mut plain = claims();
+        plain["aud"] = json!("execution-core");
+        plain["zdr"] = json!(false);
+        let plain_caller = verifier
+            .authenticate(&authenticated_request(&sign(&plain, "key-waiver-session")))
+            .await
+            .expect("the persistent caller verifies");
+        let mut zdr_session = claims();
+        zdr_session["aud"] = json!("session-core");
+        zdr_session["zdr"] = json!(true);
+        let zdr_token = sign(&zdr_session, "key-waiver-session");
+        assert_eq!(
+            bind_session(&verifier, &zdr_token, &plain_caller)
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied,
+            "a ZDR session bearer is not a persistent caller's bearer"
+        );
+
+        let token = sign(&waived_claims("execution-core"), "key-waiver-session");
+        assert_eq!(
+            bind_session(&verifier, &token, &caller)
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated,
+            "a bearer minted for another audience is not a session bearer"
+        );
     }
 }

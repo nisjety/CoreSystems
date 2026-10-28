@@ -7,6 +7,7 @@ import { getSession } from '@/shared/session/session-store'
 
 const DashboardPage = lazy(() => import('@/features/dashboard/components/DashboardPage'))
 const ChatPage = lazy(() => import('@/features/chat/components/ChatPage'))
+const ChatUtilityPage = lazy(() => import('@/features/chat/components/ChatUtilityPage'))
 const StudioPage = lazy(() => import('@/features/studio/components/StudioPage'))
 const InboxPage = lazy(() => import('@/features/inbox/components/InboxPage'))
 const TicketingPage = lazy(() => import('@/features/tickets/components/TicketingPage'))
@@ -34,6 +35,12 @@ const OnboardingPage = lazy(() => import('@/features/onboarding/components/Onboa
 const AccountSettingsPage = lazy(() => import('@/features/settings/components/AccountSettingsPage'))
 const SettingsPage = lazy(() => import('@/features/settings/components/SettingsPage'))
 const NotFoundPage = lazy(() => import('@/app/routes/NotFoundPage'))
+
+// Product-scene route (plans/product-scenes/CONTRACT.md). Exists only when
+// VITE_SCENE_MODE=1; a normal build has no /scene route and no src/demo chunk.
+const sceneRoutes = import.meta.env.VITE_SCENE_MODE === '1'
+  ? [{ path: '/scene/:id', component: lazy(() => import('@/demo/ScenePage')) }]
+  : []
 
 function SessionLoading() {
   return (
@@ -168,6 +175,9 @@ export const Router = createRouter({
         { path: '/', component: DashboardPage },
         { path: '/dashboard', component: DashboardPage },
         { path: '/chat', component: ChatPage },
+        { path: '/chat/findings', component: () => <ChatUtilityPage section="findings" /> },
+        { path: '/chat/reports', component: () => <ChatUtilityPage section="reports" /> },
+        { path: '/chat/routines', component: () => <ChatUtilityPage section="routines" /> },
         { path: '/spaces', component: SpacesIndexPage },
         { path: '/spaces/:spaceId', component: SpacePage },
         { path: '/studio', component: () => <StudioPage section="canvas" /> },
@@ -229,6 +239,7 @@ export const Router = createRouter({
         },
       ],
     },
+    ...sceneRoutes,
     { path: '*404', component: NotFoundPage },
   ],
   explicitLinks: true,

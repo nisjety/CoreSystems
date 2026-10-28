@@ -281,6 +281,79 @@ type ConnectionZDRStore interface {
 	// with a closed reason and returns the rows it revoked (none when there was nothing active).
 	// A revoked row is final.
 	RevokeConnectionZDRAcknowledgements(ctx context.Context, connectionID, reason string, at time.Time) ([]ConnectionZDRAcknowledgement, error)
+	// PurgeOrganizationConnectionZDR erases an organisation's ZDR records and acknowledgements (the
+	// organisation purge). It is the only operation that deletes ledger rows; a second run finds
+	// nothing and removes nothing.
+	PurgeOrganizationConnectionZDR(ctx context.Context, organizationID string) (ConnectionZDRPurgeResult, error)
+	// ListOrganizationConnectionZDRAcknowledgements returns the organisation's ledger for its admins:
+	// the newest limit rows (no more than limit, at least one) and the counts over all rows.
+	ListOrganizationConnectionZDRAcknowledgements(ctx context.Context, organizationID string, limit int) (ConnectionZDRAcknowledgementList, error)
+}
+
+// ConnectionZDRPurgeResult counts what an organisation purge erased.
+type ConnectionZDRPurgeResult struct {
+	Records          int
+	Acknowledgements int
+}
+
+// ConnectionZDRAcknowledgementList is one organisation's ledger as its admins see it.
+type ConnectionZDRAcknowledgementList struct {
+	// Items are the newest rows, up to the requested limit.
+	Items []ConnectionZDRAcknowledgement
+	// Active and Revoked count every row of the organisation, not only the ones in Items.
+	Active  int
+	Revoked int
+}
+
+// ZDRAcknowledgementRevokedEventType is the audit event written for each acknowledgement a
+// revocation takes out of force (the owner's revoke, a removed connection, a purge does not
+// audit: it erases).
+const ZDRAcknowledgementRevokedEventType = "subscription_connection.zdr_acknowledgement_revoked"
+
+// RevokeAcknowledgementsOnRemoval revokes every active acknowledgement of a connection that is
+// being removed (reason connection_removed) and writes one content-free audit row per revoked
+// acknowledgement, all inside the caller's transaction. Every path that marks a model connection
+// deleted calls it in that same transaction, so a removed connection never keeps a live
+// acknowledgement and the removal and its audit rows commit or roll back together. It returns
+// the audit rows it wrote.
+func RevokeAcknowledgementsOnRemoval(ctx context.Context, tx AuditTransaction, connectionID string, at time.Time) ([]AuditEvent, error) {
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	revoked, err := tx.RevokeConnectionZDRAcknowledgements(ctx, connectionID, ZDRRevokeConnectionRemoved, at)
+	if err != nil {
+		return nil, fmt.Errorf("revoke acknowledgements of removed connection: %w", err)
+	}
+	events := make([]AuditEvent, 0, len(revoked))
+	for _, ack := range revoked {
+		event := ZDRAcknowledgementRevokedAuditEvent(ack, ZDRRevokeConnectionRemoved, at)
+		if err := tx.InsertAuditEvent(ctx, event); err != nil {
+			return nil, fmt.Errorf("audit revoked acknowledgement: %w", err)
+		}
+		events = append(events, event)
+	}
+	return events, nil
+}
+
+// ZDRAcknowledgementRevokedAuditEvent is the content-free audit row for one acknowledgement that a
+// revocation took out of force. Its id is derived from the acknowledgement, which can be revoked
+// only once, so the row is unique without a random component.
+func ZDRAcknowledgementRevokedAuditEvent(ack ConnectionZDRAcknowledgement, reason string, at time.Time) AuditEvent {
+	return AuditEvent{
+		ID:             "audit:integration:zdr-acknowledgement-revoked:" + ack.ID,
+		OrganizationID: ack.OrganizationID,
+		UserID:         ack.UserID,
+		ConnectionID:   ack.ConnectionID,
+		EventType:      ZDRAcknowledgementRevokedEventType,
+		ProviderKey:    ack.ProviderKey,
+		Metadata: map[string]any{
+			"acknowledgementId": ack.ID,
+			"reason":            reason,
+			"digest":            ack.Digest,
+			"textVersion":       ack.TextVersion,
+		},
+		CreatedAt: at.UTC(),
+	}
 }
 
 func containsString(list []string, value string) bool {

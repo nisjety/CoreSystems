@@ -5,6 +5,7 @@
 //! producers receive a stable receipt or a conflict, while the recovery loop
 //! may only record an observable unknown-outcome failure.
 
+use crate::retention_receipt::{self, RetentionClass, RunRetention};
 use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1 as pb;
 use mp_events::idempotency::derive_idempotency_hash;
@@ -441,6 +442,21 @@ struct ExistingManagedStart {
     agent_id: String,
     goal: String,
     mode: String,
+    retention_class: String,
+    waiver_ack_id: Option<String>,
+    waiver_connection_id: Option<String>,
+}
+
+/// A retry is the same start only if it carries the same receipt. A waiver
+/// token for one connection must never adopt a run that was started under
+/// another connection's waiver, or under no waiver at all.
+fn existing_retention_matches(existing: &ExistingManagedStart, retention: &RunRetention) -> bool {
+    RunRetention::from_storage(
+        &existing.retention_class,
+        existing.waiver_ack_id.clone(),
+        existing.waiver_connection_id.clone(),
+    )
+    .is_ok_and(|stored| stored == *retention)
 }
 
 fn existing_start_matches(
@@ -523,9 +539,10 @@ async fn insert_managed_run_started(
     request: &pb::StartManagedRunRequest,
     persisted: &ManagedStartPersistence,
     source: pb::ManagedRunSource,
-    zdr: bool,
+    retention: &RunRetention,
     now: DateTime<Utc>,
 ) -> Result<(), Status> {
+    let zdr = retention.class == RetentionClass::Zdr;
     let residency = super::grpc::configured_residency();
     // The thread was created only after verifying its signed Space decision.
     // Copy that durable, non-secret context here instead of trusting any
@@ -542,9 +559,11 @@ async fn insert_managed_run_started(
         Option<i64>,
     ) = sqlx::query_as(
         "INSERT INTO runs (id, thread_id, parent_run_id, agent_id, goal, mode, org_id, user_id, status, residency, created_at, updated_at,
-                          space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision)
+                          space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision,
+                          retention_class, waiver_ack_id, waiver_connection_id)
          SELECT $1, t.id, NULLIF($3, ''), $4, $5, $6, $7, $8, 'queued', $9, $10, $10,
-                t.space_id, t.space_decision_ref, t.recipient_audience_ref, t.recipient_audience_revision, t.recipient_audience_hash, t.privacy_policy_ref, t.resource_authorization_ref, t.authority_revision
+                t.space_id, t.space_decision_ref, t.recipient_audience_ref, t.recipient_audience_revision, t.recipient_audience_hash, t.privacy_policy_ref, t.resource_authorization_ref, t.authority_revision,
+                $11, $12, $13
          FROM threads AS t
          WHERE t.id = $2 AND t.org_id = $7 AND t.user_id = $8
          RETURNING space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision",
@@ -559,6 +578,9 @@ async fn insert_managed_run_started(
     .bind(&request.user_id)
     .bind(residency)
     .bind(now)
+    .bind(retention.class.as_str())
+    .bind(retention.ack_id())
+    .bind(retention.connection_id())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(database_error)?
@@ -646,18 +668,53 @@ async fn insert_managed_run_started(
     .execute(&mut **transaction)
     .await
     .map_err(database_error)?;
+
+    // A waived run's start is audited durably, on the same transaction as the
+    // run, so the audit row exists if and only if the run does.
+    if let Some(body) = retention_receipt::run_started_zdr_waived_body(
+        retention,
+        run_id,
+        &request.org_id,
+        &request.user_id,
+        thread_id,
+        now,
+    ) {
+        retention_receipt::enqueue_run_started_zdr_waived(transaction, run_id, &body).await?;
+    }
     Ok(())
 }
 
-/// Atomically start a run and install its one terminalization obligation. The
-/// caller identity has already been validated and user-pinned by the gRPC
-/// boundary; this inner function never trusts a caller-provided identity.
+/// Start a run whose receipt is the one a bare ZDR flag or a persistent
+/// credential gives: no waiver. A caller that holds a waiver uses
+/// [`start_managed_run_with_retention_inner`].
 #[allow(clippy::result_large_err)]
 pub(crate) async fn start_managed_run_inner(
     pool: &PgPool,
     request: pb::StartManagedRunRequest,
     zdr: bool,
 ) -> Result<ManagedRunStart, Status> {
+    let retention = if zdr {
+        RunRetention::zdr()
+    } else {
+        RunRetention::persistent()
+    };
+    start_managed_run_with_retention_inner(pool, request, retention).await
+}
+
+/// Atomically start a run and install its one terminalization obligation. The
+/// caller identity has already been validated and user-pinned by the gRPC
+/// boundary; this inner function never trusts a caller-provided identity.
+///
+/// `retention` is the receipt the caller's verified claims give (see
+/// [`RunRetention::from_caller`]). It is recorded immutably on the run, and a
+/// child run must match its parent's receipt ([`RunRetention::inherit_from`]).
+#[allow(clippy::result_large_err)]
+pub(crate) async fn start_managed_run_with_retention_inner(
+    pool: &PgPool,
+    request: pb::StartManagedRunRequest,
+    retention: RunRetention,
+) -> Result<ManagedRunStart, Status> {
+    let zdr = retention.class == RetentionClass::Zdr;
     let source = validate_managed_start_request(&request, zdr)?;
     let persisted = managed_start_persistence(&request, zdr);
     let mut transaction = pool.begin().await.map_err(database_error)?;
@@ -679,7 +736,8 @@ pub(crate) async fn start_managed_run_inner(
     let existing: Option<ExistingManagedStart> = sqlx::query_as(
         "SELECT o.run_id, r.thread_id, r.created_at, o.configured_source,
                 o.configured_terminal_step_id, o.zdr, r.parent_run_id,
-                r.agent_id, r.goal, r.mode
+                r.agent_id, r.goal, r.mode,
+                r.retention_class, r.waiver_ack_id, r.waiver_connection_id
          FROM managed_run_terminalization_outbox AS o
          JOIN runs AS r ON r.id = o.run_id
          WHERE o.org_id = $1 AND o.user_id = $2 AND o.start_key = $3
@@ -692,7 +750,9 @@ pub(crate) async fn start_managed_run_inner(
     .await
     .map_err(database_error)?;
     if let Some(existing) = existing {
-        if !existing_start_matches(&existing, &request, zdr, source) {
+        if !existing_start_matches(&existing, &request, zdr, source)
+            || !existing_retention_matches(&existing, &retention)
+        {
             return Err(Status::already_exists(
                 "managed start key is bound to different immutable input",
             ));
@@ -708,6 +768,20 @@ pub(crate) async fn start_managed_run_inner(
     }
 
     let now = Utc::now();
+    // A child run takes its parent's receipt, and must be this caller's own run
+    // in this org. A ZDR start never names a parent (see managed_start_persistence).
+    let retention = if zdr || persisted.parent_run_id.is_empty() {
+        retention
+    } else {
+        let parent = retention_receipt::load_parent_retention(
+            &mut transaction,
+            &request.org_id,
+            &request.user_id,
+            &persisted.parent_run_id,
+        )
+        .await?;
+        retention.inherit_from(Some(&parent))?
+    };
     let thread_id = if persisted.create_metadata_thread {
         insert_zdr_thread(&mut transaction, &request.org_id, &request.user_id, now).await?
     } else {
@@ -721,7 +795,7 @@ pub(crate) async fn start_managed_run_inner(
         &request,
         &persisted,
         source,
-        zdr,
+        &retention,
         now,
     )
     .await?;
@@ -1374,6 +1448,10 @@ impl DirectRunCompletion {
 pub(crate) struct CommittedDirectCompletion {
     pub completion: DirectRunCompletion,
     pub memory: Option<crate::grpc::AppendedMemory>,
+    /// The posture the mirror of `memory` must apply: the run's own receipt. The
+    /// caller of this RPC is the gateway's service credential, which never carries
+    /// a waiver, so its own posture cannot stand for the run's.
+    pub memory_retention: crate::grpc::MemoryRetention,
 }
 
 #[derive(FromRow)]
@@ -1421,13 +1499,15 @@ pub(crate) async fn complete_direct_run_with_message_inner(
     if thread.is_none() {
         return Err(Status::not_found("thread not found"));
     }
-    let run: Option<(String, String)> =
-        sqlx::query_as("SELECT status, thread_id FROM runs WHERE id = $1 FOR UPDATE")
-            .bind(&request.run_id)
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(database_error)?;
-    let (run_status, run_thread_id) = run.ok_or_else(|| Status::not_found("run not found"))?;
+    let run: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT status, thread_id, retention_class FROM runs WHERE id = $1 FOR UPDATE",
+    )
+    .bind(&request.run_id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(database_error)?;
+    let (run_status, run_thread_id, run_retention_class) =
+        run.ok_or_else(|| Status::not_found("run not found"))?;
     if run_thread_id != request.thread_id {
         return Err(Status::permission_denied(
             "the assistant message must go to the run's own thread",
@@ -1467,6 +1547,7 @@ pub(crate) async fn complete_direct_run_with_message_inner(
         return Ok(CommittedDirectCompletion {
             completion: result,
             memory: None,
+            memory_retention: crate::grpc::MemoryRetention::Durable,
         });
     }
     if obligation.state == "reconciliation_required" || obligation.state == "superseded" {
@@ -1474,6 +1555,7 @@ pub(crate) async fn complete_direct_run_with_message_inner(
         return Ok(CommittedDirectCompletion {
             completion: DirectRunCompletion::AlreadyTerminal,
             memory: None,
+            memory_retention: crate::grpc::MemoryRetention::Durable,
         });
     }
     if obligation.state == "processing" {
@@ -1490,6 +1572,7 @@ pub(crate) async fn complete_direct_run_with_message_inner(
         return Ok(CommittedDirectCompletion {
             completion: DirectRunCompletion::AlreadyTerminal,
             memory: None,
+            memory_retention: crate::grpc::MemoryRetention::Durable,
         });
     }
     if source_from_storage(&obligation.configured_source)? != source {
@@ -1505,6 +1588,15 @@ pub(crate) async fn complete_direct_run_with_message_inner(
             "a zero-retention run has no durable assistant message",
         ));
     }
+    // The answer's memories are mirrored under the run's receipt. A waived run's
+    // memories stay local: they never reach the external memory service (Z-17).
+    let memory_retention = match RetentionClass::from_storage(&run_retention_class) {
+        Some(RetentionClass::Persistent) => crate::grpc::MemoryRetention::Durable,
+        Some(RetentionClass::ZdrWaived) => crate::grpc::MemoryRetention::WaivedRun,
+        Some(RetentionClass::Zdr) | None => {
+            return Err(Status::internal("run retention receipt is invalid"));
+        }
+    };
 
     // An empty answer completes the run without a message, as the two-call
     // path did (the Gateway skipped the append and still recorded Completed).
@@ -1562,6 +1654,7 @@ pub(crate) async fn complete_direct_run_with_message_inner(
             message_sequence,
         },
         memory,
+        memory_retention,
     })
 }
 

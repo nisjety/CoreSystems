@@ -100,6 +100,7 @@ type Config struct {
 	// (one Codex auth.json per connection, written by the Codex CLI sign-in
 	// and refreshed in place by the broker), never in the integration
 	// database.
+	ZDRAcknowledgementEnabled          bool
 	CodexSubscriptionEnabled           bool
 	CodexAppServerCommand              string
 	CodexSubscriptionHome              string
@@ -345,6 +346,7 @@ func Load() (Config, error) {
 		RateLimitWindow:     envDuration("INTEGRATION_RATE_LIMIT_WINDOW", time.Minute),
 		TokenLeaseConsumers: envCSV("INTEGRATION_TOKEN_LEASE_CONSUMERS", "finspo-core,conversation-core,data-plane-v2,model-plane,application-plane,verevon-v2-bff,verevon-v3-gateway,social-publisher,email-worker"),
 
+		ZDRAcknowledgementEnabled:          envBool("ZDR_ACKNOWLEDGEMENT_ENABLED", false),
 		CodexSubscriptionEnabled:           envBool("CODEX_SUBSCRIPTION_ENABLED", false),
 		CodexAppServerCommand:              strings.TrimSpace(envOr("CODEX_APP_SERVER_COMMAND", "codex")),
 		CodexSubscriptionHome:              strings.TrimSpace(os.Getenv("CODEX_SUBSCRIPTION_HOME")),

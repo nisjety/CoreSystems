@@ -116,6 +116,43 @@ fn error_stream(
     Sse::new(ReceiverStream::new(rx))
 }
 
+/// A typed zero-data-retention refusal as the stream's terminal `error` frame:
+/// the catalogue's code, English fallback, retry flag, action and, when the code
+/// takes one, the feature.
+fn zdr_error_stream(
+    request_id: &str,
+    refusal: mp_contracts::zdr_refusal::Refusal,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let evt = crate::sse_events::ChatEvent::ZdrError { refusal };
+    let sse = evt.to_sse(request_id);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(1);
+    tokio::spawn(async move {
+        let _ = tx.send(Ok(sse)).await;
+    });
+    Sse::new(ReceiverStream::new(rx))
+}
+
+/// A typed zero-data-retention refusal raised after the run was prepared (Z-41b). The run is terminalized under
+/// the refusal's own code, exactly as [`prepared_direct_failure_stream`] does for its failures, and the stream's
+/// terminal frame is the typed refusal. If the terminal state cannot be recorded the client is told so instead,
+/// as every prepared failure says.
+async fn prepared_zdr_refusal_stream(
+    state: &AppState,
+    run: &crate::session_flow::SessionRun,
+    bearer: &VerifiedModelBearer,
+    request_id: &str,
+    refusal: mp_contracts::zdr_refusal::Refusal,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let terminalized = terminalize_prepared_failure(state, run, bearer, refusal.code()).await;
+    if terminalized {
+        return zdr_error_stream(request_id, refusal);
+    }
+    let message = refusal.message();
+    let (code, message, retryable) =
+        prepared_failure_report(refusal.code(), &message, refusal.retryable(), false);
+    error_stream(request_id, code, message, retryable)
+}
+
 /// Fail a direct-inference turn after `StartRun` without leaving its durable
 /// lifecycle queued. This path is only for errors we have observed locally
 /// before dispatching inference or a tool action; transport ambiguity belongs
@@ -560,15 +597,18 @@ mod subscription_route_tests {
     use super::*;
     #[test]
     fn auxiliary_calls_preserve_subscription_identity_and_privacy() {
+        // The turn's own route is a connection route, and a connection route is never ZDR downstream
+        // (the resolver refuses a ZDR token on it, and a waiver is persistent for its connection), so
+        // the turn carries `zdr: false` and the auxiliary call inherits exactly that.
         let route = InferRequest { model:"gpt-5.6-terra".into(), provider_hint:"openai-codex-subscription".into(),
-            subscription_connection_id:"connection".into(), min_privacy_tier:2, min_residency:"eu".into(), zdr:true, ..Default::default() };
+            subscription_connection_id:"connection".into(), min_privacy_tier:2, min_residency:"eu".into(), zdr:false, ..Default::default() };
         let scoped = subscription_scoped_request(InferRequest {model:"gpt-4o-mini".into(),..Default::default()}, &route);
         assert_eq!(scoped.model,route.model);
         assert_eq!(scoped.provider_hint,route.provider_hint);
         assert_eq!(scoped.subscription_connection_id,route.subscription_connection_id);
         assert_eq!(scoped.min_privacy_tier,route.min_privacy_tier);
         assert_eq!(scoped.min_residency,route.min_residency);
-        assert!(scoped.zdr);
+        assert!(!scoped.zdr, "the auxiliary call takes the connection turn's posture, never ZDR");
         let ordinary=subscription_scoped_request(InferRequest {model:"gpt-4o-mini".into(),..Default::default()}, &InferRequest::default());
         assert_eq!(ordinary.model,"gpt-4o-mini");
     }
@@ -856,6 +896,11 @@ pub async fn invoke_stream_sse(
         timing.fail();
         error_stream(request_id, code, message, retryable)
     };
+    // A typed ZDR refusal ends the turn the same way, and is counted the same way.
+    let zdr_refusal_stream = |request_id: &str, refusal: mp_contracts::zdr_refusal::Refusal| {
+        timing.fail();
+        zdr_error_stream(request_id, refusal)
+    };
     // Resolve the model the SAME way as the unary path (DEFAULT_MODEL env), not
     // the literal "default" — providers have no deployment named "default", so
     // sending it 404s and exhausts the chain (live-verified bug).
@@ -909,13 +954,28 @@ pub async fn invoke_stream_sse(
         return error_stream(&request_id, "source_scope_conflict",
             "Org-knowledge-only turns can't run web research. Switch to Kunnskap + nett or Kun nett to use Dyp research.", false);
     }
-    // A token that says ZDR cannot be served on the user's own subscription
-    // connection, and the persistence-free branch below has no route to give
-    // it: refuse first, typed, before normalisation, a run, a budget read or
-    // any model call. The token's own claim decides, never the body's flag
-    // (`normalize` has no claims). See `zdr_precheck`.
-    if let Some(refusal) = crate::zdr_precheck::refuse_subscription_under_token_zdr(&claims, &req) {
-        return error_stream(&request_id, refusal.code, refusal.message, refusal.retryable);
+    // The turn's posture, decided once through the resolver before normalisation, a run, a budget
+    // read or any model call (see `zdr_posture`). A ZDR token on the user's own connection is
+    // refused, typed, with no route to give it; a waiver is honoured only on the connection it
+    // names; every other combination follows the posture matrix. The token's claims decide, never
+    // the body's flag alone.
+    let requested_route = crate::zdr_posture::Route::named(
+        req.provider.as_deref(),
+        req.subscription_connection_id.as_deref(),
+        req.zdr,
+    );
+    let turn_posture = match crate::zdr_posture::decide_for(&claims, &requested_route) {
+        Ok(turn_posture) => turn_posture,
+        Err(refusal) => return zdr_refusal_stream(&request_id, refusal),
+    };
+    // A waiver names one connection. Deep research, image generation and a vision turn (AnalyzeImage)
+    // call the platform chain, which a waived turn must never reach, so they are refused before any run.
+    if turn_posture.is_waived()
+        && (req.deep_research
+            || req.generate_image
+            || crate::vision::select_image(&req.attachments).is_some())
+    {
+        return zdr_refusal_stream(&request_id, mp_contracts::zdr_refusal::Refusal::WAIVER_ROUTE_MISMATCH);
     }
     // Normalize and validate BEFORE branching: an unknown tier numeric must
     // fail closed on both the durable and the persistence-free path, and the
@@ -930,6 +990,11 @@ pub async fn invoke_stream_sse(
     ) {
         Ok(normalized) => normalized,
         Err((_, Json(error))) => {
+            // A typed refusal (a ZDR turn on the subscription route, for one)
+            // keeps its catalogue code, action and feature.
+            if let Some(refusal) = mp_contracts::zdr_refusal::Refusal::from_body(&error) {
+                return zdr_refusal_stream(&request_id, refusal);
+            }
             let message = error
                 .get("error")
                 .and_then(Value::as_str)
@@ -948,7 +1013,11 @@ pub async fn invoke_stream_sse(
     // Caller's privacy floor as the wire numeric (0 = UNSPECIFIED). Captured
     // once here so every derived call site threads it without re-deriving.
     let min_privacy_tier_wire = crate::normalize::min_privacy_tier_wire(&normalized);
-    let effective_zdr = claims.effective_zdr(req.zdr);
+    let effective_zdr = turn_posture.zdr();
+    // The Data Plane retrieval mode of this turn: ephemeral, reject for a waived turn, or absent.
+    let data_plane_mode = turn_posture.data_plane_mode();
+    // How the answer's content is retained, stated on its usage frame (a waived turn says so).
+    let retention_class = turn_posture.retention_class();
     // Jurisdiction posture for every Data Plane retrieval this turn makes, the
     // counterpart to `effective_zdr` above. Derived once, from the two things
     // that can honestly speak for the axis: the token's signed `sovereign`
@@ -974,23 +1043,14 @@ pub async fn invoke_stream_sse(
     // event, stream-buffer, idempotency, memory, cache, artifact, or tool write.
     // Plain inference and optional read-only Data grounding remain usable.
     if effective_zdr {
-        if !req.attachments.is_empty()
-            || req.generate_image
-            // Deep research runs every search and page read through the AUDITED
-            // tool path (session-core reserve → run → finalize), and this branch
-            // has no run to audit against. Rejecting is the honest outcome:
-            // degrading would answer a "Dyp research" request with a plain
-            // ungrounded completion and no indication the research never ran,
-            // which is precisely the lie `crate::deep_research` exists to stop.
-            || req.deep_research
-            || features.iter().any(|feature| feature == "agentic")
-        {
-            return error_stream(
-                &request_id,
-                "zdr_feature_not_supported",
-                "ZDR currently supports plain chat and read-only grounding only",
-                false,
-            );
+        // What the persistence-free path can do for this request is decided field
+        // by field in `zdr_features`. A request for something it cannot do is
+        // refused with its catalogue code and feature, before any model call, and
+        // nothing it asked for is dropped. Deep research in particular is refused
+        // rather than degraded: degrading would answer a research request with a
+        // plain ungrounded completion and no sign the research never ran.
+        if let Some(refusal) = crate::zdr_features::refusal(&req) {
+            return zdr_refusal_stream(&request_id, refusal);
         }
         let grounding = if !conversation_only
             && retrieval_scope != crate::normalize::RetrievalScope::WebOnly
@@ -1004,18 +1064,24 @@ pub async fn invoke_stream_sse(
                     false,
                 );
             };
-            crate::retrieval::retrieve(
+            // A ZDR retrieval the Data Plane refused for want of a ZDR-approved route is the typed refusal of
+            // this turn, not an empty grounding: nothing has been sent to a model yet (Z-41b).
+            match crate::retrieval::retrieve_checked(
                 &state,
                 bearer,
                 &org_id,
                 &req.content,
-                true,
+                data_plane_mode.clone(),
                 sovereign_retrieval,
                 req.space_context
                     .as_ref()
                     .map(|context| context.retrieval_decision_token.as_str()),
             )
             .await
+            {
+                Ok(grounding) => grounding,
+                Err(refusal) => return zdr_refusal_stream(&request_id, refusal),
+            }
         } else {
             None
         };
@@ -1066,6 +1132,7 @@ pub async fn invoke_stream_sse(
             &normalized.provider_hint,
             &normalized.subscription_connection_id,
         );
+        let settings = zdr_turn_settings(&state, &req);
         return zdr_direct_stream(
             state,
             request_id,
@@ -1076,6 +1143,7 @@ pub async fn invoke_stream_sse(
             grounding,
             min_privacy_tier_wire,
             route,
+            settings,
             inference_bearer,
         )
         .await;
@@ -1431,6 +1499,7 @@ pub async fn invoke_stream_sse(
             features,
             agentic_tools,
             effective_zdr,
+            retention_class,
             min_privacy_tier_wire,
             posture.to_owned(),
             req.plan_mode,
@@ -1618,18 +1687,35 @@ pub async fn invoke_stream_sse(
         // Bearer presence already verified above.
         match data_plane_bearer.as_ref() {
             Some(bearer) => {
-                crate::retrieval::retrieve(
+                // The run is already prepared, so a refusal terminalizes it under the refusal's own code. A
+                // waived turn's restrictive retrieval refused for want of a ZDR-approved route is said as
+                // that refusal, never as an answer from an empty grounding (Z-41b).
+                match crate::retrieval::retrieve_checked(
                     &state,
                     bearer,
                     &org_id,
                     &req.content,
-                    effective_zdr,
+                    data_plane_mode.clone(),
                     sovereign_retrieval,
                     req.space_context
                         .as_ref()
                         .map(|context| context.retrieval_decision_token.as_str()),
                 )
                 .await
+                {
+                    Ok(grounding) => grounding,
+                    Err(refusal) => {
+                        timing.fail();
+                        return prepared_zdr_refusal_stream(
+                            &state,
+                            &session_run,
+                            &model_bearer,
+                            &request_id,
+                            refusal,
+                        )
+                        .await;
+                    }
+                }
             }
             None => None,
         }
@@ -1640,18 +1726,35 @@ pub async fn invoke_stream_sse(
         // missing credential here must never break plain chat.
         match data_plane_bearer.as_ref() {
             Some(bearer) => {
-                crate::retrieval::retrieve(
+                // A restrictive turn's refusal is the typed refusal here as well, never an ungrounded answer (Z-41b).
+                // The run is already prepared, so it is terminalized under the refusal's code, as the explicit branch
+                // above does. A persistent turn cannot be refused, so its behaviour is unchanged.
+                match crate::retrieval::retrieve_checked(
                     &state,
                     bearer,
                     &org_id,
                     &req.content,
-                    effective_zdr,
+                    data_plane_mode.clone(),
                     sovereign_retrieval,
                     req.space_context
                         .as_ref()
                         .map(|context| context.retrieval_decision_token.as_str()),
                 )
                 .await
+                {
+                    Ok(grounding) => grounding,
+                    Err(refusal) => {
+                        timing.fail();
+                        return prepared_zdr_refusal_stream(
+                            &state,
+                            &session_run,
+                            &model_bearer,
+                            &request_id,
+                            refusal,
+                        )
+                        .await;
+                    }
+                }
             }
             None => None,
         }
@@ -1674,7 +1777,12 @@ pub async fn invoke_stream_sse(
         .as_ref()
         .map(|payload| payload.zdr_actions_applied.as_slice())
     {
-        if crate::retrieval_metadata::retention_posture_conflict(!effective_zdr, actions) {
+        // A waived turn is persistent for its connection by design, and its restricted documents are
+        // filtered (`reject`), so ZDR actions on it are the expected outcome rather than a conflict.
+        if crate::retrieval_metadata::retention_posture_conflict(
+            !effective_zdr && retention_class.is_none(),
+            actions,
+        ) {
             tracing::warn!(
                 request_id = %request_id,
                 org_id = %org_id,
@@ -1790,6 +1898,8 @@ pub async fn invoke_stream_sse(
         &user_id,
         &session_run.run_id,
         &session_run.thread_id,
+        // The decided posture of THIS turn: a ZDR turn (explicit or from its org) or a waived one.
+        turn_posture.zdr() || turn_posture.is_waived(),
     );
     if !skill_context.is_empty() {
         let joined = skill_context.join("\n\n");
@@ -2094,6 +2204,21 @@ pub async fn invoke_stream_sse(
             )
             .await;
         }
+        // A reduced answer says so before it streams (Z-41b). Buffered like every frame, so a resumed stream
+        // replays it. Emitted even when the grounding is empty: an answer from text search that found nothing is
+        // still an answer from text search only.
+        if let Some(notice) = grounding.as_ref().and_then(|payload| payload.notice) {
+            emit_and_buffer(
+                &tx,
+                &stream_buffers,
+                &buffer_key,
+                &mut seq,
+                &features,
+                &req_id,
+                crate::sse_events::ChatEvent::RetrievalNotice { notice },
+            )
+            .await;
+        }
 
         // The deterministic "memory was used" indicator (§7.9). Emitted only
         // when memory was genuinely injected this turn; gated on the `memory`
@@ -2342,6 +2467,8 @@ pub async fn invoke_stream_sse(
                     .as_ref()
                     .map(VerifiedCapabilityBearer::as_str),
                 effective_zdr,
+                // The turn's own retention mode: a waived turn's derived content-safety pass stays off.
+                data_plane_mode.clone(),
                 // The model the USER asked for, never a substitution: it is the
                 // tier signal for the paid-provider grant and for the page-read
                 // budget. No substitution has happened at this point — this runs
@@ -2436,6 +2563,7 @@ pub async fn invoke_stream_sse(
                     .as_ref()
                     .map(VerifiedCostBearer::as_str),
                 effective_zdr,
+                data_plane_mode.clone(),
                 sovereign_retrieval,
                 min_privacy_tier_wire,
                 &model_clone,
@@ -2912,6 +3040,7 @@ pub async fn invoke_stream_sse(
                 seq,
                 &timing,
                 head_summary.as_ref(),
+                retention_class,
             )
             .await;
             finish_stream_registrations(&cancels, &queued_inputs, &req_id);
@@ -3364,7 +3493,7 @@ pub async fn invoke_stream_sse(
                                 bearer,
                                 &org_clone,
                                 query,
-                                effective_zdr,
+                                data_plane_mode.clone(),
                                 verify_sovereign,
                                 verify_space_decision.as_deref(),
                             )
@@ -3475,6 +3604,7 @@ pub async fn invoke_stream_sse(
                                     .as_ref()
                                     .map(VerifiedCapabilityBearer::as_str),
                                 effective_zdr,
+                                data_plane_mode.clone(),
                                 Vec::new(),
                                 query,
                                 Some(&sink),
@@ -4117,6 +4247,7 @@ pub async fn invoke_stream_sse(
                         latency_ms,
                         confidence,
                         served_by,
+                        retention_class,
                     };
                     emit_and_buffer(
                         &tx,
@@ -5470,7 +5601,8 @@ async fn summarize_head(
     // `None` and take the truncation fallback.
     .map_err(|_| ())
     .and_then(|result| result.map_err(|_| ()))
-    .ok();
+    .ok()
+    .map(|answer| answer.content);
     if summary.is_none() {
         tracing::warn!(
             %thread_id,
@@ -6398,6 +6530,8 @@ async fn run_infer_fallback(
     timing: &crate::turn_timing::TurnTiming,
     // A compaction summary written this turn, persisted with the answer.
     head_summary: Option<&crate::compaction::StoredHeadSummary>,
+    // How the answer's content is retained, stated on its usage frame.
+    retention_class: Option<crate::sse_events::RetentionClass>,
 ) {
     let publisher = state.publisher.clone();
     let buffers = state.stream_buffers.clone();
@@ -6860,6 +6994,7 @@ async fn run_infer_fallback(
                     &resp.residency,
                     min_privacy_tier,
                 ),
+                retention_class,
             };
             // Buffered like the chunks around it, so a resumed fallback turn
             // replays its tokens, latency, confidence and cost basis too.
@@ -7528,7 +7663,62 @@ async fn read_latest_assistant(
         .map(|m| m.content)
 }
 
-/// Direct inference used only by the persistence-free ZDR response path.
+/// What one persistence-free model call answered with. The content goes only to
+/// the caller and is never stored; the rest is what the call that served it
+/// reported about where and how the answer was processed.
+#[derive(Debug)]
+struct DirectAnswer {
+    content: String,
+    /// The served model, or the requested one when the provider named none.
+    model_used: String,
+    /// Registry id of the deployment that served the answer; empty when none did.
+    provider_used: String,
+    /// Residency that deployment declares (`global`, `eu` or `norway`); empty
+    /// when it declares none.
+    residency: String,
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
+impl DirectAnswer {
+    /// The answer a served response carries. A negative token count from a
+    /// malformed response is zero, never a wrapped value.
+    fn from_response(
+        response: mp_contracts::model_plane::v1::InferResponse,
+        requested_model: &str,
+    ) -> Self {
+        Self {
+            content: response.content,
+            model_used: if response.model_used.is_empty() {
+                requested_model.to_owned()
+            } else {
+                response.model_used
+            },
+            provider_used: response.provider_used,
+            residency: response.residency,
+            input_tokens: u32::try_from(response.input_tokens).unwrap_or(0),
+            output_tokens: u32::try_from(response.output_tokens).unwrap_or(0),
+        }
+    }
+}
+
+/// The privacy floor a persistence-free turn enforced: the caller's own minimum
+/// raised to ZDR-contractual. The call goes with `zdr` set, and inference-core
+/// serves only providers with a verified ZDR contract under it, so an answer that
+/// came back met that tier. A value outside the enum expresses no caller minimum
+/// (normalize refuses such a value before this branch).
+fn zdr_enforced_floor(min_privacy_tier: i32) -> i32 {
+    let caller = if (0..=4).contains(&min_privacy_tier) {
+        min_privacy_tier
+    } else {
+        0
+    };
+    caller.max(mp_contracts::model_plane::v1::PrivacyTier::ZdrContractual as i32)
+}
+
+/// Direct inference for the thread-compaction summary: one user message, the
+/// answer token budget and no thinking budget. The persistence-free ZDR answer
+/// calls `direct_infer_turn` with the turn's own settings instead.
 ///
 /// Governed agent runs deliberately never call this as a substitute for an
 /// uncertain execution outcome: doing so would bypass their approval/tool
@@ -7545,7 +7735,52 @@ async fn direct_infer(
     zdr: bool,
     min_privacy_tier: i32,
     inference_bearer: &VerifiedInferenceBearer,
-) -> Result<String, tonic::Status> {
+) -> Result<DirectAnswer, tonic::Status> {
+    direct_infer_turn(
+        state,
+        request_id,
+        org_id,
+        model,
+        provider_hint,
+        subscription_connection_id,
+        vec![ChatMessage {
+            compaction_summary: String::new(),
+            role: "user".to_owned(),
+            content: content.to_owned(),
+            name: String::new(),
+        }],
+        answer_token_budget(),
+        0,
+        String::new(),
+        temperature,
+        zdr,
+        min_privacy_tier,
+        inference_bearer,
+    )
+    .await
+}
+
+/// One model call of the persistence-free path with the given messages, token
+/// ceiling and thinking budget. The ZDR answer and the compaction summarizer both
+/// come through here or through `direct_infer`, which fixes those three to what
+/// they always were.
+#[allow(clippy::too_many_arguments)]
+async fn direct_infer_turn(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    model: &str,
+    provider_hint: &str,
+    subscription_connection_id: &str,
+    messages: Vec<ChatMessage>,
+    max_tokens: i32,
+    thinking_budget_tokens: i32,
+    structured_output_schema: String,
+    temperature: f32,
+    zdr: bool,
+    min_privacy_tier: i32,
+    inference_bearer: &VerifiedInferenceBearer,
+) -> Result<DirectAnswer, tonic::Status> {
     let mut client = state.inference_client.clone();
     client
         .infer(authenticated_inference_request(
@@ -7555,16 +7790,15 @@ async fn direct_infer(
                 model: model.to_owned(),
                 provider_hint: provider_hint.to_owned(),
                 subscription_connection_id: subscription_connection_id.to_owned(),
-                messages: vec![ChatMessage {
-                    compaction_summary: String::new(),
-                    role: "user".to_owned(),
-                    content: content.to_owned(),
-                    name: String::new(),
-                }],
+                messages,
                 temperature,
-                // Agentic fallback still produces the answer the user reads.
-                max_tokens: answer_token_budget(),
-                structured_output_schema: String::new(),
+                // The caller's own ceiling (already capped by the ZDR turn), so
+                // the answer never asks for more than the turn was allowed.
+                max_tokens,
+                // Extended thinking, derived from the caller's effort profile
+                // (0 when none was asked for).
+                thinking_budget_tokens,
+                structured_output_schema,
                 // GDPR ZDR: honor the run's Zero-Data-Retention flag on the agentic
                 // fallback inference (was hardcoded false, ignoring the run's ZDR).
                 zdr,
@@ -7576,7 +7810,7 @@ async fn direct_infer(
             inference_bearer,
         ))
         .await
-        .map(|response| response.into_inner().content)
+        .map(|response| DirectAnswer::from_response(response.into_inner(), model))
 }
 
 /// Model for the thread-title summarization: a **pinned** cheap non-reasoning
@@ -8100,6 +8334,76 @@ fn is_emoji_like(c: char) -> bool {
     )
 }
 
+/// What a ZDR turn sends besides the user's message, and the limits it answers
+/// under. The persistence-free path honors the instructions the rest of the chat
+/// honors (platform, organisation, Space and persona instructions, the mentioned
+/// agent's persona, and whose organisation and user the model acts for), the
+/// verbosity directive, the caller's own token ceiling, and the thinking budget
+/// of its effort profile. A request for anything it cannot honor is refused by
+/// `zdr_features` before this is built.
+pub(crate) struct ZdrTurnSettings {
+    /// One system message, or none when there is nothing to say.
+    pub(crate) system: Option<String>,
+    /// The answer's token ceiling: the caller's own `max_tokens` when it is lower.
+    pub(crate) max_tokens: i32,
+    pub(crate) thinking_budget_tokens: i32,
+    /// The caller's structured-output schema, sent with the turn ("" when none).
+    pub(crate) structured_output_schema: String,
+}
+
+impl ZdrTurnSettings {
+    /// The messages of the one model call: the system message when there is one,
+    /// then the user's message.
+    pub(crate) fn messages(&self, content: &str) -> Vec<ChatMessage> {
+        let mut messages = Vec::with_capacity(2);
+        if let Some(system) = &self.system {
+            messages.push(ChatMessage {
+                compaction_summary: String::new(),
+                role: "system".to_owned(),
+                content: system.clone(),
+                name: String::new(),
+            });
+        }
+        messages.push(ChatMessage {
+            compaction_summary: String::new(),
+            role: "user".to_owned(),
+            content: content.to_owned(),
+            name: String::new(),
+        });
+        messages
+    }
+}
+
+/// The settings of one ZDR turn, from the request and the state's platform
+/// instructions. Persona is on for the turn: a ZDR turn has no thread, so the
+/// per-thread override is unknown, and the global switch was applied upstream.
+pub(crate) fn zdr_turn_settings(state: &AppState, req: &InvokeRequest) -> ZdrTurnSettings {
+    let mut sections: Vec<String> = Vec::new();
+    if let Some(identity) = crate::zdr_features::identity_framing(req) {
+        sections.push(identity);
+    }
+    if let Some(authored) = authored_instructions_message(state, req, true) {
+        sections.push(authored.content);
+    }
+    if let Some(directive) = req.verbosity.as_deref().and_then(crate::verbosity::directive) {
+        sections.push(directive.to_owned());
+    }
+    let ceiling = answer_token_budget();
+    let max_tokens = req
+        .max_tokens
+        .and_then(|cap| i32::try_from(cap).ok())
+        .map_or(ceiling, |cap| cap.clamp(1, ceiling));
+    ZdrTurnSettings {
+        system: (!sections.is_empty()).then(|| sections.join("\n\n")),
+        max_tokens,
+        thinking_budget_tokens: crate::thinking::budget_tokens(
+            req.effort.as_deref().unwrap_or_default(),
+            max_tokens,
+        ),
+        structured_output_schema: req.structured_output_schema.clone().unwrap_or_default(),
+    }
+}
+
 /// Persistence-free SSE response for Zero Data Retention requests. It emits
 /// only response bytes to the current client connection and never touches the
 /// durable stream/session/event/cache seams used by the normal chat path.
@@ -8121,16 +8425,24 @@ async fn zdr_direct_stream(
     // not serve a connection without ZDR support under a ZDR request, refuses
     // it rather than the default chain quietly serving the turn.
     route: crate::zdr_precheck::ConnectionRoute,
+    // The instructions, verbosity, token ceiling and thinking budget the turn
+    // answers under (`zdr_turn_settings`).
+    settings: ZdrTurnSettings,
     inference_bearer: VerifiedInferenceBearer,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
-    let answer = match direct_infer(
+    let messages = settings.messages(&content);
+    let started = std::time::Instant::now();
+    let answer = match direct_infer_turn(
         &state,
         &request_id,
         &org_id,
         &model,
         &route.provider_hint,
         &route.subscription_connection_id,
-        &content,
+        messages,
+        settings.max_tokens,
+        settings.thinking_budget_tokens,
+        settings.structured_output_schema.clone(),
         0.7,
         true,
         min_privacy_tier,
@@ -8150,8 +8462,10 @@ async fn zdr_direct_stream(
                 reason = status.message(),
                 "zdr turn on a user connection refused by inference-core"
             );
-            let refusal = crate::zdr_precheck::ZdrRefusal::CONNECTION_NOT_SUPPORTED;
-            return error_stream(&request_id, refusal.code, refusal.message, refusal.retryable);
+            return zdr_error_stream(
+                &request_id,
+                mp_contracts::zdr_refusal::Refusal::CONNECTION_NOT_SUPPORTED,
+            );
         }
         // `FailedPrecondition` is the ZDR attestation gate, not an outage:
         // inference-core skipped every provider because none has an
@@ -8167,12 +8481,7 @@ async fn zdr_direct_stream(
                 reason = status.message(),
                 "temporary chat refused: no provider deployment is attested for zero data retention"
             );
-            return error_stream(
-                &request_id,
-                "zdr_unavailable",
-                "Temporary chat is unavailable: no model deployment is attested for zero                  data retention. An operator must confirm a no-retention contract before                  this mode can be used.",
-                false,
-            );
+            return zdr_error_stream(&request_id, mp_contracts::zdr_refusal::Refusal::UNAVAILABLE);
         }
         Err(status) => {
             tracing::warn!(
@@ -8180,16 +8489,61 @@ async fn zdr_direct_stream(
                 code = ?status.code(),
                 "ephemeral inference failed"
             );
-            return error_stream(
+            return zdr_error_stream(
                 &request_id,
-                "zdr_inference_failed",
-                "The ephemeral inference request failed",
-                true,
+                mp_contracts::zdr_refusal::Refusal::INFERENCE_FAILED,
             );
         }
     };
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    zdr_answer_stream(
+        request_id,
+        grounding,
+        features,
+        min_privacy_tier,
+        answer,
+        latency_ms,
+    )
+}
+
+/// The persistence-free answer as its SSE stream: the grounding and citation
+/// frames the turn carries, the answer in chunks, one `usage` frame with the
+/// answer's provenance and counts, then `done`. Every frame is gated as its
+/// durable counterpart is.
+fn zdr_answer_stream(
+    request_id: String,
+    grounding: Option<crate::retrieval::Grounding>,
+    features: Vec<String>,
+    min_privacy_tier: i32,
+    answer: DirectAnswer,
+    latency_ms: u64,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    // The answer's provenance as the serving call stated it, floored at the ZDR
+    // tier the call was made under. It carries counts and provenance only, never
+    // content. Metering of ZDR turns is the deferred Z-06b task, so no cost is
+    // stated on this path rather than estimated.
+    let usage = crate::sse_events::ChatEvent::Usage {
+        input_tokens: answer.input_tokens,
+        output_tokens: answer.output_tokens,
+        cost_usd: None,
+        cost_basis: None,
+        latency_ms,
+        confidence: None,
+        served_by: crate::sse_events::ServedBy::stamped(
+            &answer.provider_used,
+            &answer.residency,
+            zdr_enforced_floor(min_privacy_tier),
+        ),
+        retention_class: Some(crate::sse_events::RetentionClass::Zdr),
+    };
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
+        // A reduced answer says so before anything else it streams (Z-41b). Control: a ZDR answer's client is told
+        // whatever it opted into, and a turn without a notice streams exactly as it always did.
+        if let Some(notice) = grounding.as_ref().and_then(|payload| payload.notice) {
+            let event = crate::sse_events::ChatEvent::RetrievalNotice { notice };
+            let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+        }
         if let Some(payload) = grounding.filter(|g| !g.is_empty()) {
             let event = crate::sse_events::ChatEvent::Grounding {
                 grounding: payload.clone(),
@@ -8218,12 +8572,12 @@ async fn zdr_direct_stream(
         }
 
         let mut sequence = 0_u64;
-        for piece in chunk_for_stream(&answer, 48) {
+        for piece in chunk_for_stream(&answer.content, 48) {
             let chunk = SseChunk {
                 request_id: request_id.clone(),
                 delta: piece,
                 done: false,
-                model_used: model.clone(),
+                model_used: answer.model_used.clone(),
                 input_tokens: 0,
                 output_tokens: 0,
             };
@@ -8240,13 +8594,19 @@ async fn zdr_direct_stream(
             }
             sequence += 1;
         }
+        // One usage frame per answer, before `done` and under the same `usage`
+        // opt-in the durable path applies: a client that did not ask for usage
+        // never sees it.
+        if usage.should_emit(&features) {
+            let _ = tx.send(Ok(usage.to_sse(&request_id))).await;
+        }
         let done = SseChunk {
             request_id: request_id.clone(),
             delta: String::new(),
             done: true,
-            model_used: model,
-            input_tokens: 0,
-            output_tokens: 0,
+            model_used: answer.model_used,
+            input_tokens: answer.input_tokens,
+            output_tokens: answer.output_tokens,
         };
         let _ = tx
             .send(Ok(Event::default()
@@ -9175,6 +9535,7 @@ fn agentic_run_stream(
     features: Vec<String>,
     tools: Vec<ToolDefinition>,
     zdr: bool,
+    retention_class: Option<crate::sse_events::RetentionClass>,
     min_privacy_tier_wire: i32,
     permission_mode: String,
     plan_mode: bool,
@@ -9731,6 +10092,7 @@ fn agentic_run_stream(
             // served inside execution-core. Nothing is stamped rather than
             // guessed from the route, so a run states no residency at all.
             served_by: None,
+            retention_class,
         };
         if usage_event.should_emit(&features) {
             let _ = tx.send(Ok(usage_event.to_sse(&request_id))).await;
@@ -10273,6 +10635,11 @@ fn publish_implicit_dissatisfaction(
     user_id: &str,
     run_id: &str,
     thread_id: &str,
+    // Whether THIS turn ran under zero retention or a waiver. It is stored with the turn, so the turn
+    // after it can refuse the signal about it, and it refuses its own signal too: the evidence is this
+    // turn's message, and a learning review would send a private run's content to a processor that is
+    // not the user's own account (D-B).
+    private_turn: bool,
 ) {
     use crate::dissatisfaction::{classify, TurnContext};
 
@@ -10290,6 +10657,7 @@ fn publish_implicit_dissatisfaction(
         &req.content,
         run_id,
         skill_ids,
+        private_turn,
     ) else {
         return;
     };
@@ -10305,8 +10673,15 @@ fn publish_implicit_dissatisfaction(
         return;
     }
 
-    let envelopes =
-        crate::implicit_feedback::envelopes_for(&signals, &previous, org_id, user_id, req.zdr);
+    // The signal attaches to the PREVIOUS run, so the previous answer's posture decides it as much as
+    // this turn's does: a private answer that a persistent turn complains about is not recorded either.
+    let envelopes = crate::implicit_feedback::envelopes_for(
+        &signals,
+        &previous,
+        org_id,
+        user_id,
+        private_turn || previous.private_run,
+    );
     if envelopes.is_empty() {
         return;
     }
@@ -12576,5 +12951,375 @@ mod agentic_follow_tests {
         drop(out);
         tokio::time::sleep(Duration::from_millis(1)).await;
         assert!(tx.is_closed(), "the pump must drop its hold on the stream task's channel");
+    }
+}
+
+#[cfg(test)]
+mod zdr_provenance_tests {
+    use super::{zdr_answer_stream, zdr_enforced_floor, DirectAnswer};
+    use axum::response::IntoResponse;
+    use mp_contracts::model_plane::v1::InferResponse;
+    use serde_json::Value;
+
+    /// The answer a served ZDR call reports, as inference-core returns it: the
+    /// content, the deployment that served it, its residency and token counts.
+    fn served(content: &str) -> InferResponse {
+        InferResponse {
+            content: content.to_owned(),
+            model_used: "gpt-4.1-eu-deploy".to_owned(),
+            provider_used: "azure-openai".to_owned(),
+            residency: "eu".to_owned(),
+            input_tokens: 42,
+            output_tokens: 7,
+            ..Default::default()
+        }
+    }
+
+    /// Every SSE frame of a finished stream, in order, as (event name, JSON data).
+    async fn frames(stream: impl IntoResponse) -> Vec<(String, Value)> {
+        let body = axum::body::to_bytes(stream.into_response().into_body(), usize::MAX)
+            .await
+            .expect("the stream body reads");
+        let text = String::from_utf8(body.to_vec()).expect("SSE is UTF-8");
+        text.split("\n\n")
+            .filter(|frame| !frame.trim().is_empty())
+            .map(|frame| {
+                let mut name = String::new();
+                let mut data = String::new();
+                for line in frame.lines() {
+                    if let Some(event) = line.strip_prefix("event: ") {
+                        name = event.to_owned();
+                    } else if let Some(payload) = line.strip_prefix("data: ") {
+                        data.push_str(payload);
+                    }
+                }
+                (
+                    name,
+                    serde_json::from_str(&data).expect("each frame carries JSON"),
+                )
+            })
+            .collect()
+    }
+
+    /// The stream of one answer, with the opt-in features and privacy floor the
+    /// request carried.
+    async fn stream_of(
+        answer: DirectAnswer,
+        features: &[&str],
+        min_privacy_tier: i32,
+        latency_ms: u64,
+    ) -> Vec<(String, Value)> {
+        frames(zdr_answer_stream(
+            "req-zdr".to_owned(),
+            None,
+            features
+                .iter()
+                .map(|feature| (*feature).to_owned())
+                .collect(),
+            min_privacy_tier,
+            answer,
+            latency_ms,
+        ))
+        .await
+    }
+
+    /// A grounding that carries only what the notice tests need.
+    fn grounding_with_notice(
+        notice: Option<crate::retrieval_metadata::RetrievalNotice>,
+    ) -> crate::retrieval::Grounding {
+        crate::retrieval::Grounding {
+            mode: "hybrid".to_owned(),
+            query: "refund policy".to_owned(),
+            notice,
+            ..Default::default()
+        }
+    }
+
+    fn zdr_notice() -> crate::retrieval_metadata::RetrievalNotice {
+        crate::retrieval_metadata::notice_for_code("zdr_dense_unavailable")
+            .expect("the ZDR notice is catalogued")
+    }
+
+    /// A reduced ZDR answer says so before its first answer chunk, to a client that opted into no feature family.
+    /// Mutation: dropping the emission in `zdr_answer_stream` fails here.
+    #[tokio::test]
+    async fn a_reduced_zdr_answer_says_so_before_it_streams() {
+        let answer = DirectAnswer::from_response(served("SECRET-ANSWER-2 hei"), "requested-model");
+        let out = frames(zdr_answer_stream(
+            "req-zdr".to_owned(),
+            Some(grounding_with_notice(Some(zdr_notice()))),
+            Vec::new(),
+            0,
+            answer,
+            12,
+        ))
+        .await;
+        let names: Vec<&str> = out.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| **name == "retrieval_notice")
+                .count(),
+            1,
+            "one notice per reduced answer: {names:?}"
+        );
+        let notice_at = names
+            .iter()
+            .position(|name| *name == "retrieval_notice")
+            .expect("the notice streams");
+        let first_chunk = names
+            .iter()
+            .position(|name| *name == "chunk")
+            .expect("the answer streams");
+        assert!(notice_at < first_chunk, "the notice comes first: {names:?}");
+        let payload = &out[notice_at].1;
+        assert_eq!(payload["code"], "zdr_dense_unavailable", "{payload}");
+        assert_eq!(
+            payload["wording_key"], "retrieval.zdr_dense_unavailable",
+            "{payload}"
+        );
+        assert_eq!(payload["request_id"], "req-zdr", "{payload}");
+        assert!(!payload.to_string().contains("SECRET-ANSWER"), "{payload}");
+    }
+
+    /// A ZDR answer that was not reduced streams exactly as before: no notice frame, with or without a grounding.
+    #[tokio::test]
+    async fn a_zdr_answer_without_a_notice_streams_no_notice() {
+        for grounding in [None, Some(grounding_with_notice(None))] {
+            let answer = DirectAnswer::from_response(served("plain answer"), "requested-model");
+            let out = frames(zdr_answer_stream(
+                "req-zdr".to_owned(),
+                grounding,
+                Vec::new(),
+                0,
+                answer,
+                12,
+            ))
+            .await;
+            assert!(
+                out.iter().all(|(name, _)| name != "retrieval_notice"),
+                "{out:?}"
+            );
+        }
+    }
+
+    /// The durable turn's notice takes a place in the stream's cursor, so a client that resumes replays it.
+    /// Mutation: a notice that is not buffered is lost to every resumed stream.
+    #[tokio::test]
+    async fn a_durable_turns_notice_is_buffered_so_a_resumed_stream_replays_it() {
+        let buffers = crate::stream_buffer::StreamBufferStore::new();
+        let key = crate::stream_buffer::scoped_stream_key("org-1", "user-1", "req-r");
+        let (tx, mut live) = tokio::sync::mpsc::channel::<
+            Result<axum::response::sse::Event, std::convert::Infallible>,
+        >(8);
+        let mut seq = 0_u64;
+        super::emit_and_buffer(
+            &tx,
+            &buffers,
+            &key,
+            &mut seq,
+            &[],
+            "req-r",
+            crate::sse_events::ChatEvent::RetrievalNotice {
+                notice: zdr_notice(),
+            },
+        )
+        .await;
+        assert!(
+            live.try_recv().is_ok(),
+            "the live stream carries the notice"
+        );
+        assert_eq!(seq, 1, "the notice takes one place in the cursor");
+        let replay = buffers.replay_after(&key, None).await;
+        assert!(replay.found, "the buffer holds the stream");
+        let events: Vec<&str> = replay
+            .deltas
+            .iter()
+            .map(|buffered| buffered.event.as_str())
+            .collect();
+        assert_eq!(events, vec!["retrieval_notice"]);
+    }
+
+    /// The only usage frame of a stream; a failure names every frame it has.
+    fn usage_of(frames: &[(String, Value)]) -> &Value {
+        let usage: Vec<&Value> = frames
+            .iter()
+            .filter(|(name, _)| name.as_str() == "usage")
+            .map(|(_, data)| data)
+            .collect();
+        assert_eq!(usage.len(), 1, "one usage frame per answer: {frames:?}");
+        usage[0]
+    }
+
+    #[tokio::test]
+    async fn a_zdr_answer_ends_with_one_usage_frame_that_names_its_provider_and_no_content() {
+        let answer =
+            DirectAnswer::from_response(served("SECRET-ANSWER-7731 hei"), "requested-model");
+        let frames = stream_of(answer, &["usage"], 0, 730).await;
+
+        let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names.last().copied(), Some("done"), "{names:?}");
+        assert_eq!(
+            names[names.len() - 2],
+            "usage",
+            "usage comes right before done: {names:?}"
+        );
+        assert!(
+            names[..names.len() - 2].iter().all(|name| *name == "chunk"),
+            "{names:?}"
+        );
+
+        let usage = usage_of(&frames);
+        assert_eq!(usage["provider_used"], "azure-openai");
+        assert_eq!(usage["residency"], "eu");
+        assert_eq!(usage["privacy_tier"], "zdr_contractual");
+        assert_eq!(usage["retention_class"], "zdr");
+        assert_eq!(usage["input_tokens"], 42);
+        assert_eq!(usage["output_tokens"], 7);
+        assert_eq!(usage["latency_ms"], 730);
+        // Metering of ZDR turns is a separate task, so no cost is stated for them.
+        assert!(usage["cost_usd"].is_null(), "{usage}");
+        // Counts and provenance only: nothing the answer said reaches this frame.
+        assert!(!usage.to_string().contains("SECRET-ANSWER"), "{usage}");
+        let mut keys: Vec<&str> = usage
+            .as_object()
+            .expect("usage is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "confidence",
+                "cost_usd",
+                "input_tokens",
+                "latency_ms",
+                "output_tokens",
+                "privacy_tier",
+                "provider_used",
+                "residency",
+                "retention_class",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_answer_and_done_name_the_model_that_served_it_and_count_its_tokens() {
+        let answer = DirectAnswer::from_response(served("Hei"), "requested-model");
+        let frames = stream_of(answer, &["usage"], 0, 5).await;
+
+        let chunks: Vec<&Value> = frames
+            .iter()
+            .filter(|(name, _)| name.as_str() == "chunk")
+            .map(|(_, data)| data)
+            .collect();
+        assert!(!chunks.is_empty(), "{frames:?}");
+        for chunk in chunks {
+            assert_eq!(chunk["model_used"], "gpt-4.1-eu-deploy");
+        }
+        let (name, done) = frames.last().expect("a done frame");
+        assert_eq!(name.as_str(), "done");
+        assert_eq!(done["done"], true);
+        assert_eq!(done["model_used"], "gpt-4.1-eu-deploy");
+        assert_eq!(done["input_tokens"], 42);
+        assert_eq!(done["output_tokens"], 7);
+    }
+
+    #[tokio::test]
+    async fn the_usage_frame_is_gated_by_the_usage_feature_as_its_durable_counterpart_is() {
+        let answer = DirectAnswer::from_response(served("Hei"), "requested-model");
+        let frames = stream_of(answer, &["citations"], 0, 5).await;
+        assert!(
+            frames.iter().all(|(name, _)| name.as_str() != "usage"),
+            "{frames:?}"
+        );
+        assert_eq!(frames.last().map(|(name, _)| name.as_str()), Some("done"));
+    }
+
+    #[tokio::test]
+    async fn the_stamped_tier_is_the_zdr_floor_raised_by_the_callers_floor_and_never_lower() {
+        let global = DirectAnswer::from_response(
+            InferResponse {
+                residency: "global".to_owned(),
+                ..served("Hei")
+            },
+            "requested-model",
+        );
+        let frames = stream_of(global, &["usage"], 0, 5).await;
+        assert_eq!(usage_of(&frames)["privacy_tier"], "zdr_contractual");
+
+        let norway = DirectAnswer::from_response(
+            InferResponse {
+                residency: "norway".to_owned(),
+                ..served("Hei")
+            },
+            "requested-model",
+        );
+        let frames = stream_of(norway, &["usage"], 4, 5).await;
+        assert_eq!(usage_of(&frames)["privacy_tier"], "sovereign");
+    }
+
+    #[tokio::test]
+    async fn a_zdr_answer_that_names_no_serving_provider_states_none_and_keeps_its_retention() {
+        let unnamed = DirectAnswer::from_response(
+            InferResponse {
+                provider_used: String::new(),
+                residency: String::new(),
+                ..served("Hei")
+            },
+            "requested-model",
+        );
+        let frames = stream_of(unnamed, &["usage"], 0, 5).await;
+        let usage = usage_of(&frames);
+        for key in ["provider_used", "residency", "privacy_tier"] {
+            assert!(usage.get(key).is_none(), "{key} must be omitted: {usage}");
+        }
+        assert_eq!(usage["retention_class"], "zdr");
+    }
+
+    #[test]
+    fn the_direct_answer_takes_what_the_served_response_reports() {
+        let answer = DirectAnswer::from_response(served("Hei"), "requested-model");
+        assert_eq!(answer.content, "Hei");
+        assert_eq!(answer.model_used, "gpt-4.1-eu-deploy");
+        assert_eq!(answer.provider_used, "azure-openai");
+        assert_eq!(answer.residency, "eu");
+        assert_eq!((answer.input_tokens, answer.output_tokens), (42, 7));
+
+        // A provider that names no served model is answered by the requested
+        // one, as the durable path does.
+        let unnamed = DirectAnswer::from_response(
+            InferResponse {
+                model_used: String::new(),
+                ..served("Hei")
+            },
+            "requested-model",
+        );
+        assert_eq!(unnamed.model_used, "requested-model");
+
+        // A negative count from a malformed response is zero, never a wrapped value.
+        let negative = DirectAnswer::from_response(
+            InferResponse {
+                input_tokens: -5,
+                output_tokens: -1,
+                ..served("Hei")
+            },
+            "requested-model",
+        );
+        assert_eq!((negative.input_tokens, negative.output_tokens), (0, 0));
+    }
+
+    #[test]
+    fn a_zdr_turn_enforces_zdr_contractual_or_the_callers_higher_floor() {
+        assert_eq!(zdr_enforced_floor(0), 3);
+        assert_eq!(zdr_enforced_floor(1), 3);
+        assert_eq!(zdr_enforced_floor(2), 3);
+        assert_eq!(zdr_enforced_floor(3), 3);
+        assert_eq!(zdr_enforced_floor(4), 4);
+        // A value outside the enum expresses no caller minimum: only the ZDR
+        // floor applies.
+        assert_eq!(zdr_enforced_floor(99), 3);
+        assert_eq!(zdr_enforced_floor(-1), 3);
     }
 }

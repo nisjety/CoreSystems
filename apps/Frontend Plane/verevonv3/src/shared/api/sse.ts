@@ -62,8 +62,8 @@ export async function readSseStream(
       // instead of a generic "connection failed", so onError reports the real
       // upstream code/message (e.g. unauthorized, model_error, upstream_error).
       const errorBody = await response.json().catch(() => null)
-      const { code, message } = extractError(errorBody, response.status)
-      throw new ApiError(message, response.status, code)
+      const { code, message, feature } = extractError(errorBody, response.status)
+      throw new ApiError(message, response.status, code, feature ?? null)
     }
     if (!response.body) {
       throw new Error(`SSE connection failed (${response.status})`)
