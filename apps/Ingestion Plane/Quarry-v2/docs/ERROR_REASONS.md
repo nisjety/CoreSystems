@@ -44,9 +44,11 @@ A browser operation that did not finish inside its deadline (`crates/quarry-brow
 | field | values | meaning |
 |---|---|---|
 | `op` | `launch`, `tab_attach`, `navigate`, `content`, `ax_snapshot`, `screenshot`, `pdf`, `evaluate`, `input`, `native_action`, `wait_for_poll`, `wait_for`, `page_close`, `context_close`, `profile_capture`, `download_begin`, `download_complete` | what timed out. `health_probe` is also an `Op` (`deadlines.rs`) but only the background prober runs under it, so it is not a value a client sees (see the paragraph above the table) |
-| `deadline_ms` | number | the bound that expired, after `QUARRY_BROWSER_DEADLINE_SCALE` |
+| `deadline_ms` | number | the bound that expired, after `QUARRY_BROWSER_DEADLINE_SCALE`. chromiumoxide's own 30 s per-command timer can expire first (a scale above 1.2 for `navigate` and `pdf`); then it is 30000 |
 | `effect` | `none` | the operation cannot have changed the page: a read or a teardown. `retryable` is true |
 | `effect` | `unknown` | the operation may have changed the page (`navigate`, `evaluate`, `input`, `native_action`): look at the page before repeating it. `retryable` is false |
+
+After a `navigate` timeout the load is stopped and the page can be read at once: the tab is on the slow page if its document had arrived, and still on the page it had before if not (SC4). On an agent step the timeout can also come from the observation read after the action (`evaluate`, `content`, `ax_snapshot`); its `effect` is then the step's: `unknown` (`retryable` false) after an action that can change the page, `none` (`retryable` true) after a wait or a read-only action.
 
 ## 415 `UNSUPPORTED_MEDIA` on `POST /v1/scrape`
 

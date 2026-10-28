@@ -655,9 +655,13 @@ impl ObservationRunner {
             Err(error) if error.code == ErrorCode::Unsupported => Vec::new(),
             Err(error) => return Err(error),
         };
-        if let Some(last_receipt) = egress_receipts.last() {
-            ctx.last_egress_sequence = ctx.last_egress_sequence.max(last_receipt.sequence);
-        }
+        // The cursor moves only once the observation that carries these receipts is
+        // returned: a step that fails below leaves them for the next observation.
+        let next_egress_sequence = egress_receipts
+            .last()
+            .map_or(ctx.last_egress_sequence, |last_receipt| {
+                ctx.last_egress_sequence.max(last_receipt.sequence)
+            });
         // WS12.S2: everything below that is returned to the caller passes the Live profile.
         let mut redactor = Redactor::new();
         let mut dialogs = self.browser.dialogs(session).await.unwrap_or_default();
@@ -675,7 +679,7 @@ impl ObservationRunner {
             }
         };
         if let Some(error) = stalled {
-            return Err(error);
+            return Err(observation_read_error(&request.action, error));
         }
         if let Some(bytes) = html_bytes.as_ref() {
             // Proof must identify the bytes actually observed, not the
@@ -697,8 +701,9 @@ impl ObservationRunner {
             // browser operation must not silently downgrade because its AX
             // query failed mid-run.
             Err(error) if error.code == ErrorCode::Unsupported => None,
-            Err(error) => return Err(error),
+            Err(error) => return Err(observation_read_error(&request.action, error)),
         };
+        ctx.last_egress_sequence = next_egress_sequence;
         if let Some(projection) = native_projection.as_mut() {
             redactor.projection(projection);
         }
@@ -1627,17 +1632,7 @@ impl ObservationRunner {
                 }))()"#,
             )
             .await
-            .map_err(|mut error| {
-                // The script only reads, so its timeout is a read's: nothing changed
-                // and it may be repeated, whatever a generic `evaluate` has to assume.
-                if error.code == ErrorCode::Timeout {
-                    error.retryable = true;
-                    if let Some(Value::Object(details)) = error.details.as_mut() {
-                        details.insert("effect".to_owned(), Value::from("none"));
-                    }
-                }
-                note_stalled_read(stalled, error);
-            })
+            .map_err(|error| note_stalled_read(stalled, error))
             .ok()
             .map(|value| PageState {
                 url: value
@@ -2115,6 +2110,34 @@ fn note_stalled_read(stalled: &mut Option<QuarryError>, error: QuarryError) {
     if error.code == ErrorCode::Timeout && stalled.is_none() {
         *stalled = Some(error);
     }
+}
+
+/// The step's error for an observation read that timed out after `action` ran. The
+/// read itself changed nothing, but the step did whatever its action did: after an
+/// action that only reads or waits nothing changed and the step may be repeated;
+/// after any other (a click that landed, a navigation) the effect is unknown and a
+/// blind retry could act twice. Other errors pass through.
+fn observation_read_error(action: &AgentAction, mut error: QuarryError) -> QuarryError {
+    if error.code != ErrorCode::Timeout {
+        return error;
+    }
+    let only_reads = matches!(
+        action,
+        AgentAction::Wait { .. }
+            | AgentAction::WaitFor { .. }
+            | AgentAction::WaitForRef { .. }
+            | AgentAction::FrameWaitForRef { .. }
+            | AgentAction::WaitForSemantic { .. }
+            | AgentAction::Screenshot { .. }
+            | AgentAction::Pdf
+            | AgentAction::GetContent
+    );
+    let effect = if only_reads { "none" } else { "unknown" };
+    error.retryable = only_reads;
+    if let Some(Value::Object(details)) = error.details.as_mut() {
+        details.insert("effect".to_owned(), Value::from(effect));
+    }
+    error
 }
 
 fn console_summary_from_devtools(events: &[BrowserDevtoolsEvent]) -> Vec<ConsoleLine> {
@@ -3571,6 +3594,9 @@ mod tests {
         stalls_at: Option<&'static str>,
         /// SC4 T3: every `content` and `native_page_projection` call.
         reads: std::sync::atomic::AtomicUsize,
+        /// The egress receipts the driver holds, by sequence; none means the driver
+        /// has no receipt authority.
+        egress_sequences: &'static [u64],
     }
 
     /// The typed timeout the chromiumoxide driver returns for `op`.
@@ -3677,6 +3703,30 @@ mod tests {
             self.touch();
             Err(QuarryError::unsupported_action("select"))
         }
+        async fn egress_receipts(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+            after_sequence: u64,
+            _limit: usize,
+        ) -> QuarryResult<Vec<quarry_core::contracts::BrowserEgressReceipt>> {
+            if self.egress_sequences.is_empty() {
+                return Err(QuarryError::unsupported_action("egress_receipts"));
+            }
+            Ok(self
+                .egress_sequences
+                .iter()
+                .filter(|sequence| **sequence > after_sequence)
+                .map(|sequence| quarry_core::contracts::BrowserEgressReceipt {
+                    sequence: *sequence,
+                    tab_id: None,
+                    method: "GET".into(),
+                    url: "https://example.com/".into(),
+                    decision: quarry_core::contracts::BrowserEgressDecision::Allow,
+                    policy: "url_dns_public".into(),
+                    timestamp_ms: 0,
+                })
+                .collect())
+        }
         async fn content(&self, _session: &quarry_browser::BrowserSession) -> QuarryResult<Bytes> {
             self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.stalls_at == Some("content") {
@@ -3738,6 +3788,19 @@ mod tests {
     }
 
     async fn observe_a_wait(driver: Arc<ContentDriver>) -> QuarryResult<BrowserObservation> {
+        observe(
+            driver,
+            AgentAction::Wait { ms: 0 },
+            &mut ObservationContext::default(),
+        )
+        .await
+    }
+
+    async fn observe(
+        driver: Arc<ContentDriver>,
+        action: AgentAction,
+        ctx: &mut ObservationContext,
+    ) -> QuarryResult<BrowserObservation> {
         let runner = ObservationRunner {
             browser: driver.clone(),
             artifacts: None,
@@ -3764,7 +3827,7 @@ mod tests {
         let request = AgentActionRequest {
             run_id: Id::new(),
             lease_id: lease.lease_id.clone(),
-            action: AgentAction::Wait { ms: 0 },
+            action,
             instruction: None,
             constraints: AgentConstraints {
                 max_steps: 3,
@@ -3775,13 +3838,13 @@ mod tests {
             zdr: ZdrMode::Off,
             extraction_profile: None,
         };
-        let mut ctx = ObservationContext::default();
-        runner.execute(&request, &session, &mut ctx).await
+        runner.execute(&request, &session, ctx).await
     }
 
     /// SC4 T3: the page state read timed out, so the content and accessibility reads are
     /// not made (each would wait out its own deadline on the same held page), and the
-    /// step fails with that first timeout, as a read: nothing changed, it may be retried.
+    /// step fails with that first timeout. The step only waited, so nothing changed and
+    /// it may be retried, whatever a generic `evaluate` has to assume.
     #[tokio::test]
     async fn a_page_state_timeout_ends_the_page_reads_with_a_read_timeout() {
         let driver = Arc::new(ContentDriver {
@@ -3818,6 +3881,60 @@ mod tests {
             1,
             "only the content read was made"
         );
+    }
+
+    /// SC4 T3: the same stalled read after an action that can change the page (here a
+    /// navigation that went through) is no read timeout: the step's effect is unknown
+    /// and it must not be retried blindly.
+    #[tokio::test]
+    async fn a_stalled_read_after_an_effectful_action_keeps_its_effect_unknown() {
+        for stalls_at in ["evaluate", "content"] {
+            let driver = Arc::new(ContentDriver {
+                html: b"<html><body><p>hello</p></body></html>",
+                stalls_at: Some(stalls_at),
+                ..Default::default()
+            });
+            let navigate = AgentAction::Navigate {
+                url: "https://example.com/".into(),
+            };
+            let error = observe(driver, navigate, &mut ObservationContext::default())
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::Timeout, "{stalls_at}");
+            assert!(!error.retryable, "{stalls_at}");
+            assert_eq!(
+                error.details.expect("details")["effect"],
+                "unknown",
+                "{stalls_at}"
+            );
+        }
+    }
+
+    /// A step whose observation fails leaves the egress cursor where it was: the
+    /// receipts it read go out with the next observation instead of being skipped.
+    #[tokio::test]
+    async fn a_failed_observation_leaves_its_egress_receipts_for_the_next_one() {
+        let mut ctx = ObservationContext::default();
+        let stalled = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            stalls_at: Some("content"),
+            egress_sequences: &[1, 2],
+            ..Default::default()
+        });
+        observe(stalled, AgentAction::Wait { ms: 0 }, &mut ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(ctx.last_egress_sequence, 0);
+
+        let answering = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            egress_sequences: &[1, 2],
+            ..Default::default()
+        });
+        observe(answering, AgentAction::Wait { ms: 0 }, &mut ctx)
+            .await
+            .expect("observation");
+        assert_eq!(ctx.last_egress_sequence, 2);
     }
 
     /// A page that answers keeps the old path: every read is made and an optional

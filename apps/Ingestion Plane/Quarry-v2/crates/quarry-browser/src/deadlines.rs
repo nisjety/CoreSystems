@@ -106,10 +106,11 @@ pub(crate) enum Op {
     /// `Performance.getMetrics` for the telemetry sample (`page.metrics()`). Effect-less;
     /// the sample is optional, so a timeout leaves the observation without renderer metrics.
     Metrics,
-    /// Putting a tab back into a usable state after its navigation timed out (stop the
-    /// load, leave for `about:blank`, wait for the library's navigation queue to drain).
-    /// Best effort and only logged: the navigation's own `Timeout` is what the caller
-    /// gets. It moves the page, so it counts as effectful.
+    /// Putting a tab back into a usable state after its navigation timed out: stop the
+    /// load at once, and at the tab's next navigation leave for `about:blank` and wait
+    /// for the library's navigation queue to drain. Best effort and only logged: the
+    /// navigation's own `Timeout` is what the caller gets. It moves the page, so it
+    /// counts as effectful.
     NavigateRecovery,
 }
 
