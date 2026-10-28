@@ -1149,6 +1149,12 @@ async fn merged_tool_defs_governed(
     ) {
         tools.push(read_provider_action_def());
     }
+    // The Space's read-only workspace tools (WS24-S3): offered to a Space-scoped run that is not
+    // retention-bound, while `WORKSPACE_TOOLS` is on. They are appended after the base set, so the
+    // run is not derivable, as the connected-app read above is.
+    if crate::workspace_tools::offered(crate::workspace_tools::mode(), zdr, space_scoped) {
+        tools.extend(crate::workspace_tools::tool_defs());
+    }
     // The ungoverned listing, exactly as it was. A zero-retention run is not asked:
     // nothing it could be offered may run.
     if mode == McpDoTools::Off && !zdr {
@@ -3883,7 +3889,8 @@ async fn run_rounds(
                     // only where it is used keeps the "absent unless relevant"
                     // invariant visible at the call sites that care.
                     let reads_sandbox = call.name == "code_interpreter"
-                        || crate::process_tools::is_process_tool(&call.name);
+                        || crate::process_tools::is_process_tool(&call.name)
+                        || crate::workspace_tools::is_workspace_tool(&call.name);
                     let sandbox = if reads_sandbox && !ctx.req.space_id.is_empty() {
                         ctx.sandbox_bearer.map(|sandbox_bearer| {
                             crate::sandbox_lease::SandboxLeaseContext {
@@ -6173,6 +6180,7 @@ mod capability_binding_contract {
         let mut all = offered_tool_defs();
         all.extend(browser_tool_defs());
         all.extend(process_tool_defs());
+        all.extend(crate::workspace_tools::tool_defs());
         all
     }
 
@@ -6243,6 +6251,7 @@ mod capability_binding_contract {
             "pub fn memory_attestations(",
             "pub fn retrieval_attestations(",
             "pub fn web_attestations(",
+            "pub fn workspace_attestations(",
         ]
         .iter()
         .map(|signature| {

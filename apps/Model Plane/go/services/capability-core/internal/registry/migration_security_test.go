@@ -280,3 +280,55 @@ func TestBackgroundProcessCapabilityStaysLowRiskBehindASecondGate(t *testing.T) 
 		}
 	}
 }
+
+// 0018 seed: cap.workspace.read is one low-risk row for the four read-only workspace
+// tools. It starts unattested, names no write tool (writes are a separate capability,
+// WS24-S4), and its down migration removes exactly what the up migration added.
+func TestWorkspaceReadCapabilityStaysReadOnlyAndUnattested(t *testing.T) {
+	t.Parallel()
+
+	up := readMigration(t, "0018_workspace_read_capability.up.sql")
+	for _, required := range []string{
+		"'cap.workspace.read'",
+		"'workspace_read'",
+		"'low'",
+		"'global'",
+		"ARRAY['global']",
+		"ARRAY['execution-dispatch']",
+		"'execution-dispatch:cap.workspace.read:v1'",
+		"'unavailable'",
+		"'health_not_attested'",
+		"health_checked_at",
+		"ON CONFLICT (id) DO UPDATE SET",
+		"'migration:0018_workspace_read_capability'",
+		"'writes', 'none'",
+	} {
+		if !strings.Contains(up, required) {
+			t.Fatalf("migration missing %q", required)
+		}
+	}
+	if strings.Contains(up, "availability_state = 'available'") {
+		t.Fatal("migration must not fabricate a live health attestation")
+	}
+	for _, member := range []string{"'workspace_read'", "'workspace_grep'", "'workspace_glob'", "'workspace_list'"} {
+		if !strings.Contains(up, member) {
+			t.Fatalf("migration must declare the whole read family, missing %q", member)
+		}
+	}
+	for _, write := range []string{"'workspace_edit'", "'workspace_put'", "'workspace_write'"} {
+		if strings.Contains(up, write) {
+			t.Fatalf("the read capability must not name the write tool %s", write)
+		}
+	}
+	down := readMigration(t, "0018_workspace_read_capability.down.sql")
+	for _, required := range []string{
+		"DELETE FROM capability_tools",
+		"DELETE FROM capabilities",
+		"'cap.workspace.read'",
+		"'migration:0018_workspace_read_capability'",
+	} {
+		if !strings.Contains(down, required) {
+			t.Fatalf("down migration missing %q", required)
+		}
+	}
+}

@@ -94,6 +94,7 @@ fn seeded_rows() -> Vec<Seeded> {
         "../../../go/services/capability-core/migrations/0016_capability_tool_classes.up.sql",
     );
     for later in [
+        "0018_workspace_read_capability.up.sql",
         "0020_result_query_capability.up.sql",
         "0024_provider_read_tool.up.sql",
     ] {

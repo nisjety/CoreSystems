@@ -1191,6 +1191,24 @@ mod tests {
     /// what plan mode refuses — stated in the ladder's vocabulary instead of as
     /// a boolean, so the two cannot drift.
     #[test]
+    fn workspace_reads_are_allowed_under_ask_and_read_only_rung() {
+        for name in [
+            "workspace_glob",
+            "workspace_grep",
+            "workspace_list",
+            "workspace_read",
+        ] {
+            assert_eq!(
+                evaluate_call(PermissionMode::Ask, name, "{}"),
+                PermissionDecision::Allow,
+                "{name}"
+            );
+            assert_eq!(rung_required_for(name, "{}"), AutonomyRung::ReadOnly, "{name}");
+            assert!(!is_risky_tool(name), "{name} trips the risky-name gate");
+        }
+    }
+
+    #[test]
     fn read_only_refuses_everything_plan_mode_refuses() {
         for tool in [
             "book_shipment",

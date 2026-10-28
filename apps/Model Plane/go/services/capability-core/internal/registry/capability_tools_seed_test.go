@@ -21,8 +21,9 @@ var seedRowPattern = regexp.MustCompile(`\('global', '([^']+)', '([^']+)', '([a-
 
 func readSeedRows(t *testing.T) []seedRow {
 	t.Helper()
-	// 0016 seeds the classes; 0020 adds the row of the one tool registered after it.
+	// 0016 seeds the classes; 0018 and 0020 add the rows of the tools registered after it.
 	sql := readMigration(t, "0016_capability_tool_classes.up.sql") +
+		readMigration(t, "0018_workspace_read_capability.up.sql") +
 		readMigration(t, "0020_result_query_capability.up.sql") +
 		readMigration(t, "0024_provider_read_tool.up.sql")
 	var rows []seedRow

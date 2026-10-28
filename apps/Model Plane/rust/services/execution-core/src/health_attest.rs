@@ -72,6 +72,11 @@ pub const AGENT_SPAWN_CAPABILITY: &str = "cap.agent.spawn";
 /// The S4.2 background-process family (`process_*`).
 pub const PROCESS_CAPABILITY: &str = "cap.process.background";
 
+/// The read-only Space workspace tools (`workspace_read`, `workspace_grep`, `workspace_glob`,
+/// `workspace_list`; WS24-S3). Attested only while the tools are switched on and the workspace
+/// store and the sandbox-manager are configured.
+pub const WORKSPACE_READ_CAPABILITY: &str = "cap.workspace.read";
+
 /// Knowledge retrieval over Data Plane v2 (`knowledge_search`).
 pub const RETRIEVAL_QUERY_CAPABILITY: &str = "cap.retrieval.query";
 
@@ -405,6 +410,27 @@ pub fn retrieval_attestations(retrieval_up: bool) -> Vec<Attestation> {
         "Data Plane retrieval engine reported Postgres and Qdrant ready, and its retrieval \
          endpoint answered an unauthenticated call with Unauthenticated.",
         COST_CLASS_BOUNDED,
+    )]
+}
+
+/// The `cap.workspace.read` attestation (WS24-S3). The read tools need the workspace store to
+/// fetch a Space's tree and the sandbox-manager to lease it, and nothing else: no bubblewrap and no
+/// interpreter, so this does not follow the sandbox probe. It is attested only while the switch
+/// offers the tools, so an instance that does not offer them cannot report that it does. Lease and
+/// fetch failures stay per call, as they do for `code_interpreter`.
+#[must_use]
+pub fn workspace_attestations(
+    switched_on: bool,
+    cas_configured: bool,
+    sandbox_manager_configured: bool,
+) -> Vec<Attestation> {
+    if !(switched_on && cas_configured && sandbox_manager_configured) {
+        return Vec::new();
+    }
+    vec![attestation(
+        WORKSPACE_READ_CAPABILITY,
+        "workspace_store_configured",
+        "The workspace store and the sandbox-manager are configured, and the workspace tools are switched on.",
     )]
 }
 
@@ -1055,7 +1081,12 @@ impl HealthAttestor {
 /// outage of execution-core itself.
 pub fn spawn_heartbeat() {
     let outcome = probe();
-    let planned = attestable(outcome);
+    let mut planned = attestable(outcome);
+    planned.extend(workspace_attestations(
+        crate::workspace_tools::mode() != crate::workspace_tools::Mode::Off,
+        matches!(crate::workspace_cas::CasClient::from_env(), Ok(Some(_))),
+        crate::sandbox_manager_client::SandboxManagerClient::from_env().is_ok(),
+    ));
     if planned.is_empty() {
         tracing::warn!(
             sandbox_probe = outcome.sandbox,
@@ -1179,6 +1210,7 @@ mod tests {
             PROCESS_CAPABILITY,
             RETRIEVAL_QUERY_CAPABILITY,
             WEB_HTTP_CAPABILITY,
+            WORKSPACE_READ_CAPABILITY,
         ] {
             if !allowlist.contains(&format!("\"{capability}\"")) {
                 missing.push(capability);
@@ -1711,6 +1743,16 @@ mod tests {
                 && reason_code.len() <= 128,
             "reason_code '{reason_code}' violates the server pattern"
         );
+    }
+
+    #[test]
+    fn workspace_attestation_needs_the_switch_and_both_stores() {
+        assert!(workspace_attestations(false, true, true).is_empty());
+        assert!(workspace_attestations(true, false, true).is_empty());
+        assert!(workspace_attestations(true, true, false).is_empty());
+        let planned = workspace_attestations(true, true, true);
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].capability_id, WORKSPACE_READ_CAPABILITY);
     }
 
     #[test]

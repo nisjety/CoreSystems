@@ -1357,13 +1357,14 @@ impl ExecutionCore for ExecutionService {
         } else {
             None
         };
-        // Demanded only for a Space-scoped code_interpreter step — every
-        // other step, and a non-Space code_interpreter step, is unaffected.
+        // Demanded only for a Space-scoped code_interpreter or workspace read (WS24-S3) step —
+        // every other step, and a non-Space one, is unaffected.
         // sandbox-manager's own AcquireLease binds a Space capability
         // decision to the CALLING principal, so a service-level credential
         // could never pass it; this is the one delegated bearer that must be
         // user-bound (S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md §3.5 B.2).
-        let sandbox_bearer = if request.get_ref().tool_name == "code_interpreter"
+        let sandbox_bearer = if (request.get_ref().tool_name == "code_interpreter"
+            || crate::workspace_tools::is_workspace_tool(&request.get_ref().tool_name))
             && !request.get_ref().space_id.is_empty()
         {
             Some(

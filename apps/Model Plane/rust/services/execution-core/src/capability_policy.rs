@@ -1548,6 +1548,11 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         "publish_social_post" => "cap.tool.social.publish",
         "list_provider_actions" | "read_provider_action" => "cap.tool.provider.read",
         "execute_provider_action" => "cap.tool.provider.execute",
+        // The Space's read-only workspace tools (WS24-S3) share one capability: reading a file and
+        // listing the tree are one authority over one object, as the process family is.
+        "workspace_read" | "workspace_grep" | "workspace_glob" | "workspace_list" => {
+            "cap.workspace.read"
+        }
         // A Conversation Core ticket is a model-proposed effect, never a
         // generic service call. The executor's dedicated adapter obtains a
         // current Control target-action decision and the owner verifies it.

@@ -728,6 +728,16 @@ async fn execute_step_inner(
     if tool_name == READ_PROVIDER_ACTION_TOOL && sandbox.is_some() {
         return StepOutcome::failed("read_provider_action is not available in a Space room");
     }
+    // Workspace reads copy a Space's files to this host and take a durable lease, so none runs
+    // under zero data retention or on a waived route, nor while the switch is off. Refused before
+    // the capability gate is asked, as MCP is (WS24-S3).
+    if crate::workspace_tools::is_workspace_tool(tool_name)
+        && (zdr || waived || crate::workspace_tools::mode() == crate::workspace_tools::Mode::Off)
+    {
+        return StepOutcome::failed(&format!(
+            "{tool_name} is not available on this run: workspace tools need a Space-scoped run on a deployment that switches them on, and never run under zero data retention"
+        ));
+    }
     // The class and floor this call's policy decision carried. A governed MCP call is
     // compared with them at dispatch (`execute_governed_mcp`).
     let signed_class: crate::mcp_gateway::SignedToolClass;
@@ -891,21 +901,9 @@ async fn execute_step_inner(
                     "Space-scoped code_interpreter requires run state tracking",
                 );
             };
-            let lease = match crate::sandbox_lease::ensure_sandbox_lease(
-                sandbox, state, run_id, org_id, user_id,
-            )
-            .await
-            {
-                Ok(lease) => lease,
-                Err(status) => return StepOutcome::failed(status.message()),
-            };
-            match crate::sandbox_lease::ensure_hydrated_workspace(
-                sandbox, state, run_id, org_id, &lease,
-            )
-            .await
-            {
+            match ensure_space_workspace(sandbox, state, run_id, org_id, user_id).await {
                 Ok(path) => Some(path),
-                Err(status) => return StepOutcome::failed(status.message()),
+                Err(message) => return StepOutcome::failed(&message),
             }
         } else {
             None
@@ -930,6 +928,11 @@ async fn execute_step_inner(
     } else if crate::process_tools::is_process_tool(tool_name) {
         execute_process_tool(
             tool_name, tool_input, org_id, user_id, run_id, step_id, state, sandbox,
+        )
+        .await
+    } else if crate::workspace_tools::is_workspace_tool(tool_name) {
+        execute_workspace_tool(
+            tool_name, tool_input, org_id, user_id, run_id, state, sandbox,
         )
         .await
     } else if matches!(tool_name, WEB_SEARCH_TOOL | QUARRY_MCP_WEB_SEARCH_TOOL) {
@@ -1330,6 +1333,58 @@ async fn execute_process_tool(
         start,
     };
     match crate::process_tools::execute(tool_name, tool_input, &ctx).await {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(error) => tool_error(error),
+    }
+}
+
+/// The Space's hydrated workspace root for this run: the lease, then the hydrated tree. Shared by
+/// `code_interpreter` and the workspace tools (WS24-S3), which read the same tree.
+async fn ensure_space_workspace(
+    sandbox: &crate::sandbox_lease::SandboxLeaseContext<'_>,
+    state: &crate::state::StateStore,
+    run_id: &str,
+    org_id: &str,
+    user_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    let lease = crate::sandbox_lease::ensure_sandbox_lease(sandbox, state, run_id, org_id, user_id)
+        .await
+        .map_err(|status| status.message().to_owned())?;
+    crate::sandbox_lease::ensure_hydrated_workspace(sandbox, state, run_id, org_id, &lease)
+        .await
+        .map_err(|status| status.message().to_owned())
+}
+
+/// Runs a workspace read tool (WS24-S3) against the Space's hydrated tree. A run with no Space has
+/// no tree to read, so it is refused rather than given an empty one.
+async fn execute_workspace_tool(
+    tool_name: &str,
+    tool_input: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    state: Option<&crate::state::StateStore>,
+    sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+) -> tool_bridge::ToolExecution {
+    let Some(sandbox) = sandbox else {
+        return tool_error("workspace tools are available only on a Space-scoped run".to_owned());
+    };
+    let Some(state) = state else {
+        return tool_error("Space-scoped workspace tools require run state tracking".to_owned());
+    };
+    let workspace = match ensure_space_workspace(sandbox, state, run_id, org_id, user_id).await {
+        Ok(path) => path,
+        Err(message) => return tool_error(message),
+    };
+    let root = match crate::workspace_edit::WorkspaceRoot::new(&workspace) {
+        Ok(root) => root,
+        Err(error) => return tool_error(format!("{}: {error}", error.code())),
+    };
+    let lock = state.workspace_lock(run_id);
+    match crate::workspace_tools::execute(tool_name, tool_input, &root, &lock).await {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,

@@ -75,6 +75,14 @@ var reasonCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,127}$`)
 //       routes. So while Auth Core refuses either scope for execution-core the
 //       row stays unavailable, and it flips on its own once that grant lands.
 //
+//   cap.workspace.read                       the WS24-S3 read-only Space workspace
+//       tools (`workspace_read`, `workspace_grep`, `workspace_glob`,
+//       `workspace_list`) read the Space's hydrated tree through
+//       execution-core's own lease and workspace store. Added 2026-10-28. The
+//       reporter attests it only while the workspace store and the sandbox-manager
+//       are configured AND WORKSPACE_TOOLS is switched on, so an instance that does
+//       not offer the tools cannot report that it does.
+//
 // Everything with effects or an owner elsewhere stays OFF this list on purpose:
 // cap.tool.provider.execute, cap.tool.social.publish, cap.tool.shipping.book,
 // cap.browser.open and cap.tool.ticket.create (see
@@ -98,6 +106,7 @@ var genericGlobalHealthCapabilityIDs = map[string]struct{}{
 
 	"cap.retrieval.query": {},
 	"cap.tool.http":       {},
+	"cap.workspace.read":  {},
 }
 
 type availabilityRequest struct {
