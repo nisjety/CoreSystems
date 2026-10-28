@@ -20,7 +20,7 @@ import { parseYamlSubset } from "../yaml-subset.mjs";
 const OPTION_B =
   "option B (the Data Plane rerank wire and config) exists only as uncommitted edits in C:/dev/CoresSystem (branch main); see .plan-work/quarry-w1w2/depth/D-D-B3-openapi-sdk.md";
 const QB_T17 =
-  "QB-T17: the compose defaults QUARRY_EDGE__AUTOPROMPT to 1 and omits six Model Plane switches; the flags-off default is an owner decision (see .plan-work/quarry-w1w2/depth/D-D-B3-openapi-sdk.md)";
+  "QB-T17: answer synthesis, AI extract formats, search suggest and audio have no switch in config.rs and run whenever QUARRY_EDGE__MODEL_PLANE_URL is set, so the seven switches this test pins include four that do not exist. Stays pending until the QB-T17 gate lands (model_plane_gate.rs is not on this branch); see decision 3.12 in .plan-work/quarry-w1w2/DECISIONS-ROUND-2026-10-27.md";
 const pending = (name, reason, fn) => test(name, { todo: reason }, fn);
 
 const here = dirname(fileURLToPath(import.meta.url));
