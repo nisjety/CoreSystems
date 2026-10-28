@@ -147,9 +147,9 @@ func publisherRegistry() []publisherRow {
 		},
 		{
 			service: "model-gateway", natsUser: gatewayUser, inbox: gatewayBox,
+			// The semantic shadow pass publishes the same subject from semantic_screening.rs.
 			subject: "mp.v1.security.x", transport: coreNATS, builder: "security_subject", args: []string{"x"},
 			source: "rust/services/model-gateway/src/tool_loop.rs", needle: "subjects::security_subject(org_id)",
-			gap: gatewayGrant + " (tool-result screening events)",
 		},
 		{
 			service: "model-gateway", natsUser: gatewayUser, inbox: gatewayBox,

@@ -2544,6 +2544,20 @@ async fn assess_external_payload(
     provenance
 }
 
+/// `mp_gateway_tool_screening_total`: one count per tool result the security audit sees, by trust
+/// class and screening posture. Counted where the audit decides rather than inside
+/// [`assess_external_payload`] alone, so an external result that no screening pass saw shows as
+/// `not-applicable` instead of being absent. Labels come from closed `label()` matches, so the
+/// series cannot grow with request data, and the counter carries no content.
+fn record_tool_screening(provenance: &crate::moderation::ToolProvenance) {
+    metrics::counter!(
+        "mp_gateway_tool_screening_total",
+        "trust" => provenance.trust.label(),
+        "posture" => provenance.screening.posture.label(),
+    )
+    .increment(1);
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn dispatch_tool(
     state: &AppState,
@@ -7917,6 +7931,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             {
                 sole_revision_source_read = true;
             }
+            record_tool_screening(&outcome.provenance);
             // Security audit (§5): fire-and-forget, exactly like
             // `implicit_feedback`'s call site — a missing NATS connection
             // must never fail or slow the turn the model is waiting on.
@@ -8010,6 +8025,40 @@ pub async fn run_tool_rounds_for_model_with_attachments(
 mod tests {
     use super::*;
     use mp_contracts::model_plane::v1 as mpv1;
+
+    /// Every tool result the audit sees is counted under its trust class and posture, so an external
+    /// result that no screening pass saw appears as `not-applicable` rather than going missing.
+    #[test]
+    fn tool_screening_counts_every_result_by_trust_class_and_posture() {
+        use crate::moderation::{ScreeningOutcome, ScreeningPosture, ToolProvenance, TrustClass};
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let flagged = ToolProvenance {
+            trust: TrustClass::ExternalWeb,
+            screening: ScreeningOutcome {
+                posture: ScreeningPosture::Flagged,
+                content_hash: crate::moderation::content_hash(b"page"),
+                rule_ids: vec!["injection.ignore_previous_instructions"],
+            },
+        };
+        metrics::with_local_recorder(&recorder, || {
+            record_tool_screening(&flagged);
+            record_tool_screening(&ToolProvenance::unscreened("mcp__srv__create_order", "ok"));
+            record_tool_screening(&ToolProvenance::unscreened("knowledge_search", "hits"));
+        });
+        let rendered = handle.render();
+        for series in [
+            r#"mp_gateway_tool_screening_total{trust="external-web",posture="flagged"} 1"#,
+            r#"mp_gateway_tool_screening_total{trust="third-party-mcp",posture="not-applicable"} 1"#,
+            r#"mp_gateway_tool_screening_total{trust="org-internal",posture="not-applicable"} 1"#,
+        ] {
+            assert!(
+                rendered.lines().any(|line| line == series),
+                "{series} is not counted once:\n{rendered}"
+            );
+        }
+    }
 
     #[test]
     fn checked_single_post_revision_finishes_but_mixed_requests_keep_the_tool_path() {
