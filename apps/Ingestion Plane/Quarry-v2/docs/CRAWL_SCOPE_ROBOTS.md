@@ -76,7 +76,7 @@ Old names in `docs/CONTRACTS.md` (before this document) are superseded by the ta
 - No new event types. The list is frozen (`docs/CONTRACTS.md`, the event list).
 - `run_started.payload` gains `scope`, `scope_mode` and `robots`.
 - `page_blocked.payload` is `{url, category: "blocklist", code, message, remedy, source: "fetch" | "discovery", user_agent?, path?}`.
-- Terminal payloads (`run_completed`, `run_cancelled`) gain `pages_blocked`, `links_denied`, `hosts_added` and `denials: {mode, counts, samples}`. Counts are per code. Samples are capped at 3 per code and 20 per page.
+- Terminal payloads (`run_completed`, `run_cancelled`) gain `pages_blocked`, `pages_blocked_robots` (the part of it the robots gate refused, WS14.S4), `links_denied`, `hosts_added` and `denials: {mode, counts, samples}`. Counts are per code. Samples are capped at 3 per code and 20 per page.
 - Field names are stable: they enter the run-trace vocabulary through the default-deny allowlist of WS10 (R-11).
 - Logs never carry a URL, query, title or raw error text (log-field lint). Counts and classes only.
 

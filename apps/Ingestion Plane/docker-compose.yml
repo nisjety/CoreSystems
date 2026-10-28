@@ -40,6 +40,11 @@ services:
       # production. user admits user tokens on the dev/evidence stack only (fixture or
       # owned hosts); on also needs a verified Model caller (D2-012) and an approval gate.
       QUARRY_EDGE__SCRAPE_ACTIONS: "${QUARRY_EDGE_SCRAPE_ACTIONS:-off}"
+      # WS14.S4 (X-10, owner decision 2026-10-28): robots.txt on crawl and batch pages. observe
+      # is the default and the soak; enforce is the flip, made after the volume-based soak
+      # (docs/RUNBOOKS.md, robots.txt gate). An unreachable robots.txt counts as disallow.
+      QUARRY_EDGE__CRAWL_ROBOTS: "${QUARRY_EDGE_CRAWL_ROBOTS:-observe}"
+      QUARRY_EDGE__ROBOTS_UNREACHABLE: "${QUARRY_EDGE_ROBOTS_UNREACHABLE:-disallow}"
       QUARRY_EDGE__SCRAPE_CAPTURE_INLINE_MAX_BYTES: "${QUARRY_EDGE_SCRAPE_CAPTURE_INLINE_MAX_BYTES:-6291456}"
       # Caps on live runs and the sweeper that releases idle ones (docs/RUNBOOKS.md,
       # "Run caps and the run sweeper"). The caps are live from the first deploy; the
