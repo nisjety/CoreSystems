@@ -56,3 +56,14 @@ One line per change: time UTC | leg | KEY old -> new. One line per revert.
 2026-10-28T20:55:46Z | L-X12-D16 | QUARRY_EDGE__AGENT_DEFAULT_MAX_STEPS 5 -> (unset, 60) (revert)
 2026-10-28T20:55:46Z | L-X12-D16 | QUARRY_EDGE__RUN_SWEEPER_DRY_RUN 0 -> (unset, compose default 1) (revert); RUN_SWEEP_INTERVAL_S 5 -> (unset) (revert); AGENT_RUN_IDLE_TTL_S 30 -> (unset) (revert); METRICS_ENABLED stays 1 for the D16 half
 2026-10-28T20:58:56Z | L-X12-D16 | QUARRY_EDGE__METRICS_ENABLED 1 -> (unset) (revert; live-flags.env empty, edge recreated)
+
+## Re-run 2026-10-29
+
+2026-10-28T23:18:02Z | R-SC4 | QUARRY_BROWSER_DEADLINE_SCALE (unset, 1) -> 0.5 (T2; same non-QUARRY_EDGE__ name as the original leg; navigate deadline 12.5 s)
+2026-10-28T23:20:33Z | R-SC4 | QUARRY_BROWSER_DEADLINE_SCALE 0.5 -> (unset, 1) (revert; live-flags.env empty, edge recreated)
+2026-10-28T23:25:35Z | R-X12 | QUARRY_EDGE__METRICS_ENABLED (unset, 0) -> 1 (internal :9092, to read quarry_agent_budget_exhausted_total)
+2026-10-28T23:25:35Z | R-X12 | QUARRY_EDGE__BUDGET_ENFORCEMENT shadow -> on
+2026-10-28T23:25:35Z | R-X12 | QUARRY_EDGE__AGENT_DEFAULT_MAX_STEPS (unset, 60) -> 5
+2026-10-28T23:27:37Z | R-X12 | QUARRY_EDGE__BUDGET_ENFORCEMENT on -> (unset, compose default shadow) (revert)
+2026-10-28T23:27:37Z | R-X12 | QUARRY_EDGE__AGENT_DEFAULT_MAX_STEPS 5 -> (unset, 60) (revert)
+2026-10-28T23:27:37Z | R-X12 | QUARRY_EDGE__METRICS_ENABLED 1 -> (unset, 0) (revert; live-flags.env empty, edge recreated)

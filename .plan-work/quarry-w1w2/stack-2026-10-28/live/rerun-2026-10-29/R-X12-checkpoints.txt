@@ -1,0 +1,21 @@
+# R-X12 X12.7 2026-10-28T23:27:25Z, SELECT only, db quarry_edge, run run_01M62DD2EWDPY9A28S438DCP3W
+BEGIN
+ exhausted | status | step | count 
+-----------+--------+------+-------
+ steps     | closed |    5 |     1
+(1 row)
+
+ rows_for_run | exhausted_steps 
+--------------+-----------------
+            1 |               1
+(1 row)
+
+ exhausted | status | count 
+-----------+--------+-------
+ cost      | closed |     2
+ runtime   | closed |     2
+ steps     | closed |     5
+           | closed |     8
+(4 rows)
+
+COMMIT
