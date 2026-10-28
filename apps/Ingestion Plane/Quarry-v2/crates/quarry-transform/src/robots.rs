@@ -467,8 +467,18 @@ mod tests {
         // real files have: a UTF-8 byte order mark, CRLF line ends, trailing comments, blank
         // lines between user-agent lines, Crawl-delay before the rules, and an empty Allow.
         let cases: [(&str, &str, &str, bool); 12] = [
-            ("\u{feff}User-agent: *\nDisallow: /private\n", "quarrybot", "/private/x", false),
-            ("\u{feff}User-agent: *\nDisallow: /private\n", "quarrybot", "/public", true),
+            (
+                "\u{feff}User-agent: *\nDisallow: /private\n",
+                "quarrybot",
+                "/private/x",
+                false,
+            ),
+            (
+                "\u{feff}User-agent: *\nDisallow: /private\n",
+                "quarrybot",
+                "/public",
+                true,
+            ),
             (
                 "\u{feff}# header\r\nSitemap: https://example.test/s.xml\r\n\
                  User-agent: * # all\r\nDisallow: /admin # staff\r\n",
@@ -501,18 +511,51 @@ mod tests {
                 "/public",
                 true,
             ),
-            ("User-agent: quarrybot\nAllow:\nUser-agent: *\nDisallow: /x\n", "quarrybot", "/x", true),
-            ("User-agent: *\r\nAllow:\r\nDisallow: /tmp\r\n", "quarrybot", "/tmp/a", false),
-            ("User-agent: quarrybot\n\nUser-agent: *\n\nDisallow: /\n", "other", "/anything", false),
-            ("User-agent: QuarryBot\nDisallow: /q\n", "quarrybot", "/q/x", false),
-            ("User-agent: QuarryBot\nDisallow: /q\n", "QUARRYBOT", "/q/x", false),
+            (
+                "User-agent: quarrybot\nAllow:\nUser-agent: *\nDisallow: /x\n",
+                "quarrybot",
+                "/x",
+                true,
+            ),
+            (
+                "User-agent: *\r\nAllow:\r\nDisallow: /tmp\r\n",
+                "quarrybot",
+                "/tmp/a",
+                false,
+            ),
+            (
+                "User-agent: quarrybot\n\nUser-agent: *\n\nDisallow: /\n",
+                "other",
+                "/anything",
+                false,
+            ),
+            (
+                "User-agent: QuarryBot\nDisallow: /q\n",
+                "quarrybot",
+                "/q/x",
+                false,
+            ),
+            (
+                "User-agent: QuarryBot\nDisallow: /q\n",
+                "QUARRYBOT",
+                "/q/x",
+                false,
+            ),
         ];
         for (body, agent, path, allowed) in cases {
             let r = RobotsTxt::parse(body);
-            assert_eq!(r.is_allowed(agent, path), allowed, "{agent} {path} in {body:?}");
+            assert_eq!(
+                r.is_allowed(agent, path),
+                allowed,
+                "{agent} {path} in {body:?}"
+            );
         }
-        let header = RobotsTxt::parse("\u{feff}# header\r\nSitemap: https://example.test/s.xml\r\n");
-        assert_eq!(header.sitemaps, vec!["https://example.test/s.xml".to_string()]);
+        let header =
+            RobotsTxt::parse("\u{feff}# header\r\nSitemap: https://example.test/s.xml\r\n");
+        assert_eq!(
+            header.sitemaps,
+            vec!["https://example.test/s.xml".to_string()]
+        );
         let delay = RobotsTxt::parse("User-agent: quarrybot\nCrawl-delay: 2\nUser-agent: *\n");
         assert_eq!(delay.crawl_delay_any(&["quarrybot"]), Some(2.0));
     }
