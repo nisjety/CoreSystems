@@ -964,6 +964,9 @@ struct MailTaskThreadDecisionClaims {
     service_audience: String,
     action_id: String,
     nonce: String,
+    /// Required, like the scheduled-run decision's: Control states it on every decision it signs (always
+    /// false, since it refuses a ZDR org), and a decision that omits it or claims true is refused here.
+    zero_data_retention: bool,
     issued_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
 }
@@ -1196,7 +1199,8 @@ fn verify_mail_task_thread_decision_with_keys(
         && claims.action_id == MAIL_TASK_THREAD_PREPARE_ACTION
         && !claims.decision_ref.trim().is_empty()
         && !claims.alias_id.trim().is_empty()
-        && !claims.provider_message_id.trim().is_empty();
+        && !claims.provider_message_id.trim().is_empty()
+        && !claims.zero_data_retention;
     if !matches
         || claims.nonce.trim().is_empty()
         || claims.expires_at <= now
@@ -15777,6 +15781,8 @@ mod tests {
         service_audience: String,
         action_id: String,
         nonce: String,
+        /// `None` leaves the claim out of the signed payload altogether.
+        zero_data_retention: Option<bool>,
         issued_at: DateTime<Utc>,
         expires_at: DateTime<Utc>,
     }
@@ -15798,6 +15804,7 @@ mod tests {
                 service_audience: super::MAIL_TASK_THREAD_PREPARE_AUDIENCE.to_owned(),
                 action_id: super::MAIL_TASK_THREAD_PREPARE_ACTION.to_owned(),
                 nonce: "nonce-1".to_owned(),
+                zero_data_retention: Some(false),
                 issued_at: now - chrono::Duration::seconds(1),
                 expires_at: now + chrono::Duration::minutes(5),
             }
@@ -15821,7 +15828,7 @@ mod tests {
         }
 
         fn sign(&self) -> String {
-            let claims = serde_json::json!({
+            let mut claims = serde_json::json!({
                 "decision_ref": self.decision_ref,
                 "org_id": self.org_id,
                 "user_id": self.user_id,
@@ -15835,6 +15842,9 @@ mod tests {
                 "issued_at": self.issued_at.to_rfc3339(),
                 "expires_at": self.expires_at.to_rfc3339(),
             });
+            if let Some(zero_data_retention) = self.zero_data_retention {
+                claims["zero_data_retention"] = serde_json::json!(zero_data_retention);
+            }
             let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims encode"));
             let encoded_key = URL_SAFE_NO_PAD.encode(self.key_id.as_bytes());
             let signing_input = format!("{}.{encoded_key}.{payload}", super::MAIL_TASK_DECISION_VERSION);
@@ -15853,6 +15863,30 @@ mod tests {
         let decision = MailTaskDecisionBuilder::new(now);
         super::verify_mail_task_thread_decision_with_keys(&decision.request(), &decision.keys(), now)
             .expect("a fully matching mail-task-v1 decision must authorize the request");
+    }
+
+    /// A mail-task decision claiming zero data retention is refused, and so is one that does not state
+    /// the claim at all: Control always states it (false), so a silent decision is not one it signed.
+    #[test]
+    fn mail_task_thread_decision_is_refused_for_a_zero_data_retention_claim_or_a_missing_one() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        for (label, claim) in [("claims true", Some(true)), ("states nothing", None)] {
+            let mut decision = MailTaskDecisionBuilder::new(now);
+            decision.zero_data_retention = claim;
+            let error = super::verify_mail_task_thread_decision_with_keys(
+                &decision.request(),
+                &decision.keys(),
+                now,
+            )
+            .expect_err("a zero-retention or silent mail-task decision must not authorize a thread");
+            assert_eq!(error.code(), tonic::Code::PermissionDenied, "{label}");
+        }
+        // Control's own shape (the claim stated, false) still passes.
+        let decision = MailTaskDecisionBuilder::new(now);
+        super::verify_mail_task_thread_decision_with_keys(&decision.request(), &decision.keys(), now)
+            .expect("an explicit false claim authorizes");
     }
 
     /// prepare_user_owned_thread_rejects_a_decision_minted_for_user_A_when_the_request_names_user_B

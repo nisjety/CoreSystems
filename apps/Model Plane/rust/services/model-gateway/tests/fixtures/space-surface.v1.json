@@ -1660,12 +1660,12 @@
       "handler": "http_routes.rs::prepare_mail_task_thread_for_gateway_bff",
       "decision_type": "service_principal",
       "min_role": "service",
-      "zdr_class": "n/a",
-      "basis": "unreviewed",
+      "zdr_class": "refuse",
+      "basis": "guard:verify_mail_task_thread_decision",
       "idempotency": "unspecified",
       "flag": null,
       "payload_allow_list": [],
-      "reason": "Service-internal bridge that creates an empty user-owned thread (ids only). OPEN: the Control decision it verifies carries no zero_data_retention claim and user-core has no ZDR check on mail tasks, so a ZDR org is not refused here; needs an owner decision."
+      "reason": "Service-internal bridge that creates an empty user-owned thread (ids only). Control refuses to issue the decision for a ZDR org, and Session Core requires an explicit zero_data_retention:false claim and refuses true or a missing one (grpc.rs verify_mail_task_thread_decision). The pipeline itself is not wired: AppState.mail_task_pipeline is None in every build."
     },
     {
       "id": "mg:POST:/v1/internal/space-deletion/threads",

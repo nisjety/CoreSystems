@@ -1,6 +1,7 @@
 package spaces
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +79,46 @@ func TestIssueMailTaskThreadDecisionRefusesForAZDROrg(t *testing.T) {
 
 	if _, err := IssueMailTaskThreadDecision(policy, signer, "org-1", "user-1", "alias-1", "provider-msg-1", now); err == nil {
 		t.Fatalf("expected zero data retention to refuse mail task decision issuance")
+	}
+}
+
+// Session Core requires an explicit zero_data_retention statement and refuses a true one, so the signed
+// claim set must carry it, and false, on every decision Control issues.
+func TestIssueMailTaskThreadDecisionSignsAnExplicitFalseZeroDataRetentionClaim(t *testing.T) {
+	signer, verifier := testDecisionKeys(t)
+	now := time.Date(2026, time.September, 28, 12, 0, 0, 0, time.UTC)
+	token, err := IssueMailTaskThreadDecision(validMailTaskEffectPolicy("org-1"), signer, "org-1", "user-1", "alias-1", "provider-msg-1", now)
+	if err != nil {
+		t.Fatalf("IssueMailTaskThreadDecision: %v", err)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.Split(token, ".")[2])
+	if err != nil {
+		t.Fatalf("payload is not base64url: %v", err)
+	}
+	if !strings.Contains(string(payload), `"zero_data_retention":false`) {
+		t.Fatalf("the signed claims must state zero_data_retention:false explicitly, got %s", payload)
+	}
+	decision, err := VerifyMailTaskThreadDecision(verifier, token, now.Add(time.Second))
+	if err != nil || decision.ZeroDataRetention {
+		t.Fatalf("a freshly issued decision must verify with the claim false: %v %#v", err, decision)
+	}
+}
+
+func TestMailTaskThreadDecisionIsNeverSignedWithAZeroDataRetentionClaim(t *testing.T) {
+	signer, _ := testDecisionKeys(t)
+	now := time.Date(2026, time.September, 28, 12, 0, 0, 0, time.UTC)
+	decision := MailTaskThreadDecision{
+		DecisionRef: "decision-1", OrgID: "org-1", UserID: "user-1", AliasID: "alias-1",
+		ProviderMessageID: "provider-msg-1", SessionKey: MailTaskSessionKey("org-1", "provider-msg-1"),
+		Origin: "mail_task", ServiceAudience: mailTaskThreadPrepareAudience, ActionID: mailTaskThreadPrepareAction,
+		Nonce: "nonce-1", IssuedAt: now, ExpiresAt: now.Add(time.Minute),
+	}
+	if _, err := SignMailTaskThreadDecision(signer, decision); err != nil {
+		t.Fatalf("a decision without the claim must sign: %v", err)
+	}
+	decision.ZeroDataRetention = true
+	if _, err := SignMailTaskThreadDecision(signer, decision); err == nil {
+		t.Fatalf("a decision claiming zero data retention must never be signed")
 	}
 }
 
