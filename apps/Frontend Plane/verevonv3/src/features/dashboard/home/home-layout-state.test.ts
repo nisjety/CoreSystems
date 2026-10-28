@@ -68,13 +68,13 @@ describe('reading the remembered layout', () => {
   })
 
   it('restores every stored field', () => {
-    const saved = { dockMinimized: true, dockExpanded: true, feed: 'aquatiq', category: 'Business', pinnedOnly: true }
+    const saved = { dockMinimized: true, dockExpanded: true, feed: 'workspace', category: 'Business', pinnedOnly: true }
     localStorage.setItem(keyA, JSON.stringify(saved))
     expect(readHomeLayout(keyA)).toEqual(saved)
   })
 
   it('accepts each feed the existing feed schema knows', () => {
-    for (const feed of ['news', 'traffic', 'aquatiq'] as const) {
+    for (const feed of ['news', 'traffic', 'workspace'] as const) {
       localStorage.setItem(keyA, JSON.stringify({ feed }))
       expect(readHomeLayout(keyA).feed).toBe(feed)
     }
@@ -108,8 +108,8 @@ describe('reading the remembered layout', () => {
 describe('writing a partial update', () => {
   it('merges the patch into what is stored and returns the saved state', () => {
     expect(writeHomeLayout(keyA, { pinnedOnly: true })).toEqual({ ...HOME_LAYOUT_DEFAULTS, pinnedOnly: true })
-    expect(writeHomeLayout(keyA, { feed: 'aquatiq', category: 'Technology' })).toEqual({ ...HOME_LAYOUT_DEFAULTS, pinnedOnly: true, feed: 'aquatiq', category: 'Technology' })
-    expect(stored(keyA)).toEqual({ dockMinimized: false, dockExpanded: false, feed: 'aquatiq', category: 'Technology', pinnedOnly: true })
+    expect(writeHomeLayout(keyA, { feed: 'workspace', category: 'Technology' })).toEqual({ ...HOME_LAYOUT_DEFAULTS, pinnedOnly: true, feed: 'workspace', category: 'Technology' })
+    expect(stored(keyA)).toEqual({ dockMinimized: false, dockExpanded: false, feed: 'workspace', category: 'Technology', pinnedOnly: true })
   })
 
   it('writes nothing while the identity is unknown', () => {
@@ -136,7 +136,7 @@ describe('writing a partial update', () => {
 
   it('leaves another identity untouched', () => {
     writeHomeLayout(keyB, { feed: 'traffic' })
-    writeHomeLayout(keyA, { feed: 'aquatiq' })
+    writeHomeLayout(keyA, { feed: 'workspace' })
     expect(stored(keyB).feed).toBe('traffic')
   })
 })
@@ -155,11 +155,11 @@ describe('useHomeLayout', () => {
   it('updates the state and remembers it', () => {
     const layout = mount()
     layout.update({ dockMinimized: true })
-    layout.update({ feed: 'aquatiq' })
+    layout.update({ feed: 'workspace' })
     flush()
-    expect(layout.state()).toEqual({ ...HOME_LAYOUT_DEFAULTS, dockMinimized: true, feed: 'aquatiq' })
-    expect(stored(keyA)).toEqual({ ...HOME_LAYOUT_DEFAULTS, dockMinimized: true, feed: 'aquatiq' })
-    expect(mount().state()).toEqual({ ...HOME_LAYOUT_DEFAULTS, dockMinimized: true, feed: 'aquatiq' })
+    expect(layout.state()).toEqual({ ...HOME_LAYOUT_DEFAULTS, dockMinimized: true, feed: 'workspace' })
+    expect(stored(keyA)).toEqual({ ...HOME_LAYOUT_DEFAULTS, dockMinimized: true, feed: 'workspace' })
+    expect(mount().state()).toEqual({ ...HOME_LAYOUT_DEFAULTS, dockMinimized: true, feed: 'workspace' })
   })
 
   it('lets components that own different fields update the same record', () => {
@@ -227,9 +227,9 @@ describe('useHomeLayout', () => {
       expect(layout.state().feed).toBe('traffic')
       signIn('user-b', 'org-a')
       expect(layout.state()).toEqual({ ...HOME_LAYOUT_DEFAULTS, dockExpanded: true })
-      layout.update({ feed: 'aquatiq' })
+      layout.update({ feed: 'workspace' })
       flush()
-      expect(stored(keyB)).toEqual({ ...HOME_LAYOUT_DEFAULTS, dockExpanded: true, feed: 'aquatiq' })
+      expect(stored(keyB)).toEqual({ ...HOME_LAYOUT_DEFAULTS, dockExpanded: true, feed: 'workspace' })
       expect(stored(keyA)).toEqual({ ...HOME_LAYOUT_DEFAULTS, feed: 'traffic', pinnedOnly: true })
       signIn('user-a', 'org-a')
       expect(layout.state()).toEqual({ ...HOME_LAYOUT_DEFAULTS, feed: 'traffic', pinnedOnly: true })
@@ -249,7 +249,7 @@ describe('useHomeLayout', () => {
 
     it('does not carry a signed-out account into the next one on a shared computer', () => {
       const layout = mount()
-      layout.update({ dockMinimized: true, feed: 'aquatiq', pinnedOnly: true })
+      layout.update({ dockMinimized: true, feed: 'workspace', pinnedOnly: true })
       flush()
       signIn(null, null)
       expect(layout.state()).toEqual(HOME_LAYOUT_DEFAULTS)

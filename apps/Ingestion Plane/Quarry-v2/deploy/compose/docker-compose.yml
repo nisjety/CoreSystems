@@ -98,9 +98,16 @@ services:
       QUARRY_EDGE__MODEL_PLANE_URL: ${MODEL_PLANE_URL:-}
       # Model Plane switches, off (decision 3.12 of 2026-10-27). Each one also needs MODEL_PLANE_URL.
       QUARRY_EDGE__AUTOPROMPT: "${QUARRY_EDGE_AUTOPROMPT:-0}"
-      QUARRY_EDGE__SEMANTIC_RERANK: "${QUARRY_EDGE_SEMANTIC_RERANK:-0}"
       QUARRY_EDGE__LLM_CLASSIFY_INTENT: "${QUARRY_EDGE_LLM_CLASSIFY_INTENT:-0}"
       QUARRY_EDGE__PAGE_TITLE_ENRICH: "${QUARRY_EDGE_PAGE_TITLE_ENRICH:-0}"
+      # QB-T17 switches, off until the search_suggest ZDR and token-retention review.
+      QUARRY_EDGE__ANSWER_SYNTHESIS: "${QUARRY_EDGE_ANSWER_SYNTHESIS:-0}"
+      QUARRY_EDGE__AI_FORMATS: "${QUARRY_EDGE_AI_FORMATS:-0}"
+      QUARRY_EDGE__SEARCH_SUGGEST: "${QUARRY_EDGE_SEARCH_SUGGEST:-0}"
+      QUARRY_EDGE__MODEL_AUDIO: "${QUARRY_EDGE_MODEL_AUDIO:-0}"
+      # Semantic rerank is option B: Data Plane's /v1/rerank (needs DATA_PLANE_URL and the
+      # cross-plane tokens), not Model Plane. Off; see the Ingestion compose.
+      QUARRY_EDGE__SEMANTIC_RERANK: "${QUARRY_EDGE_SEMANTIC_RERANK:-0}"
       # ADR-6 (owner ruling 2026-10-28): scrape-time actions default off; see the Ingestion compose.
       QUARRY_EDGE__SCRAPE_ACTIONS: "${QUARRY_EDGE_SCRAPE_ACTIONS:-off}"
       # SmartRouter web-search primary. Quarry-v2 owns its searxng (defined

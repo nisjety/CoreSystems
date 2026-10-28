@@ -74,6 +74,7 @@ import { getSession } from '@/shared/session/session-store'
 import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
 import { FilledRailIcon } from './FilledRailIcon'
 import { ChatSidebarOrganizer } from './sidebar/ChatSidebarOrganizer'
+import { ChatWorkLinks } from './sidebar/ChatWorkLinks'
 import { homeOverviewActionSchema, homeOverviewGroup, homeOverviewSidebarItems, parseHomeOverview } from '@/shared/actions/home-overview'
 
 export const SIDEBAR_MINIMIZED_WIDTH = 60
@@ -685,6 +686,7 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
         Ny samtale
       </a>
       </Show>
+      <Show when={!chatAppearanceActive('organizer')}><ChatWorkLinks /></Show>
 
       {/* The empty-state fallback below already surfaces `error()` when there
           is nothing else to show. This banner covers the opposite case -- a

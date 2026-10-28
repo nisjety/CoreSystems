@@ -1955,3 +1955,93 @@ This section corrects and extends "Profile owner and ACL check (WS17.P2, unit W2
 - Rollout, in order, none of it done: rebuild the edge so the stamp is live; run the count and note the time; observe a week (`quarry_profile_owner_decisions_total`, the stamp counter); choose between a manual, org-confirmed rescue (`UPDATE quarry_profiles SET owner_user_id = '<actor id>' WHERE org_id = '<org id>' AND profile_id = '<profile id>' AND owner_user_id IS NULL;`) and a backfill from run records (user actors only); then set `QUARRY_EDGE__PROFILE_OWNER_ENFORCE=enforce` and restart; then run the two-user evidence below.
 - Tests (run in the build, Linux container): `cargo test -p quarry-edge --lib profile_guard` (16), `--test profile_owner` (8), `--test profile_guard` (8), `--test profile_attach` (10, run-path tests: person stamped under observe and enforce, org_shared scope, no persistent profile, service principal not stamped, off, ZDR refused with no row, existing row untouched), `cargo test -p quarry-browser --lib session` (52), `cargo test -p quarry-runtime --lib profile` (48). The Postgres store tests (default scope, stamp insert-only and tombstone) compile under `--features postgres-queue` and skip without `DATABASE_URL`: not run against a database. The Redis-gated `metadata_methods_pass_through_to_inner_uncached` was corrected and did not run (no `REDIS_URL`).
 - Evidence owed (stack session): with two users A and B in one org, A starts a run with `persist_profile: true`; `GET /v1/profiles` as A lists it with `owner_is_caller: true`; as B it does not appear under enforce, and `GET /v1/profiles/<id>` as B is a 404 (served under observe, with a `profile.owner.would_deny` line). The S3 profile backend has no tombstones, so its stamp is not ordered against a delete.
+
+## Semantic rerank (Data Plane `/v1/rerank`)
+
+Quarry reorders the top search results with the Data Plane's rerank (`rerank-v1`, profile
+`web-v1`, a paid Azure cross-encoder). No Model Plane is involved and no general model is prompted.
+
+Switches on quarry-edge (each: default, boot check, effect):
+
+- `QUARRY_EDGE__SEMANTIC_RERANK`: off in the binary, and off in the Ingestion compose
+  (`QUARRY_EDGE_SEMANTIC_RERANK` defaults to `0`). Set it to `1` only after the ship check passes (see
+  Deploy order). On needs `QUARRY_EDGE__DATA_PLANE_URL` and the cross-plane tokens. Boot logs
+  `semantic rerank: enabled (Data Plane /v1/rerank)`; if an input is missing it logs one ERROR naming
+  it and rerank stays off.
+- `QUARRY_EDGE__SEMANTIC_RERANK_TOP_N`: default 10, clamped to 1..100 (the Data Plane's limit).
+- `QUARRY_EDGE__RERANK_DEADLINE_MS`: the budget of one call in milliseconds, default 2000 (the compose
+  sets it from `QUARRY_EDGE_RERANK_DEADLINE_MS`). It is sent as the Data Plane's `deadline_ms`, clamped to
+  100 to 8000, the range the Data Plane accepts. Quarry stops waiting at the budget plus 0.5 s, and a miss
+  degrades the search to its input order (`degraded`, reason `timeout`). Boot logs `deadline_ms` on the
+  `semantic rerank: enabled` line.
+- `QUARRY_EDGE__RERANK_SHADOW`: off in the binary. The Ingestion compose sets it to `1`
+  (`QUARRY_EDGE_RERANK_SHADOW`) for the first deploy's smoke run, and the orchestrator sets that default to
+  `0` after the live proof. In shadow mode the Data Plane is asked and its answer measured, but the results
+  keep their input order and carry no score (`status: shadow`). Boot logs a WARN if it is set while
+  `SEMANTIC_RERANK` is off.
+- `QUARRY_EDGE__ZERO_SAAS_SEARCH`: on a sovereign deployment the reranker is never called
+  (`skipped sovereign`, no call).
+
+Data Plane switches (on `retrieval-engine`, default safe): `WEB_RERANK_ENABLED` and
+`WEB_RERANK_PROCESSOR_APPROVED` are off until set, so the route answers `skipped disabled` or
+`skipped processor_unapproved` and makes no provider call. `WEB_RERANK_ALLOWED_SERVICES` defaults to
+`service:quarry-edge`.
+
+Reading an outcome: each search response carries `rerank.status` (`applied`, `skipped`, `degraded`,
+`shadow`, or `rerank-not-configured`) and `rerank.reason`. Every such response writes one
+`search.rerank` log line with `outcome`, `reason`, `profile`, `score_kind`, `cache_hit`, `zdr` and
+`hits`. The query text is never logged. In shadow mode `rerank.reason` is `would_apply` when the Data Plane's order would have reordered the head. Scores reach a caller only when it sends
+`score_kinds: ["cross_encoder.v1"]`; the response then names `score_kind`.
+
+What never reaches the Data Plane: a ZDR run (from the body or the user's token), and an org that is
+not a tenant (`onboarding` or `global`, reason `input_not_tenant`). A service caller that omits `zdr` is refused
+with `ZDR_REQUIRED`. Degraded and skipped answers are never cached.
+
+Deploy order (owner ruling 2026-10-12). Do not ship the rerank client before the Data Plane gate and the
+Control Plane grant are live: until they are, every non-ZDR search skips or degrades its rerank, the
+outcome is never cached, and each search pays the search providers again. The order, the sign-off marker the
+check accepts and the rollback order are in `apps/Data Plane v2/docs/web-rerank-v1.md` (deploy order for
+quarry-edge). The check is `bash "apps/Data Plane v2/scripts/qb-preflight.sh" --live --ship-qb-t09`. The compose default is `0`, so a deploy is dark until `QUARRY_EDGE_SEMANTIC_RERANK=1` is set after the
+check passes (exit 0). Do not set it on a deploy whose check fails.
+
+The two Data Plane switches are `WEB_RERANK_ENABLED` and `WEB_RERANK_PROCESSOR_APPROVED`. The processor
+switch is `true` only after counsel's Article 28 sign-off (OD-LEGAL), and the check accepts it only with
+`DPV2_PREFLIGHT_ART28_CONFIRMED=yes` recorded. The Control Plane grant is `data:rerank` for `quarry-edge` on
+`data-plane`, which is in the committed registry and live in auth-service (read-only check, 2026-10-13). Model Gateway sends no `score_kinds`
+until QB-T12 ships its `score_kind` calibration in `relevance.rs`, so QB-T12 ships before or with any change
+that makes Model Gateway ask for `cross_encoder.v1`.
+
+Failures and what to do:
+
+- `degraded`, reason `refused`: the Data Plane answered 401, 403, 404 or 422 to the rerank call, and the
+  results keep their input order. One ERROR line is written a minute. That window is shared with the token
+  refusals below, so a misconfigured principal writes one line a minute, not one per search. A 401 or 403
+  means the quarry-edge principal lacks `data:rerank` or its audience: check the registry row. A 404 can mean the route is not deployed on the Data Plane (the live check of 2026-10-13 found an image
+  without `/v1/rerank`), and a 422 means the `rerank-v1` contract has drifted: check the goldens.
+- `degraded`, reason `token_unavailable`: Auth Core refused the `web-rerank` token (an ERROR line in that
+  shared window when Auth Core answers 401 or 403) or could not be reached (a warning). The token log line
+  says which.
+- `degraded`, reason `contract`: the answer did not match `rerank-v1`. That is a 400, a 413 or another status
+  other than 200, 429 or 5xx, an answer that does not decode, or an answer for another request or profile.
+  Check the goldens and the Data Plane's version.
+- `degraded`, reason `rate_limited`: the Data Plane's rate gate answered 429. The provider was not called,
+  so the breaker does not count it.
+- `degraded`, reason `provider_error` (a 5xx from the Data Plane) or `unreachable` (no answer, or a body cut
+  off): both count against the breaker.
+- `skipped`, reason `circuit_open`: five consecutive failed calls opened the breaker for 30 s. It then admits
+  one probe, and a success closes it.
+- `degraded`, reason `provider_rate_limited`: the Data Plane answered `degraded` because its rerank provider
+  reported a rate limit. The breaker counts it.
+- `degraded`, reason `no_scores`: the Data Plane answered `ok` with no usable scores for the head. The breaker
+  counts it.
+- `skipped`, reason `processor_unapproved`, `misconfigured` or `metering_unavailable`: the Data Plane's own gate
+  declined before any provider call (see the Data Plane switches above). That is not a failure of the route.
+- `degraded`, reason `timeout`: the Data Plane did not answer inside the budget (`QUARRY_EDGE__RERANK_DEADLINE_MS`,
+  2 s by default).
+
+Known gap: the candidates go to the processor for every non-ZDR tenant org, and they are not all public web
+pages. The org's own indexed pages (the local index, always registered) are candidates whether or not the
+vector leg is on, and with the vector leg on (`QUARRY_EDGE__VECTOR_RETRIEVAL`) its vector hits are too, so
+their titles and snippets reach the processor. Quarry's per-request `allow_third_party_processing` privacy
+flag is not carried on the search path. The processor gate that applies today is the Data Plane's deployment switch
+`WEB_RERANK_PROCESSOR_APPROVED`, which the owner's legal confirmation (O2) decides before production.

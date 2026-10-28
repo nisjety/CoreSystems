@@ -1,0 +1,27 @@
+{
+  "format": "zdr-acknowledgement-wording/1",
+  "current": "v1",
+  "versions": {
+    "v1": {
+      "status": "draft_pending_od_legal",
+      "files": {
+        "v1/en/chatgpt_subscription_not_supported.first_use.txt": "619fc6b41b782096b262016041742ae91783e2b0efcf79ff8e2da60c81296cb2",
+        "v1/en/chatgpt_subscription_not_supported.org_zdr_off.txt": "ce39ee6f6af026fc607bb346252bf03cd886139eb4367ed2f57fc6244f54798d",
+        "v1/en/chatgpt_subscription_not_supported.org_zdr_on.txt": "edc4e32f09acb46f4e78d82c2247d9b297cc542f10ed3fc2589fb8a2e4152660",
+        "v1/en/connection_cannot_verify.first_use.txt": "0fa1256274bc9cb10baa0826a085a648b96a85e2bce7e2631aab136d3e63141b",
+        "v1/en/connection_cannot_verify.org_zdr_off.txt": "5128c95fcfeb619d2db44d67f7794d280cf7a6b06f436109e32de81e851a2ce6",
+        "v1/en/connection_cannot_verify.org_zdr_on.txt": "777137f981aa0377ebb499aa57325321d7834bdb8bcf3a3fb4f61b28e9d99295",
+        "v1/en/connection_supported.org_zdr_off.txt": "0a2dceec601305fcb34a2f4c2b19314605381febffc407f4f4c0009024e1afac",
+        "v1/en/connection_supported.org_zdr_on.txt": "56e5f953cafff78ee1a94da290c0054415b93d06ad355e1b9c42786b97475f70",
+        "v1/no/chatgpt_subscription_not_supported.first_use.txt": "40ed5b115fd43bfcfb2fa699e6c4fee5c822520d99d2fc47c1a15b01368f7c6d",
+        "v1/no/chatgpt_subscription_not_supported.org_zdr_off.txt": "df2c6e75c1157e952796587c5ba2823d39608ae452ea33240c6efb7f40c2dd5e",
+        "v1/no/chatgpt_subscription_not_supported.org_zdr_on.txt": "1bc0cce3c1ba4abd1e391d1a84f956dcd3eb9a64a64a8f248acd4ecd4c5d4aa2",
+        "v1/no/connection_cannot_verify.first_use.txt": "c39a90de5e343a16e56e29a525bb6cb5e2c5fd2664197e6b2db5e05185366dea",
+        "v1/no/connection_cannot_verify.org_zdr_off.txt": "01db11e208f258d438ecea7876b74a3362459276ee454cdb219ae78516e244e7",
+        "v1/no/connection_cannot_verify.org_zdr_on.txt": "9d108484bbb3f7843a5b5c21e884e8ec1c91420c3d0382330808e67d976c5a93",
+        "v1/no/connection_supported.org_zdr_off.txt": "74383fd6a85ebab5f844d36d7c73547b51339849b87115cd87f7f9dd6ebc4886",
+        "v1/no/connection_supported.org_zdr_on.txt": "9517c487523153e3e0c638b53eaa1bc8019b2e1ef5d807e2e112d5db9a77e38f"
+      }
+    }
+  }
+}

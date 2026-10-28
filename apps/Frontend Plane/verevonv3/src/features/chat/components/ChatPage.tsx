@@ -22,7 +22,9 @@ import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import {
   DashboardComposer,
   type DashboardComposerAttachment,
+  type DashboardComposerSubmitPayload,
 } from '@/features/dashboard/home/DashboardComposer'
+import { withChatWorkPeriod, type ChatWorkPeriod } from '@/shared/actions/chat-work-period'
 import { getThreadContext } from '@/shared/api/chat-client'
 import { importUpload } from '@/shared/api/knowledge-client'
 import { getSession } from '@/shared/session/session-store'
@@ -140,6 +142,11 @@ export default function ChatPage() {
   // files share the same conversation. The canvas still lets the user switch
   // files locally after it opens.
   const [selectedAttachmentId, setSelectedAttachmentId] = createSignal<string | null>(null)
+  const [workPeriod, setWorkPeriod] = createSignal<ChatWorkPeriod>({ kind: 'none' })
+  const submitWithWorkPeriod = (payload: DashboardComposerSubmitPayload) => handleComposerSubmit({
+    ...payload,
+    text: withChatWorkPeriod(payload.text, workPeriod(), i18n.locale() === 'no' ? 'no' : 'en'),
+  })
 
   // "Planlegg dette" (chat-wave2 "schedule" spec §2.1) — the message-action
   // entry point. `resolveScheduleSeedForTurn` reuses `rerunAsNewTurn`'s own
@@ -229,6 +236,8 @@ export default function ChatPage() {
       sourceScopeLocked={state.turns.length > 0}
       retrievalScope={retrievalScope()}
       onRetrievalScopeChange={setRetrievalScope}
+      workPeriod={workPeriod()}
+      onWorkPeriodChange={setWorkPeriod}
       imageMode={imageMode()}
       message={input()}
       onBrowseWebChange={setBrowseWeb}
@@ -236,7 +245,7 @@ export default function ChatPage() {
       onMessageChange={setInput}
       onPlanModeChange={setPlanMode}
       onStop={handleStop}
-      onSubmit={handleComposerSubmit}
+      onSubmit={submitWithWorkPeriod}
       onTemporaryChatChange={setTemporaryChat}
       planMode={planMode()}
       showTurnReceipt={false}
@@ -787,7 +796,9 @@ export default function ChatPage() {
             <EmptyChatState
               onSelectPrompt={setInput}
               onResumeThread={(threadId) => selectChatThread(threadId)}
+              orgId={session.activeOrg?.id}
               orgName={session.activeOrg?.name}
+              userId={session.user?.id}
               userName={session.user?.name}
             >
               {composerView}

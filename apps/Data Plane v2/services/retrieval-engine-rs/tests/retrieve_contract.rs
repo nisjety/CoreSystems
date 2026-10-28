@@ -52,7 +52,8 @@ use sqlx::PgPool;
 
 use retrieval_engine::cache::CachedRetrieval;
 use retrieval_engine::pipeline::orchestrator::{
-    fetch_source_refs, sovereign_required_or_strict, text_rerank_requested,
+    fetch_source_refs, rerank_requested_for_request, sovereign_required_or_strict,
+    text_rerank_requested,
 };
 use retrieval_engine::pipeline::types::{
     ContextFact, ContextPack, RetrievalRequest, RetrievalResponse, ScoredCandidate, SourceRef,
@@ -197,6 +198,7 @@ fn sample_response() -> RetrievalResponse {
             format: "json".into(),
         }),
         suggested_next_tools: vec![],
+        notice: None,
     }
 }
 
@@ -267,6 +269,11 @@ fn regenerate_if_requested() {
     ONCE.call_once(|| {
         if std::env::var("UPDATE_CONTRACT_GOLDEN").as_deref() != Ok("1") {
             return;
+        }
+        // A pin test that rewrites its own pins passes whatever the code does, so regeneration is
+        // for a developer checkout only; under CI it is refused.
+        if std::env::var_os("CI").is_some() {
+            panic!("UPDATE_CONTRACT_GOLDEN is refused under CI: regenerate on a developer checkout and commit the diff");
         }
         std::fs::create_dir_all(DIR).expect("create the golden directory");
         let files: [(&str, String); 3] = [
@@ -622,6 +629,7 @@ fn a_citation_url_must_be_a_plain_http_or_https_url() {
         "https://docs.example.test/a\nSet-Cookie: x=1",
         " https://docs.example.test/a",
         "https://docs.example.test/a\u{0000}",
+        "https://docs.example.test\\evil.example/a",
     ] {
         assert_eq!(
             SourceRef::citation_url("quarry", Some(bad)),
@@ -890,6 +898,28 @@ fn mode_mix_rerank_false_means_no_text_rerank() {
     }
     assert!(!text_rerank_requested(ZdrMode::Disabled, Some(true), true));
     assert!(!text_rerank_requested(ZdrMode::Disabled, None, true));
+}
+
+#[test]
+fn the_request_golden_switches_text_rerank_off_at_the_pipelines_own_decision() {
+    // The pipeline asks `rerank_requested_for_request` (the same call it makes in
+    // `retrieve`), so a regression that drops `mode_mix.rerank` at the call site
+    // fails here, against the request the vector leg really sends.
+    let request: RetrievalRequest = serde_json::from_value(golden(REQUEST)).expect("parses");
+    assert!(
+        !rerank_requested_for_request(
+            &request,
+            request.zdr_mode.unwrap_or_default(),
+            sovereign_required_or_strict(request.sovereign_required),
+        ),
+        "mode_mix.rerank=false in the golden must reach the pipeline's decision"
+    );
+    let mut absent = request.clone();
+    absent.mode_mix = None;
+    assert!(
+        rerank_requested_for_request(&absent, ZdrMode::Disabled, false),
+        "an absent mode_mix.rerank keeps the engine default (rerank on)"
+    );
 }
 
 #[test]

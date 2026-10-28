@@ -15,14 +15,6 @@ import { fileURLToPath } from "node:url";
 
 import { parseYamlSubset } from "../yaml-subset.mjs";
 
-// Assertions that pin work this branch does not have. They still run and are printed as TODO, so a failure is
-// visible but does not fail the suite. Drop the marker when the work lands on quarryv2-next.
-const OPTION_B =
-  "option B (the Data Plane rerank wire and config) exists only as uncommitted edits in C:/dev/CoresSystem (branch main); see .plan-work/quarry-w1w2/depth/D-D-B3-openapi-sdk.md";
-const QB_T17 =
-  "QB-T17: answer synthesis, AI extract formats, search suggest and audio have no switch in config.rs and run whenever QUARRY_EDGE__MODEL_PLANE_URL is set, so the seven switches this test pins include four that do not exist. Stays pending until the QB-T17 gate lands (model_plane_gate.rs is not on this branch); see decision 3.12 in .plan-work/quarry-w1w2/DECISIONS-ROUND-2026-10-27.md";
-const pending = (name, reason, fn) => test(name, { todo: reason }, fn);
-
 const here = dirname(fileURLToPath(import.meta.url));
 const quarry = resolve(here, "..", "..");
 const ingestion = resolve(quarry, "..");
@@ -150,7 +142,7 @@ const registry = JSON.parse(read(paths.registry));
 
 // ----------------------------------------------------------------------------- removed identifiers
 
-pending("no removed rerank identifier remains in the compose, the config, the code or the docs", OPTION_B, () => {
+test("no removed rerank identifier remains in the compose, the config, the code or the docs", () => {
   const removed = [
     "SEMANTIC_RERANK_MODEL",
     "semantic_rerank_model",
@@ -182,7 +174,7 @@ test("no current document says the semantic reranker calls the Model Plane", () 
 
 // ----------------------------------------------------------------------------- rerank wiring
 
-pending("the rerank deadline is read from its env, clamped in the config and passed to the reranker", OPTION_B, () => {
+test("the rerank deadline is read from its env, clamped in the config and passed to the reranker", () => {
   const config = read(paths.config);
   const main = read(paths.main);
   assert.match(config, /pub rerank_deadline_ms:\s*Option<u64>/, "config.rs has the deadline field");
@@ -191,7 +183,7 @@ pending("the rerank deadline is read from its env, clamped in the config and pas
   assert.match(main, /\.with_deadline\(cfg\.rerank_deadline\(\)\)/, "main.rs gives the wrapper the budget");
 });
 
-pending("the rerank switches the compose sets are the ones the binary reads", OPTION_B, () => {
+test("the rerank switches the compose sets are the ones the binary reads", () => {
   const env = environmentOf(quarryEdgeBlock(read(paths.compose)));
   // A rerank key the binary never reads is a dead switch: each must be a field of EdgeConfig in config.rs.
   const fields = new Set([...read(paths.config).matchAll(/^\s*pub ([a-z_][a-z0-9_]*)\s*:/gm)].map((m) => m[1]));
@@ -212,7 +204,7 @@ pending("the rerank switches the compose sets are the ones the binary reads", OP
   }
 });
 
-pending("the compose rerank comments name the live check, the ship gate and the score opt-in", OPTION_B, () => {
+test("the compose rerank comments name the live check, the ship gate and the score opt-in", () => {
   const comments = quarryEdgeBlock(read(paths.compose))
     .filter((line) => /^ {6}#/.test(line))
     .join("\n");
@@ -220,7 +212,7 @@ pending("the compose rerank comments name the live check, the ship gate and the 
   assert.match(comments, /model-gateway[\s\S]{0,200}score_kinds|score_kinds[\s\S]{0,200}model-gateway/, "the model-gateway score opt-in (QB-T12) is named");
 });
 
-pending("the Model Plane switches default off, as the docs say (QB-T17)", QB_T17, () => {
+test("the Model Plane switches default off, as the docs say (QB-T17)", () => {
   const env = environmentOf(quarryEdgeBlock(read(paths.compose)));
   for (const key of [
     "QUARRY_EDGE__AUTOPROMPT",
@@ -235,7 +227,7 @@ pending("the Model Plane switches default off, as the docs say (QB-T17)", QB_T17
   }
 });
 
-pending("the runbook and the self-host table state the rerank defaults the compose has", OPTION_B, () => {
+test("the runbook and the self-host table state the rerank defaults the compose has", () => {
   const env = environmentOf(quarryEdgeBlock(read(paths.compose)));
   const rerank = composeDefault(env.get("QUARRY_EDGE__SEMANTIC_RERANK"));
   const shadow = composeDefault(env.get("QUARRY_EDGE__RERANK_SHADOW"));
@@ -292,7 +284,7 @@ test("each token-request row is named in the cross-plane integration table", () 
   }
 });
 
-pending("the integration table does not list the semantic reranker among the Model Plane callers", OPTION_B, () => {
+test("the integration table does not list the semantic reranker among the Model Plane callers", () => {
   const line = read(paths.crossPlaneIntegration)
     .split(/\r?\n/)
     .find((candidate) => candidate.includes("refuses the three Model Plane rows"));
@@ -302,7 +294,7 @@ pending("the integration table does not list the semantic reranker among the Mod
 
 // ----------------------------------------------------------------------------- openapi
 
-pending("SearchRequest documents zdr and score_kinds", OPTION_B, () => {
+test("SearchRequest documents zdr and score_kinds", () => {
   const spec = read(paths.openapi);
   const properties = schemaProperties(spec, "SearchRequest");
   assert.ok(properties.has("zdr"), "zdr is documented");
@@ -313,7 +305,7 @@ pending("SearchRequest documents zdr and score_kinds", OPTION_B, () => {
   );
 });
 
-pending("SearchResponse documents score_kind and the rerank report", OPTION_B, () => {
+test("SearchResponse documents score_kind and the rerank report", () => {
   const spec = read(paths.openapi);
   const properties = schemaProperties(spec, "SearchResponse");
   assert.ok(properties.has("score_kind"), "score_kind is documented");
@@ -324,7 +316,7 @@ pending("SearchResponse documents score_kind and the rerank report", OPTION_B, (
   );
 });
 
-pending("RerankReport lists the five statuses the wire carries", OPTION_B, () => {
+test("RerankReport lists the five statuses the wire carries", () => {
   const spec = read(paths.openapi);
   const properties = schemaProperties(spec, "RerankReport");
   assert.ok(properties.has("status") && properties.has("reason") && properties.has("profile"));
@@ -334,14 +326,14 @@ pending("RerankReport lists the five statuses the wire carries", OPTION_B, () =>
   }
 });
 
-pending("SearchResultItem documents the per-result score and no highlights", OPTION_B, () => {
+test("SearchResultItem documents the per-result score and no highlights", () => {
   const spec = read(paths.openapi);
   const properties = schemaProperties(spec, "SearchResultItem");
   assert.ok(properties.has("score"), "score is documented");
   assert.ok(!properties.has("highlights"), "rerank highlights are deferred (QB-T06), not documented");
 });
 
-pending("the /v1/search operation documents its 400 refusals", OPTION_B, () => {
+test("the /v1/search operation documents its 400 refusals", () => {
   const block = pathBlock(read(paths.openapi), "/v1/search");
   assert.ok(block.includes("'400':"), "the 400 response (ZDR_REQUIRED, SCORE_KIND_UNSUPPORTED) is documented");
 });

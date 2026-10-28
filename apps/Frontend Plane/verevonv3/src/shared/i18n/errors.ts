@@ -12,6 +12,11 @@
 // code that has neither an entry nor a reasoned internal-only exemption, so the
 // table cannot drift. A code answered by status class (401, 403, 429, no network)
 // needs no entry; everything else falls back to the caller's own sentence.
+// The zero-retention refusals of the Model Plane catalogue are the exception:
+// their words live with the catalogue (shared/api/zdr-refusals.ts), so this seam
+// renders them from there.
+
+import { isZdrRefusalCode, zdrRefusalPresentation } from '@/shared/api/zdr-refusals'
 
 type ErrorCopy = {
   no: string
@@ -27,6 +32,7 @@ type ApiErrorLike =
       retryAfterSeconds?: number | null
       blockReason?: string | null
       resumable?: boolean
+      feature?: string | null
     }
   | null
   | undefined
@@ -939,6 +945,20 @@ function describe(
   const kind = errorKind(like, code)
   const retryAfterSeconds =
     typeof like?.retryAfterSeconds === 'number' && like.retryAfterSeconds >= 1 ? Math.ceil(like.retryAfterSeconds) : null
+
+  // A zero-retention refusal of the Model Plane catalogue: its own words, with
+  // the feature it names (an ApiError carries it) and the next step. A message
+  // the SPA wrote itself (LocalizedError) still wins.
+  if (code && isZdrRefusalCode(code) && !(err instanceof LocalizedError)) {
+    const shown = zdrRefusalPresentation(code, typeof like?.feature === 'string' ? like.feature : null, tr)
+    return {
+      code,
+      kind,
+      message: shown.next === null ? shown.message : `${shown.message} ${shown.next}`,
+      resumable: like?.resumable === true,
+      retryAfterSeconds,
+    }
+  }
 
   let copy: ErrorCopy | undefined
   if (err instanceof LocalizedError) copy = err.copy

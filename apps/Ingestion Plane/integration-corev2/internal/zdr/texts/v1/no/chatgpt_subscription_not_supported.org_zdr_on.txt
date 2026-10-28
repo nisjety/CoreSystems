@@ -1,0 +1,9 @@
+title: ZDR slås av for samtaler med dette abonnementet
+continue: Fortsett uten ZDR for dette abonnementet
+cancel: Avbryt
+
+Organisasjonen din har Zero Data Retention (ZDR) på. ChatGPT-abonnementet ditt kan ikke gi ZDR: samtalene du kjører med det sendes til OpenAI under din egen konto og dine egne vilkår, og OpenAI kan beholde dem. Verevon kan ikke endre det.
+
+Hvis du fortsetter, slås ZDR av bare for samtaler du kjører med dette abonnementet. De lagres da i arbeidsområdet ditt som vanlige samtaler. Organisasjonens kunnskap som hentes inn i samtalen, og resultater fra verktøy, sendes til OpenAI. Følgende bakgrunnsjobber kjøres ikke for disse samtalene: minneindeksering, «dreaming»-utvinning og gjennomgang av læring. Samtaler som allerede er kjørt, blir værende der de er.
+
+ZDR er fortsatt på for resten av organisasjonen, for andre medlemmer og for alle andre modeller og tilkoblinger. Du kan trekke valget tilbake når som helst under Integrasjoner.

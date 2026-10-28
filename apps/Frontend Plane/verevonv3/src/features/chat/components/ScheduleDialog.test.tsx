@@ -89,6 +89,22 @@ describe('ScheduleDialog — cadence presets', () => {
 })
 
 describe('ScheduleDialog — submit shape', () => {
+  it('requires a task when opened from the routines page', async () => {
+    mockedCreate.mockResolvedValue({ id: 'cron_1' })
+    const { getByRole } = renderDialog('', '')
+    const submit = getByRole('button', { name: 'Opprett plan' }) as HTMLButtonElement
+    expect(submit.disabled).toBe(true)
+
+    fireEvent.input(getByRole('textbox', { name: 'Navn' }), { target: { value: 'Daglig brief' } })
+    fireEvent.input(getByRole('textbox', { name: 'Oppgave' }), { target: { value: 'Oppsummer nye saker.' } })
+    flush()
+
+    expect(submit.disabled).toBe(false)
+    fireEvent.click(submit)
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalledTimes(1))
+    expect(mockedCreate.mock.calls[0]![0].goalText).toBe('Oppsummer nye saker.')
+  })
+
   it('defaults to Europe/Oslo and never asks for a workflow type (schedule-from-chat.ts omits it)', async () => {
     mockedCreate.mockResolvedValue({ id: 'cron_1' })
     const { getByRole } = renderDialog('Navn', 'Målet')

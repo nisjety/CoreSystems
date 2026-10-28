@@ -200,6 +200,12 @@ pub struct Grounding {
     /// [`crate::retrieval_metadata::retention_posture_conflict`].
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub zdr_actions_applied: Vec<String>,
+    /// Set when Data Plane answered in a reduced form this turn may show: the answer used text search
+    /// only because no ZDR-approved query embedding route is attached (Z-41b). It reaches the client as
+    /// its own `retrieval_notice` event, never inside this payload, so it is not serialized here and
+    /// never persisted with the grounding.
+    #[serde(skip_serializing)]
+    pub notice: Option<crate::retrieval_metadata::RetrievalNotice>,
     #[serde(skip_serializing)]
     pub context_block: String,
     #[serde(skip_serializing)]
@@ -778,6 +784,7 @@ pub fn build_grounding(query: &str, resp: &RetrieveResponse) -> Grounding {
         graph: None,
         suggested_next_tools,
         zdr_actions_applied: metadata.zdr_actions_applied,
+        notice: metadata.notice,
         context_block,
         citations,
     }
@@ -860,6 +867,7 @@ fn graph_only_grounding(query: &str, graph: GroundingGraph) -> Grounding {
         // report: nothing was enforced because nothing was retrieved.
         suggested_next_tools: Vec::new(),
         zdr_actions_applied: Vec::new(),
+        notice: None,
         context_block,
         citations: Vec::new(),
     }
@@ -884,9 +892,17 @@ pub fn authorize<T>(
     Ok(request)
 }
 
+/// The Data Plane `zdr_mode` a retrieval carries for a turn: `ephemeral` for a ZDR turn,
+/// `reject` for a turn that runs under a waiver (restricted documents are filtered before they
+/// reach the personal account), and absent for a persistent turn, as every persistent request has
+/// always sent it. The mapping is `mp_contracts::dataplane_posture`; only its `disabled` value is
+/// left out.
 #[must_use]
-pub fn data_plane_zdr_mode(zdr: bool) -> Option<String> {
-    zdr.then(|| "ephemeral".to_owned())
+pub fn data_plane_zdr_mode(zdr: bool, waived: bool) -> Option<String> {
+    match mp_contracts::dataplane_posture::data_plane_zdr_mode(zdr, waived) {
+        "disabled" => None,
+        mode => Some(mode.to_owned()),
+    }
 }
 
 pub(crate) fn retrieval_http_base_url() -> String {
@@ -927,7 +943,7 @@ fn build_graph_grounding_request(
     bearer: &VerifiedBearer,
     org_id: &str,
     query: &str,
-    zdr: bool,
+    zdr_mode: Option<String>,
 ) -> Result<reqwest::Request, reqwest::Error> {
     client
         .post(format!("{base_url}/v1/retrieve/graph"))
@@ -939,7 +955,7 @@ fn build_graph_grounding_request(
             "query": query,
             "max_entities": i32::try_from(GRAPH_NODE_LIMIT).unwrap_or(i32::MAX),
             "include_communities": true,
-            "zdr_mode": data_plane_zdr_mode(zdr),
+            "zdr_mode": zdr_mode,
         }))
         .build()
 }
@@ -949,7 +965,7 @@ async fn load_graph_grounding(
     bearer: &VerifiedBearer,
     org_id: &str,
     query: &str,
-    zdr: bool,
+    zdr_mode: Option<String>,
 ) -> Option<GroundingGraph> {
     let request = match build_graph_grounding_request(
         &state.http_client,
@@ -957,7 +973,7 @@ async fn load_graph_grounding(
         bearer,
         org_id,
         query,
-        zdr,
+        zdr_mode,
     ) {
         Ok(request) => request,
         Err(error) => {
@@ -1025,13 +1041,45 @@ async fn load_graph_grounding(
 
 /// Retrieve grounding for `query` from Data Plane v2. Returns `None` when the
 /// retrieval service is unavailable, errors, or yields nothing — callers then
-/// proceed ungrounded.
+/// proceed ungrounded. A refusal made under zero retention is not hidden as an
+/// empty result, and a caller that must answer it uses [`retrieve_checked`].
 pub async fn retrieve(
     state: &AppState,
     bearer: &VerifiedBearer,
     org_id: &str,
     query: &str,
-    zdr: bool,
+    zdr_mode: Option<String>,
+    sovereign_required: bool,
+    space_decision: Option<&str>,
+) -> Option<Grounding> {
+    retrieve_checked(
+        state,
+        bearer,
+        org_id,
+        query,
+        zdr_mode,
+        sovereign_required,
+        space_decision,
+    )
+    .await
+    .ok()
+    .flatten()
+}
+
+/// [`retrieve`], with the one outcome a turn must not treat as an empty result: the Data Plane's
+/// refusal of a restrictive retrieval whose query could not be embedded on a ZDR-approved route (Z-41).
+/// That is returned as the typed zero-data-retention refusal, so the turn says why it cannot be answered
+/// from the organisation's knowledge instead of answering as though nothing had been found.
+///
+/// # Errors
+///
+/// The typed refusal, when a restrictive retrieval was refused for want of a ZDR-approved route.
+pub async fn retrieve_checked(
+    state: &AppState,
+    bearer: &VerifiedBearer,
+    org_id: &str,
+    query: &str,
+    zdr_mode: Option<String>,
     // Jurisdiction posture for this turn, already merged from the caller's
     // signed `sovereign` claim and privacy floor by
     // `mp_contracts::dataplane_posture`. A `bool` rather than an `Option`
@@ -1040,18 +1088,22 @@ pub async fn retrieve(
     // embedding provider cannot satisfy, and every dense query fails closed.
     sovereign_required: bool,
     space_decision: Option<&str>,
-) -> Option<Grounding> {
+) -> Result<Option<Grounding>, mp_contracts::zdr_refusal::Refusal> {
     let query = query.trim();
     if query.is_empty() {
-        return None;
+        return Ok(None);
     }
+    // Read before the mode moves into the graph leg. A restrictive retrieval may carry its refusal, and the
+    // mode decides what notice, if any, the turn may state.
+    let restrictive = crate::retrieval_metadata::notice_applies_to(zdr_mode.as_deref());
+    let notice_mode = zdr_mode.clone();
 
     let request = RetrieveRequest {
         org_id: org_id.to_owned(),
         query: query.to_owned(),
         top_k: DEFAULT_TOP_K,
         user_id: None,
-        zdr_mode: data_plane_zdr_mode(zdr),
+        zdr_mode: zdr_mode.clone(),
         sovereign_required: Some(sovereign_required),
         context_budget_tokens: Some(DEFAULT_CONTEXT_BUDGET_TOKENS),
         context_format: Some(CONTEXT_FORMAT.to_owned()),
@@ -1063,14 +1115,14 @@ pub async fn retrieve(
         Ok(request) => request,
         Err(error) => {
             tracing::warn!(error = %error.message(), org_id = %org_id, "retrieval bearer could not be forwarded");
-            return None;
+            return Ok(None);
         }
     };
     let scoped_token = match scoped_retrieval_token(space_decision) {
         Ok(token) => token,
         Err(()) => {
             tracing::warn!(org_id = %org_id, "scoped grounding suppressed because retrieval authority is absent");
-            return None;
+            return Ok(None);
         }
     };
     if let Some(token) = scoped_token {
@@ -1078,13 +1130,13 @@ pub async fn retrieve(
             Ok(metadata) => metadata,
             Err(_) => {
                 tracing::warn!(org_id = %org_id, "Space decision could not be encoded for Data Plane");
-                return None;
+                return Ok(None);
             }
         };
         grpc_req.metadata_mut().insert("x-space-decision", metadata);
     }
     let retrieval_future = retrieval_client.retrieve(grpc_req);
-    let graph_future = load_graph_grounding(state, bearer, org_id, query, zdr);
+    let graph_future = load_graph_grounding(state, bearer, org_id, query, zdr_mode);
     let (retrieval_result, graph) = tokio::join!(retrieval_future, graph_future);
 
     match retrieval_result {
@@ -1097,20 +1149,53 @@ pub async fn retrieve(
             // all. The `grounded` bool fed into confidence scoring
             // (`grounding.is_some_and(|g| !g.citations.is_empty())`) is
             // unaffected since it already requires non-empty citations.
-            Some(with_graph(
-                build_grounding(query, &resp.into_inner()),
-                graph,
-            ))
+            let mut grounding = build_grounding(query, &resp.into_inner());
+            if let Some(notice) = grounding.notice.take() {
+                match crate::retrieval_metadata::notice_for_mode(notice, notice_mode.as_deref()) {
+                    Some(stated) => grounding.notice = Some(stated),
+                    None => tracing::warn!(
+                        org_id = %org_id,
+                        "Data Plane attached a reduced-answer notice to a persistent retrieval; withheld"
+                    ),
+                }
+            }
+            Ok(Some(with_graph(grounding, graph)))
         }
         Err(error) => {
+            if restrictive {
+                if let Some(refusal) = dense_unavailable_refusal(&error) {
+                    tracing::warn!(
+                        org_id = %org_id,
+                        "ZDR retrieval refused: no ZDR-approved query embedding route is attached"
+                    );
+                    return Err(refusal);
+                }
+            }
             tracing::warn!(
                 error = %error.message(),
                 org_id = %org_id,
                 "retrieval grounding unavailable; proceeding ungrounded"
             );
-            graph.map(|payload| graph_only_grounding(query, payload))
+            Ok(graph.map(|payload| graph_only_grounding(query, payload)))
         }
     }
+}
+
+/// The typed refusal a Data Plane status carries when a restrictive retrieval could not be answered:
+/// `failed_precondition` whose reason is `zdr_dense_unavailable` (Z-41). Any other status keeps its
+/// existing handling, so this maps only the refusal the Data Plane makes on purpose.
+#[must_use]
+pub fn dense_unavailable_refusal(
+    status: &tonic::Status,
+) -> Option<mp_contracts::zdr_refusal::Refusal> {
+    let message = status.message();
+    let reason = message
+        .split_once(':')
+        .map_or(message, |(reason, _)| reason)
+        .trim();
+    (status.code() == tonic::Code::FailedPrecondition
+        && reason == crate::retrieval_metadata::ZDR_DENSE_UNAVAILABLE)
+        .then_some(mp_contracts::zdr_refusal::Refusal::UNAVAILABLE)
 }
 
 /// `None` means a legacy unscoped request. An explicitly scoped request must
@@ -1126,6 +1211,194 @@ fn scoped_retrieval_token(space_decision: Option<&str>) -> Result<Option<&str>, 
             } else {
                 Ok(Some(token))
             }
+        }
+    }
+}
+
+/// Data Plane retrieval doubles for the reduced-answer tests (Z-41b). Each is a real gRPC server on a
+/// loopback port, so a test sees what the gateway puts on the wire and what it gets back. Shared with the
+/// tests of the routes and the tool loop that carry the notice onward.
+#[cfg(test)]
+pub(crate) mod notice_double {
+    use std::sync::{Arc, Mutex};
+
+    use mp_contracts::dataplane::retrieval_v2::{
+        retrieval_service_client::RetrievalServiceClient,
+        retrieval_service_server::{RetrievalService, RetrievalServiceServer},
+    };
+
+    /// How the double answers `Retrieve`.
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) enum Reply {
+        /// An ordinary answer, with no notice.
+        Ordinary,
+        /// A ZDR answer that degraded to lexical search, written the way Data Plane writes it:
+        /// `notice {code, message}` in the metadata.
+        Degraded,
+        /// The refusal Data Plane makes when a reduced answer cannot be delivered: `failed_precondition`,
+        /// with the reason first in the message.
+        Refused,
+    }
+
+    /// Records every `zdr_mode` it is sent, and answers as configured. Every other RPC is unimplemented.
+    #[derive(Clone)]
+    pub(crate) struct NoticeDouble {
+        reply: Reply,
+        modes: Arc<Mutex<Vec<Option<String>>>>,
+    }
+
+    impl NoticeDouble {
+        pub(crate) fn new(reply: Reply) -> Self {
+            Self {
+                reply,
+                modes: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        /// Every `zdr_mode` the double received, in arrival order.
+        pub(crate) fn modes(&self) -> Vec<Option<String>> {
+            self.modes
+                .lock()
+                .expect("the recorder is not poisoned")
+                .clone()
+        }
+
+        /// A Data Plane retrieval client that reaches this double over a loopback port.
+        pub(crate) async fn client(self) -> RetrievalServiceClient<tonic::transport::Channel> {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("a loopback port is free");
+            let address = listener.local_addr().expect("the listener has an address");
+            tokio::spawn(
+                tonic::transport::Server::builder()
+                    .add_service(RetrievalServiceServer::new(self))
+                    .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+            );
+            let channel = tonic::transport::Channel::from_shared(format!("http://{address}"))
+                .expect("the loopback endpoint is valid")
+                .connect()
+                .await
+                .expect("the double accepts a connection");
+            RetrievalServiceClient::new(channel)
+        }
+    }
+
+    /// The metadata Data Plane attaches to a degraded answer: `notice {code, message}`.
+    fn degraded_metadata() -> prost_types::Struct {
+        let text = |value: &str| prost_types::Value {
+            kind: Some(prost_types::value::Kind::StringValue(value.to_owned())),
+        };
+        let notice = prost_types::Struct {
+            fields: [
+                ("code".to_owned(), text("zdr_dense_unavailable")),
+                (
+                    "message".to_owned(),
+                    text("Semantic search was not used for this answer."),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        prost_types::Struct {
+            fields: [(
+                "notice".to_owned(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::StructValue(notice)),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        }
+    }
+
+    #[tonic::async_trait]
+    impl RetrievalService for NoticeDouble {
+        type RetrieveStreamStream = tokio_stream::Empty<
+            Result<mp_contracts::dataplane::retrieval_v2::RetrievalChunk, tonic::Status>,
+        >;
+
+        async fn retrieve(
+            &self,
+            request: tonic::Request<mp_contracts::dataplane::retrieval_v2::RetrieveRequest>,
+        ) -> Result<
+            tonic::Response<mp_contracts::dataplane::retrieval_v2::RetrieveResponse>,
+            tonic::Status,
+        > {
+            self.modes
+                .lock()
+                .expect("the recorder is not poisoned")
+                .push(request.into_inner().zdr_mode);
+            match self.reply {
+                Reply::Ordinary => Ok(tonic::Response::new(
+                    mp_contracts::dataplane::retrieval_v2::RetrieveResponse::default(),
+                )),
+                Reply::Degraded => Ok(tonic::Response::new(
+                    mp_contracts::dataplane::retrieval_v2::RetrieveResponse {
+                        retrieval_metadata: Some(degraded_metadata()),
+                        ..Default::default()
+                    },
+                )),
+                Reply::Refused => Err(tonic::Status::failed_precondition(
+                    "zdr_dense_unavailable: Semantic search was not used for this answer.",
+                )),
+            }
+        }
+
+        async fn retrieve_stream(
+            &self,
+            _request: tonic::Request<mp_contracts::dataplane::retrieval_v2::RetrieveRequest>,
+        ) -> Result<tonic::Response<Self::RetrieveStreamStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented(
+                "the double answers Retrieve only",
+            ))
+        }
+
+        async fn get_trace(
+            &self,
+            _request: tonic::Request<mp_contracts::dataplane::retrieval_v2::GetTraceRequest>,
+        ) -> Result<
+            tonic::Response<mp_contracts::dataplane::retrieval_v2::GetTraceResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented(
+                "the double answers Retrieve only",
+            ))
+        }
+
+        async fn get_sources(
+            &self,
+            _request: tonic::Request<mp_contracts::dataplane::retrieval_v2::GetSourcesRequest>,
+        ) -> Result<
+            tonic::Response<mp_contracts::dataplane::retrieval_v2::GetSourcesResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented(
+                "the double answers Retrieve only",
+            ))
+        }
+
+        async fn get_chunks(
+            &self,
+            _request: tonic::Request<mp_contracts::dataplane::retrieval_v2::GetChunksRequest>,
+        ) -> Result<
+            tonic::Response<mp_contracts::dataplane::retrieval_v2::GetChunksResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented(
+                "the double answers Retrieve only",
+            ))
+        }
+
+        async fn pack_context(
+            &self,
+            _request: tonic::Request<mp_contracts::dataplane::retrieval_v2::PackContextRequest>,
+        ) -> Result<
+            tonic::Response<mp_contracts::dataplane::retrieval_v2::PackContextResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented(
+                "the double answers Retrieve only",
+            ))
         }
     }
 }
@@ -1162,10 +1435,349 @@ mod tests {
         assert!(request.metadata().get("x-user-id").is_none());
     }
 
+    /// A Data Plane retrieval double that counts every `Retrieve` that reaches it and keeps the `zdr_mode`
+    /// each one carried. It is a real gRPC server on a loopback port, so the test observes what the
+    /// gateway puts on the wire, not what a helper returns. Every other RPC is unimplemented.
+    #[derive(Clone, Default)]
+    struct CountingRetrieval {
+        modes: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    #[tonic::async_trait]
+    impl mp_contracts::dataplane::retrieval_v2::retrieval_service_server::RetrievalService
+        for CountingRetrieval
+    {
+        type RetrieveStreamStream = tokio_stream::Empty<
+            Result<mp_contracts::dataplane::retrieval_v2::RetrievalChunk, tonic::Status>,
+        >;
+
+        async fn retrieve(
+            &self,
+            request: tonic::Request<mp_contracts::dataplane::retrieval_v2::RetrieveRequest>,
+        ) -> Result<
+            tonic::Response<mp_contracts::dataplane::retrieval_v2::RetrieveResponse>,
+            tonic::Status,
+        > {
+            self.modes
+                .lock()
+                .expect("the counter is not poisoned")
+                .push(request.into_inner().zdr_mode);
+            Ok(tonic::Response::new(
+                mp_contracts::dataplane::retrieval_v2::RetrieveResponse::default(),
+            ))
+        }
+
+        async fn retrieve_stream(
+            &self,
+            _request: tonic::Request<mp_contracts::dataplane::retrieval_v2::RetrieveRequest>,
+        ) -> Result<tonic::Response<Self::RetrieveStreamStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented(
+                "the double answers Retrieve only",
+            ))
+        }
+
+        async fn get_trace(
+            &self,
+            _request: tonic::Request<mp_contracts::dataplane::retrieval_v2::GetTraceRequest>,
+        ) -> Result<
+            tonic::Response<mp_contracts::dataplane::retrieval_v2::GetTraceResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented(
+                "the double answers Retrieve only",
+            ))
+        }
+
+        async fn get_sources(
+            &self,
+            _request: tonic::Request<mp_contracts::dataplane::retrieval_v2::GetSourcesRequest>,
+        ) -> Result<
+            tonic::Response<mp_contracts::dataplane::retrieval_v2::GetSourcesResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented(
+                "the double answers Retrieve only",
+            ))
+        }
+
+        async fn get_chunks(
+            &self,
+            _request: tonic::Request<mp_contracts::dataplane::retrieval_v2::GetChunksRequest>,
+        ) -> Result<
+            tonic::Response<mp_contracts::dataplane::retrieval_v2::GetChunksResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented(
+                "the double answers Retrieve only",
+            ))
+        }
+
+        async fn pack_context(
+            &self,
+            _request: tonic::Request<mp_contracts::dataplane::retrieval_v2::PackContextRequest>,
+        ) -> Result<
+            tonic::Response<mp_contracts::dataplane::retrieval_v2::PackContextResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented(
+                "the double answers Retrieve only",
+            ))
+        }
+    }
+
+    async fn counting_retrieval_channel(double: CountingRetrieval) -> tonic::transport::Channel {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port is free");
+        let address = listener.local_addr().expect("the listener has an address");
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(
+                    mp_contracts::dataplane::retrieval_v2::retrieval_service_server::RetrievalServiceServer::new(
+                        double,
+                    ),
+                )
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+        );
+        tonic::transport::Channel::from_shared(format!("http://{address}"))
+            .expect("the loopback endpoint is valid")
+            .connect()
+            .await
+            .expect("the double accepts a connection")
+    }
+
+    /// Waived reject mode, observed at the Data Plane. Each turn's posture is decided by the real
+    /// resolver, and the mode it hands `retrieve` is the one the counting double receives: a waived turn
+    /// sends exactly one `reject`, a ZDR turn `ephemeral`, and a persistent turn no mode at all. A waived
+    /// turn therefore never retrieves unfiltered, which is the restricted-document rule of the waiver.
+    #[tokio::test]
+    async fn a_waived_turns_retrieval_reaches_the_data_plane_once_in_reject_mode() {
+        use crate::zdr_posture::{decide_views, Route, TurnPosture};
+        use mp_contracts::agentic_subscription::PROVIDER_ID;
+        use mp_contracts::dataplane::retrieval_v2::retrieval_service_client::RetrievalServiceClient;
+        use mp_contracts::retention::{ClaimsView, Reason, WaiverView};
+
+        let double = CountingRetrieval::default();
+        let seen = std::sync::Arc::clone(&double.modes);
+        let mut state = AppState::new();
+        state.retrieval_client =
+            RetrievalServiceClient::new(counting_retrieval_channel(double).await);
+        // The graph leg is HTTP. A closed loopback port fails it at once, without a DNS lookup.
+        let previous = std::env::var("DATAPLANE_RETRIEVAL_HTTP_URL").ok();
+        std::env::set_var("DATAPLANE_RETRIEVAL_HTTP_URL", "http://127.0.0.1:9");
+        let bearer = crate::auth::VerifiedDataPlaneBearer::for_test("signed-user-jwt");
+
+        let waiver = WaiverView {
+            version: 1,
+            provider: PROVIDER_ID,
+            connection: "conn-1",
+        };
+        let waived = decide_views(
+            &[ClaimsView {
+                zdr: false,
+                org_zdr: Some(true),
+                waiver: Some(waiver),
+            }],
+            &Route::named(Some(PROVIDER_ID), Some("conn-1"), false),
+        )
+        .expect("a waiver on its own route is decided");
+        assert!(matches!(
+            waived,
+            TurnPosture::Waived {
+                reason: Reason::ConnectionNotZdrCapable,
+                ..
+            }
+        ));
+        let zdr = decide_views(
+            &[ClaimsView {
+                zdr: true,
+                org_zdr: Some(true),
+                waiver: None,
+            }],
+            &Route::named(None, None, false),
+        )
+        .expect("a ZDR turn on the platform route is decided");
+        let persistent = decide_views(
+            &[ClaimsView {
+                zdr: false,
+                org_zdr: Some(false),
+                waiver: None,
+            }],
+            &Route::named(None, None, false),
+        )
+        .expect("a persistent turn is decided");
+
+        for posture in [&waived, &zdr, &persistent] {
+            let _ = super::retrieve(
+                &state,
+                &bearer,
+                "org-1",
+                "what does the contract say",
+                posture.data_plane_mode(),
+                false,
+                None,
+            )
+            .await;
+        }
+
+        match previous {
+            Some(value) => std::env::set_var("DATAPLANE_RETRIEVAL_HTTP_URL", value),
+            None => std::env::remove_var("DATAPLANE_RETRIEVAL_HTTP_URL"),
+        }
+        assert_eq!(
+            seen.lock().expect("the counter is not poisoned").clone(),
+            vec![
+                Some("reject".to_owned()),
+                Some("ephemeral".to_owned()),
+                None,
+            ],
+            "the Data Plane received one Retrieve per turn, carrying that turn's mode"
+        );
+    }
+
+    /// One retrieval through a real Data Plane double, with the loopback graph leg closed. Returns what
+    /// `retrieve_checked` decided and every `zdr_mode` the double received.
+    async fn retrieve_through(
+        reply: notice_double::Reply,
+        zdr_mode: Option<&str>,
+    ) -> (
+        Result<Option<Grounding>, mp_contracts::zdr_refusal::Refusal>,
+        Vec<Option<String>>,
+    ) {
+        let double = notice_double::NoticeDouble::new(reply);
+        let seen = double.clone();
+        let mut state = AppState::new();
+        state.retrieval_client = double.client().await;
+        let previous = std::env::var("DATAPLANE_RETRIEVAL_HTTP_URL").ok();
+        std::env::set_var("DATAPLANE_RETRIEVAL_HTTP_URL", "http://127.0.0.1:9");
+        let bearer = crate::auth::VerifiedDataPlaneBearer::for_test("signed-user-jwt");
+        let result = retrieve_checked(
+            &state,
+            &bearer,
+            "org-1",
+            "what does the contract say",
+            zdr_mode.map(str::to_owned),
+            false,
+            None,
+        )
+        .await;
+        match previous {
+            Some(value) => std::env::set_var("DATAPLANE_RETRIEVAL_HTTP_URL", value),
+            None => std::env::remove_var("DATAPLANE_RETRIEVAL_HTTP_URL"),
+        }
+        (result, seen.modes())
+    }
+
+    /// A ZDR retrieval that Data Plane answered in lexical form keeps its notice on the grounding, so the
+    /// turn can tell the user the answer used text search only.
+    #[tokio::test]
+    async fn a_degraded_zdr_retrieval_carries_its_notice_into_the_grounding() {
+        let (result, modes) =
+            retrieve_through(notice_double::Reply::Degraded, Some("ephemeral")).await;
+        let grounding = result
+            .expect("a degraded answer is still an answer")
+            .expect("the grounding is returned");
+        assert_eq!(
+            grounding.notice.map(|notice| notice.code),
+            Some("zdr_dense_unavailable")
+        );
+        assert_eq!(modes, vec![Some("ephemeral".to_owned())]);
+    }
+
+    /// A persistent retrieval is never told its answer was reduced under zero retention. Forwarding the
+    /// notice on a non-ZDR turn would state a retention posture that does not apply to it.
+    #[tokio::test]
+    async fn a_persistent_retrieval_never_carries_a_notice() {
+        let (result, modes) = retrieve_through(notice_double::Reply::Degraded, None).await;
+        let grounding = result
+            .expect("the answer is delivered")
+            .expect("the grounding is returned");
+        assert!(grounding.notice.is_none(), "{grounding:?}");
+        assert_eq!(modes, vec![None]);
+    }
+
+    /// A waived retrieval runs persistent for its connection, so it is told only that its answer was reduced.
+    /// The zero-retention code and its wording never reach it.
+    #[tokio::test]
+    async fn a_waived_retrieval_is_told_only_that_its_answer_was_reduced() {
+        let (result, modes) = retrieve_through(notice_double::Reply::Degraded, Some("reject")).await;
+        let grounding = result
+            .expect("the answer is delivered")
+            .expect("the grounding is returned");
+        assert_eq!(
+            grounding.notice.map(|notice| (notice.code, notice.wording_key)),
+            Some(("retrieval_reduced", "retrieval.reduced"))
+        );
+        assert_eq!(modes, vec![Some("reject".to_owned())]);
+    }
+
+    /// The notice travels as its own event, so it is not serialized into the grounding payload that the
+    /// `grounding` event and the persisted turn carry.
+    #[tokio::test]
+    async fn the_notice_is_not_part_of_the_grounding_payload() {
+        let (result, _) = retrieve_through(notice_double::Reply::Degraded, Some("reject")).await;
+        let grounding = result
+            .expect("the answer is delivered")
+            .expect("the grounding is returned");
+        assert!(grounding.notice.is_some());
+        let wire = serde_json::to_string(&grounding).expect("the grounding serializes");
+        assert!(!wire.contains("zdr_dense_unavailable"), "{wire}");
+        assert!(!wire.contains("notice"), "{wire}");
+    }
+
+    /// The Data Plane's refusal of a restrictive retrieval is the typed ZDR refusal, not an empty result:
+    /// the turn must not answer as though the organisation had nothing on the subject.
+    #[tokio::test]
+    async fn a_refused_zdr_retrieval_is_the_typed_refusal_not_an_empty_answer() {
+        let (result, modes) =
+            retrieve_through(notice_double::Reply::Refused, Some("ephemeral")).await;
+        let refusal = result.expect_err("the refusal reaches the caller");
+        assert_eq!(refusal.code(), "zdr_unavailable");
+        assert_eq!(modes, vec![Some("ephemeral".to_owned())]);
+    }
+
+    /// The same refusal on a persistent retrieval is not a ZDR refusal. It keeps the ungrounded path it
+    /// always had, so no persistent turn is refused for a retention reason.
+    #[tokio::test]
+    async fn a_refusal_on_a_persistent_retrieval_stays_ungrounded() {
+        let (result, _) = retrieve_through(notice_double::Reply::Refused, None).await;
+        assert!(matches!(result, Ok(None)), "{result:?}");
+    }
+
+    /// Only the Data Plane's own refusal maps to the typed refusal. The same message on another status,
+    /// or another reason, keeps its existing handling.
+    #[test]
+    fn only_the_data_plane_dense_refusal_maps_to_the_typed_refusal() {
+        use tonic::{Code, Status};
+        let refusal = dense_unavailable_refusal(&Status::failed_precondition(
+            "zdr_dense_unavailable: Semantic search was not used for this answer.",
+        ))
+        .expect("the Data Plane refusal maps");
+        assert_eq!(refusal.code(), "zdr_unavailable");
+        assert!(
+            dense_unavailable_refusal(&Status::failed_precondition("zdr_dense_unavailable"))
+                .is_some()
+        );
+        for status in [
+            Status::new(Code::InvalidArgument, "zdr_dense_unavailable: text"),
+            Status::failed_precondition("sovereign_required: the query route is Azure-hosted"),
+            Status::failed_precondition("zdr_dense_unavailable_later: text"),
+            Status::internal("zdr_dense_unavailable: text"),
+        ] {
+            assert!(dense_unavailable_refusal(&status).is_none(), "{status:?}");
+        }
+    }
+
     #[test]
     fn zdr_posture_maps_to_ephemeral_retrieval_mode() {
-        assert_eq!(data_plane_zdr_mode(true).as_deref(), Some("ephemeral"));
-        assert_eq!(data_plane_zdr_mode(false), None);
+        assert_eq!(data_plane_zdr_mode(true, false).as_deref(), Some("ephemeral"));
+        assert_eq!(data_plane_zdr_mode(false, false), None);
+    }
+
+    #[test]
+    fn a_waived_turn_retrieves_in_reject_mode() {
+        assert_eq!(data_plane_zdr_mode(false, true).as_deref(), Some("reject"));
+        assert_eq!(data_plane_zdr_mode(true, true).as_deref(), Some("reject"));
     }
 
     #[test]
@@ -1178,7 +1790,7 @@ mod tests {
             &bearer,
             "org-from-claims",
             "bounded query",
-            true,
+            Some("ephemeral".to_owned()),
         )
         .expect("request should build");
 
@@ -1196,6 +1808,30 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(body).unwrap();
         assert_eq!(payload["org_id"], "org-from-claims");
         assert_eq!(payload["zdr_mode"], "ephemeral");
+    }
+
+    /// The graph grounding a waived turn asks for is filtered (`reject`), so restricted documents
+    /// never reach the personal account; a persistent turn sends no mode at all.
+    #[test]
+    fn graph_grounding_carries_the_waived_turns_reject_mode() {
+        let client = reqwest::Client::new();
+        let bearer = crate::auth::VerifiedDataPlaneBearer::for_test("signed-user-jwt");
+        let mode_sent = |mode: Option<String>| {
+            let request = build_graph_grounding_request(
+                &client,
+                "http://data-plane.test",
+                &bearer,
+                "org-from-claims",
+                "bounded query",
+                mode,
+            )
+            .expect("request should build");
+            let body = request.body().and_then(reqwest::Body::as_bytes).unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(body).unwrap();
+            payload["zdr_mode"].clone()
+        };
+        assert_eq!(mode_sent(Some("reject".to_owned())), "reject");
+        assert!(mode_sent(None).is_null(), "a persistent turn sends no mode");
     }
 
     fn candidate(doc: &str, text: &str, score: f32) -> Candidate {

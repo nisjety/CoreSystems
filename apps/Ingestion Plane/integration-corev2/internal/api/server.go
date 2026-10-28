@@ -56,6 +56,9 @@ type ServerConfig struct {
 	// CodexSubscriptions owns ChatGPT subscription device-code flows and
 	// execution. It is nil unless explicitly enabled in deployment config.
 	CodexSubscriptions *codexsubscription.Manager
+	// OrgZDR reads the organisation's ZDR posture from org-core for the acknowledgement API. Nil
+	// refuses every acknowledgement (fail closed), and the routes exist only with the switch on.
+	OrgZDR ZDROrgPosture
 	// WebhookOrg resolves the owning tenant for account-wide provider
 	// webhooks (Meta/Slack callbacks carry no Verevon org id). Nil-safe.
 	WebhookOrg *webhookorg.Resolver
@@ -211,6 +214,8 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		AllowLegacyTenantKey: cfg.Config.AllowLegacyTenantKey,
 	})
 	proPlanAuth := []fiber.Handler{internalOrBearerAuth, auth.RequirePlan(cfg.Org, "pro")}
+	// Acts on one user's own connection: a verified bearer token only, never the internal key.
+	bearerOnlyAuth := auth.BearerOnly(auth.Config{TokenVerifier: cfg.Auth})
 	rateLimited := rateLimitHandlers(cfg.Config)
 
 	app.Get("/api/v1/providers", func(c *fiber.Ctx) error {
@@ -1360,6 +1365,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 	})...)
 
 	registerCodexSubscriptionRoutes(app, cfg, codexSubscriptionModelPlaneAuth, internalOrBearerAuth, rateLimited)
+	registerZDRAcknowledgementRoutes(app, cfg, bearerOnlyAuth, rateLimited)
 
 	app.Get("/internal/gdpr/export", internalAuth, func(c *fiber.Ctx) error {
 		organizationID := strings.TrimSpace(c.Query("organizationId"))
@@ -2978,6 +2984,10 @@ func runGDPRDelete(ctx context.Context, cfg ServerConfig, body gdprRequestBody) 
 				return deleteErr
 			}
 			deletedIDs = append(deletedIDs, deleted.ID)
+			// The removed connection's live acknowledgements end in this same transaction (audited).
+			if _, err := store.RevokeAcknowledgementsOnRemoval(ctx, tx, deleted.ID, now); err != nil {
+				return err
+			}
 			if err := persist(store.AuditEvent{
 				ID:             "audit:integration:gdpr-connection-deleted:" + deleted.ID,
 				OrganizationID: deleted.OrganizationID,
@@ -2989,6 +2999,26 @@ func runGDPRDelete(ctx context.Context, cfg ServerConfig, body gdprRequestBody) 
 					"reason":          strings.TrimSpace(body.Reason),
 					"tokenPolicy":     "encrypted_tokens_cleared",
 					"consentsRevoked": len(consents),
+				},
+				CreatedAt: now,
+			}); err != nil {
+				return err
+			}
+		}
+		if userID == "" {
+			// An organisation-wide delete is the organisation purge: its ZDR records and acknowledgements
+			// are erased. A user-level delete keeps the revoked rows for the audit window instead.
+			purged, purgeErr := tx.PurgeOrganizationConnectionZDR(ctx, organizationID)
+			if purgeErr != nil {
+				return purgeErr
+			}
+			if err := persist(store.AuditEvent{
+				ID:             auditMutationID(ctx, "gdpr-zdr-purged", organizationID),
+				OrganizationID: organizationID,
+				EventType:      "gdpr.integration.zdr_purged",
+				Metadata: map[string]any{
+					"records":          purged.Records,
+					"acknowledgements": purged.Acknowledgements,
 				},
 				CreatedAt: now,
 			}); err != nil {

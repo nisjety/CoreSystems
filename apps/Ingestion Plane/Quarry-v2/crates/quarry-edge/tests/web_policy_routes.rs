@@ -171,7 +171,7 @@ use quarry_core::output::DriverKind;
 use quarry_core::QuarryResult;
 use quarry_runtime::driver::Driver;
 use quarry_runtime::fetch::FetchResponse;
-use quarry_runtime::vector_index::{VectorHit, VectorIndex};
+use quarry_runtime::vector_index::{VectorIndex, VectorOutcome, VectorQuery};
 use quarry_runtime::EventSink;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -223,9 +223,9 @@ struct CountingIndex(Arc<Reach>);
 
 #[async_trait]
 impl VectorIndex for CountingIndex {
-    async fn retrieve(&self, _org: &str, _query: &str, _top_k: usize) -> QuarryResult<Vec<VectorHit>> {
+    async fn retrieve(&self, _query: &VectorQuery<'_>) -> QuarryResult<VectorOutcome> {
         self.0.lookups.fetch_add(1, Ordering::SeqCst);
-        Ok(Vec::new())
+        Ok(VectorOutcome::Hits(Vec::new()))
     }
 }
 

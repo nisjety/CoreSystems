@@ -38,8 +38,8 @@ Ask a natural-language question, get back URLs + snippets + relevance,
 optionally with a synthesized answer.
 - **Parity with:** Tavily, Brave Search API, Exa neural search.
 - **Powered by:** dedicated search driver in `quarry-runtime` + Brave/Bing
-  API plug-ins; reranker can call **Model Plane v1**'s gateway for
-  semantic reordering.
+  API plug-ins; the semantic reranker calls the **Data Plane**'s
+  `POST /v1/rerank` (a paid cross-encoder) to reorder the top results.
 
 ### 4. Structured extraction — page + schema → typed JSON
 Hand over a URL and a JSON schema; get back JSON that matches it (e.g.
@@ -177,7 +177,7 @@ that Verevon and external clients talk to.
 
 | Service | What it gives Quarry-v2 |
 |---|---|
-| **Model Plane v1** (our Rust LLM gateway) | LLM coercion for structured extraction, deep-research planning, reranking. |
+| **Model Plane v1** (our Rust LLM gateway) | LLM coercion for structured extraction and deep-research planning. Search reranking runs on the Data Plane (`/v1/rerank`). |
 | **Browserbase** | Managed headless browsers when local browser leases are constrained. |
 | **Tantivy** (embedded) | Per-tenant search index. |
 | **Temporal** | Durable workflow orchestration, schedules, retries. |

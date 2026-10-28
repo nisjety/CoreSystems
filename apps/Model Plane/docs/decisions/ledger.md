@@ -85,10 +85,11 @@ does, and the real guard mounted on routes scanned from the real router.
   refused.
 - A route that exists for services only (`POST /v1/rerank`, rule 15) refuses an
   interactive user before any membership lookup. The user's membership path is
-  what it always was. That route is not registered in the engine's router yet
-  (the rerank capability of rule 15 is its own task): the table row and the
-  service-only refusal are in place and tested against a stand-in handler, and
-  they take effect when the handler is registered.
+  what it always was. That route is registered in the engine's router
+  (`rerank_api`, merged into the router when quarryv2-next and the live tree were
+  integrated on 2026-10-28): the table row, the service-only refusal and the
+  handler are all in the engine now. They have been built and unit-tested in the
+  working tree; no retrieval-engine image carrying them has been proven live.
 - gRPC stays membership-gated and refuses a service principal with
   `PermissionDenied` in the interceptor and again in the handler, instead of
   relying on the membership lookup failing.
@@ -136,7 +137,7 @@ name, for example `POST /v1/retrieve/graph`, is refused with 403
 `service:quarry-edge`. (4) A real Quarry `/v1/search` for the test organisation
 no longer logs `retrieve returned status 403`; what it logs next is the next
 defect in the chain, which the Quarry client work of the rerank entry above is
-to fix, and that work's own proof counts its cost. (5) Once the rerank handler is
+to fix, and that work's own proof counts its cost. (5) With the rerank handler
 registered, an interactive token on `POST /v1/rerank` is refused with 403
 `service_only_route` before any membership lookup. The docs finalisation then
 reconciles this entry with what was measured.

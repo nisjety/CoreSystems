@@ -324,6 +324,28 @@ describe('mid-run queued input', () => {
     expect(onQueuedInput).toHaveBeenCalledWith({ messages: ['bruk EUR'] })
   })
 
+  it('routes retrieval_notice to its handler by code and wording key, and ignores a notice with neither', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: retrieval_notice\ndata: ${JSON.stringify({ code: 'zdr_dense_unavailable', wording_key: 'retrieval.zdr_dense_unavailable', request_id: 'req-1' })}\n\n`,
+          // A reduction with no reason or wording key cannot be shown as one.
+          `event: retrieval_notice\ndata: ${JSON.stringify({ code: 'zdr_dense_unavailable' })}\n\n`,
+        ]),
+      ),
+    )
+    const onRetrievalNotice = vi.fn()
+    await streamChat({ content: 'hi' }, { onRetrievalNotice })
+
+    expect(onRetrievalNotice).toHaveBeenCalledTimes(1)
+    expect(onRetrievalNotice).toHaveBeenCalledWith({
+      code: 'zdr_dense_unavailable',
+      wordingKey: 'retrieval.zdr_dense_unavailable',
+      requestId: 'req-1',
+    })
+  })
+
   it('reports acceptance, including a delivery that was not durably recorded', async () => {
     vi.stubGlobal(
       'fetch',

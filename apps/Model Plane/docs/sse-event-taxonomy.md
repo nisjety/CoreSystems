@@ -23,12 +23,16 @@ asserted, not just reported.
 | `citation` | `citations` | `ChatEvent::Citation` | ✅ |
 | `error` | — (control) | `ChatEvent::Error` | ✅ |
 | `error` | — (control) | `ChatEvent::SubscriptionError` | ✅ |
+| `error` | — (control) | `ChatEvent::ZdrError` | ✅ |
 | `follow_ups` | — (control) | `ChatEvent::FollowUps` | ✅ |
 | `grounding` | `citations` | `ChatEvent::Grounding` | ✅ |
 | `memory_recall` | `memory` | `ChatEvent::MemoryRecall` | ✅ |
+| `plan_proposed` | — (control) | `ChatEvent::PlanProposed` | ✅ |
 | `queued_input` | — (control) | `ChatEvent::QueuedInput` | ✅ |
 | `reasoning_delta` | `reasoning` | `ChatEvent::ReasoningDelta` | ✅ |
 | `result_receipt` | `usage` | `ChatEvent::ResultReceipt` | ✅ |
+| `retrieval_notice` | — (control) | `ChatEvent::RetrievalNotice` | ✅ |
+| `source_scope_applied` | `citations` | `ChatEvent::SourceScopeApplied` | ✅ |
 | `step_update` | `steps` | `ChatEvent::StepUpdate` | ✅ |
 | `stopped` | — (control) | `ChatEvent::Stopped` | ✅ |
 | `title` | — (control) | `ChatEvent::Title` | ✅ |

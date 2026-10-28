@@ -44,6 +44,15 @@ paths = [
   '''(^|/)\.git/''',
   '''(^|/)vendor/''',
   '''(^|/)testdata/''',
+  # The frozen snapshot of the retrieval-evaluation corpus (apps/Data Plane v2/scripts/eval-corpus/repo/): byte-for-byte
+  # copies, cut from git history, of markdown documents that are ALREADY tracked here, pinned file by file by sha256
+  # (scripts/eval-corpus-manifest.json) and re-verified by scripts/eval-ingest-corpus.py verify. Their placeholder
+  # credentials (dev-test-key, dev-jwt-secret, ...) are the ones the originals carry; copying a document into a new
+  # path must not turn an accepted finding into a new one. The synthetic documents next to it are NOT allowlisted.
+  '''(^|/)scripts/eval-corpus/repo/''',
+  # The generated interactive-demo bundle (stage 04). scripts/build-product-demo.mjs scans it
+  # (forbidden names, hosts, e-mail addresses, secret shapes) and checks it against its manifest.
+  '''(^|/)verevon-web/public/product-demo/''',
   '''Cargo\.lock$''',
   '''go\.sum$''',
   '''go\.work\.sum$''',

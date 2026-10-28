@@ -1,4 +1,11 @@
+use std::time::Duration;
+
+use quarry_runtime::rerank::DEFAULT_RERANK_DEADLINE;
 use serde::Deserialize;
+
+/// The smallest and the largest rerank budget the Data Plane accepts as `deadline_ms`.
+const RERANK_DEADLINE_MIN: Duration = Duration::from_millis(100);
+const RERANK_DEADLINE_MAX: Duration = Duration::from_millis(8_000);
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct EdgeConfig {
@@ -41,6 +48,18 @@ pub struct EdgeConfig {
     /// Development-only static Data Plane bearer. Production mints per-org
     /// tokens from Auth Core using `quarry_service_api_key`.
     pub data_plane_service_token: Option<String>,
+    /// Kill switch for the Data Plane vector leg (`QUARRY_EDGE__VECTOR_RETRIEVAL`): the
+    /// `POST /v1/retrieve` call behind hybrid search and find-similar. Off by default, so
+    /// search is lexical-only and find-similar answers 501 until the operator turns it on.
+    /// Turn it on only after the Data Plane has stamped and backfilled the quarry corpus
+    /// (QB-M1b). Needs DATA_PLANE_URL and a service identity.
+    #[serde(default)]
+    pub vector_retrieval: bool,
+    /// Vector calls one org may spend per hour (`QUARRY_EDGE__VECTOR_RETRIEVAL_PER_ORG_HOURLY_BUDGET`).
+    /// Each call is one paid query embedding. The count lives in each process, so every replica
+    /// keeps its own; metering through the usage ledger replaces it (DEF-QB-VECTOR-METERING).
+    #[serde(default = "default_vector_retrieval_budget")]
+    pub vector_retrieval_per_org_hourly_budget: u32,
     /// Auth Core base URL used for service-principal token minting.
     #[serde(default = "default_auth_core_url")]
     pub auth_core_url: String,
@@ -78,8 +97,8 @@ pub struct EdgeConfig {
     /// should point this at a persistent volume.
     #[serde(default)]
     pub local_index_dir: Option<String>,
-    /// Model Plane gateway URL — when set, /v1/audio routes to
-    /// /v1/ai/speech + /v1/ai/transcribe via this URL.
+    /// Model Plane gateway URL. With `QUARRY_EDGE__MODEL_AUDIO` on (QB-T17), /v1/audio routes
+    /// to /v1/ai/speech + /v1/ai/transcribe via this URL.
     #[serde(default)]
     pub model_plane_url: Option<String>,
     /// Development-only static Model Plane bearer. Production uses Auth Core.
@@ -93,12 +112,12 @@ pub struct EdgeConfig {
     /// Env: `QUARRY_EDGE__PAGE_TITLE_MODEL`.
     #[serde(default)]
     pub page_title_model: Option<String>,
-    /// Master switch for the page-title Model Plane hop. Defaults to `true`
-    /// whenever `model_plane_url` is set; `false` keeps extraction purely
-    /// local (`title_source` is then `html` or `host`).
-    /// Env: `QUARRY_EDGE__PAGE_TITLE_ENRICH`.
+    /// Page-title enrichment through the Model Plane (`QUARRY_EDGE__PAGE_TITLE_ENRICH`).
+    /// Off by default: the hop needs a model path that the registry grants, and none exists
+    /// today (see `model_plane_gate`). `true` takes effect only with that path; without it
+    /// boot logs an error and extraction stays local (`title_source` is `html` or `host`).
     #[serde(default)]
-    pub page_title_enrich: Option<bool>,
+    pub page_title_enrich: bool,
     /// BrowserBroker grant validation endpoint. When set, every agent run
     /// must present a grant_id and every action revalidates that grant.
     #[serde(default)]
@@ -125,25 +144,54 @@ pub struct EdgeConfig {
     /// Autoprompt — when `true` AND `model_plane_url` is set, the router
     /// rewrites verbose `Research`/`Comparative` queries into a tighter
     /// web-search query before fan-out. Degrade-safe (falls back to the
-    /// original query). Default off to preserve deterministic latency.
+    /// original query). Default off, and it also needs a model path that the
+    /// registry grants (see `model_plane_gate`).
     #[serde(default)]
     pub autoprompt: bool,
     /// Optional Model Plane model override for autoprompt rewriting.
     #[serde(default)]
     pub autoprompt_model: Option<String>,
-    /// Semantic rerank — when `true` AND `model_plane_url` is set, the merged
-    /// result set is reordered by query-relevance via the Model Plane, with a
-    /// short relevance highlight attached per result (Exa-style). Degrade-safe
-    /// (falls back to the original order). Default off.
+    /// Answer synthesis (`POST /v1/answer`, and `include_answer` on search). Off by default.
+    /// Needs a SearchProvider and a model path (see `model_plane_gate`).
+    /// Env: `QUARRY_EDGE__ANSWER_SYNTHESIS`.
+    #[serde(default)]
+    pub answer_synthesis: bool,
+    /// Structured extraction: `schema` on `POST /v1/extract`, the ai-formats `json` output.
+    /// Off by default. Needs a model path (see `model_plane_gate`).
+    /// Env: `QUARRY_EDGE__AI_FORMATS`.
+    #[serde(default)]
+    pub ai_formats: bool,
+    /// Search suggestions (`POST /v1/search/suggest`: spelling, related queries, entity panel).
+    /// Off by default. Needs a model path (see `model_plane_gate`).
+    /// Env: `QUARRY_EDGE__SEARCH_SUGGEST`.
+    #[serde(default)]
+    pub search_suggest: bool,
+    /// Audio (`POST /v1/audio`: speech and transcription through the Model Plane). Off by default.
+    /// Needs the `model-audio` grant (see `model_plane_gate`).
+    /// Env: `QUARRY_EDGE__MODEL_AUDIO`.
+    #[serde(default)]
+    pub model_audio: bool,
+    /// Semantic rerank (Quarry option B). When `true` AND `data_plane_url` and the
+    /// cross-plane tokens are set, the Data Plane's `POST /v1/rerank` orders the top-N
+    /// merged results by a cross-encoder score. No Model Plane hop is made. Degrade-safe:
+    /// any failure keeps the original order. Default off.
     #[serde(default)]
     pub semantic_rerank: bool,
-    /// Optional Model Plane model override for semantic reranking.
-    #[serde(default)]
-    pub semantic_rerank_model: Option<String>,
-    /// How many top results to rerank (the long tail is left in place). Default
-    /// 10 when unset.
+    /// How many top results to rerank (the long tail is left in place). Default 10
+    /// when unset, and at most 100 (the Data Plane's limit).
     #[serde(default)]
     pub semantic_rerank_top_n: Option<usize>,
+    /// Shadow mode for the rerank (`QUARRY_EDGE__RERANK_SHADOW`). The Data Plane is asked
+    /// and its answer measured, but the results keep their input order and carry no score.
+    /// Used for the first deploy's smoke run. Default off. It has no effect unless
+    /// `semantic_rerank` is on.
+    #[serde(default)]
+    pub rerank_shadow: bool,
+    /// The budget of one Data Plane rerank call, in milliseconds (`QUARRY_EDGE__RERANK_DEADLINE_MS`).
+    /// It is sent as the call's `deadline_ms`, and Quarry stops waiting at it plus a 0.5 s transport
+    /// allowance. Unset, it is the runtime default (2 s). See [`EdgeConfig::rerank_deadline`].
+    #[serde(default)]
+    pub rerank_deadline_ms: Option<u64>,
     /// Zero-SaaS search posture (data residency): when `true`, the SmartRouter
     /// refuses to register external paid SERP providers (Brave/Serper) that send
     /// the query to a third party. Only in-infra providers (Tantivy / Stract /
@@ -274,6 +322,10 @@ pub struct EdgeConfig {
     pub profile_key_provider: String,
 }
 
+fn default_vector_retrieval_budget() -> u32 {
+    quarry_runtime::vector_index::DEFAULT_PER_ORG_HOURLY_BUDGET
+}
+
 fn default_port() -> u16 {
     8080
 }
@@ -317,6 +369,16 @@ fn blank_model_plane_url_is_unset(url: &mut Option<String>) {
 }
 
 impl EdgeConfig {
+    /// The budget of one rerank call: `QUARRY_EDGE__RERANK_DEADLINE_MS`, or the runtime default when
+    /// unset, clamped to 100 ms to 8 s. That is the range the Data Plane accepts for `deadline_ms`, so
+    /// the budget Quarry waits for is the budget it sends. A value outside the range is clamped.
+    pub fn rerank_deadline(&self) -> Duration {
+        let requested = self
+            .rerank_deadline_ms
+            .map_or(DEFAULT_RERANK_DEADLINE, Duration::from_millis);
+        requested.clamp(RERANK_DEADLINE_MIN, RERANK_DEADLINE_MAX)
+    }
+
     pub fn from_env() -> anyhow::Result<Self> {
         let cfg = config::Config::builder()
             .add_source(config::Environment::with_prefix("QUARRY_EDGE").separator("__"))
@@ -333,7 +395,7 @@ impl EdgeConfig {
         Ok(edge)
     }
 
-    fn defaults() -> Self {
+    pub fn defaults() -> Self {
         Self {
             port: default_port(),
             user_agent: default_ua(),
@@ -350,6 +412,8 @@ impl EdgeConfig {
             data_plane_url: None,
             data_plane_ingest_url: None,
             data_plane_service_token: None,
+            vector_retrieval: false,
+            vector_retrieval_per_org_hourly_budget: default_vector_retrieval_budget(),
             auth_core_url: default_auth_core_url(),
             quarry_service_api_key: None,
             cross_plane_auth_dev_bypass: false,
@@ -365,7 +429,7 @@ impl EdgeConfig {
             model_plane_url: None,
             model_plane_token: None,
             page_title_model: None,
-            page_title_enrich: None,
+            page_title_enrich: false,
             browser_grant_validator_url: None,
             browser_grant_validator_grpc_url: None,
             require_browser_grants: false,
@@ -373,8 +437,13 @@ impl EdgeConfig {
             llm_classify_model: None,
             autoprompt: false,
             autoprompt_model: None,
+            answer_synthesis: false,
+            ai_formats: false,
+            search_suggest: false,
+            model_audio: false,
             semantic_rerank: false,
-            semantic_rerank_model: None,
+            rerank_shadow: false,
+            rerank_deadline_ms: None,
             semantic_rerank_top_n: None,
             zero_saas_search: false,
             nats_url: None,
@@ -465,7 +534,7 @@ mod compose_switch_tests {
         assert!(!cfg.autoprompt, "autoprompt is off");
         assert!(!cfg.semantic_rerank, "semantic rerank is off");
         assert!(!cfg.llm_classify_intent, "intent classification is off");
-        assert_eq!(cfg.page_title_enrich, Some(false), "page-title enrichment is off");
+        assert!(!cfg.page_title_enrich, "page-title enrichment is off");
         blank_model_plane_url_is_unset(&mut cfg.model_plane_url);
         assert_eq!(cfg.model_plane_url, None, "an empty MODEL_PLANE_URL is not configured");
     }
@@ -490,5 +559,83 @@ mod compose_switch_tests {
         blank_model_plane_url_is_unset(&mut cfg.model_plane_url);
         assert_eq!(cfg.model_plane_url, None);
         assert!(!cfg.autoprompt);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EdgeConfig;
+    use std::time::Duration;
+
+    #[test]
+    fn the_vector_leg_is_off_until_its_kill_switch_is_set() {
+        let cfg = EdgeConfig::defaults();
+        assert!(!cfg.vector_retrieval);
+        assert_eq!(
+            cfg.vector_retrieval_per_org_hourly_budget,
+            quarry_runtime::vector_index::DEFAULT_PER_ORG_HOURLY_BUDGET
+        );
+    }
+
+    #[test]
+    fn the_rerank_is_off_and_not_in_shadow_by_default() {
+        let cfg = EdgeConfig::defaults();
+        assert!(!cfg.semantic_rerank);
+        assert!(!cfg.rerank_shadow);
+        assert_eq!(cfg.semantic_rerank_top_n, None);
+    }
+
+    /// The budget is the runtime default (2 s) unless set, and a set value is clamped to the range the
+    /// Data Plane accepts (100 ms to 8 s), so the wait and the `deadline_ms` sent are the same number.
+    #[test]
+    fn the_rerank_deadline_is_two_seconds_unless_set_and_is_clamped_to_the_data_plane_range() {
+        let mut cfg = EdgeConfig::defaults();
+        assert_eq!(cfg.rerank_deadline(), Duration::from_millis(2_000));
+        cfg.rerank_deadline_ms = Some(750);
+        assert_eq!(cfg.rerank_deadline(), Duration::from_millis(750));
+        cfg.rerank_deadline_ms = Some(5);
+        assert_eq!(cfg.rerank_deadline(), Duration::from_millis(100));
+        cfg.rerank_deadline_ms = Some(60_000);
+        assert_eq!(cfg.rerank_deadline(), Duration::from_millis(8_000));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn the_rerank_deadline_reads_from_its_env_variable() {
+        std::env::set_var("QUARRY_EDGE__RERANK_DEADLINE_MS", "1500");
+        let parsed = EdgeConfig::from_env();
+        std::env::remove_var("QUARRY_EDGE__RERANK_DEADLINE_MS");
+        let cfg = parsed.expect("the environment reads");
+        assert_eq!(cfg.rerank_deadline_ms, Some(1500));
+        assert_eq!(cfg.rerank_deadline(), Duration::from_millis(1500));
+    }
+
+    /// The compose block passes "0" or "1" as each switch's env value (QB-T17). Those strings must
+    /// read as the bools, or `from_env` falls back to all defaults and every switch silently stays off.
+    #[test]
+    #[serial_test::serial]
+    fn the_compose_values_read_as_the_model_plane_switches() {
+        let set = [
+            ("QUARRY_EDGE__ANSWER_SYNTHESIS", "1"),
+            ("QUARRY_EDGE__AI_FORMATS", "0"),
+            ("QUARRY_EDGE__SEARCH_SUGGEST", "1"),
+            ("QUARRY_EDGE__MODEL_AUDIO", "0"),
+            ("QUARRY_EDGE__PAGE_TITLE_ENRICH", "0"),
+            ("QUARRY_EDGE__AUTOPROMPT", "1"),
+        ];
+        for (name, value) in set {
+            std::env::set_var(name, value);
+        }
+        let parsed = EdgeConfig::from_env();
+        for (name, _) in set {
+            std::env::remove_var(name);
+        }
+        let cfg = parsed.expect("the environment reads");
+        assert!(cfg.answer_synthesis);
+        assert!(!cfg.ai_formats);
+        assert!(cfg.search_suggest);
+        assert!(!cfg.model_audio);
+        assert!(!cfg.page_title_enrich);
+        assert!(cfg.autoprompt);
     }
 }

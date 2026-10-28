@@ -186,6 +186,14 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("load connection ZDR capability contract")
 	}
+	// Acknowledgement wording (Z-13), checked at boot only when the acknowledgement routes are on: a
+	// text whose digest does not match its pin, or that the capability contract needs and the set
+	// lacks, stops the service rather than showing users the wrong words.
+	if cfg.ZDRAcknowledgementEnabled {
+		if _, err := zdr.DefaultWording(); err != nil {
+			logger.Fatal().Err(err).Msg("load connection ZDR acknowledgement wording")
+		}
+	}
 	reconcileCtx, cancelReconcile := context.WithTimeout(context.Background(), 60*time.Second)
 	// No inline dispatch: the audit rows are durable outbox rows the outbox worker publishes, so a
 	// slow Audit Core cannot hold the start-up up.
@@ -237,6 +245,7 @@ func main() {
 		Auth:        controlplane.NewAuthClient(cfg, controlPlaneClient),
 		Org:         controlplane.NewOrgClient(cfg, controlPlaneClient),
 		Billing:     controlplane.NewBillingClient(cfg, controlPlaneClient),
+		OrgZDR:      controlplane.NewOrgClient(cfg, controlPlaneClient),
 		Audit:       auditClient,
 		AuditOutbox: auditOutbox,
 		Events:      publisher,

@@ -1,8 +1,10 @@
 pub mod agentic_subscription;
 pub mod autonomy;
 pub mod dataplane_posture;
+pub mod retention;
 pub mod skill_recovery;
 pub mod tool_arguments;
+pub mod zdr_refusal;
 
 /// Generated protobuf and gRPC types for the Model Plane.
 ///

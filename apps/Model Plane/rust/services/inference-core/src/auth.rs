@@ -7,9 +7,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
+use mp_contracts::agentic_subscription::PROVIDER_ID;
+use mp_contracts::retention::{
+    resolve_turn, ClaimsView, Resolution, RouteView, WaiverView, SUBSCRIPTION_ALIASES,
+};
+use mp_contracts::zdr_refusal::Refusal;
 use serde::Deserialize;
 use tokio::sync::{Mutex, RwLock};
-use tonic::{Request, Status};
+use tonic::{Code, Request, Status};
 use tracing::{error, warn};
 
 const DEFAULT_JWKS_TTL_SECS: u64 = 300;
@@ -72,8 +77,67 @@ struct Claims {
     reason: Option<String>,
     #[serde(default)]
     scopes: Vec<String>,
-    #[serde(default)]
     zdr: bool,
+    /// `org_zdr`: `true` when the caller's org is Zero Data Retention, as the issuer read it when it
+    /// minted the token. Absent on service tokens and on tokens minted before the claim existed.
+    /// Only the posture check reads it.
+    #[serde(default)]
+    org_zdr: Option<bool>,
+    /// `zdr_waiver`: one user connection that runs with zero retention off for one turn. Minted only
+    /// on a persistent user token of a ZDR org. A malformed waiver fails the whole token.
+    #[serde(default)]
+    zdr_waiver: Option<ZdrWaiverClaim>,
+}
+
+/// The wire shape of the `zdr_waiver` claim, the matrix's `waiver` object. Auth Core may add fields
+/// (an acknowledgement id, a digest, a decision id); those are ignored. The three below are
+/// required, so a waiver that names no provider or connection is refused, never read as no waiver.
+#[derive(Debug, Clone, Deserialize)]
+struct ZdrWaiverClaim {
+    version: u32,
+    provider: String,
+    connection: String,
+}
+
+/// The connection-bound waiver of zero retention a verified user token carries (Z-16). Auth Core
+/// stamps it only on a persistent token of a ZDR org, for one user connection that cannot give zero
+/// retention and was acknowledged for the turn. It binds one provider and one connection, and the
+/// boundary refuses it on any other route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZdrWaiver {
+    version: u32,
+    provider: String,
+    connection: String,
+}
+
+impl ZdrWaiver {
+    /// The waiver contract version the token was minted under.
+    #[must_use]
+    pub const fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// The canonical provider the waiver binds.
+    #[must_use]
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// The one user connection the waiver binds.
+    #[must_use]
+    pub fn connection(&self) -> &str {
+        &self.connection
+    }
+}
+
+impl From<ZdrWaiverClaim> for ZdrWaiver {
+    fn from(claim: ZdrWaiverClaim) -> Self {
+        Self {
+            version: claim.version,
+            provider: claim.provider,
+            connection: claim.connection,
+        }
+    }
 }
 
 /// Canonical identity derived only from a verified credential. The original
@@ -86,6 +150,8 @@ pub struct AuthenticatedPrincipal {
     pub subject: String,
     pub scopes: Vec<String>,
     issuer_zdr: bool,
+    issuer_org_zdr: Option<bool>,
+    zdr_waiver: Option<ZdrWaiver>,
     bearer: Arc<str>,
 }
 
@@ -98,6 +164,8 @@ impl fmt::Debug for AuthenticatedPrincipal {
             .field("subject", &self.subject)
             .field("scopes", &self.scopes)
             .field("issuer_zdr", &self.issuer_zdr)
+            .field("issuer_org_zdr", &self.issuer_org_zdr)
+            .field("zdr_waiver", &self.zdr_waiver)
             .field("bearer", &"[REDACTED]")
             .finish()
     }
@@ -113,6 +181,27 @@ impl AuthenticatedPrincipal {
             subject: subject.to_owned(),
             scopes: vec!["inference:invoke".to_owned()],
             issuer_zdr,
+            issuer_org_zdr: None,
+            zdr_waiver: None,
+            bearer: Arc::from("test-bearer"),
+        }
+    }
+
+    /// A persistent user of a ZDR org, bound to one connection by a waiver (Z-16).
+    #[cfg(test)]
+    pub(crate) fn for_test_with_waiver(org_id: &str, user_id: &str, connection: &str) -> Self {
+        Self {
+            org_id: org_id.to_owned(),
+            user_id: Some(user_id.to_owned()),
+            subject: user_id.to_owned(),
+            scopes: vec!["inference:invoke".to_owned()],
+            issuer_zdr: false,
+            issuer_org_zdr: Some(true),
+            zdr_waiver: Some(ZdrWaiver {
+                version: mp_contracts::retention::WAIVER_CONTRACT_VERSION,
+                provider: PROVIDER_ID.to_owned(),
+                connection: connection.to_owned(),
+            }),
             bearer: Arc::from("test-bearer"),
         }
     }
@@ -192,6 +281,88 @@ impl AuthenticatedPrincipal {
     #[must_use]
     pub const fn effective_zdr(&self, request_zdr: bool) -> bool {
         self.issuer_zdr || request_zdr
+    }
+
+    /// The org's standing zero-retention posture, as the issuer read it when it minted the token.
+    #[must_use]
+    pub const fn org_zdr(&self) -> Option<bool> {
+        self.issuer_org_zdr
+    }
+
+    /// The connection-bound waiver this credential carries, if any.
+    #[must_use]
+    pub fn zdr_waiver(&self) -> Option<&ZdrWaiver> {
+        self.zdr_waiver.as_ref()
+    }
+
+    /// Refuse a chat call whose route the verified zero-retention posture does not allow (Z-16).
+    ///
+    /// This is the inference boundary's own check, so it holds when a caller in front of it is
+    /// bypassed. A credential whose token carries no posture beyond `zdr` (a service credential, or
+    /// a token minted before the org claim existed) is not checked here. Any other is decided by the
+    /// shared resolver in `mp_contracts::retention`: a waiver is honoured only on the one provider
+    /// and connection it binds and never on an explicit request, and a persistent token of a ZDR org
+    /// without a waiver is never served.
+    ///
+    /// # Errors
+    /// `permission_denied` for a waiver used off its route and for a token whose posture claims
+    /// disagree; `failed_precondition` for the other ZDR refusals. Each carries its catalogue kind.
+    #[allow(clippy::result_large_err)]
+    pub fn enforce_zdr_route(
+        &self,
+        provider_hint: &str,
+        connection_id: &str,
+        request_zdr: bool,
+    ) -> Result<(), Status> {
+        if self.issuer_org_zdr.is_none() && self.zdr_waiver.is_none() {
+            return Ok(());
+        }
+        let waiver = self.zdr_waiver.as_ref().map(|waiver| WaiverView {
+            version: waiver.version,
+            provider: &waiver.provider,
+            connection: &waiver.connection,
+        });
+        let claims = ClaimsView {
+            zdr: self.issuer_zdr,
+            org_zdr: self.issuer_org_zdr,
+            waiver,
+        };
+        let provider = canonical_route_provider(provider_hint);
+        let route = RouteView {
+            provider: &provider,
+            connection: (!connection_id.is_empty()).then_some(connection_id),
+            explicit_zdr: request_zdr,
+        };
+        match resolve_turn(&[claims], &route) {
+            Resolution::Refuse(refusal) => {
+                warn!(
+                    code = refusal.code(),
+                    "zero-retention posture refused at the inference boundary"
+                );
+                let code = if refusal == Refusal::WAIVER_ROUTE_MISMATCH
+                    || refusal == Refusal::POSTURE_MISMATCH
+                {
+                    Code::PermissionDenied
+                } else {
+                    Code::FailedPrecondition
+                };
+                Err(refusal.grpc_status(code))
+            }
+            Resolution::Zdr { .. } | Resolution::Persistent { .. } | Resolution::Waived { .. } => {
+                Ok(())
+            }
+        }
+    }
+
+    /// Refuse a call that is not a chat turn (Z-16). No connection is named, so no waiver covers it:
+    /// a waived credential reaches no modality and no embedding, and a persistent token of a ZDR org
+    /// is refused here as it is on every route.
+    ///
+    /// # Errors
+    /// As [`Self::enforce_zdr_route`].
+    #[allow(clippy::result_large_err)]
+    pub fn enforce_non_chat_zdr_posture(&self, request_zdr: bool) -> Result<(), Status> {
+        self.enforce_zdr_route("", "", request_zdr)
     }
 
     #[must_use]
@@ -440,14 +611,34 @@ fn validate_claims(
         _ => return Err(Status::unauthenticated("invalid credential")),
     };
 
+    // A waiver decides one person's connection. A service credential has no connection of its own,
+    // so it can never carry one.
+    if claims.zdr_waiver.is_some() && user_id.is_none() {
+        return Err(Status::unauthenticated("invalid credential"));
+    }
+
     Ok(AuthenticatedPrincipal {
         org_id: claims.org_id,
         user_id,
         subject: claims.sub,
         scopes: claims.scopes,
         issuer_zdr: claims.zdr,
+        issuer_org_zdr: claims.org_zdr,
+        zdr_waiver: claims.zdr_waiver.map(ZdrWaiver::from),
         bearer: Arc::from(token),
     })
+}
+
+/// The provider a request names, spelled as the chain matches it: case, surrounding space and `_`
+/// are ignored, and every spelling of the subscription route is that route's canonical id. Any
+/// other name is kept as given, so no waiver matches it.
+fn canonical_route_provider(provider_hint: &str) -> String {
+    let folded = provider_hint.trim().to_ascii_lowercase().replace('_', "-");
+    if folded == PROVIDER_ID || SUBSCRIPTION_ALIASES.contains(&folded.as_str()) {
+        PROVIDER_ID.to_owned()
+    } else {
+        provider_hint.to_owned()
+    }
 }
 
 async fn fetch_jwks(client: &reqwest::Client, url: &str) -> anyhow::Result<JwkSet> {
@@ -846,5 +1037,214 @@ mod tests {
             br#"{"keys":[{"kty":"RSA","alg":"RS256","kid":"bad","n":"!!!","e":"AQAB"}]}"#
         )
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_token_without_a_boolean_zdr_claim_is_rejected() {
+        // Auth Core stamps zdr on every plane token. An absent or non-boolean
+        // claim must not be read as persistent retention.
+        let kid = "key-zdr-required";
+        let verifier = verifier(kid).await;
+        let mut without_claim = user_claims();
+        without_claim
+            .as_object_mut()
+            .expect("claims object")
+            .remove("zdr");
+        assert_eq!(
+            verifier
+                .authenticate(&request(&sign(&without_claim, kid)))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        let mut non_boolean = user_claims();
+        non_boolean["zdr"] = json!("true");
+        assert_eq!(
+            verifier
+                .authenticate(&request(&sign(&non_boolean, kid)))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        assert!(verifier
+            .authenticate(&request(&sign(&user_claims(), kid)))
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_zdr_waiver_claim_is_read_onto_the_principal() {
+        let kid = "key-waiver-read";
+        let verifier = verifier(kid).await;
+        let mut claims = user_claims();
+        claims["zdr"] = json!(false);
+        claims["org_zdr"] = json!(true);
+        claims["zdr_waiver"] = json!({
+            "version": 1, "provider": "openai-codex-subscription", "connection": "conn-a",
+            "ack_id": "ack-1", "digest": "digest-1", "decision_jti": "jti-1"
+        });
+        let principal = verifier
+            .authenticate(&request(&sign(&claims, kid)))
+            .await
+            .expect("a waived user");
+        assert!(!principal.effective_zdr(false));
+        assert_eq!(principal.org_zdr(), Some(true));
+        let waiver = principal.zdr_waiver().expect("the waiver is read");
+        assert_eq!(
+            (waiver.version(), waiver.provider(), waiver.connection()),
+            (1, "openai-codex-subscription", "conn-a")
+        );
+        let plain = verifier
+            .authenticate(&request(&sign(&user_claims(), kid)))
+            .await
+            .expect("a plain user");
+        assert_eq!(plain.org_zdr(), None);
+        assert!(plain.zdr_waiver().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_malformed_zdr_waiver_or_a_waiver_on_a_service_fails_the_token() {
+        let kid = "key-waiver-malformed";
+        let verifier = verifier(kid).await;
+        let malformed = [
+            json!({"version": 1, "provider": "openai-codex-subscription"}),
+            json!({"version": 1, "connection": "conn-a"}),
+            json!({"version": "1", "provider": "openai-codex-subscription", "connection": "conn-a"}),
+            json!("conn-a"),
+        ];
+        for waiver in malformed {
+            let mut claims = user_claims();
+            claims["zdr"] = json!(false);
+            claims["org_zdr"] = json!(true);
+            claims["zdr_waiver"] = waiver.clone();
+            assert_eq!(
+                verifier
+                    .authenticate(&request(&sign(&claims, kid)))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::Unauthenticated,
+                "{waiver}"
+            );
+        }
+        // A service has no connection of its own, so it never carries a waiver.
+        let mut service = service_claims();
+        service["zdr"] = json!(false);
+        service["org_zdr"] = json!(true);
+        service["zdr_waiver"] =
+            json!({"version": 1, "provider": "openai-codex-subscription", "connection": "conn-a"});
+        assert_eq!(
+            verifier
+                .authenticate(&request(&sign(&service, kid)))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+    }
+
+    #[test]
+    fn a_waiver_reaches_only_the_route_and_connection_it_binds() {
+        let principal = AuthenticatedPrincipal::for_test_with_waiver("org-1", "user-1", "conn-a");
+        // The bound route, in any spelling the chain also matches, is allowed.
+        for provider in [
+            "openai-codex-subscription",
+            " OPENAI_CODEX-SUBSCRIPTION ",
+            "chatgpt-codex",
+            "codex-subscription",
+        ] {
+            assert!(
+                principal
+                    .enforce_zdr_route(provider, "conn-a", false)
+                    .is_ok(),
+                "{provider:?} is the bound route"
+            );
+        }
+        // Anything else is refused, typed as a route mismatch.
+        for (provider, connection, explicit) in [
+            ("openai-codex-subscription", "conn-b", false),
+            ("openai-codex-subscription", "", false),
+            ("openai-codex-subscription", "conn-a", true),
+            ("azure-openai", "conn-a", false),
+            ("", "conn-a", false),
+            ("", "", false),
+        ] {
+            let status = principal
+                .enforce_zdr_route(provider, connection, explicit)
+                .expect_err("the waiver names one route");
+            assert_eq!(
+                status.code(),
+                tonic::Code::PermissionDenied,
+                "{provider:?} {connection:?} {explicit}"
+            );
+            assert_eq!(
+                Refusal::from_status(&status),
+                Some(Refusal::WAIVER_ROUTE_MISMATCH),
+                "{provider:?} {connection:?} {explicit}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_waiver_covers_no_non_chat_call() {
+        let principal = AuthenticatedPrincipal::for_test_with_waiver("org-1", "user-1", "conn-a");
+        for request_zdr in [false, true] {
+            let status = principal
+                .enforce_non_chat_zdr_posture(request_zdr)
+                .expect_err("no modality is the route the waiver binds");
+            assert_eq!(
+                Refusal::from_status(&status),
+                Some(Refusal::WAIVER_ROUTE_MISMATCH)
+            );
+        }
+    }
+
+    #[test]
+    fn a_persistent_token_of_a_zdr_org_without_a_waiver_is_refused_on_every_route() {
+        let mut principal = AuthenticatedPrincipal::for_test("org-1", Some("user-1"), false);
+        principal.issuer_org_zdr = Some(true);
+        for (provider, connection) in [
+            ("openai-codex-subscription", "conn-a"),
+            ("azure-openai", ""),
+            ("", ""),
+        ] {
+            let status = principal
+                .enforce_zdr_route(provider, connection, false)
+                .expect_err("a persistent token of a ZDR org is never served");
+            assert_eq!(status.code(), tonic::Code::PermissionDenied);
+            assert_eq!(
+                Refusal::from_status(&status),
+                Some(Refusal::POSTURE_MISMATCH)
+            );
+        }
+        assert!(principal.enforce_non_chat_zdr_posture(false).is_err());
+    }
+
+    #[test]
+    fn a_zdr_token_of_a_zdr_org_never_reaches_a_connection_without_a_waiver() {
+        let mut principal = AuthenticatedPrincipal::for_test("org-1", Some("user-1"), true);
+        principal.issuer_org_zdr = Some(true);
+        let status = principal
+            .enforce_zdr_route("openai-codex-subscription", "conn-a", false)
+            .expect_err("a connection cannot give ZDR");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            Refusal::from_status(&status),
+            Some(Refusal::CONNECTION_NOT_ACKNOWLEDGED)
+        );
+        // The default route of a ZDR turn is ZDR, so the posture check passes it on to the ZDR gates.
+        assert!(principal.enforce_zdr_route("", "", false).is_ok());
+        assert!(principal.enforce_non_chat_zdr_posture(false).is_ok());
+    }
+
+    #[test]
+    fn a_token_without_posture_claims_is_not_checked_by_the_route_rule() {
+        let principal = AuthenticatedPrincipal::for_test("org-1", Some("user-1"), false);
+        assert!(principal
+            .enforce_zdr_route("openai-codex-subscription", "conn-a", false)
+            .is_ok());
+        assert!(principal.enforce_non_chat_zdr_posture(false).is_ok());
     }
 }

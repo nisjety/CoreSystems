@@ -137,7 +137,7 @@ pub async fn graph_search(
     org_id: &str,
     query: &str,
     limit: Option<i64>,
-    zdr: bool,
+    zdr_mode: Option<String>,
 ) -> Result<String, String> {
     let max_entities = clamp_limit(limit);
     let payload = post_typed(
@@ -150,7 +150,7 @@ pub async fn graph_search(
             "query": query,
             "max_entities": max_entities,
             "include_communities": true,
-            "zdr_mode": crate::retrieval::data_plane_zdr_mode(zdr),
+            "zdr_mode": zdr_mode,
         }),
     )
     .await?;

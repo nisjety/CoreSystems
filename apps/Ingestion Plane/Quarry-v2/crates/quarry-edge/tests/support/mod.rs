@@ -73,6 +73,7 @@ pub fn base_state(driver: Arc<dyn Driver>, event_sink: EventSink) -> AppState {
         page_title_enricher: None,
         service_token_provider: None,
         answer_pipeline: None,
+        model_plane: Default::default(),
         local_index: None,
         usage: Arc::new(quarry_runtime::NoopUsageMeter),
         limits: Arc::new(quarry_edge::limits::StaticFloor),

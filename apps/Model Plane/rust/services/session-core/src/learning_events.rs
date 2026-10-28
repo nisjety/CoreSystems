@@ -36,6 +36,7 @@
 //! counter: the learning loop can lose an event, but a chat turn must never
 //! fail, and terminalization must never roll back, because of it.
 
+use crate::retention_receipt::RetentionClass;
 use chrono::{DateTime, Utc};
 use mp_events::envelope::Envelope;
 use mp_events::idempotency::derive_idempotency_hash;
@@ -156,6 +157,27 @@ struct RunLearningIdentity {
     /// Zero Data Retention. Only managed runs carry the flag, so an unmanaged
     /// legacy run coalesces to `false`.
     zdr: bool,
+    /// The run's retention receipt (Z-17). A waived run is persistent for the
+    /// user but its transcript must not be sent to the paid review model.
+    retention_class: String,
+}
+
+/// Why a run's `RUN_COMPLETED` is withheld, or `None` when it may be announced.
+///
+/// Only an ordinary persistent run is announced. A ZDR run is withheld as ZDR. A
+/// waived run is withheld as waived, because its review would send its
+/// transcript to a paid model the user did not accept for it (decision D-B). A
+/// class this build does not know is withheld as ZDR: the gate fails closed.
+#[must_use]
+fn withheld_reason(zdr: bool, retention_class: &str) -> Option<Enqueued> {
+    if zdr {
+        return Some(Enqueued::SkippedZdr);
+    }
+    match RetentionClass::from_storage(retention_class) {
+        Some(RetentionClass::Persistent) => None,
+        Some(RetentionClass::ZdrWaived) => Some(Enqueued::SkippedWaived),
+        Some(RetentionClass::Zdr) | None => Some(Enqueued::SkippedZdr),
+    }
 }
 
 async fn load_run_identity(
@@ -164,7 +186,8 @@ async fn load_run_identity(
 ) -> Result<Option<RunLearningIdentity>, sqlx::Error> {
     sqlx::query_as::<_, RunLearningIdentity>(
         "SELECT r.org_id, r.user_id, r.thread_id,
-                COALESCE(o.zdr, false) AS zdr
+                COALESCE(o.zdr, false) AS zdr,
+                r.retention_class
          FROM runs AS r
          LEFT JOIN managed_run_terminalization_outbox AS o ON o.run_id = r.id
          WHERE r.id = $1",
@@ -202,6 +225,13 @@ pub(crate) async fn enqueue_run_completed(
                 "ZDR run: RUN_COMPLETED learning event withheld (transcript must not be reviewed)"
             );
         }
+        Ok(Enqueued::SkippedWaived) => {
+            metrics::counter!("mp_session_learning_run_events_skipped_waived_total").increment(1);
+            tracing::debug!(
+                run_id,
+                "waived run: RUN_COMPLETED learning event withheld (review would reach a paid model the user did not accept)"
+            );
+        }
         Ok(Enqueued::Replayed | Enqueued::NoRun) => {}
         Err(error) => {
             // The run is already terminal and durable. Learning is strictly
@@ -221,6 +251,7 @@ enum Enqueued {
     Inserted,
     Replayed,
     SkippedZdr,
+    SkippedWaived,
     NoRun,
 }
 
@@ -260,8 +291,10 @@ async fn enqueue_row(
     // transcript reviewed or distilled into a retained artifact, so it is never
     // announced. (ZDR runs also only ever have a redacted metadata thread, so
     // there is nothing to learn from in the first place.)
-    if identity.zdr {
-        return Ok(Enqueued::SkippedZdr);
+    // A waived run (Z-17) is withheld for the same reason one level up: its
+    // review would send the transcript to a paid model the user did not accept.
+    if let Some(withheld) = withheld_reason(identity.zdr, &identity.retention_class) {
+        return Ok(withheld);
     }
     let context = RunCompletedContext {
         run_id: run_id.to_owned(),
@@ -507,20 +540,42 @@ mod tests {
         );
     }
 
-    /// ZDR runs must never be announced: the consumer would replay and
-    /// LLM-review the transcript and persist durable skills from it.
+    /// ZDR and waived runs must never be announced: the consumer would replay
+    /// and LLM-review the transcript and persist durable skills from it. The
+    /// retention gate must run before the outbox insert.
     #[test]
-    fn zdr_runs_are_never_announced() {
+    fn zdr_and_waived_runs_are_never_announced() {
         let source = include_str!("learning_events.rs");
-        let zdr_guard = source
-            .find("if identity.zdr {")
-            .expect("enqueue must skip ZDR runs");
+        let gate = source
+            .find("withheld_reason(identity.zdr, &identity.retention_class)")
+            .expect("enqueue must consult the retention gate");
         let insert = source
             .find("INSERT INTO session_audit_outbox")
             .expect("enqueue must insert an outbox row");
         assert!(
-            zdr_guard < insert,
-            "the ZDR check must precede the outbox insert"
+            gate < insert,
+            "the retention gate must precede the outbox insert"
+        );
+    }
+
+    /// Only an ordinary persistent run is announced. A waived run is withheld as
+    /// waived, and a class this build does not know is withheld as ZDR.
+    #[test]
+    fn the_retention_gate_announces_only_ordinary_persistent_runs() {
+        assert_eq!(withheld_reason(false, "persistent"), None);
+        assert_eq!(
+            withheld_reason(true, "persistent"),
+            Some(Enqueued::SkippedZdr)
+        );
+        assert_eq!(withheld_reason(false, "zdr"), Some(Enqueued::SkippedZdr));
+        assert_eq!(
+            withheld_reason(false, "zdr_waived"),
+            Some(Enqueued::SkippedWaived)
+        );
+        assert_eq!(
+            withheld_reason(false, "unknown"),
+            Some(Enqueued::SkippedZdr),
+            "an unknown retention class fails closed"
         );
     }
 

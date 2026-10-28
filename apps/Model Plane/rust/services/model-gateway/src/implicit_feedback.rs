@@ -120,6 +120,7 @@ mod tests {
             run_id: "run-1".to_owned(),
             skill_ids: vec!["skill-a".to_owned(), "skill-b".to_owned()],
             elapsed: Duration::from_secs(10),
+            private_run: false,
         }
     }
 

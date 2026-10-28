@@ -33,6 +33,7 @@ use crate::auth::{
     VerifiedIdentity,
 };
 use crate::orchestration_store as store;
+use crate::retention_receipt;
 use crate::store::Pool;
 
 /// Channel capacity for broadcast of orchestration events to streaming clients.
@@ -1160,7 +1161,9 @@ fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
 /// omitted — a reader must be able to tell "not proven" from "nothing
 /// happened". Assembling these needs each owning plane's own contract; there
 /// is no shared database to join across.
-fn unavailable_proof_sections() -> Vec<proto::UnavailableSection> {
+fn unavailable_proof_sections(
+    provenance: &store::RunProvenanceRow,
+) -> Vec<proto::UnavailableSection> {
     vec![
         proto::UnavailableSection {
             section: "known".to_string(),
@@ -1177,12 +1180,45 @@ fn unavailable_proof_sections() -> Vec<proto::UnavailableSection> {
         },
         proto::UnavailableSection {
             section: "retained".to_string(),
-            reason: "Retention/ZDR posture is owned by Control Plane organization policy \
-                     and is not restated here; reading it from this plane could report a \
-                     posture that has since changed."
-                .to_string(),
+            reason: retention_reason(provenance),
         },
     ]
+}
+
+/// The `retained` section's reason. It cites the run's own receipt, which Session
+/// Core stamped when the run started, and it still does not claim the
+/// organisation's live posture: Control Plane owns that, and reading it from this
+/// plane could report a posture that has since changed.
+fn retention_reason(provenance: &store::RunProvenanceRow) -> String {
+    use crate::retention_receipt::{RetentionClass, RunRetention};
+    let current = "The organisation's current retention posture is owned by Control Plane \
+                   and is not restated here.";
+    match RunRetention::from_storage(
+        &provenance.retention_class,
+        provenance.waiver_ack_id.clone(),
+        provenance.waiver_connection_id.clone(),
+    ) {
+        Ok(retention) => match retention.class {
+            RetentionClass::Zdr => format!(
+                "Retention at run start: zdr. The run was zero retention, so its content was \
+                 not persisted. {current}"
+            ),
+            RetentionClass::Persistent => format!(
+                "Retention at run start: persistent. The run was an ordinary persistent run. \
+                 {current}"
+            ),
+            RetentionClass::ZdrWaived => format!(
+                "Retention at run start: zdr_waived. The run was kept on connection {} under \
+                 acknowledgement {}, with ZDR off for this run only. Its content was not sent to \
+                 background learning review, dreaming, or external memory indexing. {current}",
+                retention.connection_id().unwrap_or_default(),
+                retention.ack_id().unwrap_or_default(),
+            ),
+        },
+        Err(_) => "Retention at run start could not be read from the run's receipt, so nothing \
+                   is claimed for it."
+            .to_string(),
+    }
 }
 
 /// Build a run's proof bundle from already-fetched, already-tenant-scoped
@@ -1231,7 +1267,7 @@ fn build_run_proof_bundle(
             created_at: Some(ts(provenance.created_at)),
         }),
         approvals,
-        unavailable: unavailable_proof_sections(),
+        unavailable: unavailable_proof_sections(provenance),
     }
 }
 
@@ -1905,6 +1941,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         let started = Instant::now();
         let result: Result<Response<proto::TransitionPlanResponse>, Status> = async {
             let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
             authorize_operation(&caller, "orchestration:write")?;
             let mut req = request.into_inner();
             if req.plan_id.is_empty() {
@@ -1919,6 +1956,12 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?
                 .ok_or_else(|| Status::not_found("plan not found"))?;
+            // Owner decision 17: the plan's stored posture is its run's receipt, checked before any state
+            // change. A plan with no run is persistent.
+            let stored =
+                retention_receipt::stored_plan_retention(&self.pool, before.run_id.as_deref())
+                    .await?;
+            retention_receipt::require_stored_posture(&caller, &stored)?;
             let prev_state = plan_state_from_str(&before.status);
 
             validate_plan_transition_legality(
@@ -2213,6 +2256,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         let started = Instant::now();
         let result: Result<Response<proto::TransitionTodoResponse>, Status> = async {
             let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
             authorize_operation(&caller, "orchestration:write")?;
             let mut req = request.into_inner();
             if req.todo_id.is_empty() {
@@ -2227,6 +2271,10 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?
                 .ok_or_else(|| Status::not_found("todo not found"))?;
+            // Owner decision 17: a todo's stored posture is the receipt of its plan's run, checked before
+            // the write.
+            let stored = retention_receipt::stored_todo_retention(&self.pool, &req.todo_id).await?;
+            retention_receipt::require_stored_posture(&caller, &stored)?;
             let prev_state = todo_state_from_str(&before.status);
 
             store::update_todo_status(&self.pool, &req.todo_id, new_status)
@@ -2600,6 +2648,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         let started = Instant::now();
         let result: Result<Response<proto::DecideApprovalResponse>, Status> = async {
             let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
             authorize_operation(&caller, "approval:decide")?;
             let mut req = request.into_inner();
             if req.approval_id.is_empty() {
@@ -2607,6 +2656,19 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             }
             pin_approval_decision_identity(&caller, &mut req)?;
             validate_approval_decision_context(&req.org_id, &req.decided_by)?;
+            // Owner decision 17: an approval's stored posture is its run's receipt. An approval of another
+            // org, another user's approval, or one that does not exist, is left to the decision below to
+            // answer, so the posture of someone else's run is never disclosed.
+            if let Some(stored) = retention_receipt::stored_approval_retention(
+                &self.pool,
+                &req.approval_id,
+                &req.org_id,
+                caller.user_id(),
+            )
+            .await?
+            {
+                retention_receipt::require_stored_posture(&caller, &stored)?;
+            }
             let new_status = approval_state_to_str(req.decision)
                 .ok_or_else(|| Status::invalid_argument("invalid decision state"))?;
             if matches!(new_status, "requested") {
@@ -4290,7 +4352,46 @@ mod tests {
             agent_id: "general-v1".to_owned(),
             status: "completed".to_owned(),
             created_at: chrono::Utc::now(),
+            retention_class: "persistent".to_owned(),
+            waiver_ack_id: None,
+            waiver_connection_id: None,
         }
+    }
+
+    /// The `retained` section cites the run's own receipt rather than only
+    /// disclaiming it, and it never claims the live org posture.
+    #[test]
+    fn proof_bundle_retained_section_cites_the_run_receipt() {
+        let retained_reason = |provenance: &store::RunProvenanceRow| {
+            build_run_proof_bundle("run_1", "org-1", provenance, &[], &[])
+                .unavailable
+                .into_iter()
+                .find(|section| section.section == "retained")
+                .expect("retained section is always declared")
+                .reason
+        };
+
+        let mut waived = test_provenance();
+        waived.retention_class = "zdr_waived".to_owned();
+        waived.waiver_ack_id = Some("ack-1".to_owned());
+        waived.waiver_connection_id = Some("conn-1".to_owned());
+        let reason = retained_reason(&waived);
+        assert!(reason.contains("zdr_waived"), "{reason}");
+        assert!(reason.contains("conn-1"), "{reason}");
+        assert!(reason.contains("ack-1"), "{reason}");
+        assert!(reason.contains("Control Plane"), "{reason}");
+
+        let persistent = retained_reason(&test_provenance());
+        assert!(persistent.contains("persistent"), "{persistent}");
+        assert!(!persistent.contains("zdr_waived"), "{persistent}");
+
+        let mut malformed = test_provenance();
+        malformed.retention_class = "zdr_waived".to_owned();
+        let reason = retained_reason(&malformed);
+        assert!(
+            reason.contains("could not be read"),
+            "a waived row without its ids is not cited as a receipt: {reason}"
+        );
     }
 
     fn test_approval(id: &str) -> store::ApprovalRow {
@@ -5972,6 +6073,142 @@ mod tests {
             db.decide(&plan.id, proto::PlanState::Approved, "", Vec::new())
                 .await
                 .expect("the owner approves");
+            db.cleanup().await;
+        }
+
+        fn refusal_code_of(error: &Status) -> Option<&'static str> {
+            mp_contracts::zdr_refusal::Refusal::from_status(error).map(|refusal| refusal.code())
+        }
+
+        /// A `TransitionPlan` for `plan_id` as the holder of `identity`.
+        fn decision_as(
+            identity: VerifiedIdentity,
+            plan_id: &str,
+            target: proto::PlanState,
+        ) -> Request<proto::TransitionPlanRequest> {
+            let mut request = Request::new(proto::TransitionPlanRequest {
+                plan_id: plan_id.to_owned(),
+                target_state: target as i32,
+                actor: String::new(),
+                reason: String::new(),
+                edited_steps: Vec::new(),
+            });
+            request.extensions_mut().insert(identity);
+            request
+        }
+
+        /// A run of the harness's org and user that carries the receipt `class`, and the waiver when there
+        /// is one.
+        async fn run_with_receipt(
+            db: &PlanGateDb,
+            thread: &str,
+            class: &str,
+            waiver: Option<(&str, &str)>,
+        ) -> String {
+            let id = format!("run-pg-{}", lower_ulid());
+            let (ack, connection) = waiver.map_or((None, None), |(ack, connection)| {
+                (Some(ack), Some(connection))
+            });
+            sqlx::query(
+                "INSERT INTO runs (id, thread_id, goal, org_id, user_id, retention_class,
+                                   waiver_ack_id, waiver_connection_id)
+                 VALUES ($1, $2, 'g', $3, $4, $5, $6, $7)",
+            )
+            .bind(&id)
+            .bind(thread)
+            .bind(&db.org)
+            .bind(&db.user)
+            .bind(class)
+            .bind(ack)
+            .bind(connection)
+            .execute(&db.pool)
+            .await
+            .expect("seed run with a receipt");
+            id
+        }
+
+        /// Owner decision 17: a plan decision advances the run its plan belongs to, so the caller's posture
+        /// must be that run's receipt, exactly. A refusal leaves the plan as it was. The owner's persistent
+        /// decision on a persistent run is unchanged.
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn zdr_receipt_plan_decisions_follow_the_plans_run_receipt() {
+            use mp_contracts::zdr_refusal::code;
+            let db = PlanGateDb::connect().await;
+            let waiver_as = |connection: &str| {
+                VerifiedIdentity::user_for_test_with_waiver(&db.org, &db.user, connection, "ack-1")
+            };
+            let zdr_as = VerifiedIdentity::user_for_test_with_zdr(&db.org, &db.user, true);
+            let owner_as = VerifiedIdentity::user_for_test(&db.org, &db.user);
+
+            // The waiver's own run: the same waiver decides its plan.
+            let thread_a = db.new_thread().await;
+            let waived_run =
+                run_with_receipt(&db, &thread_a, "zdr_waived", Some(("ack-1", "conn-1"))).await;
+            let own = db.propose(&thread_a, &waived_run, &["Own step"], "").await;
+            db.svc
+                .transition_plan(decision_as(
+                    waiver_as("conn-1"),
+                    &own.id,
+                    proto::PlanState::Approved,
+                ))
+                .await
+                .expect("the same waiver may decide its own run's plan");
+            assert_eq!(db.status_of(&own.id).await, "approved");
+
+            // Another connection's waiver on that run: refused, and the plan stays proposed.
+            let thread_b = db.new_thread().await;
+            let waived_run_b =
+                run_with_receipt(&db, &thread_b, "zdr_waived", Some(("ack-1", "conn-1"))).await;
+            let other = db
+                .propose(&thread_b, &waived_run_b, &["Other connection"], "")
+                .await;
+            let error = db
+                .svc
+                .transition_plan(decision_as(
+                    waiver_as("conn-2"),
+                    &other.id,
+                    proto::PlanState::Approved,
+                ))
+                .await
+                .expect_err("a waiver for another connection may not decide the plan");
+            assert_eq!(refusal_code_of(&error), Some(code::POSTURE_MISMATCH));
+            assert_eq!(db.status_of(&other.id).await, "proposed");
+
+            // A plan of a persistent run: a waiver is refused, and a ZDR credential is refused as a durable
+            // mutation. Neither changes the plan.
+            let thread_c = db.new_thread().await;
+            let persistent_run = run_with_receipt(&db, &thread_c, "persistent", None).await;
+            let plan = db
+                .propose(&thread_c, &persistent_run, &["Persistent step"], "")
+                .await;
+            let error = db
+                .svc
+                .transition_plan(decision_as(
+                    waiver_as("conn-1"),
+                    &plan.id,
+                    proto::PlanState::Approved,
+                ))
+                .await
+                .expect_err("a waiver may not attach itself to a persistent run's plan");
+            assert_eq!(refusal_code_of(&error), Some(code::POSTURE_MISMATCH));
+            let error = db
+                .svc
+                .transition_plan(decision_as(zdr_as, &plan.id, proto::PlanState::Approved))
+                .await
+                .expect_err("a ZDR credential never decides a plan");
+            assert_eq!(
+                refusal_code_of(&error),
+                Some(code::DURABLE_MUTATION_FORBIDDEN)
+            );
+            assert_eq!(db.status_of(&plan.id).await, "proposed");
+
+            // The owner's persistent credential decides the persistent run's plan.
+            db.svc
+                .transition_plan(decision_as(owner_as, &plan.id, proto::PlanState::Approved))
+                .await
+                .expect("a persistent owner decides a persistent run's plan");
+            assert_eq!(db.status_of(&plan.id).await, "approved");
             db.cleanup().await;
         }
     }

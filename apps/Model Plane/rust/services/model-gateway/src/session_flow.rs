@@ -702,6 +702,11 @@ pub(crate) async fn require_durable_run_owner_with_token(
         .await
         .map(|response| response.into_inner().authorized)
         .map_err(|error| {
+            // A typed refusal from Session Core (a posture mismatch under owner decision 17) is the answer
+            // and passes through unchanged. Any other failure reads as the authority being unavailable.
+            if mp_contracts::zdr_refusal::Refusal::from_status(&error).is_some() {
+                return error;
+            }
             tracing::warn!(code = ?error.code(), "Session Core run ownership lookup unavailable");
             tonic::Status::unavailable("run ownership unavailable")
         })?;

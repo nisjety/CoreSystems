@@ -12,6 +12,10 @@ export type DashboardCard = {
   promptEn: string
 }
 
+// Images live in public/, which Vite does not let JavaScript import, so their
+// URLs follow the build's base path (the demo is served under /product-demo/).
+const assetBase = import.meta.env.BASE_URL
+
 export const dashboardCards: DashboardCard[] = [
   {
     id: 'weather',
@@ -57,7 +61,7 @@ export const dashboardCards: DashboardCard[] = [
     titleEn: 'Websites and connected sources',
     description: 'Administrer nettsider, SharePoint-biblioteker og andre datakilder.',
     descriptionEn: 'Manage websites, SharePoint libraries, and other data sources.',
-    image: '/imagens/curved-concrete-space.png',
+    image: `${assetBase}imagens/curved-concrete-space.png`,
     href: '/knowledge',
     prompt: 'Hvilke datakilder er koblet til systemet og hva er statusen?',
     promptEn: 'Which data sources are connected to the system, and what is their status?',
@@ -70,7 +74,7 @@ export const dashboardCards: DashboardCard[] = [
     titleEn: 'Indexed files and documents',
     description: 'Bla gjennom opplastede filer og automatisk hentet dokumentasjon.',
     descriptionEn: 'Browse uploaded files and automatically imported documentation.',
-    image: '/imagens/curved-interior-sculpture.png',
+    image: `${assetBase}imagens/curved-interior-sculpture.png`,
     href: '/knowledge',
     prompt: 'Bla gjennom indekserte dokumenter og finn relevante filer.',
     promptEn: 'Browse indexed documents and find relevant files.',
@@ -83,7 +87,7 @@ export const dashboardCards: DashboardCard[] = [
     titleEn: 'Team members and access',
     description: 'Inviter kollegaer, administrer roller og se hvem som har tilgang til hva.',
     descriptionEn: 'Invite colleagues, manage roles, and see who has access to what.',
-    image: '/imagens/arched-hallway-symmetry.jpeg',
+    image: `${assetBase}imagens/arched-hallway-symmetry.jpeg`,
     href: '/settings',
     prompt: 'Hvem er i teamet og hvilke tilganger har de?',
     promptEn: 'Who is on the team, and what access do they have?',

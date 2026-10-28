@@ -1,0 +1,9 @@
+title: ZDR is on in your organisation
+continue: Continue without ZDR for this key
+cancel: Choose another model
+
+Your organisation has turned on ZDR, and we cannot confirm ZDR for this key. Whether it gives zero retention depends on your agreement with the provider, which Verevon cannot see or check. Confirm to continue without ZDR for chats with this key, or choose another model.
+
+If you continue, ZDR is turned off only for chats you run with this key. They are then saved in your workspace like ordinary chats. Retrieved organisation knowledge and tool results are sent to the provider of the key. The background jobs that index memory, extract insights (dreaming) or review learning from these chats are not run. Chats that have already run stay where they are.
+
+ZDR stays on for the rest of the organisation, for other members and for every other model and connection. You can withdraw this choice at any time under Integrations.

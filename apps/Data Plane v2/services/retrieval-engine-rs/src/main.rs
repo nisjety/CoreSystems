@@ -10,6 +10,7 @@ mod config;
 mod context_pack;
 mod context_pins;
 mod db;
+mod egress_attestation;
 mod embed;
 mod gdpr;
 mod grpc;
@@ -17,6 +18,7 @@ mod metrics;
 mod pipeline;
 mod rate_limit;
 mod redact;
+mod rerank_api;
 mod search;
 mod space_scope;
 mod telemetry;
@@ -39,7 +41,7 @@ use crate::grpc::pb_documents::document_service_server::DocumentServiceServer;
 use crate::grpc::pb_knowledge::knowledge_service_server::KnowledgeServiceServer;
 use crate::grpc::pb_retrieval::retrieval_service_server::RetrievalServiceServer;
 use crate::pipeline::orchestrator::RetrievalPipeline;
-use crate::search::rerank::RerankClient;
+use crate::search::rerank::{ProviderGate, ProviderLimits, RerankClient};
 use crate::search::sparse::{
     DynSparseSearchBackend, FallbackSparseBackend, PostgresSparseBackend, QuickwitSparseBackend,
 };
@@ -143,12 +145,34 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .map_err(|e| anyhow::anyhow!("qdrant connect: {e}"))?;
 
-    let embedder = EmbeddingClient::from_config(&cfg)?;
+    // Z-41 — the egress attestation for ZDR-restricted content, read once at boot from data. A route
+    // without a valid attestation stays fail closed. Each problem is logged, and none is fatal:
+    // tenant retrieval does not depend on the attestation.
+    let egress =
+        egress_attestation::EgressAttestation::from_config(&cfg, chrono::Utc::now().date_naive());
+    for problem in egress.problems() {
+        tracing::error!(%problem, "ZDR egress attestation refused; that route stays fail closed");
+    }
+    let embedder = EmbeddingClient::from_config(&cfg)?.with_egress_attestation(&egress);
     tracing::info!(
         provider = embedder.provider_name(),
         model = embedder.model_name(),
         "embedding backend selected"
     );
+
+    // QB-T05b — the provider gate of this replica: one permit pool, one request budget and one
+    // breaker, shared by tenant retrieval (below) and POST /v1/rerank (built later from the same
+    // gate). The defaults keep tenant retrieval unchanged and give the route no capacity. A
+    // malformed limit logs once here and every limit reads as its default: the engine still starts.
+    let provider_limits = match cfg.provider_limits() {
+        Ok(limits) => limits,
+        Err(error) => {
+            tracing::error!(%error, "malformed rerank provider setting: every provider limit reads as its default");
+            ProviderLimits::default()
+        }
+    };
+    tracing::info!(?provider_limits, "rerank provider gate");
+    let provider_gate = ProviderGate::new(provider_limits);
 
     let reranker = cfg
         .cohere_api_key
@@ -161,6 +185,9 @@ async fn main() -> anyhow::Result<()> {
                 &cfg.rerank_endpoint,
                 !cfg.rerank_use_api_key,
             )
+            .with_gate(provider_gate.clone())
+            // CR-T15: the pipeline's rerank judges each chunk with its context in force when the switch is on.
+            .with_chunk_context_input(cfg.rerank_input_include_context_on())
         });
 
     // Redis-compatible cache (Dragonfly in compose; optional and degraded to
@@ -403,11 +430,114 @@ async fn main() -> anyhow::Result<()> {
         keyword_client,
     });
 
+    // QB-T05a — POST /v1/rerank (Quarry option B). Built from the pipeline's own reranker,
+    // policy, NATS client and signer. The route answers skipped/misconfigured when its
+    // endpoint or key is unfit; it never stops the engine or touches tenant retrieval.
+    let rerank_availability = match rerank_api::RouteAvailability::for_route(
+        &cfg.rerank_endpoint,
+        cfg.cohere_api_key
+            .as_deref()
+            .is_some_and(|key| !key.is_empty()),
+    ) {
+        // The route has no capacity without a share of the permit pool and a request budget
+        // (QB-T05b). It is misconfigured then, as it is for a bad endpoint.
+        rerank_api::RouteAvailability::Available if !provider_limits.web_capacity() => {
+            rerank_api::RouteAvailability::Misconfigured(
+                rerank_api::EndpointProblem::NoProviderCapacity,
+            )
+        }
+        other => other,
+    };
+    if cfg.web_rerank_on() {
+        if let rerank_api::RouteAvailability::Misconfigured(problem) = rerank_availability {
+            tracing::error!(
+                problem = ?problem,
+                "WEB_RERANK_ENABLED is set but the web rerank route is misconfigured; POST /v1/rerank answers skipped/misconfigured"
+            );
+        }
+    }
+    // A malformed route switch reads as off (see `Config::web_rerank_on`); log it once, here.
+    for (name, raw) in [
+        ("WEB_RERANK_ENABLED", cfg.web_rerank_enabled.as_str()),
+        (
+            "WEB_RERANK_PROCESSOR_APPROVED",
+            cfg.web_rerank_processor_approved.as_str(),
+        ),
+        ("USAGE_EMIT_ENABLED", cfg.usage_emit_enabled.as_str()),
+    ] {
+        if let Err(error) = config::parse_switch(name, raw) {
+            tracing::error!(%error, "malformed web rerank switch: it reads as off and POST /v1/rerank stays skipped");
+        }
+    }
+    // CR-T15: the rerank input switch reads as off when malformed, so the reranker judges the raw chunk
+    // text; log it once, here, and say which mode the engine runs in.
+    match config::parse_switch(
+        "RERANK_INPUT_INCLUDE_CONTEXT",
+        &cfg.rerank_input_include_context,
+    ) {
+        Ok(on) => tracing::info!(
+            rerank_input_include_context = on,
+            "rerank input mode (CR-T15)"
+        ),
+        Err(error) => tracing::error!(
+            %error,
+            "malformed rerank input switch: it reads as off and the reranker judges the raw chunk text"
+        ),
+    }
+    // QB-M: the route's usage ledger. `None` when it cannot record a call, and then the route never
+    // calls the paid provider. A failure here is logged and never stops the engine.
+    let web_rerank_cost =
+        build_web_rerank_cost(&cfg, pipeline.event_signer.clone(), pipeline.nats.clone()).await;
+    let rerank_state = rerank_api::RerankState {
+        settings: rerank_api::RerankSettings {
+            enabled: cfg.web_rerank_on(),
+            processor_approved: cfg.web_rerank_processor_ok(),
+            allowed_services: cfg
+                .web_rerank_allowed_services
+                .split(',')
+                .map(str::trim)
+                .filter(|service| !service.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            daily_unit_budget: cfg.web_rerank_daily_unit_budget,
+        },
+        availability: rerank_availability,
+        // The route's own client, which never follows a redirect (`RerankClient::for_route`).
+        provider: match (rerank_availability, cfg.cohere_api_key.as_deref()) {
+            (rerank_api::RouteAvailability::Available, Some(key)) if !key.is_empty() => Some(
+                RerankClient::for_route(
+                    reqwest::Client::builder(),
+                    key,
+                    &cfg.reranker_model,
+                    &cfg.rerank_endpoint,
+                    !cfg.rerank_use_api_key,
+                )?
+                .with_gate(provider_gate.clone()),
+            ),
+            _ => None,
+        },
+        model: cfg.reranker_model.clone(),
+        guard: authz::AuthGuard::new(
+            pipeline.policy.clone(),
+            Arc::new(audit::PgAuditSink::new(pipeline.pool.clone())),
+            Arc::new(authz::EnvClaimsVerifier),
+        ),
+        limiter: Arc::new(rate_limit::PerOrgLimiter::rerank_from_env()),
+        cost: web_rerank_cost,
+        budget: Arc::new(rerank_api::limits::DailyUnitBudget::new(
+            cfg.redis_url.clone(),
+        )),
+        attestation: Arc::new(egress.clone()),
+        // The breaker over the provider's answers, shared with tenant retrieval through the gate.
+        circuit: provider_gate.clone(),
+        cache: rerank_api::RerankCache::new(),
+    };
+
     // Prometheus metrics
     let metrics_handle = Arc::new(metrics::init_metrics());
 
     // HTTP server (Axum)
-    let app = api::router_with_metrics(pipeline.clone(), Some(metrics_handle));
+    let app = api::router_with_metrics(pipeline.clone(), Some(metrics_handle), rerank_state);
     let http_addr = format!("0.0.0.0:{}", cfg.http_port);
     let http_listener = tokio::net::TcpListener::bind(&http_addr).await?;
     tracing::info!("http listening on {http_addr}");
@@ -496,6 +626,40 @@ async fn main() -> anyhow::Result<()> {
 
 fn signed_event_consumers_enabled(value: &str) -> bool {
     value == "1"
+}
+
+/// QB-M: the web route's usage ledger, or `None`, which the route answers as `metering_unavailable`
+/// without calling the provider. Built only when `USAGE_EMIT_ENABLED` is on, the signed event path
+/// and NATS exist, and the durable `DATAPLANE_COST` stream can be created or checked. Each missing
+/// piece is logged once at boot.
+async fn build_web_rerank_cost(
+    cfg: &Config,
+    signer: Option<Arc<EventSigner>>,
+    nats: Option<async_nats::Client>,
+) -> Option<Arc<rerank_api::CostLedger>> {
+    if !cfg.usage_emit_on() {
+        if cfg.web_rerank_on() {
+            tracing::error!(
+                "WEB_RERANK_ENABLED is set but USAGE_EMIT_ENABLED is off: POST /v1/rerank answers skipped metering_unavailable and calls no paid provider"
+            );
+        }
+        return None;
+    }
+    let (Some(signer), Some(nats)) = (signer, nats) else {
+        tracing::error!(
+            "USAGE_EMIT_ENABLED is set but the signed event path or NATS is missing: POST /v1/rerank answers skipped metering_unavailable"
+        );
+        return None;
+    };
+    let ledger = usage_ledger_rs::JetStreamLedger::new(nats, signer);
+    if let Err(error) = usage_ledger_rs::ensure_stream(ledger.context()).await {
+        tracing::error!(
+            %error,
+            "the usage ledger stream is not usable: POST /v1/rerank answers skipped metering_unavailable"
+        );
+        return None;
+    }
+    Some(Arc::new(rerank_api::CostLedger::new(Arc::new(ledger))))
 }
 
 async fn shutdown_signal() {

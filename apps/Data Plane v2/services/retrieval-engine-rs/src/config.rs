@@ -1,4 +1,8 @@
+use std::time::Duration;
+
 use serde::Deserialize;
+
+use crate::search::rerank::{BreakerPolicy, ProviderLimits};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -149,6 +153,36 @@ pub struct Config {
     #[serde(default = "default_embed_v4_api_version")]
     pub cohere_embed_v4_api_version: String,
 
+    // Z-41 — egress attestation for ZDR-restricted content, read by `egress_attestation`. Data, not
+    // code: every field empty (the default) attests nothing, so a ZDR query answers lexically with a
+    // notice and the embedding guards refuse before any network call. The six fields of one Azure
+    // resource are set together, through the release path. A partial or invalid set is logged as a
+    // boot problem; it never stops the engine.
+    #[serde(default)]
+    pub azure_cohere_zdr_resource_id: String,
+    #[serde(default)]
+    pub azure_cohere_zdr_approval_ref: String,
+    #[serde(default)]
+    pub azure_cohere_zdr_effective_date: String,
+    #[serde(default)]
+    pub azure_cohere_zdr_review_by: String,
+    #[serde(default)]
+    pub azure_cohere_zdr_reviewer: String,
+    #[serde(default)]
+    pub azure_cohere_zdr_digest: String,
+    #[serde(default)]
+    pub azure_openai_zdr_resource_id: String,
+    #[serde(default)]
+    pub azure_openai_zdr_approval_ref: String,
+    #[serde(default)]
+    pub azure_openai_zdr_effective_date: String,
+    #[serde(default)]
+    pub azure_openai_zdr_review_by: String,
+    #[serde(default)]
+    pub azure_openai_zdr_reviewer: String,
+    #[serde(default)]
+    pub azure_openai_zdr_digest: String,
+
     // Audio + video arms, served by the self-hosted `media-embedder` sidecar
     // (LAION-CLAP for audio, X-CLIP or SigLIP 2 for video). Both arms are dark until
     // `media_embedder_endpoint` is set, exactly like the visual arm and the
@@ -287,6 +321,58 @@ pub struct Config {
     /// 1.0 = embed only the expansion and ignore the literal query.
     #[serde(default = "default_query_expansion_blend_weight")]
     pub query_expansion_blend_weight: f32,
+
+    /// QB-T05a — `POST /v1/rerank` (Quarry option B). Read as text: envy accepts only
+    /// `true`/`false`, while the compose contract writes `0`/`1`. Off until the live proof.
+    /// Use [`Config::web_rerank_on`]; a malformed value reads as off and is logged at boot.
+    #[serde(default = "default_switch_off")]
+    pub web_rerank_enabled: String,
+    /// QB-T05a — `WEB_RERANK_PROCESSOR_APPROVED`, the processor gate (GDPR Art. 28). Off
+    /// until counsel confirms it; the live proof sets it in its own environment only.
+    #[serde(default = "default_switch_off")]
+    pub web_rerank_processor_approved: String,
+    /// QB-T05a — comma-separated service ids that may call `POST /v1/rerank`.
+    #[serde(default = "default_web_rerank_allowed_services")]
+    pub web_rerank_allowed_services: String,
+    /// QB-T05a — alert threshold for billed web-rerank units per org per UTC day. Alert
+    /// only: exceeding it logs and counts, it never stops a call. `0` disables the alert.
+    #[serde(default = "default_web_rerank_daily_unit_budget")]
+    pub web_rerank_daily_unit_budget: u64,
+    /// QB-M — `USAGE_EMIT_ENABLED`, the usage ledger's switch, read as text like the others. Off
+    /// (the default) means the web route answers `skipped metering_unavailable` and calls no paid
+    /// provider: a call that cannot be recorded is not made. Use [`Config::usage_emit_on`]; a
+    /// malformed value reads as off and is logged at boot.
+    #[serde(default = "default_switch_off")]
+    pub usage_emit_enabled: String,
+
+    /// QB-T05b — concurrent provider calls this replica may have in flight, shared by tenant
+    /// retrieval and `POST /v1/rerank`. Text, like the switches. `0` (default) leaves tenant
+    /// retrieval unbounded and gives web rerank no capacity. See [`Config::provider_limits`].
+    #[serde(default = "default_zero_setting")]
+    pub rerank_provider_max_inflight: String,
+    /// QB-T05b — provider requests per second this replica may send. `0` (default) gives web
+    /// rerank no capacity. Tenant retrieval is never refused by it, but its calls spend it.
+    #[serde(default = "default_zero_setting")]
+    pub rerank_provider_rps: String,
+    /// QB-T05b — how long a tenant rerank waits for a permit once the pool is saturated, in
+    /// milliseconds. Past it the call degrades to the fused order, as any reranker failure does.
+    #[serde(default = "default_rerank_provider_tenant_wait_ms")]
+    pub rerank_provider_tenant_wait_ms: String,
+    /// QB-T05b — the provider breaker: failed calls inside the window that open it.
+    #[serde(default = "default_rerank_breaker_failures")]
+    pub rerank_breaker_failures: String,
+    /// QB-T05b — the breaker's failure window, in seconds.
+    #[serde(default = "default_rerank_breaker_window_secs")]
+    pub rerank_breaker_window_secs: String,
+    /// QB-T05b — how long the breaker stays open before one probe, in seconds.
+    #[serde(default = "default_rerank_breaker_open_secs")]
+    pub rerank_breaker_open_secs: String,
+    /// CR-T15 — `RERANK_INPUT_INCLUDE_CONTEXT`, the rerank input switch, read as text like the others.
+    /// Off (the default) sends the raw chunk text to the reranker, byte for byte as before. On sends
+    /// each chunk with its context in force ahead of it, so the reranker judges what retrieval matched.
+    /// Use [`Config::rerank_input_include_context_on`]; a malformed value reads as off and is logged at boot.
+    #[serde(default = "default_switch_off")]
+    pub rerank_input_include_context: String,
 }
 
 fn default_http_port() -> u16 {
@@ -480,16 +566,171 @@ fn default_grpc_max_concurrent() -> u32 {
 fn default_event_auth_audience() -> String {
     "dataplane-events".into()
 }
+fn default_switch_off() -> String {
+    "false".into()
+}
+fn default_web_rerank_allowed_services() -> String {
+    "service:quarry-edge".into()
+}
+/// Placeholder alert threshold (units per org per UTC day). The owner's figure replaces it;
+/// until then it is an alert, never a stop (owner default D-E).
+fn default_web_rerank_daily_unit_budget() -> u64 {
+    10_000
+}
+fn default_zero_setting() -> String {
+    "0".into()
+}
+fn default_rerank_provider_tenant_wait_ms() -> String {
+    "1000".into()
+}
+fn default_rerank_breaker_failures() -> String {
+    "5".into()
+}
+fn default_rerank_breaker_window_secs() -> String {
+    "30".into()
+}
+fn default_rerank_breaker_open_secs() -> String {
+    "30".into()
+}
+
+/// Reads a bounded whole number. Empty counts as the default. Anything that is not a whole number
+/// in `min..=max` is an error, which the caller logs; the engine itself does not stop.
+pub fn parse_bounded(
+    name: &str,
+    raw: &str,
+    default: u64,
+    min: u64,
+    max: u64,
+) -> anyhow::Result<u64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(default);
+    }
+    match trimmed.parse::<u64>() {
+        Ok(value) if (min..=max).contains(&value) => Ok(value),
+        _ => anyhow::bail!("{name} must be a whole number from {min} to {max}"),
+    }
+}
+
+/// Reads a `0`/`1`/`true`/`false` switch. Empty counts as off. Anything else is an error, which
+/// the caller logs; the gate then reads as off, never as a silent default.
+pub fn parse_switch(name: &str, raw: &str) -> anyhow::Result<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => Ok(true),
+        "0" | "false" | "" => Ok(false),
+        _ => anyhow::bail!("{name} must be 0, 1, true or false"),
+    }
+}
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
+        // A malformed route switch never stops the engine: it reads as off, and main logs it
+        // once at boot. Tenant retrieval does not depend on these gates.
         Ok(envy::from_env::<Config>()?)
+    }
+
+    /// Whether `POST /v1/rerank` is switched on. A malformed value reads as off.
+    #[must_use]
+    pub fn web_rerank_on(&self) -> bool {
+        parse_switch("WEB_RERANK_ENABLED", &self.web_rerank_enabled).unwrap_or(false)
+    }
+
+    /// Whether the web-rerank processor is approved. A malformed value reads as not approved.
+    #[must_use]
+    pub fn web_rerank_processor_ok(&self) -> bool {
+        parse_switch(
+            "WEB_RERANK_PROCESSOR_APPROVED",
+            &self.web_rerank_processor_approved,
+        )
+        .unwrap_or(false)
+    }
+
+    /// QB-M — whether the usage ledger is on. A malformed value reads as off.
+    #[must_use]
+    pub fn usage_emit_on(&self) -> bool {
+        parse_switch("USAGE_EMIT_ENABLED", &self.usage_emit_enabled).unwrap_or(false)
+    }
+
+    /// CR-T15 — whether the pipeline's rerank sends chunk context. A malformed value reads as off, and
+    /// `main` names it once at boot.
+    #[must_use]
+    pub fn rerank_input_include_context_on(&self) -> bool {
+        parse_switch(
+            "RERANK_INPUT_INCLUDE_CONTEXT",
+            &self.rerank_input_include_context,
+        )
+        .unwrap_or(false)
+    }
+
+    /// QB-T05b — the provider gate's limits. A malformed value is an error for the boot log, and
+    /// the caller then uses [`ProviderLimits::default`]: tenant retrieval unbounded and web rerank
+    /// without capacity, which is the safe side of every limit.
+    pub fn provider_limits(&self) -> anyhow::Result<ProviderLimits> {
+        Ok(ProviderLimits {
+            max_inflight: parse_bounded(
+                "RERANK_PROVIDER_MAX_INFLIGHT",
+                &self.rerank_provider_max_inflight,
+                0,
+                0,
+                1_024,
+            )? as usize,
+            requests_per_second: parse_bounded(
+                "RERANK_PROVIDER_RPS",
+                &self.rerank_provider_rps,
+                0,
+                0,
+                10_000,
+            )? as u32,
+            tenant_wait: Duration::from_millis(parse_bounded(
+                "RERANK_PROVIDER_TENANT_WAIT_MS",
+                &self.rerank_provider_tenant_wait_ms,
+                1_000,
+                0,
+                30_000,
+            )?),
+            breaker: BreakerPolicy {
+                failures: parse_bounded(
+                    "RERANK_BREAKER_FAILURES",
+                    &self.rerank_breaker_failures,
+                    5,
+                    1,
+                    1_000,
+                )? as u32,
+                window: Duration::from_secs(parse_bounded(
+                    "RERANK_BREAKER_WINDOW_SECS",
+                    &self.rerank_breaker_window_secs,
+                    30,
+                    1,
+                    3_600,
+                )?),
+                open_for: Duration::from_secs(parse_bounded(
+                    "RERANK_BREAKER_OPEN_SECS",
+                    &self.rerank_breaker_open_secs,
+                    30,
+                    1,
+                    3_600,
+                )?),
+            },
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_route_switches_read_both_spellings_and_refuse_anything_else() {
+        assert!(parse_switch("X", "1").expect("1"));
+        assert!(parse_switch("X", "true").expect("true"));
+        assert!(parse_switch("X", " TRUE ").expect("trimmed and case-folded"));
+        assert!(!parse_switch("X", "0").expect("0"));
+        assert!(!parse_switch("X", "false").expect("false"));
+        assert!(!parse_switch("X", "").expect("empty is off"));
+        // A typo is an error, never a silent default.
+        assert!(parse_switch("X", "yes").is_err());
+        assert!(parse_switch("X", "2").is_err());
+    }
 
     #[test]
     fn keyword_arm_default_weight_matches_visual_arms_launch_calibration() {
@@ -527,5 +768,75 @@ mod tests {
         // Empty by default — this is what makes the arm no-op-skip rather
         // than send unauthenticated requests when unconfigured.
         assert!(cfg.meilisearch_api_key.is_empty());
+    }
+
+    /// QB-M: the usage ledger's switch is off unless it reads `1` or `true`, and a typo is off too
+    /// (the boot log names it), never a silent on: a paid call is made only when it can be recorded.
+    #[test]
+    fn the_usage_ledger_switch_is_off_by_default_and_a_typo_is_off() {
+        let read = |extra: &[(&str, &str)]| -> bool {
+            let mut pairs = vec![
+                (
+                    "DATABASE_URL".to_string(),
+                    "postgres://test.invalid/test".to_string(),
+                ),
+                (
+                    "QDRANT_URL".to_string(),
+                    "http://test.invalid:6334".to_string(),
+                ),
+            ];
+            pairs.extend(
+                extra
+                    .iter()
+                    .map(|(name, value)| (name.to_string(), value.to_string())),
+            );
+            let cfg: Config = envy::from_iter(pairs).expect("config");
+            cfg.usage_emit_on()
+        };
+        assert!(!read(&[]), "off by default");
+        assert!(read(&[("USAGE_EMIT_ENABLED", "1")]));
+        assert!(read(&[("USAGE_EMIT_ENABLED", "true")]));
+        assert!(!read(&[("USAGE_EMIT_ENABLED", "0")]));
+        assert!(
+            !read(&[("USAGE_EMIT_ENABLED", "yes")]),
+            "a typo reads as off"
+        );
+    }
+
+    /// CR-T15: `RERANK_INPUT_INCLUDE_CONTEXT` is off unless it reads `1` or `true`. A typo is off
+    /// too, and the boot check names it: the reranker then judges the raw chunk text, as it always did.
+    #[test]
+    fn the_rerank_input_switch_is_off_by_default_and_a_typo_is_off() {
+        let read = |extra: &[(&str, &str)]| -> bool {
+            let mut pairs = vec![
+                (
+                    "DATABASE_URL".to_string(),
+                    "postgres://test.invalid/test".to_string(),
+                ),
+                (
+                    "QDRANT_URL".to_string(),
+                    "http://test.invalid:6334".to_string(),
+                ),
+            ];
+            pairs.extend(
+                extra
+                    .iter()
+                    .map(|(name, value)| (name.to_string(), value.to_string())),
+            );
+            let cfg: Config = envy::from_iter(pairs).expect("config");
+            cfg.rerank_input_include_context_on()
+        };
+        assert!(!read(&[]), "off by default");
+        assert!(read(&[("RERANK_INPUT_INCLUDE_CONTEXT", "1")]));
+        assert!(read(&[("RERANK_INPUT_INCLUDE_CONTEXT", "true")]));
+        assert!(!read(&[("RERANK_INPUT_INCLUDE_CONTEXT", "0")]));
+        assert!(
+            !read(&[("RERANK_INPUT_INCLUDE_CONTEXT", "yes")]),
+            "a typo reads as off"
+        );
+        assert!(
+            parse_switch("RERANK_INPUT_INCLUDE_CONTEXT", "yes").is_err(),
+            "the boot check refuses a typo by name"
+        );
     }
 }

@@ -451,6 +451,10 @@ func (s *Service) DisconnectConnection(ctx context.Context, connectionID, reason
 		if deleteErr != nil {
 			return deleteErr
 		}
+		// A removed model connection keeps no live ZDR acknowledgement (audited, same transaction).
+		if _, err := store.RevokeAcknowledgementsOnRemoval(ctx, tx, deleted.ID, s.now()); err != nil {
+			return err
+		}
 		return tx.InsertAuditEvent(ctx, store.AuditEvent{
 			ID:             "audit:integration:connection-deleted:" + deleted.ID,
 			OrganizationID: deleted.OrganizationID,

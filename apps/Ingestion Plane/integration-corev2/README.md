@@ -835,6 +835,32 @@ line `connection ZDR assessment reconcile` gives the counts. To change a
 provider's capability, edit the contract, bump `catalog_version`, add the digest
 vector, re-pin and re-vendor every copy (see `apps/Model Plane/api/contracts/README.md`).
 
+### ZDR acknowledgement (Z-13)
+
+A member who uses a connection that cannot give zero data retention (today: the ChatGPT subscription) acknowledges that once, against the exact assessment and text they were shown. The routes are bearer-only and owner-only. The internal API key cannot reach them.
+
+| Env | Default | Meaning |
+|---|---|---|
+| `ZDR_ACKNOWLEDGEMENT_ENABLED` | `false` | Switches the acknowledgement routes on. Off, the routes do not exist (404). On, the service checks the wording at boot and stops if it does not match its pins and the capability contract. |
+
+Routes, all under `/api/v1/model-connections`:
+
+- `GET /:id/zdr`: the assessment, the acknowledgement in force and the text for `locale` (`no` or `en`) and `variant` (`org_zdr_on` by default, `org_zdr_off`, `first_use`).
+- `POST /:id/zdr-acknowledgement`: body `{digest, textVersion, locale, variant, acknowledgedVia}`. `variant` is the text the member was shown (`org_zdr_on` or `first_use`), and that text is the one stored. 201 when created, 200 on a replay. 409 `zdr_assessment_changed` carries the current assessment. 503 `zdr_org_state_unavailable` when org-core cannot say whether ZDR is on: the acknowledgement is refused (fail closed).
+- `DELETE /:id/zdr-acknowledgement`: the owner's revoke (idempotent).
+- `GET /:id/zdr-posture`: what Auth Core reads for a turn. It carries `ackState` (`not_required`, `acknowledged`, `required` or `unassessed`), `ackId`, `digest` and `textVersion`, and nothing else.
+- `GET /zdr-acknowledgements`: the organisation's owners and admins only. Ids, states and counts, never the text.
+
+Revocation: the owner's revoke (`owner_revoked`); a removed connection, in the same transaction, on every removal path (subscription disconnect, the generic disconnect, GDPR delete) (`connection_removed`); a changed digest (`capability_changed`, Z-12). A user-level GDPR delete revokes and keeps the rows for the audit window. An organisation-wide GDPR delete (no `userId`) erases the organisation's ZDR records and acknowledgements.
+
+Wording: `internal/zdr/texts/<version>/<locale>/<key>.<variant>.txt`, each file pinned by `texts/index.json`. A wording change is a new version directory and a new index, never an edit in place. Both locales are drafted. The status is `draft_pending_od_legal` until counsel signs off (OD-LEGAL).
+
+Runbook, before `ZDR_ACKNOWLEDGEMENT_ENABLED=true` in any environment:
+
+1. integration-core's service principal must hold `org:retention:read:any` in the Control Plane registry (CP P1). Without it every acknowledgement is refused with 503.
+2. OD-LEGAL signs off the text version, or the owner decides to ship the draft.
+3. Waived runs must skip the derived background jobs (memory indexing, dreaming, learning review) before the text that says they are skipped is shown to a user (D-B).
+
 ## Unified-service replacement
 
 The old unified-service profile and real-time features are split by ownership:

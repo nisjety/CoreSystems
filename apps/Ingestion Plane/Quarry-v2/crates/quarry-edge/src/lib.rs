@@ -27,6 +27,7 @@ pub mod job_stream;
 pub mod limits;
 pub mod map_routes;
 pub mod metrics;
+pub mod model_plane_gate;
 pub mod policy_baseline;
 pub mod profile_guard;
 pub mod profile_routes;

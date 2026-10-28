@@ -293,12 +293,19 @@ fn normalize_with(
     // The one exception is the agentic run on `execution-core`'s governed loop,
     // which the streaming endpoint may admit (see `AgenticSubscriptionPolicy`).
     if is_codex_subscription {
+        // A ZDR turn on the user's own subscription is refused typed, with the same
+        // answer the pre-check gives a ZDR token: that subscription cannot give zero
+        // retention, so nothing is sent and no other model stands in.
+        if req.zdr {
+            return Err(crate::zdr_precheck::http(
+                &mp_contracts::zdr_refusal::Refusal::CONNECTION_NOT_SUPPORTED,
+            ));
+        }
         let agentic = req.features.iter().any(|feature| feature == "agentic");
-        let other_unsupported = req.zdr
-            || req
-                .structured_output_schema
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
+        let other_unsupported = req
+            .structured_output_schema
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
             || !req.attachments.is_empty()
             || req.generate_image
             || req.browse_web

@@ -23,6 +23,16 @@ pub fn install_recorder() -> Result<PrometheusHandle, metrics_exporter_prometheu
     PrometheusBuilder::new().install_recorder()
 }
 
+/// Publish the zero-retention waiver contract version this gateway enforces, as the gauge
+/// `gateway_zdr_waiver_contract_version`. The launcher reads it before it turns waivers on (Z-32),
+/// so a gateway that does not know the version the minter issues is never sent one. Set once at
+/// boot, after the recorder is installed.
+pub fn record_zdr_waiver_contract_version() {
+    gauge!("gateway_zdr_waiver_contract_version").set(f64::from(
+        mp_contracts::retention::WAIVER_CONTRACT_VERSION,
+    ));
+}
+
 /// Axum middleware that records request count, duration, and status metrics.
 pub async fn metrics_middleware(request: Request, next: Next) -> Response {
     let method = request.method().to_string();
