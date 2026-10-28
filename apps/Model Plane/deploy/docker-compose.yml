@@ -331,6 +331,10 @@ services:
       # WS08-S6: a Do run carries the turn's attachments. Unset is off; flip it together with the client's
       # VITE_CHAT_DO_ATTACHMENTS_ENABLED. The server declares it on /v1/models as modes.do_attachments.
       CHAT_DO_ATTACHMENTS_ENABLED: ${CHAT_DO_ATTACHMENTS_ENABLED:-}
+      # WS18-S2: a follow-up turn's Space append context (from the BFF's GATEWAY_SPACE_APPEND_RETRIEVAL) scopes its
+      # retrieval to the thread's Space. Off by default; only the literal `true` turns it on, and only after the
+      # staging proof.
+      MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL: ${MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL:-false}
       # WS11-S5: derive the reasoning level once in the gateway and send it to inference-core. Off by default; only the
       # literal `true` turns it on. Roll out in this order: inference-core adapter flags on first, then this switch. With
       # this on and the adapter flags off, a deep request sends budget 0 and a level nothing renders (no thinking).
@@ -787,6 +791,10 @@ services:
       # changed one drifts. Off by default; only the literal `true` turns it on. Needs the same MCP_OAUTH_SERVICE_TOKEN as
       # capability-core. Skipped for a ZDR turn.
       MCP_TOOL_OBSERVATION_ENABLED: ${MCP_TOOL_OBSERVATION_ENABLED:-false}
+      # WS13-S5: a grant whose approval cause demands a fresh password re-check (step_up claim in the Model Plane
+      # token, minted after auth-core's POST /api/v2/auth/step-up). Only the literal `shadow` (log, let through) or
+      # `enforce` (refuse) turns it on; anything else is off. A denial never needs it.
+      APPROVAL_STEP_UP_ENFORCED: ${APPROVAL_STEP_UP_ENFORCED:-off}
       # ADR-0003 — the platform layer of the authored-instruction hierarchy
       # (`apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md`): deployment-level
       # configuration, deliberately not a database row (no "platform
@@ -1258,6 +1266,9 @@ services:
       # SESSION_CORE_PARK_RECOVERY_ENABLED (a store that does not accept the park leaves the run
       # with its committed outcome). Flip it last, after the gateway and the BFF; turn it off first.
       EXECUTION_LOOP_PARKING_ENABLED: ${EXECUTION_LOOP_PARKING_ENABLED:-false}
+      # WS13-S4: within one run, a call the user already declined (same tool, same arguments) is refused from the
+      # run's approvals instead of being asked again. Off by default; only the literal `true` turns it on.
+      APPROVAL_DENIAL_MEMORY_ENABLED: ${APPROVAL_DENIAL_MEMORY_ENABLED:-false}
       # Autonomous tool-using runs route through Azure's model-router deployment,
       # which selects the best model per turn (tool-calling model selection is
       # handled by the router, cost-aware). Overridable per deployment; empty →

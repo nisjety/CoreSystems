@@ -7,6 +7,7 @@ import { UsersController } from './users/users.controller';
 import { NatsAuthController } from './auth/nats-auth.controller';
 import { ConvexAuthController } from './auth/convex-auth.controller';
 import { ModelPlaneTokenController } from './auth/model-plane-token.controller';
+import { StepUpController } from './auth/step-up.controller';
 import { PlaneTokenController } from './auth/plane-token.controller';
 import { DataPlaneAuthorizationController } from './auth/data-plane-authorization.controller';
 import { MembershipAuthorityController } from './auth/membership-authority.controller';
@@ -43,6 +44,7 @@ import { InvitationAcceptanceRepairService } from './services/invitation-accepta
     NatsAuthController,
     ConvexAuthController,
     ModelPlaneTokenController,
+    StepUpController,
     PlaneTokenController,
     DataPlaneAuthorizationController,
     MembershipAuthorityController,
