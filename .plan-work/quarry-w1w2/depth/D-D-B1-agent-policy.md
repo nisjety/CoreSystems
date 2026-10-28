@@ -8,6 +8,9 @@ What was fixed is in the commits (git log, `fix(quarry-edge): ...`). Open items:
    product question for the owner: a person who takes over an agent-class run now spends the agent's step budget
    while driving. R-8 reads that way; if the owner wants takeover steps exempt, `counts_against_step_budget`
    needs the control mode as a third input.
+   UPDATE 2026-10-28: stale. 7d78ab2e8 added that third input (`takeover`); a person's step during a takeover never
+   counts and the runtime clock is paused. The owner ratified it (TAKEOVER-BUDGET, decision 3.4) and the exempted
+   steps and seconds are now counted (`quarry_agent_takeover_exempt_*`, D2-A-agent-authority).
 2. The delegate lane (`attach.rs delegate_step`) has its own budget accounting; not read in this unit.
 3. `drain_runs` (older) and `finish_run(Drain)` now both treat a held lane at the deadline as "in use".
    Before, a step held the run entry only until WS8.H; since WS8.H a running step holds only its lane, so the
