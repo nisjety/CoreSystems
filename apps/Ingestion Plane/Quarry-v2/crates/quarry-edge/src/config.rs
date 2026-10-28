@@ -306,6 +306,16 @@ fn default_cache_ttl() -> u64 {
     crate::cache::DEFAULT_TTL_SECS
 }
 
+/// Compose sets `QUARRY_EDGE__MODEL_PLANE_URL` to an empty string when the operator has not
+/// opted in to the Model Plane (`${MODEL_PLANE_URL:-}`). An empty URL means "not configured", so
+/// it becomes `None`. Left as `Some("")`, the cross-plane boot gate in main.rs would demand
+/// `QUARRY_EDGE__QUARRY_SERVICE_API_KEY` from a stack that never asked for the Model Plane.
+fn blank_model_plane_url_is_unset(url: &mut Option<String>) {
+    if url.as_deref().is_some_and(|raw| raw.trim().is_empty()) {
+        *url = None;
+    }
+}
+
 impl EdgeConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let cfg = config::Config::builder()
@@ -316,6 +326,7 @@ impl EdgeConfig {
             tracing::error!(error = %err, "EdgeConfig failed to deserialize from environment; falling back to all-defaults (check for a required field with no #[serde(default)])");
             Self::defaults()
         });
+        blank_model_plane_url_is_unset(&mut edge.model_plane_url);
         if edge.redis_url.is_none() {
             edge.redis_url = edge.dragonfly_url.clone();
         }
@@ -414,5 +425,70 @@ mod artifact_backend_tests {
         ] {
             assert_eq!(normalize_artifact_backend(raw), want, "{raw:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod compose_switch_tests {
+    use super::{blank_model_plane_url_is_unset, EdgeConfig};
+    use std::collections::HashMap;
+
+    /// Reads the edge config from env-style pairs through the same `config` crate source that
+    /// `EdgeConfig::from_env` uses, so the values the compose passes ("0", "") are parsed the
+    /// way the running binary parses them.
+    fn config_from(pairs: &[(&str, &str)]) -> EdgeConfig {
+        let source: HashMap<String, String> = pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect();
+        config::Config::builder()
+            .add_source(
+                config::Environment::with_prefix("QUARRY_EDGE")
+                    .separator("__")
+                    .source(Some(source)),
+            )
+            .build()
+            .expect("the config builder accepts the pairs")
+            .try_deserialize()
+            .expect("EdgeConfig deserializes the compose values")
+    }
+
+    #[test]
+    fn compose_off_values_parse_as_off_and_an_empty_url_is_unset() {
+        let mut cfg = config_from(&[
+            ("QUARRY_EDGE__MODEL_PLANE_URL", ""),
+            ("QUARRY_EDGE__AUTOPROMPT", "0"),
+            ("QUARRY_EDGE__SEMANTIC_RERANK", "0"),
+            ("QUARRY_EDGE__LLM_CLASSIFY_INTENT", "0"),
+            ("QUARRY_EDGE__PAGE_TITLE_ENRICH", "0"),
+        ]);
+        assert!(!cfg.autoprompt, "autoprompt is off");
+        assert!(!cfg.semantic_rerank, "semantic rerank is off");
+        assert!(!cfg.llm_classify_intent, "intent classification is off");
+        assert_eq!(cfg.page_title_enrich, Some(false), "page-title enrichment is off");
+        blank_model_plane_url_is_unset(&mut cfg.model_plane_url);
+        assert_eq!(cfg.model_plane_url, None, "an empty MODEL_PLANE_URL is not configured");
+    }
+
+    #[test]
+    fn a_model_plane_url_that_is_set_is_kept() {
+        let mut cfg = config_from(&[("QUARRY_EDGE__MODEL_PLANE_URL", "http://model-gateway:8080")]);
+        blank_model_plane_url_is_unset(&mut cfg.model_plane_url);
+        assert_eq!(cfg.model_plane_url.as_deref(), Some("http://model-gateway:8080"));
+    }
+
+    #[test]
+    fn a_whitespace_only_url_is_unset() {
+        let mut url = Some("   ".to_string());
+        blank_model_plane_url_is_unset(&mut url);
+        assert_eq!(url, None);
+    }
+
+    #[test]
+    fn an_absent_url_stays_absent() {
+        let mut cfg = config_from(&[]);
+        blank_model_plane_url_is_unset(&mut cfg.model_plane_url);
+        assert_eq!(cfg.model_plane_url, None);
+        assert!(!cfg.autoprompt);
     }
 }
