@@ -77,6 +77,26 @@ export function formatWhen(value: string): string {
 }
 
 /**
+ * How long ago something happened, for a reply summary: "for 4 min. siden", "i går", and the plain
+ * date from a week on. `now` is a parameter so the wording is testable. An unreadable value reads as
+ * empty rather than as a wrong time.
+ */
+export function formatRelativeWhen(value: string | undefined, now: number = Date.now()): string {
+  if (!value) return ''
+  const at = new Date(value).getTime()
+  if (!Number.isFinite(at)) return ''
+  // A time ahead of this browser's clock (skew between the server and the reader) is "now", not "in 1 t".
+  const seconds = Math.min(0, Math.round((at - now) / 1000))
+  const abs = Math.abs(seconds)
+  const rtf = new Intl.RelativeTimeFormat('nb-NO', { numeric: 'auto', style: 'short' })
+  if (abs < 45) return rtf.format(0, 'second')
+  if (abs < 3600) return rtf.format(Math.round(seconds / 60), 'minute')
+  if (abs < 86_400) return rtf.format(Math.round(seconds / 3600), 'hour')
+  if (abs < 7 * 86_400) return rtf.format(Math.round(seconds / 86_400), 'day')
+  return formatWhen(value)
+}
+
+/**
  * A moment, for the activity feed: "06.09.2026, 14:32".
  *
  * The feed is ordered by consequence rather than recency, so a row has to carry

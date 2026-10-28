@@ -138,3 +138,97 @@
     display: none;
   }
 }
+
+/* ── Folded thread: the reply summary row (U2) ─────────────────────────────── */
+
+/* Slack's "N replies" row under the root message: who replied, how many, the latest reply, how long ago.
+   Indented under the message text (avatar 30px + gap 10px) so it reads as part of the message. */
+.verevon-room-post__summary {
+  display: flex;
+  width: calc(100% - 40px);
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  margin: -4px 0 0 40px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.verevon-room-post__summary:hover,
+.verevon-room-post__summary:focus-visible {
+  border-color: var(--verevon-border);
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-room-post__summary-avatars {
+  display: flex;
+  flex: none;
+  align-items: center;
+}
+
+.verevon-room-post__summary-avatars > * {
+  width: 22px;
+  height: 22px;
+  margin-left: -6px;
+  border: 2px solid var(--verevon-surface);
+  box-sizing: content-box;
+  font-size: 9px;
+}
+
+.verevon-room-post__summary-avatars > :first-child {
+  margin-left: 0;
+}
+
+.verevon-room-post__summary-more {
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--verevon-surface-muted);
+  color: var(--verevon-text-muted);
+  font-weight: 700;
+}
+
+.verevon-room-post__summary-count {
+  flex: none;
+  color: var(--verevon-accent-ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.verevon-room-post__summary-last {
+  min-width: 0;
+  flex: 1 1 0;
+  overflow: hidden;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-room-post__summary-last strong {
+  color: var(--verevon-text);
+  font-weight: 600;
+}
+
+.verevon-room-post__summary-when {
+  flex: none;
+  color: var(--verevon-text-subtle);
+  font-size: 11px;
+}
+
+/* Phone width: the preview keeps the words and drops the author, so no name is cut mid-way. */
+@media (max-width: 520px) {
+  .verevon-room-post__summary {
+    gap: 8px;
+  }
+
+  .verevon-room-post__summary-last strong {
+    display: none;
+  }
+}

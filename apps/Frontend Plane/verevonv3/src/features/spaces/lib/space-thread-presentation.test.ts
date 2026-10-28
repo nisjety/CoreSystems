@@ -7,6 +7,7 @@ import {
   ACTIVE_RUN_STATUSES,
   AWAITING_APPROVAL_RUN_STATUS,
   LIVE_RUN_STATUSES,
+  formatRelativeWhen,
   threadStatus,
 } from './space-thread-presentation'
 
@@ -65,5 +66,36 @@ describe('thread_run_active copy', () => {
     expect(english).toMatch(/already working/i)
     expect(norwegian).toMatch(/jobber allerede/i)
     expect(english).not.toBe(norwegian)
+  })
+})
+
+describe('formatRelativeWhen (reply summary)', () => {
+  const now = Date.parse('2026-10-28T12:00:00Z')
+  const ago = (seconds: number) => new Date(now - seconds * 1000).toISOString()
+
+  it('says "now" inside a minute, then minutes, then hours, then days', () => {
+    expect(formatRelativeWhen(ago(10), now)).toMatch(/nå/i)
+    expect(formatRelativeWhen(ago(4 * 60), now)).toMatch(/4\s*min/)
+    expect(formatRelativeWhen(ago(3 * 3600), now)).toMatch(/3\s*t/)
+    expect(formatRelativeWhen(ago(3 * 86_400), now)).toMatch(/3\s*d/)
+  })
+
+  it('uses Norwegian words for yesterday and the day before', () => {
+    expect(formatRelativeWhen(ago(86_400 + 3600), now)).toBe('i går')
+    expect(formatRelativeWhen(ago(2 * 86_400), now)).toBe('i forgårs')
+  })
+
+  it('reads a time ahead of the browser clock as now, not as the future', () => {
+    expect(formatRelativeWhen(ago(-3600), now)).toMatch(/nå/i)
+  })
+
+  it('falls back to the plain date from a week on', () => {
+    expect(formatRelativeWhen(ago(10 * 86_400), now)).toMatch(/18\.\s*okt/)
+  })
+
+  it('reads an absent or unreadable time as empty, never as a wrong one', () => {
+    expect(formatRelativeWhen(undefined, now)).toBe('')
+    expect(formatRelativeWhen('', now)).toBe('')
+    expect(formatRelativeWhen('not a date', now)).toBe('')
   })
 })

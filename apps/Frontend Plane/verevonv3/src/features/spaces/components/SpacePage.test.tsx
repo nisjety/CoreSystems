@@ -1845,20 +1845,20 @@ describe('SpacePage', () => {
       expect(document.querySelector('.verevon-space-auxpane')).toBeNull()
     })
 
-    it('draws a long thread collapsed in the room only with human posts on', async () => {
+    it('folds a thread with replies to a summary row in the room only with human posts on', async () => {
       const turns = Array.from({ length: 6 }, (_, i) => ({
         role: 'user', content: `Melding ${i + 1}`, authorSubjectId: 'user_1',
       }))
       spacesClient.getSpaceThreadTranscript.mockResolvedValue({ threadId: 'thread_1', turns })
       spacesClient.getSpaceContext.mockResolvedValue(postsContext)
       const view = renderSpacePage()
-      expect(await screen.findByRole('button', { name: '2 meldinger til i tråden' })).toBeTruthy()
+      expect(await screen.findByRole('button', { name: 'Åpne tråd · 5 svar' })).toBeTruthy()
       view.unmount()
       spacesClient.getSpaceContext.mockResolvedValue(personalContext)
       renderSpacePage()
       expect(await screen.findByText('Melding 6')).toBeTruthy()
       expect(screen.getByText('Melding 2')).toBeTruthy()
-      expect(document.querySelector('.verevon-room-post__collapsed')).toBeNull()
+      expect(document.querySelector('.verevon-room-post__summary')).toBeNull()
     })
   })
 

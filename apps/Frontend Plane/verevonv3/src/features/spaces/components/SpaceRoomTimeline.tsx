@@ -5,6 +5,7 @@ import {
   AWAITING_APPROVAL_RUN_STATUS,
   FAILED_RUN_STATUSES,
   LIVE_RUN_STATUSES,
+  formatRelativeWhen,
   formatWhen,
   stripMarkdownPreview,
   threadStatus,
@@ -14,7 +15,7 @@ import { SpaceApprovalPanel } from './SpaceApprovalPanel'
 import { agentAvatarColor, agentForName } from '../lib/agent-avatar'
 import { agentCardModel, memberCardModel } from '../lib/agent-activity'
 import type { IdentityCardModel } from '../lib/agent-activity'
-import { PostTurnHeader, SpaceTurnList, normalizeTranscriptTurns, resolveAuthorName } from './sidepane/SpaceTurnList'
+import { PostTurnHeader, SpaceTurnList, initials, normalizeTranscriptTurns, resolveAuthorName } from './sidepane/SpaceTurnList'
 import type { TranscriptTurn } from './sidepane/SpaceTurnList'
 import { SpaceRestrictedNotice } from './SpaceRestrictedNotice'
 import { SpacePendingNewPost, SpacePendingReplies } from './SpacePendingPost'
@@ -102,16 +103,16 @@ export interface SpaceRoomTimelineProps {
    */
   readonly pendingPosts?: () => readonly SpaceJournalEntry[]
   /**
-   * `features.human_posts` (WS01-S7b). On, a long thread shows its first turn, the last three and
-   * one "N more messages" row that opens the pane, and a post shows its reply count. Takes effect
-   * only with `onOpenThread` (a collapsed turn must be reachable); absent or off, every turn is
-   * drawn as before.
+   * `features.human_posts` (WS01-S7b, reshaped in U2). On, a thread with replies shows its root
+   * message and one reply-summary row (who replied, how many, the latest reply, how long ago) that
+   * opens the pane, the way Slack and Teams fold a thread. Takes effect only with `onOpenThread`
+   * (a folded turn must be reachable); absent or off, every turn is drawn as before.
    */
   readonly collapseLongThreads?: () => boolean
 }
 
-/** Turns kept visible below the collapsed row: the last three (the first turn is kept above it). */
-const COLLAPSE_TAIL_TURNS = 3
+/** Distinct reply authors drawn in the summary row's avatar stack; the rest read as "+N". */
+const SUMMARY_AVATARS = 3
 
 /** The room-level name for an assistant turn that recorded no persona: the
  * single active agent when there is exactly one, else the product name. */
@@ -252,16 +253,45 @@ function SpaceRoomPost(props: {
     props.artifactsOn ? roomItems([...turns(), { artifacts: pendingLive() }]) : [],
   )
   const readState = () => transcript()?.state
-  // First turn + last three, with the middle named by one row that opens the pane. A thread of
-  // four turns or fewer is never collapsed: hiding a single turn behind a click saves nothing.
-  const collapsed = () => props.collapse?.() === true && turns().length > COLLAPSE_TAIL_TURNS + 1
-  const headTurns = (): readonly TranscriptTurn[] => (collapsed() ? turns().slice(0, 1) : turns())
-  const tailTurns = (): readonly TranscriptTurn[] => (collapsed() ? turns().slice(-COLLAPSE_TAIL_TURNS) : [])
-  const hiddenTurnCount = () => (collapsed() ? turns().length - 1 - COLLAPSE_TAIL_TURNS : 0)
+  // A thread with replies folds to its root message plus one summary row that opens the pane. The
+  // count is what the pane will show (every turn after the root, agent answers included); until the
+  // transcript has loaded the projection's `reply_count` stands in.
   const replyCount = () => {
+    if (props.collapse?.() !== true) return 0
+    if (turns().length > 0) return turns().length - 1
     const count = props.thread.reply_count
-    return props.collapse?.() === true && typeof count === 'number' && count > 0 ? count : 0
+    return typeof count === 'number' && count > 0 ? count : 0
   }
+  const summarised = () => replyCount() > 0
+  const headTurns = (): readonly TranscriptTurn[] => (summarised() && turns().length > 0 ? turns().slice(0, 1) : turns())
+  const replyTurns = (): readonly TranscriptTurn[] => turns().slice(1)
+  const replyAuthorName = (turn: TranscriptTurn): string =>
+    turn.role === 'assistant'
+      ? turn.agentName ?? props.agentName
+      : resolveAuthorName(turn.authorSubjectId, props.roster(), props.viewerSubjectId?.(), i18n.tr)
+  // Distinct reply authors in the order they first spoke. Agents and members are told apart by what
+  // the server recorded; an unnamed author is one participant, not one per turn.
+  const replyParticipants = () => {
+    const seen = new Set<string>()
+    const out: { key: string; agent: boolean; name: string }[] = []
+    for (const turn of replyTurns()) {
+      const agent = turn.role === 'assistant'
+      const name = replyAuthorName(turn)
+      const key = `${agent ? 'agent' : 'user'}\u0000${agent ? name : turn.authorSubjectId ?? ''}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({ key, agent, name })
+    }
+    return out
+  }
+  const lastReply = (): TranscriptTurn | undefined => {
+    const replies = replyTurns()
+    return replies[replies.length - 1]
+  }
+  const replySummaryLabel = () =>
+    replyCount() === 1
+      ? i18n.tr('Åpne tråd · 1 svar', 'Open thread · 1 reply')
+      : i18n.tr(`Åpne tråd · ${replyCount()} svar`, `Open thread · ${replyCount()} replies`)
   // Before any turn has loaded, the post is still attributable: the thread's
   // own owner started it.
   const starterName = () =>
@@ -373,9 +403,7 @@ function SpaceRoomPost(props: {
         when={turns().length > 0}
         fallback={
           <div class="verevon-room-turn">
-            <span class="verevon-room-turn__avatar" aria-hidden="true">
-              <MessageCircle size={14} />
-            </span>
+            <span class="verevon-room-turn__avatar" aria-hidden="true">{initials(starterName())}</span>
             <div class="verevon-room-turn__content">
               <PostTurnHeader author={starterName()} card={starterCard()} />
               <p class="verevon-room-turn__plain">
@@ -415,27 +443,55 @@ function SpaceRoomPost(props: {
           threadId={props.thread.thread_id}
           onOpenArtifact={props.artifactsOn ? setOpenArtifactId : undefined}
         />
-        <Show when={collapsed()}>
-          <button
-            type="button"
-            class="verevon-room-post__collapsed"
-            onClick={() => props.onOpenThread?.(props.thread)}
-          >
-            {hiddenTurnCount() === 1
-              ? i18n.tr('1 melding til i tråden', '1 more message in the thread')
-              : i18n.tr(`${hiddenTurnCount()} meldinger til i tråden`, `${hiddenTurnCount()} more messages in the thread`)}
-          </button>
-          <SpaceTurnList
-            turns={tailTurns}
-            roster={props.roster}
-            viewerSubjectId={props.viewerSubjectId}
-            agentName={props.agentName}
-            agents={props.agents}
-            threads={props.threads}
-            threadId={props.thread.thread_id}
-            onOpenArtifact={props.artifactsOn ? setOpenArtifactId : undefined}
-          />
-        </Show>
+      </Show>
+
+      {/* The folded thread: who replied, how many, the latest reply and how long ago, as one row that
+          opens the pane (Slack's reply summary, Teams' collapsed replies). Its accessible name is the
+          count alone; the preview is a glance, not the label. */}
+      <Show when={summarised()}>
+        <button
+          type="button"
+          class="verevon-room-post__summary"
+          aria-label={replySummaryLabel()}
+          onClick={() => props.onOpenThread?.(props.thread)}
+        >
+          <Show when={replyParticipants().length > 0}>
+            <span class="verevon-room-post__summary-avatars" aria-hidden="true">
+              <For each={replyParticipants().slice(0, SUMMARY_AVATARS)}>
+                {(participant) => (
+                  <Show
+                    when={participant.agent}
+                    fallback={<span class="verevon-room-turn__avatar">{initials(participant.name)}</span>}
+                  >
+                    <AgentAvatar
+                      kind="agent"
+                      size={22}
+                      name={participant.name}
+                      color={agentAvatarColor(agentForName(props.agents(), participant.name))}
+                    />
+                  </Show>
+                )}
+              </For>
+              <Show when={replyParticipants().length > SUMMARY_AVATARS}>
+                <span class="verevon-room-post__summary-more">+{replyParticipants().length - SUMMARY_AVATARS}</span>
+              </Show>
+            </span>
+          </Show>
+          <span class="verevon-room-post__summary-count" aria-hidden="true">
+            {replyCount() === 1 ? i18n.tr('1 svar', '1 reply') : i18n.tr(`${replyCount()} svar`, `${replyCount()} replies`)}
+          </span>
+          <Show when={lastReply()}>
+            {(reply) => (
+              <span class="verevon-room-post__summary-last" aria-hidden="true">
+                <strong>{replyAuthorName(reply())}</strong>{' '}
+                {stripMarkdownPreview(reply().content)}
+              </span>
+            )}
+          </Show>
+          <Show when={formatRelativeWhen(when())}>
+            {(ago) => <span class="verevon-room-post__summary-when" aria-hidden="true">{ago()}</span>}
+          </Show>
+        </button>
       </Show>
 
       <SpacePendingReplies entries={props.pendingReplies?.() ?? []} />
@@ -515,16 +571,11 @@ function SpaceRoomPost(props: {
             </button>
           )}
         </Show>
-        <Show when={props.onOpenThread}>
-          {(open) => (
-            <button type="button" class="verevon-room-post__reply" onClick={() => open()(props.thread)}>
-              {replyCount() > 0
-                ? replyCount() === 1
-                  ? i18n.tr('Åpne tråd · 1 svar', 'Open thread · 1 reply')
-                  : i18n.tr(`Åpne tråd · ${replyCount()} svar`, `Open thread · ${replyCount()} replies`)
-                : i18n.tr('Åpne tråd', 'Open thread')}
-            </button>
-          )}
+        {/* With replies the summary row above is the way in; this is for a thread nobody has answered. */}
+        <Show when={props.onOpenThread && !summarised()}>
+          <button type="button" class="verevon-room-post__reply" onClick={() => props.onOpenThread?.(props.thread)}>
+            {i18n.tr('Åpne tråd', 'Open thread')}
+          </button>
         </Show>
         <Show when={isAuthor()}>
           <button

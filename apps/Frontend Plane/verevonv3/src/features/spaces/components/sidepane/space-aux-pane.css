@@ -125,24 +125,6 @@
   background: var(--verevon-surface, var(--verevon-bg, Canvas));
 }
 
-.verevon-room-post__collapsed {
-  align-self: flex-start;
-  margin: 2px 0 2px 42px;
-  padding: 4px 10px;
-  border: 1px solid var(--verevon-border, rgba(127, 127, 127, 0.25));
-  border-radius: 999px;
-  background: transparent;
-  color: var(--verevon-text-muted);
-  font: inherit;
-  font-size: 0.8rem;
-  cursor: pointer;
-}
-
-.verevon-room-post__collapsed:hover,
-.verevon-room-post__collapsed:focus-visible {
-  color: var(--verevon-text);
-}
-
 .verevon-space-thread-panel__turns {
   display: flex;
   flex-direction: column;

@@ -123,6 +123,8 @@ async function shoot(name, { width, height, path = `/spaces/${SPACE}`, after } =
   await page.locator('h1').first().waitFor({ timeout: 30_000 }).catch(() => undefined)
   await page.waitForTimeout(1500)
   if (process.env.INSPECT === name) await inspect(page)
+  // EVAL=<js expression> prints its value for the first shot (or EVAL_SHOT): a quick computed-style probe.
+  if (process.env.EVAL && name === (process.env.EVAL_SHOT ?? '01-room-desktop')) console.log('EVAL', await page.evaluate(process.env.EVAL))
   if (after) await after(page)
   await page.waitForTimeout(600)
   await page.screenshot({ path: join(OUT, `${name}.png`) })

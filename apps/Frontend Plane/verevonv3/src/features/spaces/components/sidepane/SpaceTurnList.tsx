@@ -247,7 +247,7 @@ export function PostTurnHeader(props: {
   )
 }
 
-function initials(name: string): string {
+export function initials(name: string): string {
   // The viewer's own turns read "Name (you)"; the suffix is a label, not part of the name.
   const parts = name.replace(/\s*\([^)]*\)\s*$/, '').trim().split(/\s+/).filter(Boolean)
   const first = parts[0]?.[0] ?? ''

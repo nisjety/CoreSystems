@@ -351,44 +351,46 @@ describe('SpaceRoomTimeline — thread pane entry and read states (WS01-S7a)', (
   })
 })
 
-describe('SpaceRoomTimeline — long thread collapse and reply count (WS01-S7b)', () => {
+describe('SpaceRoomTimeline — a thread with replies folds to a summary row (WS01-S7b, U2)', () => {
   const post = { thread_id: 't1', space_id: 'room-1', title: 'Innkjøp', latest_run_status: 'completed' }
   const turnsOf = (n: number) =>
     Array.from({ length: n }, (_, i) => ({ role: 'user', content: `Melding ${i + 1}`, authorSubjectId: 'user-1' }))
   const transcriptOf = (n: number) =>
     spacesClient.loadSpaceTranscript.mockResolvedValue({ state: 'ok', threadId: 't1', turns: turnsOf(n) })
   const on = () => true
+  const summary = () => document.querySelector('.verevon-room-post__summary') as HTMLElement | null
 
-  it('shows the first turn, a "N more messages" row and the last three for a six-turn thread, and the row opens the pane', async () => {
+  it('shows only the root message and one summary row for a six-turn thread, and the row opens the pane', async () => {
     transcriptOf(6)
     const open = vi.fn()
     renderRoom([post], [agent], { onOpenThread: open, collapseLongThreads: on })
 
     expect(await screen.findByText('Melding 1')).toBeTruthy()
-    for (const n of [4, 5, 6]) expect(screen.getByText(`Melding ${n}`)).toBeTruthy()
-    expect(screen.queryByText('Melding 2')).toBeNull()
-    expect(screen.queryByText('Melding 3')).toBeNull()
+    for (const n of [2, 3, 4, 5]) expect(screen.queryByText(`Melding ${n}`)).toBeNull()
+    // The latest reply is a glance inside the summary row, not a turn of its own.
+    expect(summary()?.querySelector('.verevon-room-post__summary-last')?.textContent).toContain('Melding 6')
 
-    const row = screen.getByRole('button', { name: '2 meldinger til i tråden' })
-    expect(row.className).toContain('verevon-room-post__collapsed')
+    const row = screen.getByRole('button', { name: 'Åpne tråd · 5 svar' })
+    expect(row.className).toContain('verevon-room-post__summary')
     row.click()
     expect(open).toHaveBeenCalledTimes(1)
     expect(open.mock.calls[0]?.[0]).toMatchObject({ thread_id: 't1' })
   })
 
-  it('says "1 melding til" in the singular when exactly one turn is hidden', async () => {
-    transcriptOf(5)
+  it('folds a two-turn thread too, in the singular', async () => {
+    transcriptOf(2)
     renderRoom([post], [agent], { onOpenThread: vi.fn(), collapseLongThreads: on })
-    expect(await screen.findByRole('button', { name: '1 melding til i tråden' })).toBeTruthy()
-    expect(screen.queryByText('Melding 2')).toBeNull()
+    expect(await screen.findByRole('button', { name: 'Åpne tråd · 1 svar' })).toBeTruthy()
+    expect(screen.getByText('Melding 1')).toBeTruthy()
+    expect(summary()?.querySelector('.verevon-room-post__summary-count')?.textContent).toBe('1 svar')
   })
 
-  it('does not collapse a thread of four turns or fewer', async () => {
-    transcriptOf(4)
+  it('does not fold a thread of one turn: no summary row, and the footer opens it', async () => {
+    transcriptOf(1)
     renderRoom([post], [agent], { onOpenThread: vi.fn(), collapseLongThreads: on })
-    expect(await screen.findByText('Melding 4')).toBeTruthy()
-    for (const n of [1, 2, 3]) expect(screen.getByText(`Melding ${n}`)).toBeTruthy()
-    expect(document.querySelector('.verevon-room-post__collapsed')).toBeNull()
+    expect(await screen.findByText('Melding 1')).toBeTruthy()
+    expect(summary()).toBeNull()
+    expect(screen.getByRole('button', { name: 'Åpne tråd' })).toBeTruthy()
   })
 
   it('draws every turn with the flag off', async () => {
@@ -396,7 +398,7 @@ describe('SpaceRoomTimeline — long thread collapse and reply count (WS01-S7b)'
     renderRoom([post], [agent], { onOpenThread: vi.fn(), collapseLongThreads: () => false })
     expect(await screen.findByText('Melding 6')).toBeTruthy()
     for (const n of [1, 2, 3, 4, 5]) expect(screen.getByText(`Melding ${n}`)).toBeTruthy()
-    expect(document.querySelector('.verevon-room-post__collapsed')).toBeNull()
+    expect(summary()).toBeNull()
   })
 
   it('draws every turn with the flag on but no pane to open (onOpenThread absent)', async () => {
@@ -404,7 +406,58 @@ describe('SpaceRoomTimeline — long thread collapse and reply count (WS01-S7b)'
     renderRoom([post], [agent], { collapseLongThreads: on })
     expect(await screen.findByText('Melding 6')).toBeTruthy()
     for (const n of [1, 2, 3, 4, 5]) expect(screen.getByText(`Melding ${n}`)).toBeTruthy()
-    expect(document.querySelector('.verevon-room-post__collapsed')).toBeNull()
+    expect(summary()).toBeNull()
+  })
+
+  it('names who replied, the latest reply and its author in the summary row', async () => {
+    spacesClient.loadSpaceTranscript.mockResolvedValue({
+      state: 'ok',
+      threadId: 't1',
+      turns: [
+        { role: 'user', content: 'Rot', authorSubjectId: 'user-1' },
+        { role: 'user', content: 'Første svar', authorSubjectId: 'user-2' },
+        { role: 'assistant', content: 'Alt er **klart**.', agentName: 'Lagerhjelpen' },
+        { role: 'user', content: 'Andre svar fra Ola', authorSubjectId: 'user-2' },
+      ],
+    })
+    const roster = [
+      { subject_type: 'user', subject_id: 'user-1', role: 'owner', revision: 1, display_name: 'Kari Nordmann' },
+      { subject_type: 'user', subject_id: 'user-2', role: 'editor', revision: 1, display_name: 'Ola Hansen' },
+    ]
+    render(() => (
+      <SpaceRoomTimeline
+        spaceRef="room-1"
+        spaceName="Lager"
+        threads={() => [post] as never}
+        roster={() => roster as never}
+        agents={() => [agent] as never}
+        onOpenThread={vi.fn()}
+        collapseLongThreads={on}
+      />
+    ))
+    await screen.findByText('Rot')
+    const last = summary()?.querySelector('.verevon-room-post__summary-last')
+    expect(last?.querySelector('strong')?.textContent).toBe('Ola Hansen')
+    expect(last?.textContent).toContain('Andre svar fra Ola')
+    // Two distinct repliers (Ola once, the agent once), not one avatar per turn.
+    expect(summary()?.querySelectorAll('.verevon-room-post__summary-avatars > *').length).toBe(2)
+    expect(screen.getByRole('button', { name: 'Åpne tråd · 3 svar' })).toBeTruthy()
+  })
+
+  it('draws at most three avatars and counts the rest', async () => {
+    spacesClient.loadSpaceTranscript.mockResolvedValue({
+      state: 'ok',
+      threadId: 't1',
+      turns: [
+        { role: 'user', content: 'Rot', authorSubjectId: 'u0' },
+        ...['u1', 'u2', 'u3', 'u4', 'u5'].map((id) => ({ role: 'user', content: `Svar ${id}`, authorSubjectId: id })),
+      ],
+    })
+    renderRoom([post], [agent], { onOpenThread: vi.fn(), collapseLongThreads: on })
+    await screen.findByText('Rot')
+    const stack = summary()?.querySelector('.verevon-room-post__summary-avatars') as HTMLElement
+    expect(stack.querySelectorAll('.verevon-room-turn__avatar').length).toBe(3)
+    expect(stack.querySelector('.verevon-room-post__summary-more')?.textContent).toBe('+2')
   })
 
   it('names the reply count on the footer button from reply_count', async () => {
