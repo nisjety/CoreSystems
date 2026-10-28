@@ -25,8 +25,20 @@
 #   enforce  scope and robots enforced. Expected: robots.txt is fetched, no
 #            /private/secret and no /ext are fetched, and consecutive page
 #            fetches on fixture-a are at least 2 s apart (Crawl-delay: 2).
-# Only legacy is expected to pass first. observe and enforce wait for the slices
-# that build them (WS14.S2 to S4).
+#            /v1/map on the seed is 200 and lists no /private/ URL (map consults
+#            the gate only under enforce, so this leg is the only map check).
+#   unreachable  needs UNREACHABLE_SEED_URL and FIXTURE_UNREACHABLE_CONTAINER: a
+#            host whose robots.txt answers 503. Expected: exactly two robots.txt
+#            fetches (two attempts), no page fetched, and /v1/map refused with 403
+#            (the disallow policy). The overlay serves no such host yet.
+#   redirect  needs REDIRECT_SEED_URL and FIXTURE_REDIRECT_CONTAINER: a host whose
+#            robots.txt redirects to the metadata address. Expected: robots.txt is
+#            requested and no page of that host is fetched. The edge refuses the hop
+#            (quarry-runtime/tests/robots_gate_ssrf.rs covers the driver); the fixture
+#            host itself cannot see that the hop was refused. The overlay serves no
+#            such host yet.
+# Without the inputs for unreachable or redirect, that leg reports NOT-RUN and the
+# script exits non-zero: the stack session owns those fixture hosts.
 #
 # Inputs come from the environment. The dev bearer is written to a private header
 # file and is never printed or put on a command line.
@@ -104,6 +116,13 @@ summary() {
 access_lines() {
   local n
   n=$(grep -c -F "\"$2 " "$1" 2>/dev/null)
+  echo "${n:-0}"
+}
+
+# count_in <file> <text>: how many lines of <file> contain <text> (a plain string).
+count_in() {
+  local n
+  n=$(grep -c -F -- "$2" "$1" 2>/dev/null)
   echo "${n:-0}"
 }
 
@@ -215,6 +234,26 @@ run_recipe() {
     echo "docker is not on PATH" >&2
     return 2
   fi
+  # The unreachable and redirect legs crawl their own fixture host; without its inputs they
+  # report NOT-RUN rather than running against the default seed.
+  case "$EXPECT" in
+    unreachable)
+      SEED_URL="${UNREACHABLE_SEED_URL:-}"
+      if [ -z "$SEED_URL" ] || [ -z "${FIXTURE_UNREACHABLE_CONTAINER:-}" ]; then
+        not_run unreachable_leg "set UNREACHABLE_SEED_URL and FIXTURE_UNREACHABLE_CONTAINER (a fixture host with a 503 robots.txt)"
+        summary
+        return $?
+      fi
+      ;;
+    redirect)
+      SEED_URL="${REDIRECT_SEED_URL:-}"
+      if [ -z "$SEED_URL" ] || [ -z "${FIXTURE_REDIRECT_CONTAINER:-}" ]; then
+        not_run redirect_leg "set REDIRECT_SEED_URL and FIXTURE_REDIRECT_CONTAINER (a fixture host whose robots.txt redirects to the metadata address)"
+        summary
+        return $?
+      fi
+      ;;
+  esac
   [ "$BRING_UP" -eq 1 ] && { bring_up || return 2; }
 
   local dir="${EVIDENCE_DIR:-$(mktemp -d)}" header start http_code job_id stats deadline
@@ -270,7 +309,12 @@ run_recipe() {
 
   docker logs --since "$start" "$FIXTURE_A_CONTAINER" > "$dir/fixture-a.log" 2>&1
   docker logs --since "$start" "$FIXTURE_B_CONTAINER" > "$dir/fixture-b.log" 2>&1
-  rm -f "$header"
+  if [ "$EXPECT" = unreachable ]; then
+    docker logs --since "$start" "$FIXTURE_UNREACHABLE_CONTAINER" > "$dir/fixture-unreachable.log" 2>&1
+  fi
+  if [ "$EXPECT" = redirect ]; then
+    docker logs --since "$start" "$FIXTURE_REDIRECT_CONTAINER" > "$dir/fixture-redirect.log" 2>&1
+  fi
 
   local a="$dir/fixture-a.log" b="$dir/fixture-b.log"
   echo "pages fetched per fixture host (robots.txt excluded):"
@@ -290,9 +334,27 @@ run_recipe() {
       check enforce_robots_fetched 1 "$([ "$(access_lines "$a" "GET /robots.txt")" -ge 1 ] && echo 1 || echo 0)"
       check enforce_private_not_fetched 0 "$(access_lines "$a" "GET /private/secret")"
       check enforce_external_not_fetched 0 "$(access_lines "$b" "GET /ext")"
+      map_code=$(curl -sS -o "$dir/map.json" -w '%{http_code}' -X POST "$EDGE_URL/v1/map" \
+        -H 'Content-Type: application/json' -H "@$header" --data "{\"url\":\"$SEED_URL\"}") || map_code="curl-failed"
+      check enforce_map_200 200 "$map_code"
+      check enforce_map_lists_no_private 0 "$(count_in "$dir/map.json" "/private/")"
       check enforce_crawl_delay_at_least_2s ok "$(awk -v g="$(min_gap_seconds "$a")" 'BEGIN { if (g == "none" || g + 0 >= 2) print "ok"; else print "too-fast " g }')"
       ;;
+    unreachable)
+      u="$dir/fixture-unreachable.log"
+      check unreachable_robots_fetched_twice 2 "$(access_lines "$u" "GET /robots.txt")"
+      check unreachable_no_page_fetched 0 "$(page_timestamps "$u" | wc -l | tr -d ' ')"
+      map_code=$(curl -sS -o "$dir/map-unreachable.json" -w '%{http_code}' -X POST "$EDGE_URL/v1/map" \
+        -H 'Content-Type: application/json' -H "@$header" --data "{\"url\":\"$SEED_URL\"}") || map_code="curl-failed"
+      check unreachable_map_refused 403 "$map_code"
+      ;;
+    redirect)
+      r="$dir/fixture-redirect.log"
+      check redirect_robots_requested 1 "$([ "$(access_lines "$r" "GET /robots.txt")" -ge 1 ] && echo 1 || echo 0)"
+      check redirect_no_page_fetched 0 "$(page_timestamps "$r" | wc -l | tr -d ' ')"
+      ;;
   esac
+  rm -f "$header"
   echo "evidence files: $dir (fixture-a.log, fixture-b.log, job.json, crawl-response.json)"
   summary
 }
@@ -306,8 +368,8 @@ while [ $# -gt 0 ]; do
     --expect)
       EXPECT="${2:-}"
       case "$EXPECT" in
-        legacy|observe|enforce) ;;
-        *) echo "usage: --expect legacy|observe|enforce" >&2; exit 2 ;;
+        legacy|observe|enforce|unreachable|redirect) ;;
+        *) echo "usage: --expect legacy|observe|enforce|unreachable|redirect" >&2; exit 2 ;;
       esac
       shift 2
       ;;
