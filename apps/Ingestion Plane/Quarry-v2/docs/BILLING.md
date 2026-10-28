@@ -48,10 +48,10 @@ billing-core accepts the same JSON shape over HTTP if NATS is unhealthy.
 | Constant                            | String                       | When emitted                                     | Quantity                |
 | ----------------------------------- | ---------------------------- | ------------------------------------------------ | ----------------------- |
 | `usage_metrics::SCRAPE_PAGE`        | `quarry.scrape.page`         | After successful `/v1/scrape` (skipped on error) | `1.0` per page          |
-| `usage_metrics::CRAWL_SEED`         | `quarry.crawl.seed`          | On every `/v1/crawl` handoff to orchestrator     | `1.0` per seed URL      |
+| `usage_metrics::CRAWL_SEED`         | `quarry.crawl.seed`          | On every `/v1/crawl` job Control creates (not a replay) | `1.0` per seed URL      |
 | `usage_metrics::SEARCH_QUERY`       | `quarry.search.query`        | On every successful `/v1/search`                 | `1.0` per query         |
 | `usage_metrics::ANSWER_SYNTH`       | `quarry.answer.synth`        | On every successful `/v1/answer`                 | `1.0` per synthesis     |
-| `usage_metrics::BATCH_URL`          | `quarry.batch.url`           | On every `/v1/batch` handoff                     | `len(urls) as f64`      |
+| `usage_metrics::BATCH_URL`          | `quarry.batch.url`           | On every `/v1/batch` job Control creates (not a replay) | `len(urls) as f64`      |
 
 **Pricing model:** these are free-form strings — Lago billable-metric
 codes must match exactly. To add a new metric:
@@ -66,6 +66,26 @@ billing-core dedupes by `event_id` in the `billing_usage_dedup` table.
 Quarry constructs IDs as `quarry:<request_id>:<metric>` so a single
 request that emits multiple distinct metric kinds won't collide with
 itself. NATS-level redelivery is automatically de-duplicated.
+
+**Crawl and batch (decision 3.11, D2-033).** The two durable handoffs are keyed by Control's
+job id, `quarry:<job_id>:quarry.crawl.seed` and `quarry:<job_id>:quarry.batch.url`, never by the
+request id (a client can send any `X-Request-Id`, and a reused one used to collapse two jobs into
+one billing row). Only a job this call created is billed:
+
+- A replay is not billed. Control answers 200, not 201, when the caller's `Idempotency-Key` names
+  a job it already holds; the edge then emits no event. A client that retries a crawl or batch
+  with the same key is billed once, in every browser-metrics mode.
+- A refused or failed handoff (control unreachable, a 5xx, a full queue) created no job and is not
+  billed, in every mode (before this change only `on` skipped it, and only the queue-full case
+  was skipped in `off` and `shadow`).
+- Calls without an `Idempotency-Key` make a job each and bill each.
+- A job that Control created but whose first response never reached the client is billed when the
+  edge saw the 201. If the edge died between Control's 201 and the meter call, the retry is a
+  replay and the seed is never billed (an under-bill, recorded as a depth finding).
+
+billing-core is unchanged. The synchronous routes (search, map, legacy extract, answer) are not
+idempotent: a retry re-does the work, so it is billed again, under a fresh id each time. Real
+idempotency for them needs a stored response and a body fingerprint and is not built.
 
 ## Tenant attribution
 
@@ -144,8 +164,8 @@ call sites emit them unconditionally and the mode decides what happens:
 **Event ids.** Run segments use `quarry:<run_id>:s<segment>:<metric>`; the segment is `0` for the
 first start and goes up by one on each resume, so a resumed run never reuses an id. Other events
 use `quarry:<request_id>:<metric>` (extract, map), `quarry:<run_id>:<sha256(url)[:16]>:quarry.crawl.page`
-(crawl page: a retried page activity adds no second row), or the legacy request id (crawl seed,
-batch). Every id is checked against billing-core's rule (`^[A-Za-z0-9][A-Za-z0-9._:-]*$`, at most
+(crawl page: a retried page activity adds no second row), or `quarry:<job_id>:<metric>` with
+Control's job id (crawl seed, batch; see Idempotency). Every id is checked against billing-core's rule (`^[A-Za-z0-9][A-Za-z0-9._:-]*$`, at most
 128 bytes) before it is sent; a refused id is logged by class and not sent.
 
 **Metadata.** The closed set is `outcome` (`ok`, `error`, `refused`, `cancelled`, `timeout`,
@@ -164,7 +184,7 @@ Only the agent start route reads the header; the other routes derive `surface` f
   nothing. The existing metrics keep their legacy rules. Use it for a week before `on`.
 - `on`: the seven metrics are published. The corrected rules for the existing metrics apply:
   a crawl seed or batch is billed only when the orchestrator accepted the job (no seed on a failed
-  handoff); a scrape event carries the closed metadata set (no `url`, no `fingerprint`); `/v1/extract`
+  handoff; this rule now holds in every mode, see Idempotency); a scrape event carries the closed metadata set (no `url`, no `fingerprint`); `/v1/extract`
   is billed per URL as `quarry.extract.url` rather than as `quarry.search.query`; `/v1/map` is billed as
   `quarry.map.call` rather than as `quarry.search.query`.
 

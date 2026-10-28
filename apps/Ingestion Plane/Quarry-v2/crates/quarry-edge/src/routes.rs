@@ -1100,13 +1100,13 @@ async fn crawl_handoff(
     // P3 / cluster #billing — meter a crawl.seed event. The handoff
     // request is the billable unit at this surface (the orchestrator
     // independently meters per-page scrapes via /v1/internal/run_page,
-    // so we avoid double-billing the page-level work here). A submission
-    // refused because the organization's queue is full created no job, so it
-    // is not billed.
-    let queue_full = matches!(&ack, Err(error) if error.code == ErrorCode::RateLimited);
+    // so we avoid double-billing the page-level work here). The event is keyed by
+    // Control's job id (decision 3.11), so only a job this call created is billed: a
+    // refused or failed handoff (queue full included) created no job, and a replay of
+    // an Idempotency-Key (Control answered 200) created nothing new.
+    let billed_job = crate::handoff::billable_job_id(&ack);
     if crate::usage_attrs::corrected_rules(&*state.usage) {
-        // WS6.C-e: from `on`, a seed that the handoff failed to create is not billed.
-        if ack.is_ok() {
+        if let Some(job_id) = billed_job {
             let mut attrs = crate::usage_attrs::UsageAttrs::new(
                 crate::usage_attrs::Outcome::Ok,
                 crate::usage_attrs::surface_for(&claims, None),
@@ -1115,7 +1115,7 @@ async fn crawl_handoff(
             attrs.counts = Some(serde_json::json!({ "max_pages": limits.max_pages.effective }));
             crate::usage_attrs::emit(
                 &*state.usage,
-                &[request_id.as_str()],
+                &[job_id],
                 &org_id,
                 quarry_runtime::usage_metrics::CRAWL_SEED,
                 1.0,
@@ -1124,11 +1124,11 @@ async fn crawl_handoff(
             )
             .await;
         }
-    } else if !queue_full {
+    } else if let Some(job_id) = billed_job {
         state
             .usage
             .meter(quarry_runtime::UsageEvent::new(
-                request_id.clone(),
+                job_id,
                 org_id.clone(),
                 quarry_runtime::usage_metrics::CRAWL_SEED,
                 1.0,
@@ -1252,11 +1252,12 @@ async fn batch_handoff(
     // count. Cheaper than emitting N individual events; billing-core can
     // still derive per-URL pricing via the float quantity. A submission
     // refused because the organization's queue is full created no job, so it
-    // is not billed.
-    let queue_full = matches!(&ack, Err(error) if error.code == ErrorCode::RateLimited);
+    // is not billed. The event is keyed by Control's job id (decision 3.11): a failed
+    // handoff created no job, and a replay of an Idempotency-Key (Control answered 200)
+    // created nothing new, so neither is billed.
+    let billed_job = crate::handoff::billable_job_id(&ack);
     if crate::usage_attrs::corrected_rules(&*state.usage) {
-        // WS6.C-e: from `on`, a batch the handoff failed to create is not billed.
-        if ack.is_ok() {
+        if let Some(job_id) = billed_job {
             let mut attrs = crate::usage_attrs::UsageAttrs::new(
                 crate::usage_attrs::Outcome::Ok,
                 crate::usage_attrs::surface_for(&claims, None),
@@ -1265,7 +1266,7 @@ async fn batch_handoff(
             attrs.counts = Some(serde_json::json!({ "url_count": req.urls.len() }));
             crate::usage_attrs::emit(
                 &*state.usage,
-                &[request_id.as_str()],
+                &[job_id],
                 &claims.org_id,
                 quarry_runtime::usage_metrics::BATCH_URL,
                 req.urls.len() as f64,
@@ -1274,11 +1275,11 @@ async fn batch_handoff(
             )
             .await;
         }
-    } else if !queue_full {
+    } else if let Some(job_id) = billed_job {
         state
             .usage
             .meter(quarry_runtime::UsageEvent::new(
-                request_id.clone(),
+                job_id,
                 claims.org_id.clone(),
                 quarry_runtime::usage_metrics::BATCH_URL,
                 req.urls.len() as f64,
@@ -1325,6 +1326,10 @@ pub struct HandoffAck {
     /// when none was refused. The URLs are the caller's own; no host or reason detail is added.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rejected: Vec<crate::batch_check::BatchRejection>,
+    /// True when Control answered a repeated `Idempotency-Key` with the job it already held
+    /// (HTTP 200 instead of 201). Not on the wire: it only decides whether the call is billed.
+    #[serde(skip)]
+    pub replayed: bool,
 }
 
 /// Internal endpoint called by orchestrator activities.

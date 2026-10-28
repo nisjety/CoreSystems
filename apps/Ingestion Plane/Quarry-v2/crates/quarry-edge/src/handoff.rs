@@ -265,6 +265,10 @@ pub(crate) async fn post_job(
         ));
     }
 
+    // Control answers 200 (not 201) when the `Idempotency-Key` names a job it already holds:
+    // this call created nothing. Only a call that sent a key can be a replay.
+    let replayed = idempotency_key.is_some() && status == reqwest::StatusCode::OK;
+
     let parsed: ControlJobEnvelope = resp.json().await.map_err(|e| {
         QuarryError::new(ErrorCode::Internal, format!("decode control response: {}", e.without_url()))
     })?;
@@ -283,7 +287,20 @@ pub(crate) async fn post_job(
         limits: None,
         effective: None,
         rejected: Vec::new(),
+        replayed,
     })
+}
+
+/// The id a crawl or batch usage event is keyed by (decision 3.11): Control's job id, and
+/// only for a job this handoff created. A refused or failed handoff created no job, so it
+/// has no id and is not billed; a replay (Control answered 200 for a key it already holds)
+/// created nothing either, so a client retry never bills a second time. The id is Control's
+/// and unique across organizations; the caller-suppliable request id plays no part.
+pub(crate) fn billable_job_id(ack: &Result<HandoffAck, QuarryError>) -> Option<&str> {
+    match ack {
+        Ok(ack) if !ack.replayed => Some(ack.job_id.as_str()),
+        _ => None,
+    }
 }
 
 /// The `org_backlog_full` refusal from control's error envelope
@@ -418,6 +435,50 @@ mod tests {
         .expect("accepted");
         let received = server.received_requests().await.unwrap();
         assert!(received[0].headers.get("x-quarry-sig").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_200_for_a_sent_key_is_a_replay_and_has_no_billable_job() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Control: 201 for a created job, 200 for one it already held (decision 3.11).
+        for (status, key, replayed) in [
+            (201_u16, Some("k1"), false),
+            (200, Some("k1"), true),
+            // No key was sent, so nothing can be a replay, whatever the status.
+            (200, None, false),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(serde_json::json!({ "data": { "id": "job_7" } })),
+                )
+                .mount(&server)
+                .await;
+            let ack = forward_job_signed(
+                &server.uri(),
+                "org_1",
+                "crawl",
+                serde_json::json!({ "kind": "crawl" }),
+                &RunOrigin { origin_type: "user".to_string(), actor: None, origin_ref: None },
+                key,
+                None,
+            )
+            .await;
+            assert_eq!(ack.as_ref().unwrap().replayed, replayed, "status {status} key {key:?}");
+            assert_eq!(
+                billable_job_id(&ack),
+                if replayed { None } else { Some("job_7") },
+                "status {status} key {key:?}"
+            );
+        }
+
+        // A refused handoff has no job to bill.
+        let refused: Result<HandoffAck, QuarryError> =
+            Err(QuarryError::new(ErrorCode::UpstreamBlocked, "control 500"));
+        assert_eq!(billable_job_id(&refused), None);
     }
 
     fn entitlement(caps: crate::limits::PlanCaps) -> crate::limits::OrgLimits {
