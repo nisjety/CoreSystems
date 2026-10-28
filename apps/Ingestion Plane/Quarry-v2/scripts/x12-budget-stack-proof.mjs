@@ -28,10 +28,12 @@
 //   runtime    max_runtime_s = RUNTIME_S: after it passes the next step is 402, dimension runtime
 //   cost       max_cost_usd = one navigate + three actions on the flat table (0.0013 USD with the
 //              default wait): the navigate and at least one action are 200, then 402 dimension
-//              cost, refused before it runs: the spent figure it reports is within the limit and
-//              one more action would pass it, and the call after it reports the same figure. The
-//              browser-second term (0.00003 USD per active second) can take the third action's
-//              room on a slow stack, so the number of 200s is not fixed.
+//              cost, refused before it runs: no 200's flat-table part (spent_usd minus the
+//              browser-second term at its elapsed_s) passes the limit, one more action would pass
+//              the refusal's spent figure, and the refused calls leave no receipt. The
+//              browser-second term (0.00003 USD per active second) keeps growing after the gate,
+//              so a full spent figure may pass the limit by a second or two of it, and it can take
+//              the third action's room on a slow stack: the number of 200s is not fixed.
 //   people     a person's own steps are never capped: PERSON_STEPS (default 20) steps, all 200,
 //              on a session whose request cap is 12 (the gateway's number; the pre-slice
 //              baseline answered 429 on the 13th)
@@ -53,6 +55,8 @@
 //                       http://fixture-a.crawl.test/, the crawl fixture on the Ingestion stack)
 //   ACTION_JSON         the action to drive after it (default {"type":"wait","ms":0}; the cost
 //                       bound is sized from its flat-table price)
+//   BUDGET_BROWSER_SECOND_USD  the edge's QUARRY_EDGE__BUDGET_BROWSER_SECOND_USD, when it is
+//                       not the shipped 0.00003 (the cost bound takes it out of spent_usd)
 //   STEP_TIMEOUT_MS     per-request timeout (default 60000)
 //
 // Usage:
@@ -143,35 +147,53 @@ export function costLimitUsd(action) {
 const micro = (usd) => Math.round(Number(usd) * 1e6);
 
 /**
- * The cost run: `steps` are the replies that came before the first refusal (the navigate
- * first), `refusal` is that refusal and `again` the call after it. The refusal must be made
- * on the projection, before the action runs and before the run overshoots.
+ * The flat-table part of a 200's meta.budget.spent_usd, in micro-USD: the spent figure minus
+ * the browser-second term (whole active seconds x the rate), both read at the same instant.
+ * The gate admits an action when spent so far + its flat price fits, but the browser-second
+ * term keeps growing after it, so the full figure of a correctly admitted step can pass the
+ * limit by a browser second or two. The flat part cannot.
  */
-export function judgeCost(steps, refusal, again, limit, action) {
+export function flatPartMicro(step, browserSecondMicro) {
+  const budget = step.body?.meta?.budget ?? {};
+  if (typeof budget.spent_usd !== 'number' || typeof budget.elapsed_s !== 'number') return null;
+  return micro(budget.spent_usd) - Math.floor(budget.elapsed_s) * browserSecondMicro;
+}
+
+/**
+ * The cost run: `steps` are the replies that came before the first refusal (the navigate
+ * first), `refusal` is that refusal, `again` the call after it, and `receipts` the run's
+ * receipts read after both. The refusal must be made on the projection, before the action
+ * runs: no admitted step's flat-table charges pass the limit, the refusal comes only when one
+ * more action would pass it, and the two refused calls leave no receipt.
+ */
+export function judgeCost(steps, refusal, again, receipts, limit, action, browserSecondMicro) {
   if (steps.length < 2) {
     const statuses = steps.map((step) => step.status).join(', ') || 'none';
     return `only ${steps.length} steps answered 200 before the stop (${statuses}), want the navigate and at least one action`;
   }
   for (const [index, step] of steps.entries()) {
-    const spent = step.body?.meta?.budget?.spent_usd;
-    if (typeof spent !== 'number') return `step ${index + 1} has no meta.budget.spent_usd`;
-    if (micro(spent) > micro(limit)) return `step ${index + 1} spent ${spent} USD, over the ${limit} limit`;
+    const flat = flatPartMicro(step, browserSecondMicro);
+    if (flat === null) return `step ${index + 1} has no meta.budget.spent_usd and elapsed_s`;
+    if (flat > micro(limit)) return `step ${index + 1} charged ${flat / 1e6} USD on the flat table, over the ${limit} limit`;
   }
   if (refusal === null) return 'never refused';
   const problem = judgeRefusal(refusal, 'cost', limit);
   if (problem) return problem;
   const spent = refusal.body.error.details.spent;
   if (typeof spent !== 'number') return 'the refusal names no spent figure';
-  if (micro(spent) > micro(limit)) return `refused at ${spent} USD, past the ${limit} limit (overshot)`;
   if (micro(spent) + flatMicroUsd(action) <= micro(limit)) {
     return `refused at ${spent} USD although one more action (${flatMicroUsd(action) / 1e6}) fits under ${limit}`;
   }
   const latched = judgeRefusal(again, 'cost', limit);
   if (latched) return `the call after the refusal: ${latched}`;
-  // Only the browser-second term may move it between the two calls, never an action's price.
-  if (micro(again.body.error.details.spent) - micro(spent) >= flatMicroUsd(action)) {
-    return `the refused call moved spent from ${spent} to ${again.body.error.details.spent} USD (it ran)`;
+  if (typeof again.body.error.details.spent !== 'number') return 'the call after the refusal names no spent figure';
+  // Neither refused call ran: each admitted step has its receipt, a refused one has none.
+  if (!Array.isArray(receipts)) return 'the receipts are not a list';
+  if (receipts.length !== steps.length) {
+    return `${receipts.length} receipts for ${steps.length} admitted steps (a refused call ran)`;
   }
+  const charged = receipts.reduce((sum, receipt) => sum + (Number(receipt.cost_micro_usd) || 0), 0);
+  if (charged > micro(limit)) return `the receipts charge ${charged / 1e6} USD, over the ${limit} limit`;
   return null;
 }
 
@@ -185,6 +207,7 @@ function brief(reply) {
 const edgeUrl = (process.env.EDGE_URL ?? 'http://127.0.0.1:8082').replace(/\/+$/, '');
 const timeoutMs = Number(process.env.STEP_TIMEOUT_MS ?? 60000);
 const action = process.env.ACTION_JSON ? JSON.parse(process.env.ACTION_JSON) : { type: 'wait', ms: 0 };
+const browserSecondMicro = micro(process.env.BUDGET_BROWSER_SECOND_USD ?? 0.00003);
 // The first step of every driven run: a page for the actions after it (see the header).
 const openPage = { type: 'navigate', url: process.env.PAGE_URL ?? 'http://fixture-a.crawl.test/' };
 
@@ -318,13 +341,14 @@ async function proveCost(token) {
     else refusal = step;
   }
   const again = refusal === null ? null : await stepOf(token, runId, undefined);
+  const receipts = await call(token, 'GET', `/v1/agent/runs/${runId}/receipts`);
   await closeRun(token, runId);
-  const problem = judgeCost(steps, refusal, again, limit, action);
+  const problem = judgeCost(steps, refusal, again, receipts.body?.data, limit, action, browserSecondMicro);
   record(
     'cost',
     problem ? 'FAIL' : 'PASS',
     problem ??
-      `${steps.length} steps under ${limit} USD, then 402 cost at ${refusal.body.error.details.spent} USD, before it ran`,
+      `${steps.length} steps within ${limit} USD on the flat table, then 402 cost at ${refusal.body.error.details.spent} USD, before it ran`,
   );
 }
 
@@ -434,21 +458,36 @@ function selfTest() {
   expect('cost limit for wait', sized, null);
   const navigateSized = costLimitUsd({ type: 'navigate', url: 'x' }) === 0.004 ? null : 'navigate limit';
   expect('cost limit for navigate', navigateSized, null);
-  const ok = (spent) => ({ status: 200, body: { meta: { budget: { spent_usd: spent } } } });
+  const ok = (spent, elapsed) => ({ status: 200, body: { meta: { budget: { spent_usd: spent, elapsed_s: elapsed } } } });
   const costRefusal = (spent) => refusal('cost', 0.0013, { details: { dimension: 'cost', limit: 0.0013, spent } });
-  // The by-hand stack run of 2026-10-28 (X12.5e): 0.001, 0.0011, 0.00123, then 402 at 0.00123 twice.
-  const stack = [ok(0.001), ok(0.0011), ok(0.00123)];
-  expect('cost stack run', judgeCost(stack, costRefusal(0.00123), costRefusal(0.00123), 0.0013, wait), null);
-  expect('cost one browser second later', judgeCost(stack, costRefusal(0.00123), costRefusal(0.00126), 0.0013, wait), null);
-  expect('cost slow stack, one wait', judgeCost(stack.slice(0, 2), costRefusal(0.00122), costRefusal(0.00122), 0.0013, wait), null);
-  expect('cost navigate refused', judgeCost([], costRefusal(0), costRefusal(0), 0.0013, wait), 'only 0 steps');
-  expect('cost no action fits', judgeCost(stack.slice(0, 1), costRefusal(0.001), costRefusal(0.001), 0.0013, wait), 'only 1 steps');
-  expect('cost early refusal', judgeCost(stack.slice(0, 2), costRefusal(0.0011), costRefusal(0.0011), 0.0013, wait), 'fits under');
-  expect('cost overshoot', judgeCost([...stack, ok(0.00133)], costRefusal(0.00133), costRefusal(0.00133), 0.0013, wait), 'over the');
-  expect('cost refused call ran', judgeCost(stack, costRefusal(0.00123), costRefusal(0.00133), 0.0013, wait), 'it ran');
-  expect('cost never refused', judgeCost(stack, null, null, 0.0013, wait), 'never refused');
-  expect('cost wrong dimension', judgeCost(stack, refusal('steps', 5), refusal('steps', 5), 0.0013, wait), 'dimension steps');
-  expect('cost no meta', judgeCost([ok(0.001), { status: 200, body: {} }], costRefusal(0.0012), costRefusal(0.0012), 0.0013, wait), 'no meta.budget');
+  const paid = (...prices) => prices.map((cost_micro_usd) => ({ cost_micro_usd, cost_source: 'flat_table' }));
+  const judge = (steps, first, second, receipts) => judgeCost(steps, first, second, receipts, 0.0013, wait, 30);
+  // The by-hand stack run of 2026-10-28 (X12.5e): 0.001, 0.0011, 0.00123 (one browser second in it),
+  // then 402 at 0.00123 twice.
+  const stack = [ok(0.001, 0.727), ok(0.0011, 0.912), ok(0.00123, 1.096)];
+  const stackPaid = paid(1000, 100, 100);
+  expect('cost stack run', judge(stack, costRefusal(0.00123), costRefusal(0.00123), stackPaid), null);
+  expect('cost one browser second later', judge(stack, costRefusal(0.00123), costRefusal(0.00126), stackPaid), null);
+  // A faster navigate: the third wait is admitted at 0.0012 + 0.0001 before the first second ends,
+  // and its meta (and both refusals) read after it carry a browser second over the limit. Correct.
+  const fast = [ok(0.001, 0.5), ok(0.0011, 0.7), ok(0.0012, 0.9), ok(0.00133, 1.05)];
+  const fastPaid = paid(1000, 100, 100, 100);
+  expect('cost fast stack', judge(fast, costRefusal(0.00133), costRefusal(0.00133), fastPaid), null);
+  expect('cost slow stack, one wait', judge(stack.slice(0, 2), costRefusal(0.00122), costRefusal(0.00122), paid(1000, 100)), null);
+  expect('cost navigate refused', judge([], costRefusal(0), costRefusal(0), []), 'only 0 steps');
+  expect('cost no action fits', judge(stack.slice(0, 1), costRefusal(0.001), costRefusal(0.001), paid(1000)), 'only 1 steps');
+  expect('cost early refusal', judge(stack.slice(0, 2), costRefusal(0.0011), costRefusal(0.0011), paid(1000, 100)), 'fits under');
+  const over = [...fast, ok(0.00143, 1.2)];
+  expect('cost overshoot', judge(over, costRefusal(0.00143), costRefusal(0.00143), paid(1000, 100, 100, 100, 100)), 'over the');
+  expect('cost refused call ran', judge(stack, costRefusal(0.00123), costRefusal(0.00133), paid(1000, 100, 100, 100)), 'a refused call ran');
+  expect('cost receipts over', judge(stack, costRefusal(0.00123), costRefusal(0.00123), paid(1000, 100, 300)), 'receipts charge');
+  expect('cost no receipts', judge(stack, costRefusal(0.00123), costRefusal(0.00123), undefined), 'not a list');
+  const unpriced = refusal('cost', 0.0013, { details: { dimension: 'cost', limit: 0.0013 } });
+  expect('cost again unpriced', judge(stack, costRefusal(0.00123), unpriced, stackPaid), 'names no spent');
+  expect('cost never refused', judge(stack, null, null, stackPaid), 'never refused');
+  expect('cost wrong dimension', judge(stack, refusal('steps', 5), refusal('steps', 5), stackPaid), 'dimension steps');
+  const bare = [ok(0.001, 0.5), { status: 200, body: {} }];
+  expect('cost no meta', judge(bare, costRefusal(0.0012), costRefusal(0.0012), paid(1000, 100)), 'no meta.budget');
   console.log(failures === 0 ? 'SELF-TEST PASS' : `SELF-TEST FAIL (${failures})`);
   return failures === 0 ? 0 : 1;
 }
