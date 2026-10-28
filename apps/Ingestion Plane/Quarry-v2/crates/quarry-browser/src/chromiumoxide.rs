@@ -49,7 +49,7 @@ use ::chromiumoxide::cdp::browser_protocol::page::{
     EventLifecycleEvent, EventScreencastFrame, FrameId, GetFrameTreeParams,
     HandleJavaScriptDialogParams, PrintToPdfParams, ScreencastFrameAckParams,
     SetWebLifecycleStateParams, SetWebLifecycleStateState, StartScreencastFormat,
-    StartScreencastParams, StopScreencastParams,
+    StartScreencastParams, StopLoadingParams, StopScreencastParams,
 };
 use ::chromiumoxide::cdp::js_protocol::runtime::{
     CallArgument, CallFunctionOnParams, EventConsoleApiCalled, ReleaseObjectParams,
@@ -76,7 +76,10 @@ use crate::capture_plan;
 use crate::stitch;
 use crate::screenshot_mask;
 use crate::actions::ScrollTarget;
-use crate::deadlines::{best_effort, deadline, read_with_retry, timeout_error, with_deadline, Op};
+use crate::deadlines::{
+    best_effort, deadline, library_timeout, read_with_retry, timeout_error, with_deadline,
+    with_limit, Op,
+};
 use crate::navigation::{guard_navigation_target, guard_page_request_target};
 use crate::profile_capture;
 use crate::profile_restore::{self, ProfileEmulation, ProfileLoadError, RestorePolicy, RestoreReport};
@@ -885,9 +888,11 @@ impl ChromiumoxideDriver {
             .with_details(json!({ "error": e.to_string() }))
         })?;
         let mut builder = BrowserConfig::builder()
-            // Above the largest deadline in the table, so a typed Timeout from
-            // `with_deadline` always beats the library's untyped one; this only
-            // bounds the calls that are not wrapped (event collectors, guards).
+            // The handler's eviction of pending commands; it bounds only what is not
+            // wrapped (event collectors, guards). It does NOT bound a command: every
+            // `CommandFuture` and every navigation keeps chromiumoxide's own fixed
+            // 30 s timer whatever this says. `deadlines` keeps one CDP call below
+            // that timer and types the library timeout when it still fires.
             .request_timeout(Duration::from_secs(40))
             .launch_timeout(Duration::from_secs(20))
             .user_data_dir(&launch_dirs.user_data)
@@ -1584,13 +1589,9 @@ impl ChromiumoxideDriver {
                 .profile_restore = Some(report.summary());
         }
         if initial_url != "about:blank" {
-            with_deadline(Op::Navigate, async {
-                page.goto(initial_url).await.map_err(|e| {
-                    QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide goto failed")
-                        .with_details(json!({ "error": e.to_string(), "url": initial_url }))
-                })
-            })
-            .await?;
+            // No recovery here: a tab whose first navigation fails is closed by the
+            // attach guard, abandoned navigation and all.
+            goto_within(&page, initial_url, deadline(Op::Navigate)).await?;
         }
         install_popup_bridge(&page).await?;
 
@@ -2292,6 +2293,59 @@ fn chromium_launch_dirs_in(root: &Path) -> std::io::Result<ChromiumLaunchDirs> {
         user_data,
         crash_dumps,
     })
+}
+
+/// `page.goto(url)` within `limit` (the `Op::Navigate` entry in production). A
+/// failure carries the library's text and never the URL: an error body must not
+/// carry a page address for a ZDR caller.
+async fn goto_within(page: &Page, url: &str, limit: Duration) -> QuarryResult<()> {
+    with_limit(Op::Navigate, limit, async {
+        page.goto(url).await.map(|_| ()).map_err(|e| {
+            QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide goto failed")
+                .with_details(json!({ "error": e.to_string() }))
+        })
+    })
+    .await
+}
+
+/// Make a tab whose navigation timed out usable again, within `limit`. Returns
+/// whether it is.
+///
+/// Dropping the timed-out `goto` does not stop anything. Chromium keeps loading
+/// (until then the page answers no read: content and the accessibility tree hang),
+/// and chromiumoxide keeps the navigation as the frame's current one, queuing every
+/// later `Page.navigate` behind it until its own 30 s timer, which it only clears
+/// when a new document commits. So: stop the load (the reads answer again), commit a
+/// fresh `about:blank` from the page itself (a `Page.navigate` would queue behind the
+/// stuck one), and navigate to `about:blank` once more, which returns only when the
+/// queue has drained. The page is then `about:blank`: the navigation's effect was
+/// unknown anyway, and the caller is told to look before acting.
+async fn release_abandoned_navigation(page: &Page, limit: Duration) -> bool {
+    let outcome = with_limit(Op::NavigateRecovery, limit, async {
+        let cdp = |e: CdpError| {
+            QuarryError::new(ErrorCode::DriverFailed, "navigation recovery failed")
+                .with_details(json!({ "error": e.to_string() }))
+        };
+        page.execute(StopLoadingParams::default())
+            .await
+            .map_err(cdp)?;
+        page.evaluate("location.replace('about:blank')")
+            .await
+            .map_err(cdp)?;
+        page.goto("about:blank").await.map_err(cdp)?;
+        Ok(())
+    })
+    .await;
+    match outcome {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                error_class = crate::deadlines::cdp_class(&error.message),
+                "chromiumoxide navigation recovery failed; the tab may stay busy until the library's timer"
+            );
+            false
+        }
+    }
 }
 
 async fn install_popup_bridge(page: &Page) -> QuarryResult<()> {
@@ -3813,18 +3867,23 @@ impl BrowserDriver for ChromiumoxideDriver {
             }
         };
 
+        let session_key = Self::session_key(session);
         if !created {
-            with_deadline(Op::Navigate, async {
-                page.goto(url).await.map_err(|e| {
-                    QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide goto failed")
-                        .with_details(json!({ "error": e.to_string(), "url": url }))
-                })
-            })
-            .await?;
+            if let Err(error) = goto_within(&page, url, deadline(Op::Navigate)).await {
+                // SC4 T3: the abandoned navigation still holds the tab (reads hang,
+                // the next navigation queues behind it), so put the tab back into a
+                // usable state before the TIMEOUT goes out. Its outcome is only logged.
+                if error.code == ErrorCode::Timeout
+                    && release_abandoned_navigation(&page, deadline(Op::NavigateRecovery)).await
+                {
+                    self.update_tab_metadata(&session_key, &tab_id, &page).await;
+                    self.invalidate_live_frame_cache(session, owner).await;
+                }
+                return Err(error);
+            }
             install_popup_bridge(&page).await?;
         }
 
-        let session_key = Self::session_key(session);
         self.update_tab_metadata(&session_key, &tab_id, &page).await;
         #[cfg(test)]
         {
@@ -4477,9 +4536,11 @@ impl BrowserDriver for ChromiumoxideDriver {
             ..PrintToPdfParams::default()
         };
         let bytes = with_deadline(Op::Pdf, async {
-            page.pdf(params).await.map_err(|_| {
-                QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide pdf failed")
-                    .with_details(json!({ "reason": "driver_error" }))
+            page.pdf(params).await.map_err(|e| match e {
+                // Still the typed TIMEOUT when the library's 30 s timer fires first.
+                CdpError::Timeout => library_timeout(),
+                _ => QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide pdf failed")
+                    .with_details(json!({ "reason": "driver_error" })),
             })
         })
         .await?;
@@ -7613,6 +7674,166 @@ mod tests {
         driver.release(session).await.expect("release");
     }
 
+    /// A loopback server that accepts every connection and never answers: a navigation
+    /// to it stays pending, like the stack's `slow.crawl.test`. Abort the handle to stop.
+    async fn silent_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("http://{}/slow.html", listener.local_addr().expect("addr"));
+        let handle = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        (url, handle)
+    }
+
+    /// A loopback server that answers every request with one small page.
+    async fn page_server(marker: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("http://{}/page.html", listener.local_addr().expect("addr"));
+        let handle = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut request = [0u8; 4096];
+                    let _ = socket.read(&mut request).await;
+                    let body = format!("<html><head><title>{marker}</title></head><body><p>{marker}</p></body></html>");
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (url, handle)
+    }
+
+    /// A plain page on the driver's own browser (the production launch config). The
+    /// driver's session tabs cannot be used here: their navigation guard and network
+    /// guard refuse loopback, and a loopback server is what makes a navigation hang.
+    async fn raw_page(driver: &ChromiumoxideDriver) -> Page {
+        driver.ensure_browser().await.expect("browser");
+        let guard = driver.browser.read().await;
+        guard
+            .as_ref()
+            .expect("launched")
+            .new_page("about:blank")
+            .await
+            .expect("page")
+    }
+
+    /// SC4 T1 and T3 against a real Chromium. A navigation that hangs ends in the typed
+    /// navigate TIMEOUT at its own deadline (no URL in it), and after the recovery the
+    /// tab answers at once: a read and the next navigation. Before the fix the reads hung
+    /// until their own deadlines and the next navigation queued behind the abandoned one
+    /// for the library's 30 s. Both a tab with a document and a fresh `about:blank` tab.
+    #[tokio::test]
+    async fn a_hung_navigation_times_out_typed_and_the_tab_is_usable_at_once() {
+        if !live_enabled() {
+            return;
+        }
+        let (silent, silent_task) = silent_server().await;
+        let (answering, answering_task) = page_server("sc4-next-page").await;
+        let driver = ChromiumoxideDriver::new();
+        for has_document in [true, false] {
+            let page = raw_page(&driver).await;
+            if has_document {
+                goto_within(&page, &answering, Duration::from_secs(10))
+                    .await
+                    .expect("first page");
+            }
+            let limit = Duration::from_millis(1500);
+            let started = Instant::now();
+            let error = goto_within(&page, &silent, limit).await.unwrap_err();
+            let waited = started.elapsed();
+            assert_eq!(error.code, ErrorCode::Timeout, "{error:?}");
+            assert!(!error.retryable);
+            let details = error.details.clone().expect("details");
+            assert_eq!(details["op"], "navigate");
+            assert_eq!(details["deadline_ms"], 1500);
+            assert_eq!(details["effect"], "unknown");
+            assert!(!format!("{error:?}").contains("127.0.0.1"), "{error:?}");
+            assert!(waited < limit + Duration::from_secs(1), "{waited:?}");
+
+            let started = Instant::now();
+            assert!(
+                release_abandoned_navigation(&page, Duration::from_secs(3)).await,
+                "recovery (has_document={has_document})"
+            );
+            eprintln!(
+                "recovery took {:?} (has_document={has_document})",
+                started.elapsed()
+            );
+
+            // The next step: an accessibility read and a navigation, each well inside
+            // a short bound.
+            let started = Instant::now();
+            with_limit(Op::AxSnapshot, Duration::from_secs(2), async {
+                page.execute(AccessibilityEnableParams::default())
+                    .await
+                    .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, e.to_string()))?;
+                page.execute(GetFullAxTreeParams::builder().depth(8).build())
+                    .await
+                    .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, e.to_string()))
+            })
+            .await
+            .expect("the accessibility tree answers after the recovery");
+            goto_within(&page, &answering, Duration::from_secs(5))
+                .await
+                .expect("the next navigation is not queued behind the abandoned one");
+            let html = with_limit(Op::Content, Duration::from_secs(2), async {
+                page.content()
+                    .await
+                    .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, e.to_string()))
+            })
+            .await
+            .expect("content");
+            assert!(html.contains("sc4-next-page"));
+            let next_step = started.elapsed();
+            eprintln!("next step took {next_step:?} (has_document={has_document})");
+            assert!(next_step < Duration::from_secs(3), "{next_step:?}");
+            let _ = best_effort(Op::PageClose, page.close()).await;
+        }
+        driver.shutdown().await;
+        silent_task.abort();
+        answering_task.abort();
+    }
+
+    /// SC4 T1 at a deadline above the library's own 30 s timer (a scale above 1): the
+    /// library's "Request timed out." comes first and is still the typed TIMEOUT, with
+    /// the bound that expired. Slow (30 s), so run by name.
+    #[tokio::test]
+    #[ignore = "SC4 live lane, slow (30 s): needs Chromium (CHROMIUMOXIDE_TEST=1)"]
+    async fn the_library_timer_is_the_typed_navigate_timeout_too() {
+        if !live_enabled() {
+            return;
+        }
+        let (silent, silent_task) = silent_server().await;
+        let driver = ChromiumoxideDriver::new();
+        let page = raw_page(&driver).await;
+        let started = Instant::now();
+        let error = goto_within(&page, &silent, Duration::from_secs(45))
+            .await
+            .unwrap_err();
+        let waited = started.elapsed();
+        assert!(waited < Duration::from_secs(35), "{waited:?}");
+        assert_eq!(error.code, ErrorCode::Timeout, "{error:?}");
+        let details = error.details.expect("details");
+        assert_eq!(details["op"], "navigate");
+        assert_eq!(details["deadline_ms"], 30_000);
+        assert_eq!(details["effect"], "unknown");
+        assert!(!details.to_string().contains("127.0.0.1"));
+        let _ = best_effort(Op::PageClose, page.close()).await;
+        driver.shutdown().await;
+        silent_task.abort();
+    }
+
     /// The end-to-end loopback-egress proof lives in
     /// `quarry-runtime/tests/browser_egress_boundary.rs`, not here.
     ///
@@ -8166,8 +8387,9 @@ mod bounded_calls_and_launch_dirs {
     /// The wrappers of `deadlines.rs`, and the one direct use of the table
     /// (`tokio::time::timeout(deadline(Op::X), call)`). A call is bounded when it sits
     /// inside the argument list of one of these.
-    const BOUNDS: [&str; 5] = [
+    const BOUNDS: [&str; 6] = [
         "with_deadline(",
+        "with_limit(",
         "read_with_retry(",
         "best_effort(",
         "bounded_hint(",

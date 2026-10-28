@@ -37,8 +37,13 @@
 //! - `BROWSER_EXIT_WAIT` (5 s): how long a retired browser process gets to exit before
 //!   its directories are deleted. It waits on a child process, not on a CDP call.
 //! - The launch builder's `request_timeout` (40 s) and `launch_timeout` (20 s): the
-//!   library's own backstop, above every entry here so a typed `Timeout` always wins;
-//!   it bounds only what has no entry (the event listeners).
+//!   library's own backstop for what has no entry (the event listeners). It is NOT the
+//!   bound on a CDP call: chromiumoxide 0.9 gives every command (`CommandFuture`) and
+//!   every navigation (`FrameNavigationRequest`) its own fixed 30 s timer
+//!   (`handler::REQUEST_TIMEOUT`), which ignores `request_timeout`. So every entry that
+//!   is one CDP call stays below [`LIBRARY_COMMAND_TIMEOUT`] (our timer fires first), and
+//!   a library timeout that still surfaces (an entry scaled above 30 s) is turned into
+//!   the op's typed `Timeout` by [`with_deadline`], never a `DriverFailed`.
 //! - The wait for a screencast frame: the caller's `timeout_ms`, clamped to 100 ms to
 //!   5 s (`normalize_live_frame_options`). It is the caller's answer to "how long may I
 //!   wait for a picture", and it expires as the typed `live_frame` `Timeout`.
@@ -101,11 +106,16 @@ pub(crate) enum Op {
     /// `Performance.getMetrics` for the telemetry sample (`page.metrics()`). Effect-less;
     /// the sample is optional, so a timeout leaves the observation without renderer metrics.
     Metrics,
+    /// Putting a tab back into a usable state after its navigation timed out (stop the
+    /// load, leave for `about:blank`, wait for the library's navigation queue to drain).
+    /// Best effort and only logged: the navigation's own `Timeout` is what the caller
+    /// gets. It moves the page, so it counts as effectful.
+    NavigateRecovery,
 }
 
 impl Op {
     #[cfg(test)]
-    pub(crate) const ALL: [Op; 24] = [
+    pub(crate) const ALL: [Op; 25] = [
         Op::Launch,
         Op::TabAttach,
         Op::Navigate,
@@ -130,6 +140,7 @@ impl Op {
         Op::LiveFrame,
         Op::GuardResolve,
         Op::Metrics,
+        Op::NavigateRecovery,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
@@ -158,6 +169,7 @@ impl Op {
             Op::LiveFrame => "live_frame",
             Op::GuardResolve => "guard_resolve",
             Op::Metrics => "metrics",
+            Op::NavigateRecovery => "navigate_recovery",
         }
     }
 
@@ -166,21 +178,34 @@ impl Op {
     pub(crate) const fn effectful(self) -> bool {
         matches!(
             self,
-            Op::Navigate | Op::Evaluate | Op::Input | Op::NativeAction
+            Op::Navigate | Op::Evaluate | Op::Input | Op::NativeAction | Op::NavigateRecovery
         )
     }
 
+    /// Whether the operation is a sequence of CDP calls or a wait for events rather
+    /// than one call: only these may sit at or above the library's own 30 s
+    /// per-command timer, which bounds each of their calls separately.
+    #[cfg(test)]
+    pub(crate) const fn spans_many_calls(self) -> bool {
+        // `WaitFor` polls (each poll is `WaitForPoll`); `DownloadComplete` waits for
+        // progress events and sends no command of its own.
+        matches!(self, Op::WaitFor | Op::DownloadComplete)
+    }
+
     /// The table, before scaling. `Launch` is the outer bound: the launch
-    /// itself is also limited to 20 s inside chromiumoxide.
+    /// itself is also limited to 20 s inside chromiumoxide. One CDP call stays
+    /// below the library's fixed 30 s timer (see the module docs): `Navigate`
+    /// and `Pdf` were 30 s, and at exactly 30 s the library's untyped
+    /// "Request timed out." won the race (SC4 T1).
     const fn base_millis(self) -> u64 {
         match self {
             Op::Launch => 25_000,
             Op::TabAttach => 15_000,
-            Op::Navigate => 30_000,
+            Op::Navigate => 25_000,
             Op::Content => 15_000,
             Op::AxSnapshot => 10_000,
             Op::Screenshot => 10_000,
-            Op::Pdf => 30_000,
+            Op::Pdf => 25_000,
             Op::Evaluate => 15_000,
             Op::Input => 5_000,
             Op::NativeAction => 10_000,
@@ -199,8 +224,39 @@ impl Op {
             Op::LiveFrame => 5_000,
             Op::GuardResolve => 5_000,
             Op::Metrics => 3_000,
+            Op::NavigateRecovery => 3_000,
         }
     }
+}
+
+/// chromiumoxide's own per-command and per-navigation timer
+/// (`chromiumoxide::handler::REQUEST_TIMEOUT`, pinned by a test).
+pub(crate) const LIBRARY_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What chromiumoxide's `CdpError::Timeout` prints (pinned by a test). A wrapped
+/// call that fails with it ran into the library's timer, not into a protocol
+/// error, so [`with_deadline`] reports it as the op's typed `Timeout`.
+pub(crate) const LIBRARY_TIMEOUT_TEXT: &str = "Request timed out.";
+
+/// Whether `error` is the library's own timeout as the driver wraps it: the text
+/// in `details.error` (the usual wrapping) or as the message (a call site that
+/// keeps no text from the library, see `library_timeout`).
+fn is_library_timeout(error: &QuarryError) -> bool {
+    error.code == ErrorCode::DriverFailed
+        && (error.message == LIBRARY_TIMEOUT_TEXT
+            || error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("error"))
+                .and_then(serde_json::Value::as_str)
+                == Some(LIBRARY_TIMEOUT_TEXT))
+}
+
+/// The marker a call site that drops the library's text (a ZDR-quiet `driver_error`)
+/// returns for the library's own timeout, so [`with_deadline`] still types it.
+#[cfg(feature = "chromiumoxide")]
+pub(crate) fn library_timeout() -> QuarryError {
+    QuarryError::new(ErrorCode::DriverFailed, LIBRARY_TIMEOUT_TEXT)
 }
 
 /// `QUARRY_BROWSER_DEADLINE_SCALE`, read once. Anything outside (0, 2] or not a
@@ -259,11 +315,23 @@ pub(crate) fn timeout_error(op: Op, limit: Duration) -> QuarryError {
 /// Run `fut` under `op`'s deadline. On expiry the future is dropped and the
 /// typed timeout comes back. Logs how long the call took at debug level, the
 /// calibration signal for the table.
+///
+/// The library's own timer (30 s per command) can expire first when the entry is
+/// scaled above it. That failure is the same event, a call that did not answer in
+/// time, so it comes back as the same typed timeout, with the bound that expired.
 pub(crate) async fn with_deadline<T, F>(op: Op, fut: F) -> QuarryResult<T>
 where
     F: Future<Output = QuarryResult<T>>,
 {
-    let limit = deadline(op);
+    with_limit(op, deadline(op), fut).await
+}
+
+/// [`with_deadline`] with an explicit bound, for the callers (and live tests) that
+/// cannot use the process-wide scale.
+pub(crate) async fn with_limit<T, F>(op: Op, limit: Duration, fut: F) -> QuarryResult<T>
+where
+    F: Future<Output = QuarryResult<T>>,
+{
     let started = Instant::now();
     let outcome = tokio::time::timeout(limit, fut).await;
     tracing::debug!(
@@ -272,6 +340,9 @@ where
         "browser_op_duration_ms"
     );
     match outcome {
+        Ok(Err(error)) if is_library_timeout(&error) => {
+            Err(timeout_error(op, limit.min(LIBRARY_COMMAND_TIMEOUT)))
+        }
         Ok(result) => result,
         Err(_) => Err(timeout_error(op, limit)),
     }
@@ -465,8 +536,102 @@ mod tests {
         }
         assert_eq!(
             deadline_scaled(Op::Navigate, 0.02),
-            Duration::from_millis(600)
+            Duration::from_millis(500)
         );
+    }
+
+    #[test]
+    fn one_cdp_call_is_bounded_below_the_library_timer() {
+        // SC4 T1: at exactly 30 s the library's untyped timeout won the race.
+        for op in Op::ALL.into_iter().filter(|op| !op.spans_many_calls()) {
+            assert!(
+                deadline_scaled(op, 1.0) < LIBRARY_COMMAND_TIMEOUT,
+                "{} must stay below the library's 30 s per-command timer",
+                op.name()
+            );
+        }
+    }
+
+    #[cfg(feature = "chromiumoxide")]
+    #[test]
+    fn library_timer_and_text_are_the_ones_chromiumoxide_uses() {
+        // A library upgrade that changes either would quietly turn the typed TIMEOUT
+        // back into a DriverFailed; this pins both.
+        assert_eq!(
+            Duration::from_millis(::chromiumoxide::handler::REQUEST_TIMEOUT),
+            LIBRARY_COMMAND_TIMEOUT
+        );
+        assert_eq!(
+            ::chromiumoxide::error::CdpError::Timeout.to_string(),
+            LIBRARY_TIMEOUT_TEXT
+        );
+        assert!(is_library_timeout(&library_timeout()));
+    }
+
+    /// The driver's usual wrapping of a failed CDP call.
+    fn wrapped(text: &str) -> QuarryError {
+        QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide goto failed")
+            .with_details(json!({ "error": text, "url": "https://example.test/secret" }))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_library_timeout_becomes_the_typed_timeout_of_the_op() {
+        for op in [Op::Navigate, Op::Content, Op::Pdf, Op::Evaluate] {
+            let limit = deadline_scaled(op, 1.0);
+            let error = with_deadline(op, async { Err::<(), _>(wrapped(LIBRARY_TIMEOUT_TEXT)) })
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::Timeout, "{}", op.name());
+            assert_eq!(error.retryable, !op.effectful(), "{}", op.name());
+            let details = error.details.expect("details");
+            assert_eq!(details["op"], op.name());
+            assert_eq!(
+                details["effect"],
+                if op.effectful() { "unknown" } else { "none" }
+            );
+            assert_eq!(
+                details["deadline_ms"],
+                u64::try_from(limit.min(LIBRARY_COMMAND_TIMEOUT).as_millis()).unwrap()
+            );
+            // The typed shape only: the wrapped error's URL is gone.
+            assert!(!details.to_string().contains("example.test"), "{details}");
+            assert_eq!(details.as_object().unwrap().len(), 3, "{details}");
+        }
+        // Scaled above the library timer, the bound that expired is the library's.
+        let error = with_limit(Op::Navigate, Duration::from_secs(50), async {
+            Err::<(), _>(QuarryError::new(
+                ErrorCode::DriverFailed,
+                LIBRARY_TIMEOUT_TEXT,
+            ))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert_eq!(error.details.unwrap()["deadline_ms"], 30_000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn other_driver_failures_are_not_turned_into_timeouts() {
+        for text in [
+            "net::ERR_TIMED_OUT",
+            "Request timed out. (and more)",
+            "No target with given id found",
+        ] {
+            let error = with_deadline(Op::Navigate, async { Err::<(), _>(wrapped(text)) })
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::DriverFailed, "{text}");
+        }
+        // Another code carrying the text is left alone too.
+        let error = with_deadline(Op::Content, async {
+            Err::<(), _>(QuarryError::new(
+                ErrorCode::BadRequest,
+                LIBRARY_TIMEOUT_TEXT,
+            ))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::BadRequest);
     }
 
     #[test]

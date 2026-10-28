@@ -622,7 +622,14 @@ impl ObservationRunner {
 
         ctx.key_focus = focus_after;
 
-        let page_state = self.page_state(session).await;
+        // SC4 T3: a page that did not answer one of the reads below in time does not
+        // answer the next one either (a load that still holds it, a renderer in a
+        // loop). Each read has its own deadline, so reading on made a step wait for
+        // their sum (page state + content + accessibility tree: 20 s at a 0.5 scale,
+        // where the tree's own deadline was 5 s). The first timeout ends the page
+        // reads, and the observation fails with it instead of the last one.
+        let mut stalled: Option<QuarryError> = None;
+        let page_state = self.page_state(session, &mut stalled).await;
         if let Some(url) = page_state.url.as_deref().filter(|url| !url.is_empty()) {
             ctx.current_url = url.to_owned();
         }
@@ -656,7 +663,20 @@ impl ObservationRunner {
         let mut dialogs = self.browser.dialogs(session).await.unwrap_or_default();
         redactor.dialogs(&mut dialogs);
 
-        let html_bytes = self.browser.content(session).await.ok();
+        let html_bytes = if stalled.is_some() {
+            None
+        } else {
+            match self.browser.content(session).await {
+                Ok(bytes) => Some(bytes),
+                Err(error) => {
+                    note_stalled_read(&mut stalled, error);
+                    None
+                }
+            }
+        };
+        if let Some(error) = stalled {
+            return Err(error);
+        }
         if let Some(bytes) = html_bytes.as_ref() {
             // Proof must identify the bytes actually observed, not the
             // synthetic run hash used before the first page is loaded.
@@ -1592,7 +1612,12 @@ impl ObservationRunner {
             .await
     }
 
-    async fn page_state(&self, session: &quarry_browser::BrowserSession) -> PageState {
+    /// The page's URL and title, or nothing. A timeout is recorded in `stalled`.
+    async fn page_state(
+        &self,
+        session: &quarry_browser::BrowserSession,
+        stalled: &mut Option<QuarryError>,
+    ) -> PageState {
         self.browser
             .evaluate(
                 session,
@@ -1602,6 +1627,17 @@ impl ObservationRunner {
                 }))()"#,
             )
             .await
+            .map_err(|mut error| {
+                // The script only reads, so its timeout is a read's: nothing changed
+                // and it may be repeated, whatever a generic `evaluate` has to assume.
+                if error.code == ErrorCode::Timeout {
+                    error.retryable = true;
+                    if let Some(Value::Object(details)) = error.details.as_mut() {
+                        details.insert("effect".to_owned(), Value::from("none"));
+                    }
+                }
+                note_stalled_read(stalled, error);
+            })
             .ok()
             .map(|value| PageState {
                 url: value
@@ -2071,6 +2107,14 @@ fn attach_related(
 struct PageState {
     url: Option<String>,
     title: Option<String>,
+}
+
+/// Keep the first page read that timed out (SC4 T3). Any other failure of an
+/// optional read is dropped, as before.
+fn note_stalled_read(stalled: &mut Option<QuarryError>, error: QuarryError) {
+    if error.code == ErrorCode::Timeout && stalled.is_none() {
+        *stalled = Some(error);
+    }
 }
 
 fn console_summary_from_devtools(events: &[BrowserDevtoolsEvent]) -> Vec<ConsoleLine> {
@@ -3523,6 +3567,21 @@ mod tests {
         visual_fidelity: bool,
         /// D2-019: every egress policy the runner installed, in order.
         egress_seen: std::sync::Mutex<Vec<BrowserEgressPolicy>>,
+        /// SC4 T3: the page read (`evaluate` or `content`) that times out.
+        stalls_at: Option<&'static str>,
+        /// SC4 T3: every `content` and `native_page_projection` call.
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    /// The typed timeout the chromiumoxide driver returns for `op`.
+    fn driver_timeout(op: &str, effect: &str) -> QuarryError {
+        let mut error = QuarryError::new(
+            ErrorCode::Timeout,
+            format!("browser operation {op} timed out"),
+        )
+        .with_details(serde_json::json!({ "op": op, "deadline_ms": 7500, "effect": effect }));
+        error.retryable = effect == "none";
+        error
     }
 
     impl ContentDriver {
@@ -3619,7 +3678,18 @@ mod tests {
             Err(QuarryError::unsupported_action("select"))
         }
         async fn content(&self, _session: &quarry_browser::BrowserSession) -> QuarryResult<Bytes> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.stalls_at == Some("content") {
+                return Err(driver_timeout("content", "none"));
+            }
             Ok(Bytes::from_static(self.html))
+        }
+        async fn native_page_projection(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+        ) -> QuarryResult<quarry_browser::BrowserNativeProjection> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(QuarryError::unsupported_action("native_page_projection"))
         }
         async fn screenshot(
             &self,
@@ -3655,6 +3725,9 @@ mod tests {
             _session: &quarry_browser::BrowserSession,
             _script: &str,
         ) -> QuarryResult<serde_json::Value> {
+            if self.stalls_at == Some("evaluate") {
+                return Err(driver_timeout("evaluate", "unknown"));
+            }
             match self.back_lands_on {
                 Some(url) if self.landed.load(std::sync::atomic::Ordering::SeqCst) => {
                     Ok(serde_json::json!({ "url": url, "title": null }))
@@ -3662,6 +3735,106 @@ mod tests {
                 _ => Err(QuarryError::unsupported_action("evaluate")),
             }
         }
+    }
+
+    async fn observe_a_wait(driver: Arc<ContentDriver>) -> QuarryResult<BrowserObservation> {
+        let runner = ObservationRunner {
+            browser: driver.clone(),
+            artifacts: None,
+            events: None,
+            visual_processor: None,
+            org_id: "org".into(),
+        };
+        let lease = BrowserLease {
+            lease_id: Id::new(),
+            profile_id: Id::new(),
+            session_affinity_key: "test".into(),
+            proxy_affinity: ProxyAffinity {
+                pool: String::new(),
+                sticky_key: None,
+            },
+            ttl_s: 60,
+            capabilities: vec![],
+            artifact_bucket: String::new(),
+            persist_profile: false,
+            viewport: None,
+            org_id: "org".into(),
+        };
+        let session = driver.acquire(&lease).await.unwrap();
+        let request = AgentActionRequest {
+            run_id: Id::new(),
+            lease_id: lease.lease_id.clone(),
+            action: AgentAction::Wait { ms: 0 },
+            instruction: None,
+            constraints: AgentConstraints {
+                max_steps: 3,
+                allowed_domains: vec![],
+                max_runtime_s: None,
+                max_cost_usd: None,
+            },
+            zdr: ZdrMode::Off,
+            extraction_profile: None,
+        };
+        let mut ctx = ObservationContext::default();
+        runner.execute(&request, &session, &mut ctx).await
+    }
+
+    /// SC4 T3: the page state read timed out, so the content and accessibility reads are
+    /// not made (each would wait out its own deadline on the same held page), and the
+    /// step fails with that first timeout, as a read: nothing changed, it may be retried.
+    #[tokio::test]
+    async fn a_page_state_timeout_ends_the_page_reads_with_a_read_timeout() {
+        let driver = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            stalls_at: Some("evaluate"),
+            ..Default::default()
+        });
+        let error = observe_a_wait(driver.clone()).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert!(error.retryable, "the page state script only reads");
+        let details = error.details.expect("details");
+        assert_eq!(details["op"], "evaluate");
+        assert_eq!(details["effect"], "none");
+        assert_eq!(
+            driver.reads.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no read after the first timeout"
+        );
+    }
+
+    /// SC4 T3: a content timeout fails the step at once; the accessibility read is not made.
+    #[tokio::test]
+    async fn a_content_timeout_ends_the_page_reads() {
+        let driver = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            stalls_at: Some("content"),
+            ..Default::default()
+        });
+        let error = observe_a_wait(driver.clone()).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert_eq!(error.details.expect("details")["op"], "content");
+        assert_eq!(
+            driver.reads.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "only the content read was made"
+        );
+    }
+
+    /// A page that answers keeps the old path: every read is made and an optional
+    /// read that fails for another reason (here `evaluate` is unsupported) is dropped.
+    #[tokio::test]
+    async fn a_page_that_answers_is_read_in_full() {
+        let driver = Arc::new(ContentDriver {
+            html: b"<html><head><title>hi</title></head><body><p>hello</p></body></html>",
+            ..Default::default()
+        });
+        let observation = observe_a_wait(driver.clone()).await.expect("observation");
+        assert_eq!(
+            driver.reads.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "content and the accessibility tree"
+        );
+        assert!(observation.snapshot.is_some());
     }
 
     /// D2-019: a run that carries its resolved egress keeps it on every action. Before the
