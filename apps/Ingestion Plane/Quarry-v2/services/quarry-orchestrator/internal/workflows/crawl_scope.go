@@ -8,6 +8,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/triodelab/quarry-v2/services/quarry-orchestrator/internal/activities"
+	"github.com/triodelab/quarry-v2/services/quarry-orchestrator/internal/errs"
 )
 
 // The crawl scope (WS14.S3). A crawl whose input carries a non-legacy scope
@@ -109,15 +110,37 @@ func appliedBy(report *activities.CrawlReport) bool {
 	return report != nil && report.ScopeApplied
 }
 
+// The two codes of the robots.txt refusals (WS14.S4), as the edge names them in
+// `details.denial.code`.
+const (
+	robotsDisallowedCode  = "robots_disallowed"
+	robotsUnreachableCode = "robots_unreachable"
+)
+
 // terminal is the scope part of a terminal event's payload (WS14.S3):
-// pages_blocked, links_denied, hosts_added and denials.
-func (s *crawlScopeRun) terminal(pagesBlocked uint32) map[string]any {
+// pages_blocked, pages_blocked_robots, links_denied, hosts_added and denials.
+// pages_blocked_robots is the part of pages_blocked the edge refused under
+// robots.txt (WS14.S4), so a crawl can say how many pages the robots file kept out.
+func (s *crawlScopeRun) terminal(pagesBlocked, pagesBlockedRobots uint32) map[string]any {
 	return map[string]any{
-		"pages_blocked": pagesBlocked,
-		"links_denied":  s.linksDenied,
-		"hosts_added":   sortedKeys(s.hostsAdded),
-		"denials":       s.denials.payload(),
+		"pages_blocked":        pagesBlocked,
+		"pages_blocked_robots": pagesBlockedRobots,
+		"links_denied":         s.linksDenied,
+		"hosts_added":          sortedKeys(s.hostsAdded),
+		"denials":              s.denials.payload(),
 	}
+}
+
+// robotsRefused reports whether the edge refused a page under robots.txt: a
+// `robots_disallowed` or `robots_unreachable` denial. Both are blocklist refusals
+// and so count in pages_blocked; a scope or web-policy refusal does not.
+func robotsRefused(err error) bool {
+	denial, ok := errs.DenialOf(err)
+	if !ok {
+		return false
+	}
+	code, _ := denial["code"].(string)
+	return code == robotsDisallowedCode || code == robotsUnreachableCode
 }
 
 // hostOf is the lower-cased host of a URL, or "" when it has none.

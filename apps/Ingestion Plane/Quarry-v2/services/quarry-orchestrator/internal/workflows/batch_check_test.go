@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/workflow"
 
+	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
 	"github.com/triodelab/quarry-v2/services/quarry-orchestrator/internal/activities"
 	"github.com/triodelab/quarry-v2/services/quarry-orchestrator/internal/errs"
 )
@@ -73,6 +74,48 @@ func TestBatchJobWF_OldVersionHistoryHasNoBatchContext(t *testing.T) {
 	require.NoError(t, env.GetWorkflowError())
 	require.Len(t, contexts, 1)
 	require.Nil(t, contexts[0], "a pre-marker history sends no crawl context")
+}
+
+// TestBatchJobWF_TerminalCountsRobotsRefusalsApartFromOtherBlocks (WS14.S4): a page the
+// edge refused under robots.txt is counted in pages_blocked and in pages_blocked_robots;
+// a scope refusal is counted in pages_blocked alone, and neither fails the batch.
+func TestBatchJobWF_TerminalCountsRobotsRefusalsApartFromOtherBlocks(t *testing.T) {
+	env, a := newEnv(t)
+	env.OnGetVersion(batchCheckVersion, workflow.DefaultVersion, 1).Return(workflow.Version(1))
+	refusal := func(code string) error {
+		body := []byte(`{"error":{"code":"SECURITY_BLOCKED","message":"refused","details":{"denial":{"code":"` + code + `","message":"m","remedy":"r"}}}}`)
+		return errs.FromHTTPResponse("run_page", 403, body).Temporal()
+	}
+	env.OnActivity(a.RunPage, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, in activities.RunPageInput) (activities.RunPageResult, error) {
+			switch in.URL {
+			case "https://robots.example/private":
+				return activities.RunPageResult{}, refusal("robots_disallowed")
+			case "https://scope.example/x":
+				return activities.RunPageResult{}, refusal("external_host_disabled")
+			}
+			return activities.RunPageResult{Status: 200}, nil
+		},
+	)
+	var completed map[string]any
+	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ string, evt quarrycontracts.Event) error {
+			if evt.Type == quarrycontracts.EvtRunCompleted {
+				completed = evt.Payload
+			}
+			return nil
+		},
+	)
+
+	env.ExecuteWorkflow(BatchJobWF, BatchJobInput{
+		RunID: "run_batch_robots",
+		URLs:  []string{"https://ok.example/a", "https://robots.example/private", "https://scope.example/x"},
+	}, a)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError(), "a refused page does not fail the batch")
+	require.EqualValues(t, 2, completed["pages_blocked"])
+	require.EqualValues(t, 1, completed["pages_blocked_robots"])
 }
 
 // TestBatchRobotsDefaultsToRespect (WS14.S5): only `ignore` is ignore; anything else,

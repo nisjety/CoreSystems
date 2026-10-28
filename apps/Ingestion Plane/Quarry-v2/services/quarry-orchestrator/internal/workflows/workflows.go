@@ -453,7 +453,7 @@ func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities
 		return err
 	}
 
-	var visited, failed, blocked uint32
+	var visited, failed, blocked, blockedRobots uint32
 	stats := newJobStatistics(workflow.Now(ctx))
 	cancelled := false
 	// WS14.S5: the batch context on each page and the blocked count. A history recorded before
@@ -478,6 +478,9 @@ func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities
 				// WS14.S5: a page the edge refused (a denial) is also counted as blocked. It stays
 				// in pages_failed and the error classes, so the statistics keep their shape.
 				blocked++
+				if robotsRefused(err) {
+					blockedRobots++
+				}
 			}
 			failed++
 			stats.recordFailure(err)
@@ -496,6 +499,7 @@ func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities
 		}
 		if checked {
 			cancelPayload["pages_blocked"] = blocked
+			cancelPayload["pages_blocked_robots"] = blockedRobots
 		}
 		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCancelled, cancelPayload, in.RunID, string(quarrycontracts.EvtRunCancelled))
 	}
@@ -507,6 +511,7 @@ func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities
 	}
 	if checked {
 		completed["pages_blocked"] = blocked
+		completed["pages_blocked_robots"] = blockedRobots
 	}
 	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, completed, in.RunID, string(quarrycontracts.EvtRunCompleted))
 }
@@ -608,7 +613,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		visited[seed] = struct{}{}
 	}
 
-	var pagesVisited, pagesFailed, pagesBlocked uint32
+	var pagesVisited, pagesFailed, pagesBlocked, pagesBlockedRobots uint32
 	stopReason := ""
 	stats := newJobStatistics(workflow.Now(ctx))
 
@@ -651,6 +656,9 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		if err != nil && scope != nil && errs.CategoryOf(err) == errs.CategoryBlocklist {
 			// The edge refused the page (scope or robots). It is counted as blocked.
 			pagesBlocked++
+			if robotsRefused(err) {
+				pagesBlockedRobots++
+			}
 			ctrl.progress.Blocked = pagesBlocked
 			ctrl.progress.Denied = scope.linksDenied
 			ctrl.progress.Pending = uint32(len(frontier))
@@ -733,7 +741,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		}, in.RunID, string(quarrycontracts.EvtRunFailed))
 	}
 	if scope != nil {
-		for k, v := range scope.terminal(pagesBlocked) {
+		for k, v := range scope.terminal(pagesBlocked, pagesBlockedRobots) {
 			completed[k] = v
 		}
 	}
@@ -781,7 +789,7 @@ func crawlJobDurableFrontier(
 		}
 	}
 
-	var pagesVisited, pagesFailed, pagesBlocked uint32
+	var pagesVisited, pagesFailed, pagesBlocked, pagesBlockedRobots uint32
 	stopReason := ""
 	stats := newJobStatistics(workflow.Now(ctx))
 	emitPaused := false
@@ -822,6 +830,9 @@ func crawlJobDurableFrontier(
 		res, pageErr := runPageWith(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", item.URL, crawl)
 		if pageErr != nil && scope != nil && errs.CategoryOf(pageErr) == errs.CategoryBlocklist {
 			pagesBlocked++
+			if robotsRefused(pageErr) {
+				pagesBlockedRobots++
+			}
 		} else if pageErr != nil {
 			pagesFailed++
 			stats.recordFailure(pageErr)
@@ -893,7 +904,7 @@ func crawlJobDurableFrontier(
 		}, in.RunID, string(quarrycontracts.EvtRunFailed))
 	}
 	if scope != nil {
-		for k, v := range scope.terminal(pagesBlocked) {
+		for k, v := range scope.terminal(pagesBlocked, pagesBlockedRobots) {
 			completed[k] = v
 		}
 	}

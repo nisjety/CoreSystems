@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/triodelab/quarry-v2/services/quarry-orchestrator/internal/activities"
+	"github.com/triodelab/quarry-v2/services/quarry-orchestrator/internal/errs"
 )
 
 // Unit tests of the crawl-scope helpers (WS14.S3). The workflow-level tests
@@ -89,9 +90,46 @@ func TestCrawlScopeRun_AbsorbAddsHostsAndDenialCounts(t *testing.T) {
 	if got := s.contextFor(1).SeedHosts; fmt.Sprint(got) != fmt.Sprint([]string{"a.test", "cdn.a.test"}) {
 		t.Errorf("seed hosts after absorb = %v", got)
 	}
-	term := s.terminal(1)
-	if term["links_denied"] != uint32(4) || term["pages_blocked"] != uint32(1) {
+	term := s.terminal(1, 0)
+	if term["links_denied"] != uint32(4) || term["pages_blocked"] != uint32(1) || term["pages_blocked_robots"] != uint32(0) {
 		t.Errorf("terminal = %v", term)
+	}
+}
+
+func TestCrawlScopeRun_TerminalCountsRobotsRefusalsApartFromOtherBlocks(t *testing.T) {
+	s := newCrawlScopeRun(CrawlJobInput{
+		Seeds: []string{"https://a.test/"},
+		Scope: &activities.CrawlScope{CrawlEntireDomain: true},
+	})
+	term := s.terminal(3, 2)
+	if term["pages_blocked"] != uint32(3) || term["pages_blocked_robots"] != uint32(2) {
+		t.Errorf("terminal = %v, want pages_blocked 3 and pages_blocked_robots 2", term)
+	}
+}
+
+func TestRobotsRefused_ReadsOnlyTheRobotsDenials(t *testing.T) {
+	denial := func(status int, code string) error {
+		body := []byte(`{"error":{"code":"SECURITY_BLOCKED","message":"refused","details":{"denial":{"code":"` + code + `","message":"m","remedy":"r"}}}}`)
+		return errs.FromHTTPResponse("run_page", status, body)
+	}
+	if !robotsRefused(denial(403, "robots_disallowed")) {
+		t.Error("robots_disallowed is a robots refusal")
+	}
+	if !robotsRefused(denial(403, "robots_unreachable")) {
+		t.Error("robots_unreachable is a robots refusal")
+	}
+	if robotsRefused(denial(403, "external_host_disabled")) {
+		t.Error("a scope refusal is not a robots refusal")
+	}
+	if robotsRefused(errs.FromHTTPResponse("run_page", 500, []byte(`{}`))) {
+		t.Error("a server error is not a robots refusal")
+	}
+	if robotsRefused(nil) {
+		t.Error("no error is not a robots refusal")
+	}
+	// The workflow sees the activity error after the Temporal round trip.
+	if !robotsRefused(denial(403, "robots_disallowed").(*errs.Error).Temporal()) {
+		t.Error("the robots denial must survive the Temporal conversion")
 	}
 }
 
