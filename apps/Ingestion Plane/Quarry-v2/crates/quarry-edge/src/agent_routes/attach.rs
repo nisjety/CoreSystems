@@ -734,8 +734,7 @@ pub(super) async fn delegate_step(
     lane.ctx.step = receipt_step;
     let receipt_run_id = entry.run_id.to_string();
     let receipt_action = req.action.clone();
-    let typed_kind =
-        quarry_runtime::observation::typed_field_kind(lane.ctx.active_snapshot.as_ref(), &req.action);
+    let typed_kind = quarry_runtime::observation::receipt_field_kind(&lane.ctx, &req.action);
     let runner = ObservationRunner {
         browser: state.agent_driver.clone(),
         artifacts: Some(state.artifacts.clone()),

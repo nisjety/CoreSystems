@@ -88,6 +88,13 @@ pub struct ObservationContext {
     /// which would drop the narrowing and the open-web mode after the first step. `None`
     /// (a context built outside `start_run`, the legacy agent loop) keeps the rebuild.
     pub egress_policy: Option<BrowserEgressPolicy>,
+    /// D2-065: the kind of the control the keyboard focus is on, as far as this run
+    /// has seen it. `None` is "not known" and is the start state, after a resume, and
+    /// after any action that can move focus without the run seeing where. A key
+    /// press that types a character is masked by this kind when its receipt is
+    /// written (`receipt_field_kind`), and as a secret when it is `None`. In memory
+    /// only, run-local, like `active_snapshot`.
+    pub key_focus: Option<FieldKind>,
 }
 
 /// Page identity captured at observation time. Deliberately tiny so carrying
@@ -387,7 +394,12 @@ impl ObservationRunner {
 
         // WS12.S2: the field kind of the control a typing action goes to, read from the
         // snapshot the action names; `ctx.active_snapshot` is replaced further down.
-        let typed_kind = typed_field_kind(ctx.active_snapshot.as_ref(), &request.action);
+        // D2-065: a key press is read against the control the run last focused.
+        let typed_kind = receipt_field_kind(ctx, &request.action);
+        // Where the keyboard focus is once this action has run. Unknown until it has: an
+        // action that fails, or returns early, leaves the focus unknown (fails closed).
+        let focus_after = key_focus_after(ctx, &request.action, typed_kind);
+        ctx.key_focus = None;
         let (effective_action, target_resolution, verified_target_action, transfer_target) = self
             .resolve_snapshot_action(&request.action, session, ctx)
             .await?;
@@ -403,6 +415,8 @@ impl ObservationRunner {
                         "action": observation_redaction::action_for_event(
                             &request.action,
                             typed_kind,
+                            // X-19: the event keeps what the stored receipt keeps.
+                            quarry_core::redaction::action::record_policy(),
                             redaction::mode(),
                             &mut Tally::new(),
                         ),
@@ -605,6 +619,8 @@ impl ObservationRunner {
                 }
             }
         }
+
+        ctx.key_focus = focus_after;
 
         let page_state = self.page_state(session).await;
         if let Some(url) = page_state.url.as_deref().filter(|url| !url.is_empty()) {
@@ -1852,7 +1868,19 @@ pub fn typed_field_kind(
         AgentAction::TypeSemantic { locator, .. } => resolve_semantic_ref(snapshot, locator).ok()?,
         _ => return None,
     };
-    let held = snapshot.targets.get(&ref_id)?;
+    held_target_kind(snapshot, &ref_id, false)
+}
+
+/// The field kind of a held snapshot target. `for_click` is a click: a target that
+/// is not a text control then has no kind (`None`: a click on a button says nothing
+/// about where the keyboard focus is), where a typing action treats it as an
+/// ordinary control.
+fn held_target_kind(
+    snapshot: &ActiveSnapshot,
+    ref_id: &str,
+    for_click: bool,
+) -> Option<FieldKind> {
+    let held = snapshot.targets.get(ref_id)?;
     if let Some(native) = &held.native_target {
         return native.field_kind;
     }
@@ -1869,7 +1897,77 @@ pub fn typed_field_kind(
     if matches!(target.tag.as_str(), "input" | "textarea") {
         return Some(FieldKind::Secret);
     }
-    Some(FieldKind::Unknown)
+    (!for_click).then_some(FieldKind::Unknown)
+}
+
+/// D2-065: the field kind a stored receipt (and the `ActionStarted` event) masks
+/// this action's text by. A typing action reads the control it names from the
+/// snapshot (`typed_field_kind`). A key press reads the control the run last
+/// focused (`ObservationContext::key_focus`); `None` when the run cannot say.
+/// Call it before `execute`, which moves both.
+#[must_use]
+pub fn receipt_field_kind(ctx: &ObservationContext, action: &AgentAction) -> Option<FieldKind> {
+    match action {
+        AgentAction::Press { .. } => ctx.key_focus,
+        _ => typed_field_kind(ctx.active_snapshot.as_ref(), action),
+    }
+}
+
+/// D2-065: where the keyboard focus is once `action` has run, as far as the run can
+/// tell; `None` when it cannot. `typed` is [`receipt_field_kind`] for the action.
+///
+/// Typing into a control, or clicking a text control, puts focus there (a raw
+/// selector only counts when its own words name a sensitive control). A key press
+/// that edits or moves inside the control, and a wait or a scroll, leave focus where
+/// it was. Everything else may move it (a click on a link, a navigation, `Tab`,
+/// `Enter`, a script on the page) and the answer is "unknown".
+fn key_focus_after(
+    ctx: &ObservationContext,
+    action: &AgentAction,
+    typed: Option<FieldKind>,
+) -> Option<FieldKind> {
+    let selector_focus = |selector: &str| {
+        let kind = quarry_core::redaction::action::selector_kind(selector);
+        kind.is_sensitive().then_some(kind)
+    };
+    match action {
+        AgentAction::TypeRef { .. }
+        | AgentAction::FrameTypeRef { .. }
+        | AgentAction::TypeSemantic { .. } => typed,
+        AgentAction::Type { selector, .. } | AgentAction::Click { selector } => {
+            selector_focus(selector)
+        }
+        AgentAction::ClickRef { ref_id, .. } | AgentAction::FrameClickRef { ref_id, .. } => ctx
+            .active_snapshot
+            .as_ref()
+            .and_then(|snapshot| held_target_kind(snapshot, ref_id, true)),
+        AgentAction::ClickSemantic { locator, .. } => {
+            let snapshot = ctx.active_snapshot.as_ref()?;
+            let ref_id = resolve_semantic_ref(snapshot, locator).ok()?;
+            held_target_kind(snapshot, &ref_id, true)
+        }
+        AgentAction::Press { key } => {
+            let last = key.rsplit('+').find(|part| !part.is_empty()).unwrap_or(key);
+            let lower = last.trim().to_ascii_lowercase();
+            let moves_focus = matches!(lower.as_str(), "tab" | "enter" | "return" | "escape" | "esc")
+                || (lower.len() >= 2
+                    && lower.starts_with('f')
+                    && lower[1..].bytes().all(|b| b.is_ascii_digit()));
+            if moves_focus {
+                None
+            } else {
+                ctx.key_focus
+            }
+        }
+        AgentAction::Wait { .. }
+        | AgentAction::WaitFor { .. }
+        | AgentAction::WaitForRef { .. }
+        | AgentAction::FrameWaitForRef { .. }
+        | AgentAction::WaitForSemantic { .. }
+        | AgentAction::Scroll { .. }
+        | AgentAction::MouseWheel { .. } => ctx.key_focus,
+        _ => None,
+    }
 }
 
 fn resolve_semantic_ref(
@@ -3772,6 +3870,96 @@ mod tests {
             .expect_err("evaluate must be refused");
         assert_eq!(error.code, ErrorCode::Forbidden);
         assert_eq!(error.details.unwrap()["reason"], "raw_script_denied");
+    }
+
+    /// D2-065: the keyboard focus the run tracks decides how a key press is masked.
+    #[test]
+    fn the_key_focus_follows_clicks_and_typing_and_fails_closed() {
+        let html = "<html><body><input id='pw' type='password' placeholder='Password'>\
+                    <button id='go'>Go</button></body></html>";
+        let run_id: RunKind = Id::new();
+        let summary = build_dom_summary(html);
+        let active = build_active_snapshot(&run_id, 1, "blake3:page", Some(&summary), None);
+        let snapshot_id = active.snapshot.snapshot_id.clone();
+        let ref_of = |needle: &str| {
+            active
+                .snapshot
+                .targets
+                .iter()
+                .find(|t| t.tag == needle)
+                .map(|t| t.ref_id.clone())
+                .unwrap_or_else(|| panic!("no target {needle}"))
+        };
+        let (password, button) = (ref_of("input"), ref_of("button"));
+        let click = |ref_id: &str| AgentAction::ClickRef {
+            snapshot_id: snapshot_id.clone(),
+            generation: 1,
+            ref_id: ref_id.to_owned(),
+        };
+        let press = |key: &str| AgentAction::Press { key: key.to_owned() };
+        let mut ctx = ObservationContext {
+            active_snapshot: Some(active.clone()),
+            ..Default::default()
+        };
+        // Start state: no known focus, so a character key is masked as a secret.
+        assert_eq!(receipt_field_kind(&ctx, &press("a")), None);
+
+        // A click on the password control puts the focus there.
+        let typed = receipt_field_kind(&ctx, &click(&password));
+        assert_eq!(typed, None, "a click is not a typing action");
+        ctx.key_focus = key_focus_after(&ctx, &click(&password), typed);
+        assert_eq!(ctx.key_focus, Some(FieldKind::Password));
+        assert_eq!(receipt_field_kind(&ctx, &press("s")), Some(FieldKind::Password));
+
+        // Characters, Backspace, a shortcut and a wait leave it where it was.
+        for action in [
+            press("s"),
+            press("Backspace"),
+            press("Control+a"),
+            AgentAction::Wait { ms: 10 },
+            AgentAction::Scroll { target: "#x".to_owned() },
+        ] {
+            ctx.key_focus = key_focus_after(&ctx, &action, None);
+            assert_eq!(ctx.key_focus, Some(FieldKind::Password), "{action:?}");
+        }
+
+        // Tab, Enter, a click on a button, a navigation and a snapshot-less click: unknown.
+        for action in [
+            press("Tab"),
+            press("Enter"),
+            press("Shift+Tab"),
+            press("F5"),
+            click(&button),
+            AgentAction::Navigate { url: "https://example.test/".to_owned() },
+            AgentAction::Back,
+            AgentAction::ClickPoint { x: 1.0, y: 2.0 },
+        ] {
+            let mut moved = ObservationContext {
+                active_snapshot: Some(active.clone()),
+                key_focus: Some(FieldKind::Password),
+                ..Default::default()
+            };
+            moved.key_focus = key_focus_after(&moved, &action, None);
+            assert_eq!(moved.key_focus, None, "{action:?}");
+        }
+
+        // Typing into a control sets the focus from the snapshot, and a raw selector only
+        // counts when its own words name a sensitive control.
+        let type_ref = AgentAction::TypeRef {
+            snapshot_id: snapshot_id.clone(),
+            generation: 1,
+            ref_id: password,
+            text: "x".to_owned(),
+        };
+        let typed = receipt_field_kind(&ctx, &type_ref);
+        assert_eq!(typed, Some(FieldKind::Password));
+        assert_eq!(key_focus_after(&ctx, &type_ref, typed), Some(FieldKind::Password));
+        let raw = |selector: &str| AgentAction::Type {
+            selector: selector.to_owned(),
+            text: "x".to_owned(),
+        };
+        assert_eq!(key_focus_after(&ctx, &raw("input[type=password]"), None), Some(FieldKind::Password));
+        assert_eq!(key_focus_after(&ctx, &raw("#q"), None), None);
     }
 
     #[tokio::test]

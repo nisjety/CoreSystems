@@ -301,15 +301,20 @@ impl Redactor {
 /// its words but passes the `Durable` rules. A raw `type` action names its
 /// control by selector only, so the selector's own words (`#password`) decide;
 /// when they say nothing either (`#q`, `input[name=x1]`) the control is not known
-/// and the text is masked as a secret, as a ref-addressed action is (D2-064). The
-/// stored receipt keeps its default text policy (X-19); an event leaves the run's
-/// own record and fails closed.
+/// and the text is masked as a secret, as a ref-addressed action is (D2-064). A key
+/// press that types a character is masked by the control the run last focused
+/// (`typed`; D2-065).
+///
+/// `policy` is the process-wide receipt text policy (`record_policy()`), the same
+/// one the stored receipt is built under (X-19): under `all` an ordinary typed
+/// text is replaced in the event too.
 /// A navigation loses its secret query and userinfo; a selected value, a dialog
 /// prompt and a script pass the `Durable` rules.
 #[must_use]
 pub fn action_for_event(
     action: &AgentAction,
     typed: Option<FieldKind>,
+    policy: RecordPolicy,
     mode: Mode,
     tally: &mut Tally,
 ) -> Option<Value> {
@@ -322,15 +327,8 @@ pub fn action_for_event(
         _ => typed,
     };
     // WS12.S3: the one function every stored or emitted action goes through (the
-    // receipt builder calls it too). An event keeps the default text policy.
-    let out = redacted_for_record(
-        RecordBranch::Typed,
-        action,
-        typed,
-        RecordPolicy::SensitiveOnly,
-        mode,
-        tally,
-    );
+    // receipt builder calls it too), under the same policy.
+    let out = redacted_for_record(RecordBranch::Typed, action, typed, policy, mode, tally);
     serde_json::to_value(&out).ok()
 }
 
@@ -622,6 +620,7 @@ mod tests {
         let value = action_for_event(
             &action,
             Some(FieldKind::Password),
+            RecordPolicy::SensitiveOnly,
             Mode::Enforce,
             &mut tally,
         )
@@ -633,6 +632,7 @@ mod tests {
         let value = action_for_event(
             &action,
             Some(FieldKind::Unknown),
+            RecordPolicy::SensitiveOnly,
             Mode::Enforce,
             &mut Tally::new(),
         )
@@ -641,12 +641,102 @@ mod tests {
     }
 
     #[test]
+    fn the_event_follows_the_receipt_text_policy() {
+        // X-19: an ordinary typed text stays under `sensitive` and is replaced under `all`,
+        // in the event exactly as in the stored receipt.
+        let action = AgentAction::TypeRef {
+            snapshot_id: "snap".to_owned(),
+            generation: 1,
+            ref_id: "@e1".to_owned(),
+            text: "wireless headphones".to_owned(),
+        };
+        let kept = action_for_event(
+            &action,
+            Some(FieldKind::Unknown),
+            RecordPolicy::SensitiveOnly,
+            Mode::Enforce,
+            &mut Tally::new(),
+        )
+        .unwrap();
+        assert_eq!(kept["text"], "wireless headphones");
+        let replaced = action_for_event(
+            &action,
+            Some(FieldKind::Unknown),
+            RecordPolicy::AllTyped,
+            Mode::Enforce,
+            &mut Tally::new(),
+        )
+        .unwrap();
+        assert_eq!(replaced["text"], "[redacted:secret]");
+        // The stored receipt of the same action and policy says the same.
+        for policy in [RecordPolicy::SensitiveOnly, RecordPolicy::AllTyped] {
+            let event = action_for_event(
+                &action,
+                Some(FieldKind::Unknown),
+                policy,
+                Mode::Enforce,
+                &mut Tally::new(),
+            )
+            .unwrap();
+            let stored = redacted_for_record(
+                RecordBranch::Typed,
+                &action,
+                Some(FieldKind::Unknown),
+                policy,
+                Mode::Enforce,
+                &mut Tally::new(),
+            );
+            assert_eq!(event, serde_json::to_value(&stored).unwrap(), "{policy:?}");
+        }
+    }
+
+    #[test]
+    fn a_key_press_in_an_event_is_masked_by_the_focused_control() {
+        // D2-065: one character per press.
+        let press = |key: &str| AgentAction::Press { key: key.to_owned() };
+        let in_password = action_for_event(
+            &press("x"),
+            Some(FieldKind::Password),
+            RecordPolicy::SensitiveOnly,
+            Mode::Enforce,
+            &mut Tally::new(),
+        )
+        .unwrap();
+        assert_eq!(in_password["key"], "[redacted:password]");
+        let unknown = action_for_event(
+            &press("x"),
+            None,
+            RecordPolicy::SensitiveOnly,
+            Mode::Enforce,
+            &mut Tally::new(),
+        )
+        .unwrap();
+        assert_eq!(unknown["key"], "[redacted:secret]");
+        let enter = action_for_event(
+            &press("Enter"),
+            None,
+            RecordPolicy::SensitiveOnly,
+            Mode::Enforce,
+            &mut Tally::new(),
+        )
+        .unwrap();
+        assert_eq!(enter["key"], "Enter");
+    }
+
+    #[test]
     fn a_raw_type_action_is_classified_by_its_selector() {
         let action = AgentAction::Type {
             selector: "input#password".to_owned(),
             text: password(),
         };
-        let value = action_for_event(&action, None, Mode::Enforce, &mut Tally::new()).unwrap();
+        let value = action_for_event(
+            &action,
+            None,
+            RecordPolicy::SensitiveOnly,
+            Mode::Enforce,
+            &mut Tally::new(),
+        )
+        .unwrap();
         assert!(!value.to_string().contains(&password()));
     }
 
@@ -660,7 +750,14 @@ mod tests {
                 text: password(),
             };
             let mut tally = Tally::new();
-            let value = action_for_event(&action, None, Mode::Enforce, &mut tally).unwrap();
+            let value = action_for_event(
+                &action,
+                None,
+                RecordPolicy::SensitiveOnly,
+                Mode::Enforce,
+                &mut tally,
+            )
+            .unwrap();
             assert_eq!(value["text"], "[redacted:secret]", "{selector}");
             assert_eq!(tally.by_rule().get("field.label"), Some(&1), "{selector}");
         }
@@ -672,6 +769,7 @@ mod tests {
         let value = action_for_event(
             &action,
             Some(FieldKind::Unknown),
+            RecordPolicy::SensitiveOnly,
             Mode::Enforce,
             &mut Tally::new(),
         )
@@ -684,7 +782,14 @@ mod tests {
         let action = AgentAction::Navigate {
             url: format!("https://example.test/cb?access_token={}&page=2", jwt()),
         };
-        let value = action_for_event(&action, None, Mode::Enforce, &mut Tally::new()).unwrap();
+        let value = action_for_event(
+            &action,
+            None,
+            RecordPolicy::SensitiveOnly,
+            Mode::Enforce,
+            &mut Tally::new(),
+        )
+        .unwrap();
         let text = value.to_string();
         assert!(!text.contains(&jwt()));
         assert!(text.contains("example.test/cb"));

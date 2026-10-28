@@ -105,8 +105,7 @@ pub async fn step(
     let receipt_action = req.action.clone();
     // WS12.S3: the kind of the control a typing action goes to, read from the snapshot the
     // action names. `execute` replaces `ctx.active_snapshot`, so this is read before it runs.
-    let typed_kind =
-        quarry_runtime::observation::typed_field_kind(lane.ctx.active_snapshot.as_ref(), &req.action);
+    let typed_kind = quarry_runtime::observation::receipt_field_kind(&lane.ctx, &req.action);
 
     let runner = ObservationRunner {
         browser: state.agent_driver.clone(),
@@ -288,8 +287,7 @@ pub(super) async fn execute_ws_action(
     let receipt_action = req.action.clone();
     // WS12.S3: the kind of the control a typing action goes to, read from the snapshot the
     // action names. `execute` replaces `ctx.active_snapshot`, so this is read before it runs.
-    let typed_kind =
-        quarry_runtime::observation::typed_field_kind(lane.ctx.active_snapshot.as_ref(), &req.action);
+    let typed_kind = quarry_runtime::observation::receipt_field_kind(&lane.ctx, &req.action);
     let receipt_run_id = entry.run_id.to_string();
     let runner = ObservationRunner {
         browser: state.agent_driver.clone(),

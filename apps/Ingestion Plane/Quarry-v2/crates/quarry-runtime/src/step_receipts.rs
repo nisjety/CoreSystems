@@ -445,7 +445,11 @@ impl StepReceipt {
         if self.redaction_rule_version.as_deref() == Some(RULE_VERSION) {
             return;
         }
-        let typed = if self.redaction_rule_version.is_none() {
+        // A key press carries no control kind of its own (D2-065): on a row that was not
+        // masked under the current rules, its character is masked as a secret.
+        let typed = if self.redaction_rule_version.is_none()
+            || matches!(self.action, AgentAction::Press { .. })
+        {
             None
         } else {
             Some(FieldKind::Unknown)
@@ -1724,6 +1728,71 @@ mod redaction_tests {
             .skip(type_ref(&password()), "user_took_over");
         assert_eq!(text_of(&receipt.action), "[redacted:password]");
         assert_eq!(receipt.redaction_rule_version.as_deref(), Some(RULE_VERSION));
+    }
+
+    fn key_of(action: &AgentAction) -> &str {
+        match action {
+            AgentAction::Press { key } => key,
+            other => panic!("not a key press: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_password_typed_key_by_key_is_masked_in_every_receipt() {
+        // D2-065: the run last focused a password control, then pressed each key.
+        for (outcome, key) in password().chars().map(|c| ("complete", c.to_string())).chain([("fail", "x".to_owned()), ("skip", "y".to_owned())]) {
+            let builder = ReceiptBuilder::start("run_x", 1)
+                .redaction_mode(Mode::Enforce)
+                .record_policy(RecordPolicy::SensitiveOnly)
+                .typed_field(Some(FieldKind::Password));
+            let action = AgentAction::Press { key: key.clone() };
+            let receipt = match outcome {
+                "complete" => builder.complete(action, None, 0.0),
+                "fail" => builder.fail(action, &QuarryError::new(ErrorCode::BadRequest, "no")),
+                _ => builder.skip(action, "user_took_over"),
+            };
+            assert_eq!(key_of(&receipt.action), "[redacted:password]", "{outcome} {key:?}");
+            assert!(!serde_json::to_string(&receipt).unwrap().contains(&format!("\"key\":\"{key}\"")));
+        }
+    }
+
+    #[test]
+    fn a_key_press_with_an_unknown_focus_is_masked_and_a_named_key_is_kept() {
+        let unknown = ReceiptBuilder::start("run_x", 1)
+            .redaction_mode(Mode::Enforce)
+            .record_policy(RecordPolicy::SensitiveOnly)
+            .complete(AgentAction::Press { key: "p".to_owned() }, None, 0.0);
+        assert_eq!(key_of(&unknown.action), "[redacted:secret]");
+        let enter = ReceiptBuilder::start("run_x", 1)
+            .redaction_mode(Mode::Enforce)
+            .record_policy(RecordPolicy::SensitiveOnly)
+            .complete(AgentAction::Press { key: "Enter".to_owned() }, None, 0.0);
+        assert_eq!(key_of(&enter.action), "Enter");
+        // An ordinary control keeps its characters under `sensitive`, not under `all`.
+        let search = ReceiptBuilder::start("run_x", 1)
+            .redaction_mode(Mode::Enforce)
+            .record_policy(RecordPolicy::SensitiveOnly)
+            .typed_field(Some(FieldKind::Unknown))
+            .complete(AgentAction::Press { key: "s".to_owned() }, None, 0.0);
+        assert_eq!(key_of(&search.action), "s");
+        let strict = ReceiptBuilder::start("run_x", 1)
+            .redaction_mode(Mode::Enforce)
+            .record_policy(RecordPolicy::AllTyped)
+            .typed_field(Some(FieldKind::Unknown))
+            .complete(AgentAction::Press { key: "s".to_owned() }, None, 0.0);
+        assert_eq!(key_of(&strict.action), "[redacted:secret]");
+    }
+
+    #[test]
+    fn a_legacy_key_press_is_masked_on_read() {
+        for stamp in [None, Some("qr-redact/3".to_owned())] {
+            let mut receipt = ReceiptBuilder::start("run_x", 1)
+                .redaction_mode(Mode::Off)
+                .complete(AgentAction::Press { key: "k".to_owned() }, None, 0.0);
+            receipt.redaction_rule_version = stamp.clone();
+            receipt.redact_for_read_with(Mode::Enforce, RecordPolicy::SensitiveOnly);
+            assert_eq!(key_of(&receipt.action), "[redacted:secret]", "stamp {stamp:?}");
+        }
     }
 
     #[test]

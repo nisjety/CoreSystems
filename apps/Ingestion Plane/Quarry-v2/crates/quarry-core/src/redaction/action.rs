@@ -19,6 +19,13 @@
 //!   token-shaped value wherever it sits. Under [`RecordPolicy::AllTyped`]
 //!   (`all`) every typed text is replaced.
 //!
+//! A key press that types a character (`a`, `Space`, `Shift+a`; see
+//! [`press_produces_text`]) is typed text one character at a time (D2-065). It is
+//! masked by the kind of the control the run last focused, the same way; when the
+//! run cannot say which control has focus the key is masked as a secret. A named
+//! key (`Enter`, `Tab`, `Backspace`, an arrow, a function key) and a shortcut with
+//! Control or Meta type nothing and are kept.
+//!
 //! The control kind comes from the snapshot the action named, read before the
 //! action ran (`typed_field_kind` in `quarry-runtime`). When the kind is not
 //! known for a ref-addressed typing action the text is masked as a secret: an
@@ -173,6 +180,79 @@ fn typed_text(
     redact_text_with(mode, &masked, Profile::Durable, tally).into_owned()
 }
 
+/// Key names that never type a character. Compared lowercase.
+const NON_TEXT_KEYS: &[&str] = &[
+    "enter",
+    "return",
+    "tab",
+    "escape",
+    "esc",
+    "backspace",
+    "delete",
+    "del",
+    "insert",
+    "home",
+    "end",
+    "pageup",
+    "pagedown",
+    "arrowup",
+    "arrowdown",
+    "arrowleft",
+    "arrowright",
+    "up",
+    "down",
+    "left",
+    "right",
+    "shift",
+    "control",
+    "ctrl",
+    "alt",
+    "meta",
+    "capslock",
+    "numlock",
+    "scrolllock",
+    "pause",
+    "printscreen",
+    "contextmenu",
+    "help",
+    "clear",
+];
+
+/// Whether a key press types a character (D2-065). One character (`a`, `7`,
+/// `+`), `Space`, `Shift+a` and any name this list does not know are text; a
+/// named editing or navigation key (`Enter`, `Tab`, `Backspace`, `ArrowDown`,
+/// `F5`) and a shortcut with Control or Meta (`Control+a`) are not. An unknown
+/// name counts as text, so the answer fails closed.
+#[must_use]
+pub fn press_produces_text(key: &str) -> bool {
+    if key.chars().count() == 1 {
+        return true;
+    }
+    // A trailing `+` is the plus key itself (`Shift++`), not a separator.
+    let (mods, last) = match key.rfind('+') {
+        Some(i) if i + 1 < key.len() => (&key[..i], &key[i + 1..]),
+        Some(i) => (&key[..i], "+"),
+        None => ("", key),
+    };
+    let shortcut = mods.split('+').any(|m| {
+        matches!(
+            m.trim().to_ascii_lowercase().as_str(),
+            "control" | "ctrl" | "meta" | "cmd" | "command" | "super" | "win"
+        )
+    });
+    if shortcut {
+        return false;
+    }
+    if last.chars().count() == 1 {
+        return true;
+    }
+    let lower = last.trim().to_ascii_lowercase();
+    let function_key = lower
+        .strip_prefix('f')
+        .is_some_and(|n| !n.is_empty() && n.len() <= 2 && n.bytes().all(|b| b.is_ascii_digit()));
+    !(function_key || NON_TEXT_KEYS.contains(&lower.as_str()))
+}
+
 /// A selected value or dialog prompt as a stored receipt may carry it.
 fn free_text(mode: Mode, policy: RecordPolicy, text: &str, tally: &mut Tally) -> String {
     typed_text(mode, policy, text, FieldKind::Unknown, tally)
@@ -181,9 +261,10 @@ fn free_text(mode: Mode, policy: RecordPolicy, text: &str, tally: &mut Tally) ->
 /// The action as a stored receipt may carry it (R-23: the one function).
 ///
 /// `typed` is the kind of the control a typing action went to, read from the
-/// snapshot before the action ran; `None` when it is not known (a raw `type`
-/// action is then classified by its selector, a ref-addressed one is masked as a
-/// secret). `tally` counts what was masked, by rule id, with no content.
+/// snapshot before the action ran, or (for a key press) the kind of the control the
+/// run last focused; `None` when it is not known (a raw `type` action is then
+/// classified by its selector, a ref-addressed one and a text-typing key press are
+/// masked as a secret). `tally` counts what was masked, by rule id, with no content.
 #[must_use]
 pub fn redacted_for_record(
     branch: RecordBranch,
@@ -207,6 +288,14 @@ pub fn redacted_for_record(
         | AgentAction::TypeSemantic { text, .. } => {
             let kind = typed.unwrap_or(FieldKind::Secret);
             *text = typed_text(mode, policy, text, kind, tally);
+        }
+        AgentAction::Press { key } if press_produces_text(key) => {
+            // D2-065: a key press that types a character is typed text, one
+            // character at a time. The control it went to is the one the run last
+            // focused (`typed`, tracked per run by the runtime); a run that cannot
+            // say fails closed, as a ref-addressed typing action does.
+            let kind = typed.unwrap_or(FieldKind::Secret);
+            *key = typed_text(mode, policy, key, kind, tally);
         }
         AgentAction::Select { value, .. }
         | AgentAction::SelectRef { value, .. }
@@ -618,6 +707,108 @@ mod tests {
         );
         let (twice, tally) = record(&once, None, RecordPolicy::SensitiveOnly);
         assert_eq!(text_of(&once), text_of(&twice));
+        assert!(tally.is_empty());
+    }
+
+    fn press(key: &str) -> AgentAction {
+        AgentAction::Press { key: key.to_owned() }
+    }
+
+    fn key_of(action: &AgentAction) -> String {
+        match action {
+            AgentAction::Press { key } => key.clone(),
+            other => panic!("not a key press: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_password_typed_key_by_key_is_masked_per_press() {
+        // D2-065: every character of the password arrives as its own press.
+        let pw = password();
+        let mut tally = Tally::new();
+        for ch in pw.chars() {
+            let out = redacted_for_record(
+                RecordBranch::Typed,
+                &press(&ch.to_string()),
+                Some(FieldKind::Password),
+                RecordPolicy::SensitiveOnly,
+                Mode::Enforce,
+                &mut tally,
+            );
+            assert_eq!(key_of(&out), "[redacted:password]", "press {ch:?}");
+        }
+        assert_eq!(
+            tally.by_rule().get("field.password"),
+            Some(&(pw.chars().count() as u32))
+        );
+        // A shifted character and a space are text too.
+        for key in ["Shift+A", "Space", " ", "+", "Shift++", "Alt+q"] {
+            let (out, _) = record(&press(key), Some(FieldKind::Password), RecordPolicy::SensitiveOnly);
+            assert_eq!(key_of(&out), "[redacted:password]", "key {key:?}");
+        }
+    }
+
+    #[test]
+    fn a_key_press_with_no_known_focus_fails_closed() {
+        let (out, _) = record(&press("x"), None, RecordPolicy::SensitiveOnly);
+        assert_eq!(key_of(&out), "[redacted:secret]");
+    }
+
+    #[test]
+    fn a_key_press_into_an_ordinary_control_keeps_its_character_unless_policy_is_all() {
+        let (out, tally) = record(&press("q"), Some(FieldKind::Unknown), RecordPolicy::SensitiveOnly);
+        assert_eq!(key_of(&out), "q");
+        assert!(tally.is_empty());
+        let (out, _) = record(&press("q"), Some(FieldKind::Unknown), RecordPolicy::AllTyped);
+        assert_eq!(key_of(&out), "[redacted:secret]");
+    }
+
+    #[test]
+    fn keys_that_type_nothing_are_kept_in_every_policy_and_focus() {
+        for key in [
+            "Enter",
+            "Tab",
+            "Escape",
+            "Backspace",
+            "Delete",
+            "ArrowDown",
+            "PageUp",
+            "Home",
+            "F5",
+            "f12",
+            "Shift",
+            "Control+a",
+            "Ctrl+v",
+            "Meta+Shift+k",
+            "Control++",
+        ] {
+            for (typed, policy) in [
+                (None, RecordPolicy::SensitiveOnly),
+                (Some(FieldKind::Password), RecordPolicy::SensitiveOnly),
+                (Some(FieldKind::Unknown), RecordPolicy::AllTyped),
+            ] {
+                let (out, tally) = record(&press(key), typed, policy);
+                assert_eq!(key_of(&out), key, "key {key:?}");
+                assert!(tally.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn press_produces_text_decides_by_key_name() {
+        for text in ["a", "Z", "7", "é", "+", "Space", "Shift+a", "Shift++", "KeyA", "Digit1", "Numpad5", "Unidentified"] {
+            assert!(press_produces_text(text), "{text:?} should be text");
+        }
+        for named in ["Enter", "tab", "ESCAPE", "ArrowLeft", "F1", "F24", "Control+c", "Cmd+v", "Shift+Tab", "Shift+Enter", "Alt+F4"] {
+            assert!(!press_produces_text(named), "{named:?} should not be text");
+        }
+    }
+
+    #[test]
+    fn a_masked_key_press_is_idempotent() {
+        let (once, _) = record(&press("p"), Some(FieldKind::Password), RecordPolicy::SensitiveOnly);
+        let (twice, tally) = record(&once, None, RecordPolicy::SensitiveOnly);
+        assert_eq!(key_of(&once), key_of(&twice));
         assert!(tally.is_empty());
     }
 
