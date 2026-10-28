@@ -369,3 +369,54 @@ fn the_continue_handler_decides_its_turn_with_the_plain_route_and_serves_persist
         "continue_run hands the same decision to the preflight: {preflight}"
     );
 }
+
+/// The ZDR stream may state a cost (WS27-S5) and must publish nothing for it. The cost is priced
+/// only behind the cost switch, and the functions that build a ZDR answer's stream call no
+/// publisher and build no usage envelope, so no ledger row can follow from a ZDR turn. Read from
+/// the source, as the continue handler's guard is, because the stream builders are private to
+/// `sse.rs`.
+#[test]
+fn zdr_stream_prices_only_behind_its_switch_and_publishes_nothing() {
+    let source = include_str!("../src/sse.rs").replace("\r\n", "\n");
+    let code: String = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body_of = |signature: &str| -> String {
+        code.split(signature)
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap_or_else(|| panic!("sse.rs defines `{signature}`"))
+            .to_owned()
+    };
+    let direct = body_of("async fn zdr_direct_stream(");
+    let (before_switch, after_switch) = direct
+        .split_once("if zdr_stream_cost_enabled() {")
+        .expect("zdr_direct_stream reads the cost switch");
+    assert!(
+        !before_switch.contains("zdr_stated_cost("),
+        "no price is read before the cost switch: {direct}"
+    );
+    assert!(
+        after_switch.contains("zdr_stated_cost("),
+        "the price is read behind the cost switch: {direct}"
+    );
+    for (name, body) in [
+        ("zdr_direct_stream", direct),
+        ("zdr_stated_cost", body_of("async fn zdr_stated_cost(")),
+        ("zdr_answer_stream", body_of("fn zdr_answer_stream(")),
+    ] {
+        for publishing in [
+            ".publish(",
+            "usage_subject",
+            "build_usage_envelope",
+            "Envelope {",
+        ] {
+            assert!(
+                !body.contains(publishing),
+                "{name} must publish nothing, but it mentions `{publishing}`"
+            );
+        }
+    }
+}

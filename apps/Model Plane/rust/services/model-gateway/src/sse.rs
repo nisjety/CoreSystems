@@ -8546,6 +8546,10 @@ struct DirectAnswer {
     residency: String,
     input_tokens: u32,
     output_tokens: u32,
+    /// Prompt tokens the provider read from its cache, and wrote to it, for this
+    /// call; zero where it reports none. Counts only.
+    cache_read_tokens: u32,
+    cache_write_tokens: u32,
 }
 
 impl DirectAnswer {
@@ -8566,8 +8570,20 @@ impl DirectAnswer {
             residency: response.residency,
             input_tokens: u32::try_from(response.input_tokens).unwrap_or(0),
             output_tokens: u32::try_from(response.output_tokens).unwrap_or(0),
+            cache_read_tokens: u32::try_from(response.cache_read_input_tokens).unwrap_or(0),
+            cache_write_tokens: u32::try_from(response.cache_creation_input_tokens).unwrap_or(0),
         }
     }
+}
+
+/// What a ZDR answer states about its own cost (WS27-S5, DEC-18): numbers only. It
+/// is priced for the one stream that states it and written nowhere, so a ZDR turn
+/// still has no ledger row and no usage envelope.
+#[derive(Debug, Clone, Copy)]
+struct StatedCost {
+    /// The answer's cost in USD; `None` when its model's price is unknown.
+    usd: Option<f64>,
+    basis: crate::pricing::CostBasis,
 }
 
 /// The privacy floor a persistence-free turn enforced: the caller's own minimum
@@ -9358,6 +9374,52 @@ fn zdr_turn_settings_with(
     }
 }
 
+/// The switch that states a ZDR answer's cost in-stream (WS27-S5). Opt-in: only the
+/// literal `true` enables it. Off, a ZDR answer's usage frame states no cost and no
+/// cache count, exactly as it did before the switch existed.
+const ZDR_STREAM_COST_VAR: &str = "MODEL_GATEWAY_ZDR_STREAM_COST";
+
+fn zdr_stream_cost_enabled() -> bool {
+    zdr_stream_cost_enabled_with(&|key| std::env::var(key).ok())
+}
+
+fn zdr_stream_cost_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(ZDR_STREAM_COST_VAR).is_some_and(|value| value.trim() == "true")
+}
+
+/// The cost a ZDR answer states, priced from its own counts and the model that served
+/// it. The basis is the route's, settled by the provider that answered, as the durable
+/// path settles it. The catalogue is read and the figure returned; nothing is stored or
+/// published.
+async fn zdr_stated_cost(
+    state: &AppState,
+    route: &crate::zdr_precheck::ConnectionRoute,
+    answer: &DirectAnswer,
+) -> StatedCost {
+    let basis = crate::pricing::CostBasis::of_route(
+        &route.provider_hint,
+        &route.subscription_connection_id,
+    )
+    .served_by(&answer.provider_used);
+    let priced = state
+        .pricing
+        .priced(
+            basis,
+            &answer.model_used,
+            crate::pricing::TokenLegs {
+                input_tokens: i64::from(answer.input_tokens),
+                output_tokens: i64::from(answer.output_tokens),
+                cache_read_input_tokens: i64::from(answer.cache_read_tokens),
+                cache_creation_input_tokens: i64::from(answer.cache_write_tokens),
+            },
+        )
+        .await;
+    StatedCost {
+        usd: priced.usd,
+        basis,
+    }
+}
+
 /// Persistence-free SSE response for Zero Data Retention requests. It emits
 /// only response bytes to the current client connection and never touches the
 /// durable stream/session/event/cache seams used by the normal chat path.
@@ -9466,12 +9528,19 @@ async fn zdr_direct_stream(
         }
     };
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // Off, the catalogue is not read at all: no price is looked up and none is stated.
+    let stated_cost = if zdr_stream_cost_enabled() {
+        Some(zdr_stated_cost(&state, &route, &answer).await)
+    } else {
+        None
+    };
     zdr_answer_stream(
         request_id,
         grounding,
         features,
         min_privacy_tier,
         answer,
+        stated_cost,
         latency_ms,
     )
 }
@@ -9486,19 +9555,29 @@ fn zdr_answer_stream(
     features: Vec<String>,
     min_privacy_tier: i32,
     answer: DirectAnswer,
+    stated_cost: Option<StatedCost>,
     latency_ms: u64,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     // The answer's provenance as the serving call stated it, floored at the ZDR
     // tier the call was made under. It carries counts and provenance only, never
-    // content. Metering of ZDR turns is the deferred Z-06b task, so no cost is
-    // stated on this path rather than estimated.
+    // content. The cost and the cache counts it was priced from are stated only when
+    // the cost switch priced this answer; persisting a ZDR turn's cost is DEF-Z-06b.
+    let (cost_usd, cost_basis, cache_read_tokens, cache_write_tokens) = match stated_cost {
+        Some(stated) => (
+            stated.usd,
+            Some(stated.basis),
+            answer.cache_read_tokens,
+            answer.cache_write_tokens,
+        ),
+        None => (None, None, 0, 0),
+    };
     let usage = crate::sse_events::ChatEvent::Usage {
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
+        cache_read_tokens,
+        cache_write_tokens,
         input_tokens: answer.input_tokens,
         output_tokens: answer.output_tokens,
-        cost_usd: None,
-        cost_basis: None,
+        cost_usd,
+        cost_basis,
         latency_ms,
         confidence: None,
         served_by: crate::sse_events::ServedBy::stamped(
@@ -15571,7 +15650,7 @@ mod agentic_follow_tests {
 
 #[cfg(test)]
 mod zdr_provenance_tests {
-    use super::{zdr_answer_stream, zdr_enforced_floor, DirectAnswer};
+    use super::{zdr_answer_stream, zdr_enforced_floor, DirectAnswer, StatedCost};
     use axum::response::IntoResponse;
     use mp_contracts::model_plane::v1::InferResponse;
     use serde_json::Value;
@@ -15633,6 +15712,7 @@ mod zdr_provenance_tests {
                 .collect(),
             min_privacy_tier,
             answer,
+            None,
             latency_ms,
         ))
         .await
@@ -15666,6 +15746,7 @@ mod zdr_provenance_tests {
             Vec::new(),
             0,
             answer,
+            None,
             12,
         ))
         .await;
@@ -15708,6 +15789,7 @@ mod zdr_provenance_tests {
                 Vec::new(),
                 0,
                 answer,
+                None,
                 12,
             ))
             .await;
@@ -15792,7 +15874,7 @@ mod zdr_provenance_tests {
         assert_eq!(usage["input_tokens"], 42);
         assert_eq!(usage["output_tokens"], 7);
         assert_eq!(usage["latency_ms"], 730);
-        // Metering of ZDR turns is a separate task, so no cost is stated for them.
+        // The cost switch is off here, so this stream states no cost.
         assert!(usage["cost_usd"].is_null(), "{usage}");
         // Counts and provenance only: nothing the answer said reaches this frame.
         assert!(!usage.to_string().contains("SECRET-ANSWER"), "{usage}");
@@ -15923,6 +16005,123 @@ mod zdr_provenance_tests {
             "requested-model",
         );
         assert_eq!((negative.input_tokens, negative.output_tokens), (0, 0));
+
+        // The cache legs are carried as the provider reports them; a negative one is zero.
+        let cached = DirectAnswer::from_response(
+            InferResponse {
+                cache_read_input_tokens: 900,
+                cache_creation_input_tokens: -3,
+                ..served("Hei")
+            },
+            "requested-model",
+        );
+        assert_eq!(
+            (cached.cache_read_tokens, cached.cache_write_tokens),
+            (900, 0)
+        );
+    }
+
+    /// With the cost switch off, a cached answer's usage frame states no cost and no cache
+    /// count: the counts are carried, not stated, as before the switch existed.
+    #[tokio::test]
+    async fn a_zdr_usage_frame_states_no_cost_and_no_cache_count_while_the_switch_is_off() {
+        let answer = DirectAnswer::from_response(
+            InferResponse {
+                cache_read_input_tokens: 30,
+                cache_creation_input_tokens: 12,
+                ..served("Hei")
+            },
+            "requested-model",
+        );
+        let frames = stream_of(answer, &["usage"], 0, 5).await;
+        let usage = usage_of(&frames);
+        assert!(usage["cost_usd"].is_null(), "{usage}");
+        for key in ["cost_basis", "cache_read_tokens", "cache_write_tokens"] {
+            assert!(usage.get(key).is_none(), "{key} must be omitted: {usage}");
+        }
+    }
+
+    /// An answer priced under the cost switch states its cost, the basis and the cache counts
+    /// it was priced from, and nothing beside it: one usage frame between the chunks and done,
+    /// no envelope-like frame, and no content in the frame. A second usage frame, or a figure
+    /// that is not the priced one, fails here.
+    #[tokio::test]
+    async fn zdr_usage_states_cost_but_publishes_no_envelope() {
+        let answer = DirectAnswer::from_response(
+            InferResponse {
+                cache_read_input_tokens: 30,
+                cache_creation_input_tokens: 12,
+                ..served("SECRET-ANSWER-9 hei")
+            },
+            "requested-model",
+        );
+        let stated = StatedCost {
+            usd: Some(0.0042),
+            basis: crate::pricing::CostBasis::Metered,
+        };
+        let out = frames(zdr_answer_stream(
+            "req-zdr".to_owned(),
+            None,
+            vec!["usage".to_owned()],
+            0,
+            answer,
+            Some(stated),
+            9,
+        ))
+        .await;
+
+        let usage = usage_of(&out);
+        assert_eq!(usage["cost_usd"], 0.0042, "{usage}");
+        assert_eq!(usage["cost_basis"], "metered", "{usage}");
+        assert_eq!(usage["cache_read_tokens"], 30, "{usage}");
+        assert_eq!(usage["cache_write_tokens"], 12, "{usage}");
+        assert_eq!(usage["retention_class"], "zdr", "{usage}");
+        let names: Vec<&str> = out.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(
+            names
+                .iter()
+                .all(|name| matches!(*name, "chunk" | "usage" | "done")),
+            "a priced answer adds no frame beside its answer: {names:?}"
+        );
+        assert!(!usage.to_string().contains("SECRET-ANSWER"), "{usage}");
+    }
+
+    /// An unknown price is stated as a null cost with its basis, never as a figure.
+    #[tokio::test]
+    async fn a_zdr_answer_whose_price_is_unknown_states_no_figure() {
+        let answer = DirectAnswer::from_response(served("Hei"), "requested-model");
+        let stated = StatedCost {
+            usd: None,
+            basis: crate::pricing::CostBasis::Metered,
+        };
+        let out = frames(zdr_answer_stream(
+            "req-zdr".to_owned(),
+            None,
+            vec!["usage".to_owned()],
+            0,
+            answer,
+            Some(stated),
+            9,
+        ))
+        .await;
+        let usage = usage_of(&out);
+        assert!(usage["cost_usd"].is_null(), "{usage}");
+        assert_eq!(usage["cost_basis"], "metered", "{usage}");
+    }
+
+    /// The cost switch is on only for the literal `true`, surrounding whitespace aside.
+    #[test]
+    fn zdr_stream_cost_is_on_only_for_the_literal_true() {
+        let on = |raw: &'static str| super::zdr_stream_cost_enabled_with(&|_| Some(raw.to_owned()));
+        assert!(on("true"));
+        assert!(on(" true\n"));
+        for off in ["", "TRUE", "True", "1", "on", "yes", "enabled", "false"] {
+            assert!(!on(off), "{off:?} must not enable the switch");
+        }
+        assert!(
+            !super::zdr_stream_cost_enabled_with(&|_| None),
+            "unset is off"
+        );
     }
 
     #[test]

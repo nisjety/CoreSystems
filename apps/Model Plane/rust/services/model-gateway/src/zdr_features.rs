@@ -170,8 +170,9 @@ pub const FEATURE_TREATMENTS: &[(&str, Treatment)] = &[
         Treatment::Inert("memory is neither read nor written on a ZDR turn"),
     ),
     // One usage frame when the request asks for it: the counts, the serving
-    // provider, its residency and tier, and the retention class. No cost is
-    // stated and no content is carried.
+    // provider, its residency and tier, and the retention class. The cost and the
+    // cache counts are stated only behind `MODEL_GATEWAY_ZDR_STREAM_COST` (WS27-S5),
+    // computed for that frame and stored nowhere (DEF-Z-06b). No content is carried.
     ("usage", Treatment::Honored),
     (
         "reasoning",
