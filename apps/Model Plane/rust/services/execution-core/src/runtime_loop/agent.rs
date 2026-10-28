@@ -4204,6 +4204,27 @@ async fn run_rounds(
             // unavailable error without a false AwaitingApproval state/event.
             if outcome.status == "awaiting_approval" {
                 if ctx.depth == 0 {
+                    // A call the person declined earlier in this run is answered with that
+                    // refusal, not a second approval (WS13 S4). A browser action is left out: a
+                    // browser denial aborts its run, and is never answered as an ordinary refusal.
+                    if outcome.cause != Some(CauseCode::BrowserActionRisk)
+                        && declined_earlier_in_run(ctx, &call.name, &call.arguments_json).await
+                    {
+                        info!(
+                            run_id = %req.run_id,
+                            tool = %call.name,
+                            "run_agent: a call declined earlier in this run was not asked again"
+                        );
+                        outcomes.push(ToolStepResult {
+                            name: call.name.clone(),
+                            output: String::new(),
+                            error: Some(mp_contracts::loop_fold::closer_text(
+                                mp_contracts::loop_fold::CloserKind::Denied,
+                                &call.name,
+                            )),
+                        });
+                        continue;
+                    }
                     // First one (by array order) wins the durable pause, matching
                     // the pre-parallel-dispatch tie-break exactly. A second
                     // approval-needing call in the same batch never ran its side
@@ -7033,6 +7054,86 @@ pub(crate) fn approval_reason_for(tool_name: &str) -> String {
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's override of the denial-memory switch (see [`DenialMemorySwitch`]).
+    static TEST_DENIAL_MEMORY: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Holds the denial-memory switch at a fixed value for the current test thread, then restores it.
+#[cfg(test)]
+struct DenialMemorySwitch;
+
+#[cfg(test)]
+impl DenialMemorySwitch {
+    fn set(on: bool) -> Self {
+        TEST_DENIAL_MEMORY.with(|cell| cell.set(Some(on)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for DenialMemorySwitch {
+    fn drop(&mut self) {
+        TEST_DENIAL_MEMORY.with(|cell| cell.set(None));
+    }
+}
+
+/// Whether denial memory is on in this process (WS13 S4). Default off: the one strict parser is
+/// `mp_contracts::approval_cause::denial_memory_enabled`.
+fn denial_memory_on() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = TEST_DENIAL_MEMORY.with(std::cell::Cell::get) {
+        return forced;
+    }
+    approval_cause::denial_memory_enabled()
+}
+
+/// Whether the person already declined this exact call earlier in this run (WS13 S4).
+///
+/// The answer comes from session-core's approvals for the run. Each carries the run-salted digest
+/// of the call its pause was raised on, so a different argument set, or the same call in another
+/// run, is asked again. A zero-retention or waived run never reads them, and a failed read answers
+/// "not declined": the call pauses for a decision exactly as it did before.
+async fn declined_earlier_in_run(
+    ctx: &LoopContext<'_>,
+    tool_name: &str,
+    tool_input: &str,
+) -> bool {
+    if !denial_memory_on() || ctx.req.zdr || ctx.route.is_waived() {
+        return false;
+    }
+    let Ok(request) = authenticated_session_request(
+        pb::ListApprovalsRequest {
+            run_id: ctx.req.run_id.clone(),
+            step_id: String::new(),
+            org_id: ctx.req.org_id.clone(),
+        },
+        ctx.session_bearer,
+    ) else {
+        return false;
+    };
+    let digest = approval_cause::call_digest(&ctx.req.run_id, tool_name, tool_input);
+    match OrchestrationCoreServiceClient::new(ctx.session_channel.clone())
+        .list_approvals(request)
+        .await
+    {
+        Ok(response) => response
+            .get_ref()
+            .approvals
+            .iter()
+            .any(|approval| approval_cause::declines_call(approval, &ctx.req.run_id, &digest)),
+        Err(error) => {
+            warn!(
+                run_id = %ctx.req.run_id,
+                code = ?error.code(),
+                "run_agent: could not read the declined calls; the call pauses for a decision"
+            );
+            false
+        }
+    }
+}
+
 /// HITL pause: mint a durable approval for the gated tool (same shape as the
 /// `ExecuteStep` RPC), then flip the run `AwaitingApproval` and return an
 /// `awaiting_approval` response. A persistence failure returns `unavailable`
@@ -9245,6 +9346,11 @@ mod tests {
         list_calls: Vec<pb::ListToolActionsRequest>,
         /// Every `CreateApproval` the mock accepted, whole.
         approval_requests: Vec<pb::CreateApprovalRequest>,
+        /// The approvals `ListApprovals` answers with, whichever run is asked for. Unfiltered on
+        /// purpose: a test seeds another run's decline here to show the run check keeps it out.
+        listed_approvals: Vec<pb::Approval>,
+        /// Every `ListApprovals` the mock observed.
+        list_approval_calls: Vec<pb::ListApprovalsRequest>,
         /// One entry per call that matters for ordering, across every mock:
         /// `save:<kind>`, `save_failed:<kind>`, `reserve`, `finalize`, `create_approval`.
         order: Vec<String>,
@@ -10827,9 +10933,13 @@ mod tests {
 
         async fn list_approvals(
             &self,
-            _: Request<pb::ListApprovalsRequest>,
+            request: Request<pb::ListApprovalsRequest>,
         ) -> Result<Response<pb::ListApprovalsResponse>, Status> {
-            Err(Status::unimplemented("list_approvals not used"))
+            let mut rec = self.rec.lock().unwrap();
+            rec.list_approval_calls.push(request.into_inner());
+            Ok(Response::new(pb::ListApprovalsResponse {
+                approvals: rec.listed_approvals.clone(),
+            }))
         }
 
         async fn list_pending_approvals(
@@ -13753,6 +13863,244 @@ mod tests {
             state.get_or_create("run_test").status,
             crate::state::RunStatus::AwaitingApproval
         );
+    }
+
+    /// Denial memory within a run (WS13 S4): a call the person declined is answered with its typed
+    /// refusal, not a second approval, and only for that same call in that same run.
+    mod denial_memory {
+        use super::*;
+
+        /// The approval session-core lists for a call the person declined: state DENIED, carrying
+        /// the cause a pause on that call in `run_id` stores.
+        fn declined_approval(run_id: &str, arguments: &str) -> pb::Approval {
+            pb::Approval {
+                id: "appr_declined".to_owned(),
+                run_id: run_id.to_owned(),
+                step_id: "tool_1_del-1".to_owned(),
+                state: pb::ApprovalState::Denied as i32,
+                cause: Some(approval_cause::for_call(
+                    CauseCode::RiskyEffectUnderAsk,
+                    run_id,
+                    "delete_records",
+                    arguments,
+                )),
+                ..Default::default()
+            }
+        }
+
+        fn delete_records_call(id: &str, arguments: &str) -> pb::ToolCall {
+            pb::ToolCall {
+                id: id.to_owned(),
+                name: "delete_records".to_owned(),
+                arguments_json: arguments.to_owned(),
+            }
+        }
+
+        /// One `ask` run whose model follows `script`, with `delete_records` offered.
+        async fn run_under_ask(
+            rec: &SharedRecorder,
+            script: Vec<Scripted>,
+            observed: &ObservedMessages,
+        ) -> Result<pb::RunAgentResponse, tonic::Status> {
+            let session_channel = spawn_session_channel(rec.clone()).await;
+            let inference_channel =
+                spawn_inference_channel_with_messages(script, observed.clone()).await;
+            let state = crate::state::StateStore::new();
+            let mut req = sample_request();
+            req.mode = "ask".to_owned();
+            run_agent_with_tools(
+                &state,
+                session_channel,
+                inference_channel,
+                &plain_caller(),
+                req,
+                vec![delete_records_tool()],
+                None,
+                Some("session-token".to_owned()),
+                "inference-token".to_owned(),
+                &ALLOW_CAPABILITY_POLICY,
+                &STATIC_TERMINAL_TOKENS,
+                None,
+                None,
+                &test_sandbox_manager_client(),
+                "test-backend",
+                None,
+                &test_sandbox_tokens(),
+                None,
+            )
+            .await
+        }
+
+        #[tokio::test]
+        async fn a_denied_call_is_not_re_asked_in_the_same_run() {
+            let _switch = DenialMemorySwitch::set(true);
+            let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+            rec.lock().unwrap().listed_approvals = vec![declined_approval("run_test", "{}")];
+            let observed: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+
+            let resp = run_under_ask(
+                &rec,
+                vec![
+                    Scripted::ToolCalls {
+                        content: String::new(),
+                        calls: vec![delete_records_call("del-2", "{}")],
+                    },
+                    Scripted::Answer("The records stay.".to_owned()),
+                ],
+                &observed,
+            )
+            .await
+            .expect("a declined call must not fail the run");
+
+            assert_eq!(resp.status, "completed");
+            let r = rec.lock().unwrap();
+            assert!(
+                r.approval_requests.is_empty(),
+                "a call already declined raises no second approval"
+            );
+            assert_eq!(
+                r.list_approval_calls.len(),
+                1,
+                "the run's declined calls are read once"
+            );
+            drop(r);
+            let rounds = observed.lock().unwrap();
+            assert_eq!(rounds.len(), 2, "the refusal is what the second round is told");
+            assert!(
+                rounds[1].iter().any(|m| m.content.contains(
+                    "The user declined the call to `delete_records`. It was not run."
+                )),
+                "the model is told the call was declined"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_different_argument_set_is_still_asked() {
+            let _switch = DenialMemorySwitch::set(true);
+            let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+            rec.lock().unwrap().listed_approvals = vec![declined_approval("run_test", "{}")];
+            let observed: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+
+            let resp = run_under_ask(
+                &rec,
+                vec![Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![delete_records_call("del-2", r#"{"id":"r-2"}"#)],
+                }],
+                &observed,
+            )
+            .await
+            .expect("a pause is not a failure");
+
+            assert_eq!(resp.status, "awaiting_approval");
+            let r = rec.lock().unwrap();
+            assert_eq!(
+                r.approval_requests.len(),
+                1,
+                "different arguments are a different call, so they pause"
+            );
+            assert_eq!(r.list_approval_calls.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_denial_in_another_run_does_not_apply() {
+            let _switch = DenialMemorySwitch::set(true);
+            let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+            rec.lock().unwrap().listed_approvals = vec![declined_approval("run_other", "{}")];
+            let observed: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+
+            let resp = run_under_ask(
+                &rec,
+                vec![Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![delete_records_call("del-2", "{}")],
+                }],
+                &observed,
+            )
+            .await
+            .expect("a pause is not a failure");
+
+            assert_eq!(resp.status, "awaiting_approval");
+            assert_eq!(
+                rec.lock().unwrap().approval_requests.len(),
+                1,
+                "the same call in another run is asked again"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_subagent_never_consults_denial_memory() {
+            let _switch = DenialMemorySwitch::set(true);
+            let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+            rec.lock().unwrap().listed_approvals = vec![declined_approval("run_test", "{}")];
+            let session_channel = spawn_session_channel(rec.clone()).await;
+            let observed: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+            let inference_channel = spawn_inference_channel_with_messages(
+                vec![
+                    Scripted::ToolCalls {
+                        content: String::new(),
+                        calls: vec![subagent_call("sub-1", r#"{"goal":"purge stale records"}"#)],
+                    },
+                    Scripted::ToolCalls {
+                        content: String::new(),
+                        calls: vec![delete_records_call("del-2", "{}")],
+                    },
+                    Scripted::Answer("I could not complete this myself.".to_owned()),
+                    Scripted::Answer("Reported back: could not complete it.".to_owned()),
+                ],
+                observed.clone(),
+            )
+            .await;
+            let state = crate::state::StateStore::new();
+            let mut req = sample_request();
+            req.mode = "ask".to_owned();
+            req.tools = vec![delete_records_tool()];
+
+            run_agent(
+                &state,
+                session_channel,
+                inference_channel,
+                &plain_caller(),
+                req,
+                None,
+                Some("session-token".to_owned()),
+                "inference-token".to_owned(),
+                &ALLOW_CAPABILITY_POLICY,
+                &STATIC_TERMINAL_TOKENS,
+                None,
+                None,
+                &test_sandbox_manager_client(),
+                "test-backend",
+                None,
+                &test_sandbox_tokens(),
+                None,
+            )
+            .await
+            .expect("a refused call inside a subagent must not fail the run");
+
+            let r = rec.lock().unwrap();
+            assert!(
+                r.list_approval_calls.is_empty(),
+                "a delegated loop never reads the run's declined calls"
+            );
+            assert!(r.approval_requests.is_empty(), "and raises no approval");
+            drop(r);
+            let texts: Vec<String> = observed
+                .lock()
+                .unwrap()
+                .iter()
+                .flatten()
+                .map(|m| m.content.clone())
+                .collect();
+            assert!(
+                texts.iter().any(|t| t.contains("a delegated subagent may never run")),
+                "the child is refused by the leaf role blocklist"
+            );
+            assert!(
+                texts.iter().all(|t| !t.contains("declined the call")),
+                "the child is never told the call was declined"
+            );
+        }
     }
 
     /// The snapshot a loop-owned pause retains, as the consume hands it back.

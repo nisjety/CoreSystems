@@ -20,7 +20,8 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-use crate::model_plane::v1::ApprovalCause;
+use crate::loop_fold::switch_from;
+use crate::model_plane::v1::{Approval, ApprovalCause, ApprovalState};
 
 /// The `execute_provider_action` tool, the one whose key carries its operation.
 const PROVIDER_ACTION_TOOL: &str = "execute_provider_action";
@@ -314,6 +315,36 @@ pub fn from_metadata(metadata: &Value) -> Option<ApprovalCause> {
     Some(normalized(cause).0)
 }
 
+/// The environment switch for denial memory within a run (build plan WS13 S4). Default off.
+/// Read through the one strict parser, so only a literal `true` enables it.
+pub const DENIAL_MEMORY_ENV: &str = "APPROVAL_DENIAL_MEMORY_ENABLED";
+
+/// Parse the denial-memory switch: `true` in any case and with surrounding whitespace, and
+/// nothing else. An unset or malformed value leaves denial memory off.
+#[must_use]
+pub fn denial_memory_from(value: Option<&str>) -> bool {
+    switch_from(value)
+}
+
+/// Whether denial memory is on in this process.
+#[must_use]
+pub fn denial_memory_enabled() -> bool {
+    denial_memory_from(std::env::var(DENIAL_MEMORY_ENV).ok().as_deref())
+}
+
+/// Whether a listed approval is a decision that declined this exact call in this run. The
+/// digest is run-salted, so the run check is a second guard, not the only one. An approval
+/// that states no cause never matches.
+#[must_use]
+pub fn declines_call(approval: &Approval, run_id: &str, call_digest: &str) -> bool {
+    approval.run_id == run_id
+        && approval.state == ApprovalState::Denied as i32
+        && approval
+            .cause
+            .as_ref()
+            .is_some_and(|cause| cause.call_digest == call_digest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,5 +460,72 @@ mod tests {
         assert_eq!(from_metadata(&metadata), Some(cause));
         assert_eq!(from_metadata(&json!({ "reason": "r" })), None);
         assert_eq!(from_metadata(&json!({ "cause": "not an object" })), None);
+    }
+
+    #[test]
+    fn denial_memory_is_off_unless_the_switch_reads_true() {
+        assert!(!denial_memory_from(None), "an unset switch is off");
+        for value in ["", "1", "yes", "on", "false", "truee"] {
+            assert!(
+                !denial_memory_from(Some(value)),
+                "{value:?} does not enable denial memory"
+            );
+        }
+        for value in ["true", "TRUE", " True "] {
+            assert!(
+                denial_memory_from(Some(value)),
+                "{value:?} enables denial memory"
+            );
+        }
+    }
+
+    #[test]
+    fn a_denial_matches_only_the_call_it_declined_in_its_run() {
+        let arguments = r#"{"id":"r-1"}"#;
+        let denied = Approval {
+            run_id: "run_1".to_owned(),
+            state: ApprovalState::Denied as i32,
+            cause: Some(for_call(
+                CauseCode::RiskyEffectUnderAsk,
+                "run_1",
+                "delete_records",
+                arguments,
+            )),
+            ..Approval::default()
+        };
+        let digest = call_digest("run_1", "delete_records", arguments);
+        assert!(declines_call(&denied, "run_1", &digest));
+        assert!(
+            !declines_call(
+                &denied,
+                "run_1",
+                &call_digest("run_1", "delete_records", r#"{"id":"r-2"}"#)
+            ),
+            "a different argument set is a different call"
+        );
+        assert!(
+            !declines_call(
+                &denied,
+                "run_2",
+                &call_digest("run_2", "delete_records", arguments)
+            ),
+            "the same call in another run is not declined"
+        );
+        let granted = Approval {
+            state: ApprovalState::Granted as i32,
+            ..denied.clone()
+        };
+        assert!(
+            !declines_call(&granted, "run_1", &digest),
+            "only a denial declines"
+        );
+        let uncaused = Approval {
+            cause: None,
+            ..denied
+        };
+        assert!(
+            !declines_call(&uncaused, "run_1", &digest),
+            "an approval that states no cause never matches"
+        );
     }
 }
