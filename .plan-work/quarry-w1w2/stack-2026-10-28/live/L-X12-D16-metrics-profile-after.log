@@ -1,0 +1,3 @@
+# HELP quarry_profile_owner_stamps_total Owner stamps at run start by outcome (stamped, already_exists, tombstone, failed, skipped_service).
+# TYPE quarry_profile_owner_stamps_total counter
+quarry_profile_owner_stamps_total{outcome="stamped"} 1

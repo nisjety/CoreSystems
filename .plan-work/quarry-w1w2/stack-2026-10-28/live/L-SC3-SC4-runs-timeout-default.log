@@ -1,0 +1,2 @@
+{"code":"DRIVER_FAILED","message":"chromiumoxide goto failed","details":{"error":"Request timed out."}}
+{"code":"TIMEOUT","message":"browser operation ax_snapshot timed out","details":{"deadline_ms":5000,"effect":"none","op":"ax_snapshot"},"retryable":true}

@@ -1,0 +1,8 @@
+[#1] Received on "usage.quarry.crawl.seed"
+{"event_id":"quarry:job_01M61QZVY04YPRBQYXX58C6TVE:quarry.crawl.seed","org_id":"org_placeholder","metric":"quarry.crawl.seed","quantity":1.0,"source":"quarry-edge","occurred_at":"2026-10-28T17:12:42.193798030Z","metadata":{"max_pages":1000,"url":"http://fixture-a.crawl.test/","user_id":"user_placeholder"}}
+[#2] Received on "usage.quarry.crawl.seed"
+{"event_id":"quarry:job_01M61QZW2HX6NXYND4CSYCC6VB:quarry.crawl.seed","org_id":"org_placeholder","metric":"quarry.crawl.seed","quantity":1.0,"source":"quarry-edge","occurred_at":"2026-10-28T17:12:42.330397Z","metadata":{"max_pages":1000,"url":"http://fixture-a.crawl.test/","user_id":"user_placeholder"}}
+[#3] Received on "usage.quarry.crawl.seed"
+{"event_id":"quarry:job_01M61R13MKM61K79BBQVX4NVNH:quarry.crawl.seed","org_id":"org_placeholder","metric":"quarry.crawl.seed","quantity":1.0,"source":"quarry-edge","occurred_at":"2026-10-28T17:13:22.846001170Z","metadata":{"max_pages":3,"url":"http://fixture-a.crawl.test/","user_id":"user_placeholder"}}
+[#4] Received on "usage.quarry.crawl.seed"
+{"event_id":"quarry:job_01M61R382EZRGNZCPNERXBZ46A:quarry.crawl.seed","org_id":"org_placeholder","metric":"quarry.crawl.seed","quantity":1.0,"source":"quarry-edge","occurred_at":"2026-10-28T17:14:32.916950825Z","metadata":{"max_pages":2,"url":"http://fixture-a.crawl.test/","user_id":"user_placeholder"}}

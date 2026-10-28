@@ -1,0 +1,9 @@
+edge http://127.0.0.1:8082, enforcement on
+PASS    ceilings  clamped to 300 steps, 3600 s, 20 USD by "ceiling"
+FAIL    steps     0 steps answered 200 before the stop, want 5
+FAIL    runtime   the first step was 502 ({"data":null,"meta":{"request_id":"req_01M624JSVQQW7G467X9Z3BVJ4S"},"error":{"code":"DRIVER_FAILED","message":"chromiumoxide: no current page; call goto() first","details":{"reason":"no_current_page"}...)
+FAIL    cost      the first two steps were 502, 502; the flat table must price the action at 0.0001 USD or less
+FAIL    people    person step 1 was 502 ({"data":null,"meta":{"request_id":"req_01M624K0B81HDFX3SBX58BM509"},"error":{"code":"DRIVER_FAILED","message":"chromiumoxide: no current page; call goto() first","details":{"reason":"no_current_page"}...)
+FAIL    guard     the model's first three steps were 502, 502, 502
+FAIL    takeover  the step before the takeover was 502
+1 PASS, 6 FAIL, 0 NOT-RUN

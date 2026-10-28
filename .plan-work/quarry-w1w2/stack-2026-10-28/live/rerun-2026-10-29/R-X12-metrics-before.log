@@ -1,0 +1,97 @@
+# TYPE quarry_robots_decisions_total counter
+quarry_robots_decisions_total{mode="observe",outcome="would_deny"} 0
+quarry_robots_decisions_total{mode="any",outcome="allowed"} 0
+quarry_robots_decisions_total{mode="observe",outcome="would_unreachable"} 0
+quarry_robots_decisions_total{mode="enforce",outcome="unreachable"} 0
+quarry_robots_decisions_total{mode="enforce",outcome="denied"} 0
+
+# HELP quarry_http_requests_total HTTP requests by route class, method and status class.
+# TYPE quarry_http_requests_total counter
+quarry_http_requests_total{route="/health",method="GET",status_class="2xx"} 1
+quarry_http_requests_total{route="/ready",method="GET",status_class="2xx"} 1
+
+# HELP quarry_lease_pool_waits_total Waits for a lease permit that ended, by pool.
+# TYPE quarry_lease_pool_waits_total counter
+quarry_lease_pool_waits_total{pool="chromium"} 0
+
+# HELP quarry_lease_pool_acquired_total Leases handed out, by pool.
+# TYPE quarry_lease_pool_acquired_total counter
+quarry_lease_pool_acquired_total{pool="chromium"} 0
+
+# HELP quarry_lease_pool_refused_total Lease requests refused, by pool and reason (pool_full, org_render_cap, wait_timeout).
+# TYPE quarry_lease_pool_refused_total counter
+quarry_lease_pool_refused_total{pool="chromium",reason="wait_timeout"} 0
+quarry_lease_pool_refused_total{pool="chromium",reason="pool_full"} 0
+quarry_lease_pool_refused_total{pool="chromium",reason="org_render_cap"} 0
+
+# HELP quarry_lease_pool_wait_seconds_sum Cumulative seconds spent waiting for a lease permit, by pool (divide by the waits counter for the mean).
+# TYPE quarry_lease_pool_wait_seconds_sum gauge
+quarry_lease_pool_wait_seconds_sum{pool="chromium"} 0
+
+# HELP quarry_agent_runs_active Live agent runs now, by class (interactive or agent).
+# TYPE quarry_agent_runs_active gauge
+quarry_agent_runs_active{class="interactive"} 0
+quarry_agent_runs_active{class="agent"} 0
+
+# HELP quarry_build_info Always 1; the version is the label.
+# TYPE quarry_build_info gauge
+quarry_build_info{version="0.1.0"} 1
+
+# TYPE quarry_robots_cache_entries gauge
+quarry_robots_cache_entries 0
+
+# HELP quarry_lease_pool_peak_in_flight Highest in-flight lease count seen, by pool.
+# TYPE quarry_lease_pool_peak_in_flight gauge
+quarry_lease_pool_peak_in_flight{pool="chromium"} 0
+
+# HELP quarry_lease_pool_capacity Concurrent leases a pool allows.
+# TYPE quarry_lease_pool_capacity gauge
+quarry_lease_pool_capacity{pool="chromium"} 2
+
+# HELP quarry_agent_runs_pending Agent run starts admitted and not yet registered.
+# TYPE quarry_agent_runs_pending gauge
+quarry_agent_runs_pending 0
+
+# HELP quarry_edge_draining 1 once the edge has begun draining for shutdown, otherwise 0.
+# TYPE quarry_edge_draining gauge
+quarry_edge_draining 0
+
+# HELP quarry_lease_pool_in_flight Leases currently held, by pool.
+# TYPE quarry_lease_pool_in_flight gauge
+quarry_lease_pool_in_flight{pool="chromium"} 0
+
+# HELP quarry_http_request_duration_seconds HTTP request duration by route class and status class.
+# TYPE quarry_http_request_duration_seconds histogram
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="0.005"} 1
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="0.01"} 1
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="0.025"} 1
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="0.05"} 1
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="0.1"} 1
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="0.25"} 1
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="0.5"} 1
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="1"} 1
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="2.5"} 1
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="5"} 1
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="10"} 1
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="30"} 1
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="60"} 1
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="+Inf"} 1
+quarry_http_request_duration_seconds_sum{route="/ready",status_class="2xx"} 0.00022922
+quarry_http_request_duration_seconds_count{route="/ready",status_class="2xx"} 1
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="0.005"} 1
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="0.01"} 1
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="0.025"} 1
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="0.05"} 1
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="0.1"} 1
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="0.25"} 1
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="0.5"} 1
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="1"} 1
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="2.5"} 1
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="5"} 1
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="10"} 1
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="30"} 1
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="60"} 1
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="+Inf"} 1
+quarry_http_request_duration_seconds_sum{route="/health",status_class="2xx"} 0.000144594
+quarry_http_request_duration_seconds_count{route="/health",status_class="2xx"} 1
+

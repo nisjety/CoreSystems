@@ -1,0 +1,12 @@
+# run 1 start 2026-10-28T23:26:05Z
+edge http://127.0.0.1:8082, enforcement on
+PASS    ceilings  clamped to 300 steps, 3600 s, 20 USD by "ceiling"
+PASS    steps     5 steps, then 402 steps; 5 receipts with a flat-table cost
+PASS    runtime   402 runtime after 5 s
+PASS    cost      4 steps within 0.0013 USD on the flat table, then 402 cost at 0.0013 USD, before it ran
+PASS    people    20 person steps on a 12-step session, all 200
+PASS    guard     the model's 4th step is 429, the person's step is 200
+PASS    takeover  5 takeover steps exempt; counted again after the hand-back; then 402 steps
+7 PASS, 0 FAIL, 0 NOT-RUN
+exit=0
+# end 2026-10-28T23:26:19Z

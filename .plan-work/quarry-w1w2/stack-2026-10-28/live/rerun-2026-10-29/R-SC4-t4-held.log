@@ -1,0 +1,35 @@
+=== t4 start 2026-10-28T23:16:02Z ready={"generation":1,"sessions_open":0}
+--- held try 1 run=run_01M62CS5DRNPW1E4WTGYBSF45F
+warm navigate fixture-a: http=200 time=0.324528 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":0,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","do
+navigate held.html: http=504 time=25.015762
+  body: {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":25000,"effect":"unknown","op":"navigate"}}
+  url-in-body: slow.crawl.test=0 any-http-url=0
+next (wait): http=200 time=0.153379
+  ok: {"url":"http://slow.crawl.test/held.html","title":"R-SC4 held image page","step":2,"ax_nodes":10,"ax_names":["R-SC4 held image page","Held image","Held image","The image below never finishes."]}
+browser-session: {"currentUrl":"http://slow.crawl.test/held.html","title":null,"status":"active","live":true}
+navigate fixture-a after: http=200 time=0.177006 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","do
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+--- held try 2 run=run_01M62CT0MMR1CSSDZTQQ44MKSA
+warm navigate fixture-a: http=200 time=0.333311 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":0,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","do
+navigate held.html: http=504 time=25.012554
+  body: {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":25000,"effect":"unknown","op":"navigate"}}
+  url-in-body: slow.crawl.test=0 any-http-url=0
+next (wait): http=200 time=0.195483
+  ok: {"url":"http://slow.crawl.test/held.html","title":"R-SC4 held image page","step":2,"ax_nodes":10,"ax_names":["R-SC4 held image page","Held image","Held image","The image below never finishes."]}
+browser-session: {"currentUrl":"http://slow.crawl.test/held.html","title":null,"status":"active","live":true}
+navigate fixture-a after: http=200 time=0.284470 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","do
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+--- held try 3 run=run_01M62CTVZGSBQFZ5TFJF987PTH
+(no warm step: the held page is the first step)
+navigate held.html: http=504 time=25.121160
+  body: {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":25000,"effect":"unknown","op":"navigate"}}
+  url-in-body: slow.crawl.test=0 any-http-url=0
+next (wait): http=502 time=0.116365
+  err: {"code":"DRIVER_FAILED","message":"chromiumoxide: no current page; call goto() first","retryable":false,"details":{"reason":"no_current_page"}}
+browser-session: {"currentUrl":"","title":null,"status":"active","live":true}
+navigate fixture-a after: http=200 time=0.362094 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","do
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+=== t4 end 2026-10-28T23:17:25Z ready={"generation":1,"sessions_open":0}

@@ -1,0 +1,15 @@
+start 2026-10-28T19:57:26Z
+evidence: C:/dev/CoresSystem/.claude/worktrees/vigorous-perlman-e7ae5b/.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/legacy
+edge health: ok
+PASS crawl_accepted: HTTP 200
+job: job_01M621DHDXVJ4WAYF1QECBHCCQ
+PASS crawl_finished: statistics present
+pages fetched per fixture host (robots.txt excluded):
+  crawl-fixture-a: 8
+  crawl-fixture-b: 1
+PASS legacy_external_followed: 1
+PASS legacy_no_robots_fetch: 0
+evidence files: C:/dev/CoresSystem/.claude/worktrees/vigorous-perlman-e7ae5b/.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/legacy (fixture-a.log, fixture-b.log, job.json, crawl-response.json)
+SUMMARY expect=legacy pass=4 fail=0 not_run=0
+end 2026-10-28T19:57:42Z
+--- robots metrics after legacy

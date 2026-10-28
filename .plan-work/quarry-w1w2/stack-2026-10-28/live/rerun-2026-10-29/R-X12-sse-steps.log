@@ -1,0 +1,11 @@
+start 2026-10-28T23:26:55.110Z run=run_01M62DD2EWDPY9A28S438DCP3W enforcement="enforcement":"on" max_steps="max_steps":5
+step1 200 0.421318 
+step2 200 0.076783 
+step3 200 0.073881 
+step4 200 0.080839 
+step5 200 0.089087 
+step6 402 0.009014 "code":"BUDGET_EXHAUSTED" "dimension":"steps" "limit":5.0 "spent":5.0
+step7 402 0.011554 "code":"BUDGET_EXHAUSTED" "dimension":"steps" "limit":5.0 "spent":5.0
+step8 402 0.004483 "code":"BUDGET_EXHAUSTED" "dimension":"steps" "limit":5.0 "spent":5.0
+close 2026-10-28T23:27:05.758Z DELETE 200
+stream stopped 2026-10-28T23:27:08.868Z

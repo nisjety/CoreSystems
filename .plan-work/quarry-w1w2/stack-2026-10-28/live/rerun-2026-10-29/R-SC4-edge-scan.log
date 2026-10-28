@@ -1,0 +1,27 @@
+# R-SC4 edge log scan (docker logs quarry-edge). Container 1 (T1/T4 at shipped scale, 23:12-23:17Z) was recreated by the T2 flag change, so its log is gone; T1/T3/T4 were repeated on the final container for this scan.
+== edge-scale05.log (since: 2026-10-28T23:12:07Z) lines=143
+lines matching relaunch|crash|lost|disconnect|dead|recycled|unhealthy: 0
+lines containing slow.crawl.test: 0
+lines containing held.html or slow.html: 0
+chromiumoxide 'WS Invalid message' warns: 7
+ERROR lines:
+2026-10-28T23:18:07.694820Z | authorization violation | nats: authorization violation |  | 
+2026-10-28T23:18:35.397603Z | response failed | Status code: 504 Gateway Timeout | 12532 ms | /v1/agent/runs/run_01M62CXD6XGPYZZ91ZD3S8SEQM/step
+2026-10-28T23:18:51.060889Z | response failed | Status code: 504 Gateway Timeout | 12531 ms | /v1/agent/runs/run_01M62CXX19JZJDNNCDBYFKCSK1/step
+2026-10-28T23:19:07.275008Z | response failed | Status code: 504 Gateway Timeout | 12519 ms | /v1/agent/runs/run_01M62CYCTG32BCJ8WJQYH2J5W3/step
+2026-10-28T23:19:23.037498Z | response failed | Status code: 504 Gateway Timeout | 12527 ms | /v1/agent/runs/run_01M62CYW6WFBXCBE3VM5RHK7ZS/step
+2026-10-28T23:19:56.120638Z | response failed | Status code: 504 Gateway Timeout | 12534 ms | /v1/agent/runs/run_01M62CZW9RRNN2GXTYDF2YF9TF/step
+2026-10-28T23:20:09.064953Z | response failed | Status code: 504 Gateway Timeout | 12598 ms | /v1/agent/runs/run_01M62CZW9RRNN2GXTYDF2YF9TF/step
+2026-10-28T23:20:22.820036Z | response failed | Status code: 504 Gateway Timeout | 12595 ms | /v1/agent/runs/run_01M62D0Q4KFW1WMTZNB0WXM3XD/step
+2026-10-28T23:20:23.153668Z | response failed | Status code: 502 Bad Gateway | 109 ms | /v1/agent/runs/run_01M62D0Q4KFW1WMTZNB0WXM3XD/step
+== edge-final.log (since: 2026-10-28T23:21:05Z) lines=67
+lines matching relaunch|crash|lost|disconnect|dead|recycled|unhealthy: 0
+lines containing slow.crawl.test: 0
+lines containing held.html or slow.html: 0
+chromiumoxide 'WS Invalid message' warns: 7
+ERROR lines:
+2026-10-28T23:21:32.703087Z | response failed | Status code: 504 Gateway Timeout | 25047 ms | /v1/agent/runs/run_01M62D2E56JBQJJ2392V8GS416/step
+2026-10-28T23:22:01.438834Z | response failed | Status code: 504 Gateway Timeout | 25035 ms | /v1/agent/runs/run_01M62D3AFEXRJXRK5Q14HGH26F/step
+2026-10-28T23:22:31.053927Z | response failed | Status code: 504 Gateway Timeout | 25023 ms | /v1/agent/runs/run_01M62D47CS9X6NW2QXZJSNTA0T/step
+2026-10-28T23:22:58.791202Z | response failed | Status code: 504 Gateway Timeout | 25121 ms | /v1/agent/runs/run_01M62D533YT527VRMPVN9A2JEN/step
+2026-10-28T23:22:59.339701Z | response failed | Status code: 502 Bad Gateway | 111 ms | /v1/agent/runs/run_01M62D533YT527VRMPVN9A2JEN/step

@@ -1,0 +1,25 @@
+start 2026-10-28T19:59:04Z
+evidence: C:/dev/CoresSystem/.claude/worktrees/vigorous-perlman-e7ae5b/.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/enforce
+edge health: ok
+PASS crawl_accepted: HTTP 200
+job: job_01M621GH8XS8YMG5HQA0565D1G
+PASS crawl_finished: statistics present
+pages fetched per fixture host (robots.txt excluded):
+  crawl-fixture-a: 3
+  crawl-fixture-b: 0
+PASS enforce_robots_fetched: 1
+PASS enforce_private_not_fetched: 0
+PASS enforce_external_not_fetched: 0
+PASS enforce_map_200: 200
+PASS enforce_map_lists_no_private: 0
+PASS enforce_crawl_delay_at_least_2s: ok
+evidence files: C:/dev/CoresSystem/.claude/worktrees/vigorous-perlman-e7ae5b/.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/enforce (fixture-a.log, fixture-b.log, job.json, crawl-response.json)
+SUMMARY expect=enforce pass=8 fail=0 not_run=0
+end 2026-10-28T19:59:19Z
+--- robots metrics after enforce
+quarry_robots_decisions_total{mode="enforce",outcome="denied"} 0
+quarry_robots_decisions_total{mode="any",outcome="allowed"} 3
+quarry_robots_decisions_total{mode="enforce",outcome="unreachable"} 0
+quarry_robots_decisions_total{mode="observe",outcome="would_unreachable"} 0
+quarry_robots_decisions_total{mode="observe",outcome="would_deny"} 0
+quarry_robots_cache_entries 1
