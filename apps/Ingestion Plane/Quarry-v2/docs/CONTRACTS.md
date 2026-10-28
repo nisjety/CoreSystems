@@ -848,3 +848,12 @@ Response (`ScrapeResponse`, all optional, absent unless asked):
 
 Errors: 501 `UNSUPPORTED` `details.reason = "browser_capability_unavailable"` (a browser that cannot capture);
 `/v1/scrape/stream` refuses capture formats with `details.reason = "unsupported_in_stream"`. No new `ErrorCode`.
+
+## OpenAPI: the public spec and the internal spec (OPENAPI-INTERNAL, decision 3.13, 2026-10-28)
+
+- `docs/openapi.yaml` is the public spec. `sdks/generate.sh` generates the SDKs from it and from nothing else. It has no `/v1/internal/*` path, no operation tagged `internal` and no `Internal*` schema; `scripts/tests/openapi-internal-guard.test.mjs` fails if one appears.
+- `docs/openapi-internal.yaml` describes the `/v1/internal/*` routes the edge registers: run_page, change/record, page-images, schedules/preflight, orgs/{org}/profiles, and the queue routes (enqueue, enqueue_batch, pop, ack). It is repository documentation only. It is never served, no SDK is generated from it, and no code or script loads it. The guard fails if the internal spec and the registered internal routes differ.
+- Who can reach an internal route is decided by gateway routing, not by the file (D2-312, not proven live). The page-images route has no token: its content hash is the capability on the trusted bus, so it must never be routed publicly.
+- The eight `/v1/internal/*` routes of the Go control service (quarry-control: jobs claim, pending-control, control-ack, running, finalize; schedules desired and runs; zdr-tombstones) are not described yet. They move with the D2-050 internal secret split.
+- Every route the edge registers is in one of the two spec files or on `scripts/openapi-route-allowlist.json` with a reason (`scripts/tests/openapi-route-coverage.test.mjs`).
+- The generator does not delete files it no longer writes. After a spec change, delete the generated files that no longer exist (the gitignored `sdks/python/quarry_client`, `sdks/python/docs`, `sdks/python/test`, `sdks/typescript/src`, and the tracked `sdks/typescript/docs`).

@@ -25,8 +25,6 @@ from quarry_client.models import (
     EnvelopeNormalizedOutput,
     FormatRef,
     HandoffAck,
-    InternalRunPage,
-    InternalRunPageResult,
     Link,
     NormalizedOutput,
     OutputFormats,
@@ -186,29 +184,6 @@ class TestEnvelopes:
         )
         assert env.success is True
         assert env.data.job_id == "job_abc"
-
-
-class TestInternalRunPage:
-    def test_minimal(self):
-        req = InternalRunPage(url="https://example.com")
-        assert req.url == "https://example.com"
-
-    def test_with_run_id(self):
-        req = InternalRunPage(url="https://example.com", run_id="run_xyz", zdr=True)
-        assert req.run_id == "run_xyz"
-        assert req.zdr is True
-
-
-class TestInternalRunPageResult:
-    def test_basic(self):
-        result = InternalRunPageResult(
-            run_id="run_xyz",
-            status=200,
-            fingerprint="blake3:aabbcc",
-            links=["https://example.com/a", "https://example.com/b"],
-        )
-        assert len(result.links) == 2
-        assert result.fingerprint == "blake3:aabbcc"
 
 
 class TestWebAgentContracts:
