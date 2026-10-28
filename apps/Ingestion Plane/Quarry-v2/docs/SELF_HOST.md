@@ -50,7 +50,7 @@ Set the following environment variables:
 | `QUARRY_EDGE__AUTH_CORE_URL` | `http://auth-core:3011` | Auth Core service-token issuer |
 | `QUARRY_EDGE__QUARRY_SERVICE_API_KEY` | — | Durable credential registered under fixed service id `quarry-edge`; required when a plane URL is set |
 | `QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS` | `false` | Local-only static-token compatibility; refused in production |
-| `MODEL_PLANE_URL` | — | `http://model-gateway:8080` for AI formats + planner |
+| `MODEL_PLANE_URL` | — (opt-in; empty keeps every Model Plane feature off) | `http://model-gateway:8080` for AI formats + planner |
 | `QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL` | — | `http://browser-broker:9095` for grant validation (the old name `BROWSER_BROKER_GRPC` was never read) |
 | `NATS_URL` | — | `nats://nats:4222` for cross-plane events |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP collector for traces |
@@ -101,7 +101,7 @@ Every model-gateway call a Quarry feature makes (intent classification, autoprom
 |-----|---------|-------|
 | `QUARRY_EDGE__MODEL_PLANE_URL` | — | Enables the hop (and every other Model Plane consumer). Unset → `title_source` is `html`/`host` only. Set, the call is still refused until a model-gateway row is granted (none is, QB-T17). |
 | `QUARRY_EDGE__PAGE_TITLE_MODEL` | `verevon-budget` | A Model Plane **routing alias** (`verevon-budget` = cheapest capable model via inference-core's `RoutingPolicy`; also `verevon-balance`, `verevon-genius`). Never a vendor model id. |
-| `QUARRY_EDGE__PAGE_TITLE_ENRICH` | `true` | Set `false` to keep extraction fully local. |
+| `QUARRY_EDGE__PAGE_TITLE_ENRICH` | `true` when a Model Plane URL is set; the Ingestion compose sets `0` | Set `false` to keep extraction fully local. |
 | `QUARRY_BROWSER_SETTLE_MS` | `3500` | Hydration settle budget for JS-shell pages fetched by the browser fallback (see `ONBOARDING_LIVE_CRAWL.md`). |
 
 Guards: 2 s time-box, 3 concurrent calls, 600 calls/hour per edge process, fingerprint-keyed cache, JSON-only reply validation. Any failure degrades to `title_source: "host"`; a page never fails because of the hop. In the shipped configuration that call is refused (above), so titles come from `html` or `host` today.

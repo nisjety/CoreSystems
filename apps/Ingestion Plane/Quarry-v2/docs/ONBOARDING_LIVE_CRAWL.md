@@ -158,7 +158,10 @@ a one-sentence summary from a ≤ 1 200-char slice of the excerpt.
   id here; use `verevon-budget`, `verevon-balance` or `verevon-genius`.
 * **Enable/disable** — `QUARRY_EDGE__PAGE_TITLE_ENRICH` (default `true`
   whenever `QUARRY_EDGE__MODEL_PLANE_URL` is set). Without a Model Plane URL
-  the hop is simply absent and `title_source` stays `html`/`host`.
+  the hop is simply absent and `title_source` stays `html`/`host`. The Ingestion
+  compose sets `QUARRY_EDGE__PAGE_TITLE_ENRICH` to `0` (decision 3.12): the hop
+  stays off until an operator sets `QUARRY_EDGE_PAGE_TITLE_ENRICH=1` and a Model
+  Plane URL.
 * **Guards** — time-boxed at 2 s, at most 3 concurrent calls, a rolling cap
   of 600 calls/hour per edge process, results cached by content
   fingerprint (re-crawls of an unchanged page never pay twice), reply must
