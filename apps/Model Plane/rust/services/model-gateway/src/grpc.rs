@@ -3519,6 +3519,7 @@ mod tests {
                     key_phrases: Vec::new(),
                     redacted_text: String::new(),
                     content_safety_json: String::new(),
+                    injection_json: String::new(),
                     detected_language_name: String::new(),
                     detected_language_code: String::new(),
                     confidence: 0.0,

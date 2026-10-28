@@ -1100,13 +1100,14 @@ mod tests {
                 "ai_speech_voices",
                 "voice catalogue read: no user content",
             ),
-            // A derived content-safety pass over tool payloads. It runs only on a persistent turn:
+            // The derived content-safety and prompt-injection passes over tool payloads (both classify
+            // functions, WS26-S1 shadow and WS26-S6 inline). They run only on a persistent turn:
             // `dispatch_tool_with_cost` passes `zdr || data_plane_mode.is_some()` to
             // `assess_external_payload`, so a ZDR or waived turn sends nothing to a processor here.
             (
                 "semantic_screening.rs",
                 "classify",
-                "derived content-safety pass, skipped on a non-persistent turn (assess_external_payload)",
+                "derived content-safety and prompt-injection passes, skipped on a non-persistent turn (assess_external_payload)",
             ),
         ];
         const INFERENCE_CALLS: &[&str] = &[

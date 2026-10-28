@@ -522,6 +522,7 @@ mod tests {
             skill_ids: Vec::new(),
             deep_research: false,
             retrieval_scope: None,
+            connector_scope: None,
             max_cost_usd: None,
             max_tokens: None,
             profile: None,

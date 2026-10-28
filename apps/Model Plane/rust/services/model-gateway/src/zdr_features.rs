@@ -101,6 +101,7 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     // `web_only` is refused. `auto` and `knowledge_only` are honored: grounding
     // then reads org knowledge only, and no web source was asked for.
     ("retrieval_scope", refused_feature("web_search")),
+    ("connector_scope", refused_feature("connector_read")),
     (
         "regenerated",
         Treatment::Inert("a learning signal, and learning does not run on a ZDR turn"),
@@ -221,6 +222,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         skill_ids: _,
         deep_research: _,
         retrieval_scope: _,
+        connector_scope: _,
         regenerated: _,
         pinned_message_ids: _,
         edited_resubmit: _,
@@ -260,6 +262,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "skill_ids",
         "deep_research",
         "retrieval_scope",
+        "connector_scope",
         "regenerated",
         "pinned_message_ids",
         "edited_resubmit",
@@ -325,6 +328,9 @@ pub fn refusal(request: &InvokeRequest) -> Option<Refusal> {
             == crate::normalize::RetrievalScope::WebOnly
     {
         return feature("web_search");
+    }
+    if request.connector_scope.as_ref().is_some_and(|ids| !ids.is_empty()) {
+        return feature("connector_read");
     }
     if !request.tools.is_empty() {
         return feature("client_tools");

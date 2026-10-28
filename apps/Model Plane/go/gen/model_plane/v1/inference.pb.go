@@ -4961,8 +4961,14 @@ type LanguageAnalysisResult struct {
 	// "violence":0..1,"self_harm":0..1,"sexual":0..1}}. Empty otherwise.
 	// capability-core safety_policies (kind=content_safety) own the thresholds.
 	ContentSafetyJson string `protobuf:"bytes,13,opt,name=content_safety_json,json=contentSafetyJson,proto3" json:"content_safety_json,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Prompt-injection verdict JSON for operation="prompt_injection":
+	// {"flagged":bool,"categories":{"instruction_override":0..1,"role_impersonation":0..1,
+	// "exfiltration_request":0..1,"tool_use_request":0..1,"hidden_text":0..1}}. Empty otherwise.
+	// The gateway only ever reads it tighten-only (WS26-S6): a flag can promote a clean
+	// result, nothing can demote one. Owner: WS26 S6.
+	InjectionJson string `protobuf:"bytes,14,opt,name=injection_json,json=injectionJson,proto3" json:"injection_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *LanguageAnalysisResult) Reset() {
@@ -5082,6 +5088,13 @@ func (x *LanguageAnalysisResult) GetRawJson() string {
 func (x *LanguageAnalysisResult) GetContentSafetyJson() string {
 	if x != nil {
 		return x.ContentSafetyJson
+	}
+	return ""
+}
+
+func (x *LanguageAnalysisResult) GetInjectionJson() string {
+	if x != nil {
+		return x.InjectionJson
 	}
 	return ""
 }
@@ -6434,7 +6447,7 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\rprovider_hint\x18\x06 \x01(\tR\fproviderHint\x12\x14\n" +
 	"\x05model\x18\a \x01(\tR\x05model\x12%\n" +
 	"\x0esentence_count\x18\b \x01(\rR\rsentenceCount\x12!\n" +
-	"\fsummary_kind\x18\t \x01(\tR\vsummaryKind\"\xff\x03\n" +
+	"\fsummary_kind\x18\t \x01(\tR\vsummaryKind\"\xa6\x04\n" +
 	"\x16LanguageAnalysisResult\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1c\n" +
 	"\tsentiment\x18\x02 \x01(\tR\tsentiment\x124\n" +
@@ -6452,7 +6465,8 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"confidence\x12\x18\n" +
 	"\asummary\x18\v \x01(\tR\asummary\x12\x19\n" +
 	"\braw_json\x18\f \x01(\tR\arawJson\x12.\n" +
-	"\x13content_safety_json\x18\r \x01(\tR\x11contentSafetyJson\"\xdc\x01\n" +
+	"\x13content_safety_json\x18\r \x01(\tR\x11contentSafetyJson\x12%\n" +
+	"\x0einjection_json\x18\x0e \x01(\tR\rinjectionJson\"\xdc\x01\n" +
 	"\x17AnalyzeLanguageResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1c\n" +

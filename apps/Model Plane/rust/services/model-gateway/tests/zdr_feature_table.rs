@@ -134,6 +134,16 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             with("retrieval_scope", json!("auto")),
             None,
         ),
+        (
+            "connector_scope",
+            with("connector_scope", json!(["conn-1"])),
+            refused("connector_read"),
+        ),
+        (
+            "connector_scope",
+            with("connector_scope", json!([])),
+            None,
+        ),
         ("regenerated", with("regenerated", json!(true)), None),
         (
             "pinned_message_ids",

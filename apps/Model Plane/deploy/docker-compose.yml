@@ -306,6 +306,15 @@ services:
       # WS26-S1: sample rate (0 to 1) of the semantic shadow pass over external tool results. Telemetry only; ZDR turns
       # never reach it. 0.2 is the code's own default, so declaring it changes nothing.
       CONTENT_SAFETY_SHADOW_SAMPLE_RATE: ${CONTENT_SAFETY_SHADOW_SAMPLE_RATE:-0.2}
+      # WS26-S6 (DEC-31 defaults): the inline, tighten-only prompt-injection pass over external tool results. Off by
+      # default; only the literal `true` turns it on, and an org then still needs a mode above `frame`. Fails open at the
+      # deadline, at most MAX_CALLS_PER_RUN classifier calls per tool loop; ZDR turns never reach it. Keep it off until
+      # the owner has seen the live proof.
+      CONTENT_SAFETY_SEMANTIC_INLINE: ${CONTENT_SAFETY_SEMANTIC_INLINE:-false}
+      CONTENT_SAFETY_MODE_DEFAULT: ${CONTENT_SAFETY_MODE_DEFAULT:-frame}
+      CONTENT_SAFETY_SEMANTIC_DEADLINE_MS: ${CONTENT_SAFETY_SEMANTIC_DEADLINE_MS:-2500}
+      CONTENT_SAFETY_SEMANTIC_MAX_CALLS_PER_RUN: ${CONTENT_SAFETY_SEMANTIC_MAX_CALLS_PER_RUN:-6}
+      CONTENT_SAFETY_INJECTION_MODEL: ${CONTENT_SAFETY_INJECTION_MODEL:-}
       # WS04-S6: durable send receipts (client_message_id on a send, dedupe in session-core, ids on the queued_input
       # delivery event). On by default since the WS04-S9 proof; only the literal `true` turns it on. Deploy order:
       # session-core (migration 0052) first, then model-gateway, then the BFF and frontend. Roll back with false plus a
