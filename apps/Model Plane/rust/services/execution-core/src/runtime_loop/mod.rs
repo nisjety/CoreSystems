@@ -445,6 +445,7 @@ pub async fn execute_step(
         None,
         None,
         true,
+        &[],
     )
     .await
 }
@@ -512,6 +513,7 @@ pub(crate) async fn execute_step_with_browser_grant(
         None,
         None,
         true,
+        &[],
     )
     .await
 }
@@ -583,6 +585,7 @@ pub(crate) async fn execute_step_with_subagent(
         release,
         None,
         true,
+        &[],
     )
     .await
 }
@@ -629,6 +632,9 @@ pub(crate) async fn execute_step_with_result_handles(
     // Whether the step may read the files its run attached (`run_inputs`). Only the root loop
     // reads them: a delegated child does not inherit its parent's files (WS08-S6).
     read_run_inputs: bool,
+    // The connections the run's person selected (WS23-S4). A caller with no run passes none, so a
+    // connector read through it is refused.
+    connector_scope: &[String],
 ) -> StepOutcome {
     execute_step_inner(
         tool_name,
@@ -656,6 +662,7 @@ pub(crate) async fn execute_step_with_result_handles(
         release,
         result_store,
         read_run_inputs,
+        connector_scope,
     )
     .await
 }
@@ -705,6 +712,8 @@ async fn execute_step_inner(
     // The run's attached files are read only when this is true: a delegated child's
     // `code_interpreter` runs without them (WS08-S6). Every caller but the agent loop passes true.
     read_run_inputs: bool,
+    // The connections the run's person selected (WS23-S4); see `execute_step_with_result_handles`.
+    connector_scope: &[String],
 ) -> StepOutcome {
     let released = release.is_some_and(|r| r.covers(step_id, tool_name, tool_input));
     // An MCP tool carries the call's content to a third-party server, so it is
@@ -1037,7 +1046,7 @@ async fn execute_step_inner(
     } else if tool_name == LIST_PROVIDER_ACTIONS_TOOL {
         execute_list_provider_actions(org_id, session_bearer).await
     } else if tool_name == READ_PROVIDER_ACTION_TOOL {
-        execute_read_provider_action(tool_input, org_id, session_bearer).await
+        execute_read_provider_action(tool_input, org_id, session_bearer, connector_scope).await
     } else if tool_name == EXECUTE_PROVIDER_ACTION_TOOL {
         execute_provider_action(
             tool_input,
@@ -2092,6 +2101,11 @@ async fn execute_company_lookup(tool_input: &str) -> tool_bridge::ToolExecution 
     }
 }
 
+/// Whether the run's selection names this connection (WS23-S4).
+fn connection_selected(connector_scope: &[String], connection_id: &str) -> bool {
+    connector_scope.iter().any(|selected| selected == connection_id)
+}
+
 /// `read_provider_action` tool — one read on a connected account the user selected for this turn
 /// (WS23-S3). Read-only by construction: the schema has no body, the operation is checked against
 /// the contract's reads, and the token is `integration:read`. The result is framed and screened at
@@ -2100,6 +2114,7 @@ async fn execute_read_provider_action(
     tool_input: &str,
     org_id: &str,
     session_bearer: Option<&str>,
+    connector_scope: &[String],
 ) -> tool_bridge::ToolExecution {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -2117,6 +2132,15 @@ async fn execute_read_provider_action(
         Ok(input) => input,
         Err(e) => return tool_error(format!("invalid read_provider_action input: {e}")),
     };
+    // A connection the run's person did not select is refused before any client, token or call
+    // (WS23-S4). An empty selection selects no connection, so a path that names none, the direct
+    // step RPC included, reaches no connected account.
+    if !connection_selected(connector_scope, &input.connection_id) {
+        return tool_error(
+            "connection_not_in_scope: this connected account was not selected for this turn"
+                .to_owned(),
+        );
+    }
     let Some(client) = crate::integration_tools::IntegrationActionsClient::from_env() else {
         return tool_error(
             "read_provider_action unavailable: integration client could not be built".to_owned(),
@@ -2460,6 +2484,7 @@ mod connector_tool_tests {
                     None, zdr, waived, 0, None, None, None, &NoPolicy, None, None, None, None,
                     None,
                     true,
+                    &[],
                 )
                 .await;
                 assert_eq!(out.status, "failed", "{tool} zdr={zdr} waived={waived}");
@@ -2470,6 +2495,29 @@ mod connector_tool_tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn connection_outside_scope_is_refused() {
+        let input = r#"{"connection_id":"conn-b","operation":"mail.messages"}"#;
+        let selected = vec!["conn-a".to_owned()];
+        let none: Vec<String> = Vec::new();
+        for scope in [selected.as_slice(), none.as_slice()] {
+            let out = execute_read_provider_action(input, "org-1", None, scope).await;
+            let error = out
+                .error
+                .expect("a read of a connection the run did not select is refused");
+            assert!(error.contains("connection_not_in_scope"), "{scope:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_connection_is_selected_only_when_the_request_names_it() {
+        let scope = vec!["conn-a".to_owned()];
+        assert!(connection_selected(&scope, "conn-a"));
+        assert!(!connection_selected(&scope, "conn-b"));
+        assert!(!connection_selected(&scope, ""), "an empty id is never selected");
+        assert!(!connection_selected(&[], "conn-a"), "an empty selection selects nothing");
     }
 }
 

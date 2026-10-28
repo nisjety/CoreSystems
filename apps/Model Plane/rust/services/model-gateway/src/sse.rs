@@ -955,7 +955,7 @@ mod agent_route_tests {
     /// The request body a turn sends: same inputs every time, only the route
     /// and plan mode vary.
     fn build(route: &AgentRoute, plan_mode: bool) -> RunAgentRequest {
-        build_with_budget(route, plan_mode, crate::run_budget::RunBudget::default())
+        build_with_budget(route, plan_mode, crate::run_budget::RunBudget::default(), Vec::new())
     }
 
     /// [`build`] with the run budget the caller resolved.
@@ -963,6 +963,7 @@ mod agent_route_tests {
         route: &AgentRoute,
         plan_mode: bool,
         budget: crate::run_budget::RunBudget,
+        connector_scope: Vec<String>,
     ) -> RunAgentRequest {
         build_run_agent_request(
             &run(),
@@ -987,6 +988,7 @@ mod agent_route_tests {
             None,
             None,
             Vec::new(),
+            connector_scope,
         )
     }
 
@@ -1096,7 +1098,7 @@ mod agent_route_tests {
             max_rounds: 10,
             max_subagents: 3,
         };
-        let with_budget = build_with_budget(&route, true, budget);
+        let with_budget = build_with_budget(&route, true, budget, Vec::new());
         assert_eq!(with_budget.max_rounds, 10);
         assert_eq!(with_budget.max_subagents, 3);
 
@@ -1120,7 +1122,7 @@ mod agent_route_tests {
         };
         let budget_of = |route: &AgentRoute| {
             let budget = crate::run_budget::resolve_run_budget(route.is_pinned(), &env);
-            build_with_budget(route, true, budget)
+            build_with_budget(route, true, budget, Vec::new())
         };
 
         let on_route = budget_of(&AgentRoute::for_turn(&normalized(
@@ -1162,6 +1164,142 @@ mod agent_route_tests {
             }
         }
     }
+
+    /// A selection is refused, typed, wherever a connected account could not be read: zero retention, a
+    /// Space, a source filter that leaves connected accounts out. An empty selection is never a refusal.
+    #[test]
+    fn connector_scope_refused_in_space_zdr_and_web_only() {
+        use super::{connector_selection, ConnectorSelectionRefusal as Refused};
+        let selected = vec!["conn_1".to_owned()];
+        assert_eq!(
+            connector_selection(Some(&selected), true, false, true),
+            Err(Refused::ZeroRetention)
+        );
+        assert_eq!(
+            connector_selection(Some(&selected), false, true, true),
+            Err(Refused::Space)
+        );
+        assert_eq!(
+            connector_selection(Some(&selected), false, false, false),
+            Err(Refused::SourceFilter)
+        );
+        assert_eq!(
+            connector_selection(Some(&selected), false, false, true),
+            Ok(selected.clone())
+        );
+        let none: Vec<String> = Vec::new();
+        assert_eq!(connector_selection(Some(&none), true, true, false), Ok(Vec::new()));
+        assert_eq!(connector_selection(None, true, true, false), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn connector_selection_is_deduplicated_and_bounded() {
+        use super::{connector_selection, ConnectorSelectionRefusal as Refused};
+        let repeated = vec!["conn_1".to_owned(), "conn_1".to_owned()];
+        assert_eq!(
+            connector_selection(Some(&repeated), false, false, true),
+            Ok(vec!["conn_1".to_owned()])
+        );
+        let eight: Vec<String> = (0..8).map(|n| format!("conn_{n}")).collect();
+        assert_eq!(connector_selection(Some(&eight), false, false, true), Ok(eight.clone()));
+        let nine: Vec<String> = (0..9).map(|n| format!("conn_{n}")).collect();
+        assert_eq!(
+            connector_selection(Some(&nine), false, false, true),
+            Err(Refused::Malformed)
+        );
+        let long = "x".repeat(129);
+        for bad in ["a/b", "a?b=1", "a b", "", long.as_str()] {
+            let selected = vec![bad.to_owned()];
+            assert_eq!(
+                connector_selection(Some(&selected), false, false, true),
+                Err(Refused::Malformed),
+                "{bad:?}"
+            );
+        }
+    }
+
+    /// The selection reaches the run request only when one was made, and names the same connections.
+    #[test]
+    fn a_selection_reaches_the_run_request_only_when_made() {
+        let route = AgentRoute::default();
+        assert!(build(&route, false).connector_scope.is_none());
+        let selected = vec!["conn_1".to_owned(), "conn_2".to_owned()];
+        let request = build_with_budget(
+            &route,
+            false,
+            crate::run_budget::RunBudget::default(),
+            selected.clone(),
+        );
+        assert_eq!(
+            request.connector_scope.map(|scope| scope.connection_ids),
+            Some(selected)
+        );
+    }
+}
+
+/// The most connected accounts one turn may select (build plan WS23 S4).
+const MAX_CONNECTOR_SCOPE: usize = 8;
+
+/// Why a turn's connected-account selection is refused before any run or model call (build plan
+/// WS23 S4). Each refusal has its own typed answer on the stream, given where `invoke_stream_sse`
+/// checks the selection.
+#[derive(Debug, PartialEq, Eq)]
+enum ConnectorSelectionRefusal {
+    /// A connected account holds personal data, which a zero-retention turn never reads.
+    ZeroRetention,
+    /// A Space room reads no connected account (DEC-06).
+    Space,
+    /// The turn's source filter, or its conversation-only mode, leaves connected accounts out.
+    SourceFilter,
+    /// Not a short list of well-formed connection ids.
+    Malformed,
+}
+
+/// The connection ids a turn selected (build plan WS23 S4), with duplicates removed in order. An
+/// absent or empty selection selects none and is never refused. A selection is refused when the turn
+/// is zero-retention, in a Space, or keeps the organisation and web sources out, and when it names
+/// more than `MAX_CONNECTOR_SCOPE` ids or one that is not a connection id.
+fn connector_selection(
+    selected: Option<&[String]>,
+    zdr: bool,
+    space: bool,
+    all_sources: bool,
+) -> Result<Vec<String>, ConnectorSelectionRefusal> {
+    let mut ids: Vec<String> = Vec::new();
+    for id in selected.unwrap_or(&[]) {
+        if !ids.contains(id) {
+            ids.push(id.clone());
+            // Past the cap the selection is refused whatever else it holds, so stop counting.
+            if ids.len() > MAX_CONNECTOR_SCOPE {
+                break;
+            }
+        }
+    }
+    if ids.is_empty() {
+        return Ok(ids);
+    }
+    if zdr {
+        return Err(ConnectorSelectionRefusal::ZeroRetention);
+    }
+    if space {
+        return Err(ConnectorSelectionRefusal::Space);
+    }
+    if !all_sources {
+        return Err(ConnectorSelectionRefusal::SourceFilter);
+    }
+    if ids.len() > MAX_CONNECTOR_SCOPE || !ids.iter().all(|id| is_connection_id(id)) {
+        return Err(ConnectorSelectionRefusal::Malformed);
+    }
+    Ok(ids)
+}
+
+/// A connection id as Integration Core issues it: 1 to 128 ASCII letters, digits, `_` or `-`.
+fn is_connection_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 pub async fn invoke_stream_sse(
@@ -1259,6 +1397,49 @@ pub async fn invoke_stream_sse(
     let turn_posture = match crate::zdr_posture::decide_for(&claims, &requested_route) {
         Ok(turn_posture) => turn_posture,
         Err(refusal) => return zdr_refusal_stream(&request_id, refusal),
+    };
+    // The connected accounts the person selected (build plan WS23 S4), checked before any run or model
+    // call. An empty selection selects nothing and is never refused.
+    let connector_ids = match connector_selection(
+        req.connector_scope.as_deref(),
+        turn_posture.zdr(),
+        req.space_context
+            .as_ref()
+            .or(req.space_append_context.as_ref())
+            .is_some_and(|context| !context.space_id.is_empty()),
+        retrieval_scope.is_auto() && !conversation_only,
+    ) {
+        Ok(ids) => ids,
+        Err(ConnectorSelectionRefusal::ZeroRetention) => {
+            return zdr_refusal_stream(
+                &request_id,
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported("connector_read"),
+            );
+        }
+        Err(ConnectorSelectionRefusal::Space) => {
+            return error_stream(
+                &request_id,
+                "scope_not_available_in_space",
+                "Connected apps are not available in a Space room.",
+                false,
+            );
+        }
+        Err(ConnectorSelectionRefusal::SourceFilter) => {
+            return error_stream(
+                &request_id,
+                "source_scope_conflict",
+                "Connected apps can't be used with a knowledge-only or web-only source filter, or in a conversation-only turn. Switch the source filter back to Kunnskap + nett to use them.",
+                false,
+            );
+        }
+        Err(ConnectorSelectionRefusal::Malformed) => {
+            return error_stream(
+                &request_id,
+                "connector_scope_invalid",
+                "Select at most eight connected apps, each named by its connection id.",
+                false,
+            );
+        }
     };
     let attachment_policy = crate::attachment_policy::AttachmentPolicy::from_env();
     // A waiver names one connection. Deep research, image generation and a vision turn (AnalyzeImage)
@@ -2048,6 +2229,7 @@ pub async fn invoke_stream_sse(
                 },
             ),
             do_attachments,
+            connector_ids,
             // The run's effort level (WS11-S8): the turn's clamped profile, through the same
             // derivation the chat turn uses. 0 with MODEL_GATEWAY_EFFORT_LADDER off.
             crate::thinking::run_level(
@@ -10367,6 +10549,8 @@ fn spawn_run_dispatch(
     run_context: Option<mp_contracts::model_plane::v1::RunContext>,
     // The attachments of a Do turn (build plan WS08-S6); empty for every other dispatch.
     attachments: Vec<mp_contracts::model_plane::v1::RunAttachment>,
+    // The connected accounts the person selected (WS23-S4); empty for every other dispatch.
+    connector_scope: Vec<String>,
     // What the run's rounds cost, published by the task itself the moment the executor
     // answers (build plan WS02 S3), so a follower that has given up cannot lose it.
     usage_ledger: AgentUsageLedger,
@@ -10459,6 +10643,7 @@ fn spawn_run_dispatch(
         resume,
         run_context,
         attachments,
+        connector_scope,
         run_effort,
     );
     let run_agent_req = authenticated_run_agent_request(
@@ -10569,6 +10754,7 @@ fn resolved_run_agent_request(
     resume: Option<mp_contracts::model_plane::v1::AgentResume>,
     run_context: Option<mp_contracts::model_plane::v1::RunContext>,
     attachments: Vec<mp_contracts::model_plane::v1::RunAttachment>,
+    connector_scope: Vec<String>,
     run_effort: i32,
 ) -> RunAgentRequest {
     let autonomy_rung = dispatch_autonomy_rung(plan_mode, resume.is_some(), granted);
@@ -10594,6 +10780,7 @@ fn resolved_run_agent_request(
         resume,
         run_context,
         attachments,
+        connector_scope,
     );
     RunAgentRequest {
         reasoning_effort: if fresh { run_effort } else { 0 },
@@ -10627,6 +10814,7 @@ fn build_run_agent_request(
     resume: Option<mp_contracts::model_plane::v1::AgentResume>,
     run_context: Option<mp_contracts::model_plane::v1::RunContext>,
     attachments: Vec<mp_contracts::model_plane::v1::RunAttachment>,
+    connector_scope: Vec<String>,
 ) -> RunAgentRequest {
     RunAgentRequest {
         run_id: run.run_id.clone(),
@@ -10697,6 +10885,13 @@ fn build_run_agent_request(
         // (`do_run_attachments`); empty with `CHAT_DO_ATTACHMENTS_ENABLED` off, for a
         // turn without attachments and for a continuation.
         attachments,
+        // The connected accounts the person selected (WS23-S4), sent only when there are some: an
+        // empty selection is absent on the wire, as it was before the field existed.
+        connector_scope: (!connector_scope.is_empty()).then(|| {
+            mp_contracts::model_plane::v1::ConnectorScope {
+                connection_ids: connector_scope,
+            }
+        }),
         // The run's effort level (WS11-S8). Unspecified here: `resolved_run_agent_request` sets
         // it for a fresh run, so this builder's bytes stay as they were. execution-core uses it
         // only with EXECUTION_CORE_RUN_EFFORT on.
@@ -11158,6 +11353,9 @@ fn agentic_run_stream(
     // The validated attachments of a Do turn (build plan WS08-S6): files for the sandbox and
     // images for every round. Empty with `CHAT_DO_ATTACHMENTS_ENABLED` off and for a continuation.
     attachments: Vec<mp_contracts::model_plane::v1::RunAttachment>,
+    // The connected accounts the person selected (WS23-S4), checked by the handler; empty for a
+    // continuation.
+    connector_scope: Vec<String>,
     // The run's effort level (WS11-S8), from `thinking::run_level` at the launch; 0 for a
     // continuation and with the ladder off.
     run_effort: i32,
@@ -11289,6 +11487,7 @@ fn agentic_run_stream(
             resume.clone(),
             run_context,
             attachments,
+            connector_scope,
             AgentUsageLedger {
                 publisher: state.publisher.clone(),
                 enabled: agent_usage_envelope_enabled(&|key| std::env::var(key).ok()),
@@ -17284,6 +17483,7 @@ pub(crate) async fn continue_run(
             None,
             // And re-requests its attachments rather than carrying them (v1).
             Vec::new(),
+            Vec::new(),
             // A continuation carries no effort level (WS11-S8).
             0,
         )
@@ -17569,6 +17769,7 @@ mod continue_run_tests {
             Some(resume),
             None,
             Vec::new(),
+            Vec::new(),
             0,
         )
     }
@@ -17597,6 +17798,7 @@ mod continue_run_tests {
             crate::run_budget::RunBudget::default(),
             resume,
             None,
+            Vec::new(),
             Vec::new(),
             run_effort,
         )
@@ -19170,6 +19372,7 @@ mod continue_run_tests {
             ApprovalSpend::SpentByGateway,
             None,
             Vec::new(),
+            Vec::new(),
             0,
         );
         let frames = frames_of_stream(stream).await;
@@ -20562,6 +20765,7 @@ mod continue_run_tests {
             ApprovalSpend::NotSpent,
             None,
             Vec::new(),
+            Vec::new(),
             0,
         );
         let frames = frames_of_stream(stream).await;
@@ -21675,6 +21879,7 @@ mod do_attachment_tests {
                 None,
                 None,
                 attachments,
+                Vec::new(),
             )
         };
         let carried = do_run_attachments(&[file("sales.csv", b"a,b")], false, None).expect("ok");

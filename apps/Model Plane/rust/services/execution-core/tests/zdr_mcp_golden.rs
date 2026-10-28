@@ -245,7 +245,7 @@ fn the_offer_of_a_retention_bound_run_asks_for_no_mcp_tool() {
     for wiring in [
         "letretention_bound=req.zdr||waived;",
         "merged_tool_defs_governed(&req.run_id,",
-        "space_scoped,retention_bound,browser_bearer,governance",
+        "space_scoped,retention_bound,browser_bearer,connector_scope_of(req),governance",
         "ifmode==McpDoTools::Off&&!zdr{",
         "}elseifzdr{count_withheld(&[(withheld::ZDR,1)].into());McpDoTools::Off}",
         "resolve_run_offer(source,governed_mode,",

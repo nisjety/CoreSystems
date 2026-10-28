@@ -7902,6 +7902,12 @@ pub struct InvokeRequest {
     /// organization knowledge and the public web.
     #[serde(default, alias = "retrievalScope")]
     pub retrieval_scope: Option<String>,
+    /// The connected accounts the person selected for this turn (build plan WS23 S4): Integration Core
+    /// connection ids, at most eight. Absent or empty selects none. A selection is refused, typed, under
+    /// zero retention, in a Space, under a knowledge-only or web-only source filter, in a conversation-only
+    /// turn and when an id is malformed (`connector_selection` in the chat stream module).
+    #[serde(default, alias = "connectorScope")]
+    pub connector_scope: Option<Vec<String>>,
     /// The client asked to regenerate the previous answer rather than send a new
     /// message.
     ///

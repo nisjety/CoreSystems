@@ -250,6 +250,20 @@ message RunAgentRequest {
   // park-resume segment carries only what its own request sends. Field 21 is reserved for
   // this message in the build plan's proto reservation table (section 4.3).
   ReasoningEffort reasoning_effort = 21;
+
+  // The connected accounts the person selected for this turn (build plan WS23 S4). Absent or empty
+  // selects none: no connector read is offered, and one that is attempted is refused. The gateway
+  // refuses a selection under zero retention, in a Space, under a knowledge-only or web-only source
+  // filter, and when an id is malformed, so a run carries one only when its turn may read connected
+  // accounts. Field 23 is reserved for this message in the build plan's proto reservation table
+  // (section 4.3).
+  ConnectorScope connector_scope = 23;
+}
+
+// ConnectorScope names the Integration Core connections one run may read (build plan WS23 S4).
+message ConnectorScope {
+  // Connection ids, each 1 to 128 ASCII letters, digits, `_` or `-`; at most eight.
+  repeated string connection_ids = 1;
 }
 
 // AgentResume names the approved call a continuation segment may release, and

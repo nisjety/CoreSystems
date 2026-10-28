@@ -946,6 +946,7 @@ async fn offered_tools(
         space_scoped,
         retention_bound,
         browser_bearer,
+        connector_scope_of(req),
         governance,
     )
     .await;
@@ -1062,6 +1063,7 @@ async fn merged_tool_defs_with_sources(
         space_scoped,
         zdr,
         false,
+        &[],
         governance_from_env(),
     )
     .await
@@ -1119,6 +1121,8 @@ async fn merged_tool_defs_governed(
     // The run's verified browser bearer, the only thing that names a broker grant. No run
     // carries one before WS21-S2, so every caller passes false until then.
     browser_bearer: bool,
+    // The connections the run's person selected (WS23-S4). Empty offers no connected-app read.
+    connector_scope: &[String],
     governance: Governance<'_>,
 ) -> (Vec<pb::ToolDefinition>, bool) {
     use crate::capability_policy::ToolClassGate;
@@ -1139,13 +1143,13 @@ async fn merged_tool_defs_governed(
         tools.extend(browser_tool_defs());
     }
     // The connected-app read is offered only where the switch, the ZDR and Space rules and a
-    // selected connection admit it (WS23-S3, K3-15). No run carries a connection selection before
-    // WS23-S4 lands, so until then no run is offered it.
+    // selected connection admit it (WS23-S3, K3-15). The selection is the request's own list
+    // (WS23-S4), so a run that selected nothing is never offered it.
     if crate::integration_tools::read_provider_action_offered(
         crate::integration_tools::provider_read_tool_enabled(),
         zdr,
         space_scoped,
-        &[],
+        connector_scope,
     ) {
         tools.push(read_provider_action_def());
     }
@@ -4095,6 +4099,9 @@ async fn run_rounds(
                             // Only the root loop reads the run's attached files: a delegated
                             // child does not inherit them (WS08-S6).
                             ctx.depth == 0,
+                            // The connections the run's person selected (WS23-S4). A delegated child
+                            // runs the same request, so it reads the same selection.
+                            connector_scope_of(req),
                         )
                         .await;
                         // The ledger's word first: a call that holds an effectful reservation
@@ -6685,6 +6692,15 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
     tools
 }
 
+/// The connections the run's person selected for this turn (WS23-S4), none when the request names
+/// none. A delegated child runs the same request, so it reads the same selection.
+fn connector_scope_of(req: &pb::RunAgentRequest) -> &[String] {
+    match req.connector_scope.as_ref() {
+        Some(scope) => &scope.connection_ids,
+        None => &[],
+    }
+}
+
 /// The connected-app read tool's definition (WS23-S3). Its `operation` is a closed enum of the
 /// contract's reads, and its schema has no body: nothing in the call can name a write.
 fn read_provider_action_def() -> pb::ToolDefinition {
@@ -8776,6 +8792,7 @@ mod tests {
             false,
             zdr,
             false,
+            &[],
             governance,
         )
         .await;
@@ -11294,6 +11311,7 @@ mod tests {
             max_rounds: 4,
             zdr: false,
             tools: Vec::new(),
+            connector_scope: None,
             // PRIVACY FLOOR: no tier stated, which is what an unconstrained run
             // sends — a floor is imposed only when the caller asked for one, and
             // the tests that DO care set it explicitly on the returned request.
@@ -11601,6 +11619,16 @@ mod tests {
         assert!(system.contains("read_provider_action returns at most 25 items"));
         let without = compose_system_prompt(&BTreeSet::from(["knowledge_search".to_owned()]));
         assert!(!without.contains("read_provider_action"));
+    }
+
+    #[test]
+    fn a_run_reads_only_the_connections_its_request_selected() {
+        let mut req = sample_request();
+        assert!(connector_scope_of(&req).is_empty(), "a request that names none selects none");
+        req.connector_scope = Some(pb::ConnectorScope {
+            connection_ids: vec!["conn_1".to_owned()],
+        });
+        assert_eq!(connector_scope_of(&req), &["conn_1".to_owned()][..]);
     }
 
     #[test]
@@ -19787,6 +19815,7 @@ mod tests {
             false,
             zdr,
             bearer,
+            &[],
             Governance {
                 gate: ToolClassGate::Off,
                 mode: McpDoTools::Off,
