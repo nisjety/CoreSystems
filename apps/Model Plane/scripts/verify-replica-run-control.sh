@@ -15,6 +15,11 @@
 #   5. NATS stopped: Stop on B answers 503 run_control_unavailable, never 202 or 404.
 #   6. A turn streamed on A is rated on B, which reads its run reference from the shared turn record.
 #      It runs after case 3 and before case 4, because case 4 kills A.
+#   7. Stop sent to B for a Do (agentic) run owned by A (D1-229): A's Do stream ends with `stopped`, B
+#      answers 202 via peer, the run is cancelled on its durable row, and A's active-stream gauge returns to 0.
+#      It runs after case 3, before case 6.
+#
+# PROOF_CASES (optional) runs a subset, for example PROOF_CASES="7"; the preflight always runs.
 #
 # Every turn asks for the direct Anthropic API and nothing else: the provider is fixed to
 # anthropic (never a Verevon route, a ChatGPT/Codex subscription or Azure Foundry, which registers as
@@ -105,6 +110,7 @@ LONG_PROMPT="${PROOF_LONG_PROMPT:-Write a long, careful essay of about two thous
 TOOL_PROMPT="${PROOF_TOOL_PROMPT:-First use the count_words tool on the text: salt has been traded for thousands of years. Then write a long, careful essay on the history of salt.}"
 PLAN_PROMPT="${PROOF_PLAN_PROMPT:-Propose a short plan for a one-page note on salt. Do not carry the plan out.}"
 DO_PROMPT="${PROOF_DO_PROMPT:-Carry out the approved plan now and write the one-page note on salt.}"
+DO_LONG_PROMPT="${PROOF_DO_LONG_PROMPT:-Carry out the approved plan now: first use the count_words tool once on each of these five sentences, one call at a time: salt was money; salt preserved fish; salt built roads; salt paid soldiers; salt shaped cities. Then write the one-page note on salt.}"
 SHORT_PROMPT="${PROOF_SHORT_PROMPT:-Say hello in one short sentence.}"
 JUSTIFICATION="Owner approved this plan during the WS04-S9 live proof; the run may write the one-page note only."
 
@@ -133,6 +139,7 @@ trap cleanup EXIT
 
 fail() { echo "FAIL: $*"; exit 1; }
 step() { echo; echo "== $*"; }
+want_case() { [ -z "${PROOF_CASES:-}" ] || case " $PROOF_CASES " in *" $1 "*) true ;; *) false ;; esac; }
 expect() { # expect <actual> <wanted> <label>
   if [ "$1" != "$2" ]; then fail "$3: wanted '$2', got '$1'"; fi
   echo "    ok: $3"
@@ -283,6 +290,7 @@ step "preflight: a short turn on each replica is served by the direct Anthropic 
 served_by_direct "$A" A
 served_by_direct "$B" B
 
+if want_case 1; then
 step "case 1: Stop on B for a stream owned by A"
 start_stream "$A" "$WORK/case1.sse" '{"content":"'"$LONG_PROMPT"'","provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
 wait_frame "$WORK/case1.sse" connected 60 || fail "case 1: no connected frame on A"
@@ -311,7 +319,9 @@ echo "    gateway_active_streams on A after the stream ended: ${GAUGE:-<no sampl
 echo "    ok: A's active-stream gauge is back to 0"
 show_metrics "$A" A
 show_metrics "$B" B
+fi
 
+if want_case 2; then
 step "case 2: a queued message sent to B is delivered by A"
 start_stream "$A" "$WORK/case2.sse" '{"content":"'"$TOOL_PROMPT"'","features":["usage","tools"],"provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
 wait_frame "$WORK/case2.sse" connected 60 || fail "case 2: no connected frame on A"
@@ -346,7 +356,9 @@ expect "$CODE" 202 "case 2: local Stop on A ends the stream"
 wait "$P" 2>/dev/null || true
 frame_summary "$WORK/case2.sse"
 show_metrics "$B" B
+fi
 
+if want_case 3; then
 step "case 3: plan approved on A, Do run on B under the durable grant"
 CASE3_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 start_stream "$A" "$WORK/case3-plan.sse" '{"content":"'"$PLAN_PROMPT"'","plan_mode":true,"features":["usage","tools","agentic"],"provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
@@ -379,7 +391,63 @@ if [ -z "$GRANT_LINE" ]; then
 fi
 echo "    B log: $GRANT_LINE"
 show_metrics "$B" B
+fi
 
+if want_case 7; then
+step "case 7: Stop on B for a Do run owned by A (D1-229)"
+start_stream "$A" "$WORK/case7-plan.sse" '{"content":"'"$PLAN_PROMPT"'","plan_mode":true,"features":["usage","tools","agentic"],"provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
+wait_frame "$WORK/case7-plan.sse" plan_proposed 240 || fail "case 7: no plan_proposed on A"
+PLAN_ID="$(json_field plan_id "$(frame_data "$WORK/case7-plan.sse" plan_proposed)")"
+wait "$P" 2>/dev/null || true
+CONNECTED="$(frame_data "$WORK/case7-plan.sse" connected)"
+RUN_ID="$(json_field run_id "$CONNECTED")"
+THREAD_ID="$(json_field thread_id "$CONNECTED")"
+if [ -z "$PLAN_ID" ] || [ -z "$RUN_ID" ] || [ -z "$THREAD_ID" ]; then
+  fail "case 7: missing plan, run or thread id (plan=$PLAN_ID run=$RUN_ID thread=$THREAD_ID)"
+fi
+CODE="$(http_post "$A" "/v1/runs/$RUN_ID/plan-approval" "{\"decision\":\"approve\",\"plan_id\":\"$PLAN_ID\",\"granted_rung\":\"workspace_write\",\"justification\":\"$JUSTIFICATION\"}" session)"
+expect "$CODE" 200 "case 7: approval on A answers 200"
+start_stream "$A" "$WORK/case7-do.sse" '{"content":"'"$DO_LONG_PROMPT"'","thread_id":"'"$THREAD_ID"'","features":["usage","tools","agentic","steps"],"provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
+wait_frame "$WORK/case7-do.sse" connected 60 || fail "case 7: no connected frame for the Do run on A"
+CONNECTED="$(frame_data "$WORK/case7-do.sse" connected)"
+RID="$(json_field request_id "$CONNECTED")"
+DO_RUN="$(json_field run_id "$CONNECTED")"
+if [ -z "$RID" ] || [ -z "$DO_RUN" ]; then fail "case 7: the Do run's connected frame carries no request or run id"; fi
+echo "    Do run $DO_RUN on A, request $RID"
+# Stop while the run is working: a few seconds after connected, before it can finish the long task.
+sleep "${PROOF_DO_STOP_AFTER:-8}"
+expect "$(frame_count "$WORK/case7-do.sse" done)" 0 "case 7: the Do run is still going when Stop is sent"
+STOP_AT="$(date -u +%s)"
+CODE="$(http_post "$B" "/v1/invoke/$RID/cancel")"
+echo "    POST B /v1/invoke/$RID/cancel -> $CODE $(last_body)"
+expect "$CODE" 202 "case 7: Stop via B answers 202"
+case "$(last_body)" in
+  *'"via":"peer"'*) echo "    ok: the answer says via peer" ;;
+  *) fail "case 7: the answer does not say via peer" ;;
+esac
+wait "$P" 2>/dev/null || true
+echo "    the Do stream ended $(( $(date -u +%s) - STOP_AT )) s after Stop"
+expect "$(frame_count "$WORK/case7-do.sse" stopped)" 1 "case 7: A's Do stream ends with one stopped frame"
+frame_summary "$WORK/case7-do.sse"
+STATUS=""
+for i in $(seq 1 20); do
+  STATUS="$(psql_one "SELECT status FROM runs WHERE id='$DO_RUN'")"
+  if [ "$STATUS" = cancelled ]; then break; fi
+  sleep 1
+done
+expect "$STATUS" cancelled "case 7: the Do run is cancelled on its durable row"
+GAUGE=""
+for i in $(seq 1 15); do
+  GAUGE="$(active_streams "$A")"
+  if [ "$GAUGE" = "0" ]; then break; fi
+  sleep 1
+done
+echo "    gateway_active_streams on A after the Do stream ended: ${GAUGE:-<no sample>}"
+[ "$GAUGE" = "0" ] || fail "case 7: A's gateway_active_streams did not return to 0 within 15 s"
+show_metrics "$B" B
+fi
+
+if want_case 6; then
 step "case 6: a turn streamed on A is rated on B (shared turn record)"
 start_stream "$A" "$WORK/case6.sse" '{"content":"'"$SHORT_PROMPT"'","features":["usage"],"provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
 wait_frame "$WORK/case6.sse" connected 60 || fail "case 6: no connected frame on A"
@@ -400,7 +468,9 @@ case "$CODE" in
   *) fail "case 6: feedback via B answered $CODE, wanted 200" ;;
 esac
 show_metrics "$B" B
+fi
 
+if want_case 4; then
 step "case 4: kill -9 of the owner A mid-stream"
 start_stream "$A" "$WORK/case4.sse" '{"content":"'"$LONG_PROMPT"'","provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
 wait_frame "$WORK/case4.sse" connected 60 || fail "case 4: no connected frame on A"
@@ -439,7 +509,9 @@ fi
 docker start "$A_CTR" >/dev/null
 if ready "$A"; then echo "    A restarted: run_control=ok"; else fail "case 4: A is not run_control=ok after restart"; fi
 show_metrics "$B" B
+fi
 
+if want_case 5; then
 step "case 5: NATS stopped, Stop on B answers 503"
 start_stream "$A" "$WORK/case5.sse" '{"content":"'"$LONG_PROMPT"'","provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
 wait_frame "$WORK/case5.sse" connected 60 || fail "case 5: no connected frame on A"
@@ -463,4 +535,5 @@ wait "$P" 2>/dev/null || true
 show_metrics "$B" B
 
 echo
-echo "PASS — the six run-control cases were recorded in $EVIDENCE"
+fi
+echo "PASS — the run-control cases (${PROOF_CASES:-1 2 3 7 6 4 5}) were recorded in $EVIDENCE"

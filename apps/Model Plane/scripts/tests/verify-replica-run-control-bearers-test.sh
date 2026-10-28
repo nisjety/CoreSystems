@@ -185,7 +185,8 @@ six_session_sites() {
   sites="$(grep -c '\$(http_post .*/\(queue\|feedback\|plan-approval\|orchestration/runs/\)' "$SCRIPT" || true)"
   marked="$(grep -c '\$(http_post .*/\(queue\|feedback\|plan-approval\|orchestration/runs/\).* session)"' "$SCRIPT" || true)"
   echo "    session call sites: $marked of $sites carry the session bearer"
-  [ "$sites" -eq 6 ] && [ "$marked" -eq 6 ]
+  # Seven since case 7 (D1-229) approves a plan of its own before its Do run.
+  [ "$sites" -eq 7 ] && [ "$marked" -eq 7 ]
 }
 stop_and_resume_bare() {
   local stops stops_with_session resume_with_session
@@ -193,7 +194,8 @@ stop_and_resume_bare() {
   stops_with_session="$(grep -c '\$(http_post .*/v1/invoke/.*/cancel".* session)' "$SCRIPT" || true)"
   resume_with_session="$(grep -A1 'invoke/resume/' "$SCRIPT" | grep -c 'x-session' || true)"
   echo "    stop call sites: $stops, with the session bearer: $stops_with_session; resume lines with it: $resume_with_session"
-  [ "$stops" -eq 5 ] && [ "$stops_with_session" -eq 0 ] && [ "$resume_with_session" -eq 0 ]
+  # Six since case 7 (D1-229) stops a Do run from the peer.
+  [ "$stops" -eq 6 ] && [ "$stops_with_session" -eq 0 ] && [ "$resume_with_session" -eq 0 ]
 }
 
 echo "== cookie mode: the three bearers are minted from the cookie jar and sent on the calls that take them"
