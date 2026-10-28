@@ -17,7 +17,7 @@ Every finding of the unit that stays open, with why and the owner's next step. C
 ## 3. SDK regeneration (WS13.8 / U56): blocked, nothing committed
 
 - Ran: `sdks/generate.sh` (openapi-generator-cli v7.22.0, docker, under `with-lock.sh`, `MSYS_NO_PATHCONV=1`). Logs: `scratchpad/D-B3-openapi-sdk/sdk-generate-2.log`, `sdk-ts-gen.log`.
-- Python: aborts in pydantic codegen ("Codegen Property not yet supported in getPydanticType"), on the cookie `value` property `type: 'null'` added by WS17.P0 (b068c33bc). The spec has 13 `type: 'null'` schemas (`grep -n "type: 'null'" docs/openapi.yaml`).
+- Python: aborts in pydantic codegen ("Codegen Property not yet supported in getPydanticType"), on the cookie `value` property `type: 'null'` added by WS17.P0 (b068c33bc). The spec has exactly one bare `type: 'null'` schema (line 3198, ProfileCookieView.value); the other `'null'` hits are type arrays, which 7.22.0 handles. (An earlier version of this note said "13 places"; that was wrong, corrected 2026-10-28 by D2-A-openapi-null, which fixed the one place and regenerated.)
 - TypeScript: generates, but `src/models/ProfileCookieView.ts` imports `./Null`, which is not generated; `tsc` (TypeScript 5.9.3, the version the SDK declares) fails with two TS2307 errors. The regenerated output is kept at `scratchpad/D-B3-openapi-sdk/sdk-regen-ts-output/`.
 - Reverted: the 25 tracked docs were restored to HEAD and the 38 new docs removed. Nothing under `sdks/` is committed.
 - Side effect to know: `sdks/typescript/src/` is gitignored (Quarry-v2 `.gitignore` line 50), so the regeneration overwrote this worktree's local generated `src/`. It does not compile now. Regenerate it once the spec fix lands, or delete it.

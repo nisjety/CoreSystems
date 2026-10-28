@@ -29,7 +29,7 @@ Findings not fixed, with the owner's next step: `depth/D-D-B3-openapi-sdk.md`. H
 
 ## Not done (details in the depth file)
 
-- SDK regeneration (WS13.8 / U56): blocked. Python generation aborts and the TypeScript output does not compile, both on the spec's OpenAPI 3.1 `type: 'null'` (13 places, added by WS17.P0). Nothing under `sdks/` committed; the tracked docs were restored to HEAD; the gitignored `sdks/typescript/src/` was overwritten and does not compile.
+- SDK regeneration (WS13.8 / U56): blocked. Python generation aborts and the TypeScript output does not compile, both on the spec's one bare OpenAPI 3.1 `type: 'null'` (ProfileCookieView.value, added by WS17.P0; the earlier "13 places" was wrong). RESOLVED 2026-10-28 by D2-A-openapi-null. Nothing under `sdks/` committed; the tracked docs were restored to HEAD; the gitignored `sdks/typescript/src/` was overwritten and does not compile.
 - docs-contract: 12 assertions pending (option B lives only in the live tree; QB-T17 compose defaults).
 - WS16.S0: model_plane_gate.rs is not on this branch; ledger entry and gateway.proto comment are the Model Plane session's.
 - D1-024: RespondDialog and MouseWheel stay allowed (documented policy); redirect into an exhausted host not checked.
