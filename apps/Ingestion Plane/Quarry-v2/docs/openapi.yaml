@@ -1168,7 +1168,7 @@ paths:
       summary: Typed agent-run events as Server-Sent Events, with resume (WS10.S3)
       description: >-
         Streams the run's user-facing events (agent.started, action.started, action.completed,
-        action.failed, observation.ready, agent.completed, agent.expired, agent.failed) in the
+        action.failed, observation.ready, agent.completed, agent.expired, agent.budget_exhausted, agent.failed) in the
         order of the run's trace. Each SSE `id:` is the event's per-run `seq` (dense, starting
         at 1 for an agent run). Resume with the `Last-Event-ID` header a reconnecting EventSource
         sends, or with `from_seq`; `from_seq` wins when both are present. The stream replays the
@@ -1209,7 +1209,7 @@ paths:
         '200':
           description: >-
             text/event-stream. Named events: agent.started, action.started, action.completed,
-            action.failed, observation.ready, agent.completed, agent.expired, agent.failed (data is
+            action.failed, observation.ready, agent.completed, agent.expired, agent.budget_exhausted, agent.failed (data is
             the Event envelope, id is seq), replay_gap (data is {requested, oldest_retained,
             fallback}), lagged (data is {skipped}), done (data is run_closed or max_events).
           content:

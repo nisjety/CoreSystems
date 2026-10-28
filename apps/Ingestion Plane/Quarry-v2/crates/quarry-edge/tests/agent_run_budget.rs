@@ -290,6 +290,64 @@ async fn an_agent_run_stops_at_the_default_60_steps_with_a_typed_402_that_latche
     );
 }
 
+/// X-12 stack row "SSE shows exactly one `agent.budget_exhausted`": the run's event stream
+/// carries the announcement once however many calls are refused, under that name, with the
+/// refusal's figures only (no URL, no page, no prompt).
+#[tokio::test]
+#[serial]
+async fn the_event_stream_carries_one_budget_exhausted_per_refused_segment() {
+    setup_on();
+    let edge = edge().await;
+    let person = member_token();
+    let run = edge
+        .start_run(&person, agent_body(json!({ "max_steps": 2 })))
+        .await;
+    let stream = edge
+        .open_stream(&person, &format!("/v1/agent/runs/{run}/events/stream"))
+        .await;
+
+    for n in 1..=2 {
+        let step = edge.step(&person, &run, wait_action(), None).await;
+        assert_eq!(step.status, 200, "step {n}: {}", step.body);
+    }
+    // Three refused calls, as on the stack: one announcement.
+    for _ in 0..3 {
+        let refused = edge.step(&person, &run, wait_action(), None).await;
+        assert_budget_refusal(&refused, "steps", 2.0);
+    }
+    let closed = edge.delete(&person, &format!("/v1/agent/runs/{run}")).await;
+    assert_eq!(closed.status, 200, "{}", closed.body);
+
+    let body = stream.text().await.expect("the stream ends after done");
+    let announced = body
+        .split("\n\n")
+        .filter(|block| block.lines().any(|line| line == "event: agent.budget_exhausted"))
+        .collect::<Vec<_>>();
+    assert_eq!(announced.len(), 1, "{body}");
+    let data = announced[0]
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .expect("the event has data");
+    let event: Value = serde_json::from_str(data).expect("the data is the Event envelope");
+    assert_eq!(event["type"], "agent_budget_exhausted", "{data}");
+    let payload = event["payload"].as_object().expect("a payload object");
+    let mut keys = payload.keys().map(String::as_str).collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["dimension", "estimated", "limit", "limit_source", "spent", "unit"],
+        "{data}"
+    );
+    assert_eq!(payload["dimension"], "steps", "{data}");
+    assert_eq!(payload["limit"], 2.0, "{data}");
+    assert_eq!(payload["spent"], 2.0, "{data}");
+    // Before the terminal event, and the stream still ends with `done`.
+    let announced_at = body.find("event: agent.budget_exhausted").expect("announced");
+    let completed_at = body.find("event: agent.completed").expect("agent.completed sent");
+    assert!(announced_at < completed_at, "{body}");
+    assert!(body.contains("data: run_closed"), "{body}");
+}
+
 #[tokio::test]
 #[serial]
 async fn an_agent_run_stops_at_its_runtime_with_a_typed_402() {

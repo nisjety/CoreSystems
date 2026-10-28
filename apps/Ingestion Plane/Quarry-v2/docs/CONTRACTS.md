@@ -80,7 +80,7 @@ The id is a support-lookup key only. It is not unique across tenants, so it is n
 - `driver.planned`, `driver.fallback`, `transport.probed`
 - `action.started`, `action.completed`, `action.failed`
 - `preview.screenshot`, `preview.markdown`, `preview.artifact`
-- `agent.started`, `agent.delta`, `agent.completed`, `agent.failed`, `agent.expired`
+- `agent.started`, `agent.delta`, `agent.completed`, `agent.failed`, `agent.expired`, `agent.budget_exhausted`
 - `artifact.written`, `snapshot.created`, `store.record.written`
 - `lease.acquired`, `lease.released`, `profile.restored`, `profile.captured`
 - `change.detected`, `change.unchanged`
@@ -459,7 +459,7 @@ Gemma 4 local is the default model provider. OpenAI and Anthropic are additive p
 }
 ```
 
-Agent events use `agent.started`, `agent.delta`, `agent.completed`, `agent.failed`, and `agent.expired` (the run sweeper released an idle or over-age run; payload `{reason: idle|ttl|takeover_idle|max_age, idle_s, age_s}`, no URL; a non-ZDR run stays resumable); the owner timeline's `lifecycle` item for that expiry carries `initiatedBy: "system"` (a start and an owner's close carry none). Agent tool calls must go through the same action/runtime policy path as user-supplied `actions[]`.
+Agent events use `agent.started`, `agent.delta`, `agent.completed`, `agent.failed`, and `agent.expired` (the run sweeper released an idle or over-age run; payload `{reason: idle|ttl|takeover_idle|max_age, idle_s, age_s}`, no URL; a non-ZDR run stays resumable); the owner timeline's `lifecycle` item for that expiry carries `initiatedBy: "system"` (a start and an owner's close carry none). `agent.budget_exhausted` is sent once per segment of a run when budget enforcement `on` refuses a call (see "Agent run budgets" at the end). Agent tool calls must go through the same action/runtime policy path as user-supplied `actions[]`.
 
 ### Crawl denial reason schema
 
@@ -774,7 +774,7 @@ An agent-class run (a service principal, or `initiated_by: "agent"`) is bounded 
 - **`meta.budget`** on a REST step response (`POST /v1/agent/runs/{id}/step`) of an agent-class run: `{class, steps, attempts, max_steps?, max_attempts?, elapsed_s, max_runtime_s?, spent_usd, max_cost_usd?, estimated: true, cost_source, exhausted?}`. The `max_*` bounds and `exhausted` are absent for a person. `cost_source` is `flat_table` (the flat action table) or `provider_billed` (the driver reported the figure). Absent when enforcement is `off`. The WebSocket reply carries no `meta.budget` yet (not done in W2-U21).
 - **Receipts** carry `cost_source` (`flat_table` | `provider_billed`; the column `quarry_step_receipts.cost_source`, migration `0012`). A failed attempt is charged the flat cost and its receipt now carries that cost too (it used to record 0); a skipped receipt has no cost and no source. A receipt written before migration `0012` has no `cost_source`.
 - **`DELETE /v1/agent/runs/{id}`** returns `data.usage` for an agent-class run: `{class, spent_usd, steps, attempts, active_s, exhausted?}`. A person's session returns `{closed: true}` without `usage`.
-- **`agent.budget_exhausted`** (`EventType::AgentBudgetExhausted`, durable type token `agent_budget_exhausted`): emitted once per segment of a run, when `on` refuses. Payload `{dimension, limit, spent, unit, estimated, limit_source}`; a ZDR run emits it through `emit_for_zdr` (nothing persisted). It is not in the App Shell SSE allow-list (`is_user_facing_event`); its path to the run trace is a WS10 projection row, not built here. The refusal also writes a checkpoint with the exhaustion latch, so a resume refuses at once and cannot refill.
+- **`agent.budget_exhausted`** (`EventType::AgentBudgetExhausted`, durable type token `agent_budget_exhausted`): emitted once per segment of a run, when `on` refuses. Payload `{dimension, limit, spent, unit, estimated, limit_source}`; a ZDR run emits it through `emit_for_zdr` (nothing persisted). It is user-facing (X-12): the run's SSE stream (`GET /v1/agent/runs/{run_id}/events/stream`, `is_user_facing_event`) sends it under the name `agent.budget_exhausted`, once per segment however many calls are refused; the payload carries the refusal's figures only (no URL, no page content, no prompt). Its path to the run trace is a WS10 projection row, not built here. The refusal also writes a checkpoint with the exhaustion latch, so a resume refuses at once and cannot refill.
 - **Legacy request cap.** `constraints.max_steps` still refuses with `429 RATE_LIMITED` ("agent step budget exhausted") where the gate does not own the bound: when enforcement is `off` (for everyone), and for an agent run while enforcement is `shadow`. In `on` the typed `402 BUDGET_EXHAUSTED` replaces it for agent runs, and a person's session is never refused for its own step count (a UI session that sends `max_steps: 12` is no longer refused at the 13th action when enforcement is `on` or `shadow`).
 
 **Error reasons.** `BUDGET_EXHAUSTED` (402, not retryable) is unchanged from the WS6.B gate; its `details` are `{dimension, limit, spent, unit, estimated, limit_source, resumable: false}`.

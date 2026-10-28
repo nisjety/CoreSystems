@@ -5,6 +5,9 @@ use super::*;
 /// `observation.ready` events; the explicit allow-list keeps
 /// future internal/telemetry events out of the user-facing
 /// stream without changing the wire contract.
+///
+/// X-12: `agent.budget_exhausted` is user-facing (once per segment, when `on`
+/// refuses); its payload is the refusal's figures only, no URL and no page.
 pub(super) fn is_user_facing_event(event_type: quarry_core::event::EventType) -> bool {
     use quarry_core::event::EventType;
     matches!(
@@ -16,6 +19,7 @@ pub(super) fn is_user_facing_event(event_type: quarry_core::event::EventType) ->
             | EventType::ObservationReady
             | EventType::AgentCompleted
             | EventType::AgentExpired
+            | EventType::AgentBudgetExhausted
             | EventType::AgentFailed
     )
 }
@@ -49,6 +53,7 @@ pub(super) fn event_name(event_type: quarry_core::event::EventType) -> &'static 
         EventType::ObservationReady => "observation.ready",
         EventType::AgentCompleted => "agent.completed",
         EventType::AgentExpired => "agent.expired",
+        EventType::AgentBudgetExhausted => "agent.budget_exhausted",
         EventType::AgentFailed => "agent.failed",
         // Defensive: every other event type is filtered before
         // this is called, but never panic on a future type.

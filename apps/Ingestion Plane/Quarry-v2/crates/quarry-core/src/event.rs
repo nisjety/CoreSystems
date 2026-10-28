@@ -84,8 +84,9 @@ pub enum EventType {
     PageExtracted,
     /// WS6.B: an agent run reached a budget bound while enforcement is `on`
     /// (once per segment of the run). Payload: `dimension`, `limit`, `spent`,
-    /// `unit`, `estimated`, `limit_source`. Not user-facing: it reaches the run
-    /// trace only through a projection row (WS10).
+    /// `unit`, `estimated`, `limit_source`. User-facing (X-12): the run's SSE
+    /// stream sends it as `agent.budget_exhausted`; the run trace still needs a
+    /// projection row (WS10).
     AgentBudgetExhausted,
     /// WS15.L2: a caller asked for a pause, resume or cancel of a job. Written by
     /// control when the request is recorded; the workflow acts on it later.
