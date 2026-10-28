@@ -29,6 +29,17 @@ pub const SCOPE_SCRAPE_INTERACT: &str = "scrape:interact";
 /// The environment switch the edge reads once per process (`scrape_actions::ENV_SCRAPE_ACTIONS`).
 pub const ENV_SWITCH: &str = "QUARRY_EDGE__SCRAPE_ACTIONS";
 
+/// The evidence gate: the same `QUARRY_EVIDENCE_STACK=1` that `scrape_actions_live` reads. A test
+/// that calls this is also `#[ignore]`d, so a plain `cargo test` reports it as ignored. These tests
+/// need no stack; the flag only puts them in the ADR-6 evidence run.
+pub fn evidence_lane() -> bool {
+    if std::env::var("QUARRY_EVIDENCE_STACK").ok().as_deref() == Some("1") {
+        return true;
+    }
+    eprintln!("skipping: set QUARRY_EVIDENCE_STACK=1 to run this ADR-6 evidence test");
+    false
+}
+
 const PAGE: &str = "<html><head><title>Actions page</title></head><body><main><h1>After</h1><p>Some body text for the real-token admission test, long enough to be extracted as main content.</p></main></body></html>";
 
 /// A browser double: the captures a real fetch carries after one click on `#swap`.

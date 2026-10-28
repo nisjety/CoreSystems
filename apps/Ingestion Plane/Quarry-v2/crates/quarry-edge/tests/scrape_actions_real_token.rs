@@ -6,6 +6,11 @@
 //! whose stub identity cannot show what a real service principal may do; these cannot be
 //! mistaken for that.
 //!
+//! Evidence, not CI: every test here is `#[ignore]`d and returns at once unless
+//! `QUARRY_EVIDENCE_STACK=1` is set (the flag of `scrape_actions_live`). Run them with
+//! `QUARRY_EVIDENCE_STACK=1 cargo test -p quarry-edge --test <this binary> -- --ignored`.
+//! They need no stack and no Chromium.
+//!
 //! The decision in force (3.8): a request labelled `initiated_by: "agent"` is refused in every
 //! mode whatever the token; a service principal needs `scrape:interact`; `on` admits a service
 //! principal that holds it. The switch is read once per process, so this binary runs `on`
@@ -19,13 +24,19 @@ mod zdr_harness;
 #[path = "support/actions_real_auth.rs"]
 mod actions_real_auth;
 
-use actions_real_auth::{click, enable, labelled, post, scrape_body, start, SCOPE_SCRAPE_INTERACT};
+use actions_real_auth::{
+    click, enable, evidence_lane, labelled, post, scrape_body, start, SCOPE_SCRAPE_INTERACT,
+};
 use zdr_harness::{golden_token, token_with_scopes, user_in_standard_org};
 
 const REFUSED: &str = "scrape_interact_scope_required";
 
 #[tokio::test]
+#[ignore = "ADR-6 evidence: set QUARRY_EVIDENCE_STACK=1 and run with --ignored"]
 async fn a_user_token_with_the_agent_label_is_refused_and_the_same_body_without_it_is_served() {
+    if !evidence_lane() {
+        return;
+    }
     enable("on");
     let harness = start().await;
     let token = user_in_standard_org();
@@ -47,7 +58,11 @@ async fn a_user_token_with_the_agent_label_is_refused_and_the_same_body_without_
 }
 
 #[tokio::test]
+#[ignore = "ADR-6 evidence: set QUARRY_EVIDENCE_STACK=1 and run with --ignored"]
 async fn an_agent_label_is_refused_for_a_service_principal_that_holds_scrape_interact() {
+    if !evidence_lane() {
+        return;
+    }
     enable("on");
     let harness = start().await;
     let token = token_with_scopes("service_execution_core", &[SCOPE_SCRAPE_INTERACT]);
@@ -58,7 +73,11 @@ async fn an_agent_label_is_refused_for_a_service_principal_that_holds_scrape_int
 }
 
 #[tokio::test]
+#[ignore = "ADR-6 evidence: set QUARRY_EVIDENCE_STACK=1 and run with --ignored"]
 async fn a_service_principal_without_scrape_interact_is_refused_with_actions() {
+    if !evidence_lane() {
+        return;
+    }
     enable("on");
     let harness = start().await;
     // Both golden service principals hold a scrape scope that reaches /v1/scrape; neither holds
@@ -74,7 +93,11 @@ async fn a_service_principal_without_scrape_interact_is_refused_with_actions() {
 }
 
 #[tokio::test]
+#[ignore = "ADR-6 evidence: set QUARRY_EVIDENCE_STACK=1 and run with --ignored"]
 async fn a_service_principal_that_holds_scrape_interact_is_served_in_on_mode() {
+    if !evidence_lane() {
+        return;
+    }
     enable("on");
     let harness = start().await;
     let token = token_with_scopes("service_execution_core", &[SCOPE_SCRAPE_INTERACT]);
@@ -85,7 +108,11 @@ async fn a_service_principal_that_holds_scrape_interact_is_served_in_on_mode() {
 }
 
 #[tokio::test]
+#[ignore = "ADR-6 evidence: set QUARRY_EVIDENCE_STACK=1 and run with --ignored"]
 async fn a_token_that_does_not_verify_never_reaches_the_action_gate() {
+    if !evidence_lane() {
+        return;
+    }
     enable("on");
     let harness = start().await;
 
