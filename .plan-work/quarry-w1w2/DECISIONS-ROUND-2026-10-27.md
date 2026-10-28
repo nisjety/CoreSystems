@@ -583,6 +583,32 @@ Answer each line yes, no, or other.
 12. DATAPLANE-OPTION-B: Flags-off compose with MODEL_PLANE_URL opt-in. QB-T17 stays pending. Option B lands later from main, after the ZDR and retention review. Yes / no / other
 13. OPENAPI-INTERNAL: Internal routes leave the public spec and the SDKs now. The Go routes follow with the D2-050 split. Yes / no / other
 
+## Implementation status (2026-10-28)
+
+Owner answer: yes to all 13 lines. Status at HEAD `795fef111` plus the D2-report notes commit. Local commits on `quarryv2-next`, nothing pushed, no live stack touched. "Done" means built, tested in the build lanes and committed; it does not mean proven on a stack. "Prepared (flag off)" means built and tested with its flag still off, observe or shadow; the flip happens in the stack session (`STACK-SESSION-RUNBOOK.md`). "Waits" means not built, by decision.
+
+| Id | List | Status | Commits | What is left |
+|---|---|---|---|---|
+| OPENAPI-NULL | A1 | done | `6d9eb115d`, `948d55f3e` | spa-verify on a real CI runner (only possible in CI) |
+| OPENAPI-INTERNAL, first half | A2 | done | `cd17f8c5c`, `07af2adcf`, `ace7d0554` | D2-312 ingress check (stack); a wire test per internal route; the public envelope schema mismatch and the missing `securitySchemes` (depth items, not decided) |
+| OPENAPI-INTERNAL, second half | C15 | waits | | the 8 Go control routes, with the D2-050 secret split |
+| ROBOTS-RFC | A3 | done | `c7bf539d4`, `ade9c9d98`, `eddc51302`, `375172656`, `837596154`, `31afcf1bc`, `00f776bb0` | owner: CR-only line endings fail open; two Crawl-delay values keep the last (both before the X-10 soak) |
+| MP-GATEWAY-AUTH (D2-012) | A4 | done; D2-012 closed by decision | `bcd02e3fe`, `7df37a4b3`, `3414526a1`, `4504c8803` | accepted residuals (an agent on a person's session token; the live-view socket trusts the client actor) |
+| TAKEOVER-BUDGET | A5 | done (rule unchanged, counter added) | `3cbce1f0f`, `4504c8803` | the stack check of 3.4 step 4 (run in X-12, runbook 3.1) |
+| DATAPLANE-OPTION-B, compose | A6 | done | `8a8bf5c1b`, `675903067`, `88fb4afe3`, `c457cdc51`, `4a912cb50` | stack: recreate the edge and confirm no Model Plane mints; four ungated Model Plane features need the QB-T17 gate code |
+| DATAPLANE option B itself | C16 | waits | | after Data Plane QB-T05a on main and the search_suggest ZDR and token-retention review |
+| BILLING-IDEMPOTENCY (D2-033) | A7 | done | `ce7e4af73`, `c26ddf5e1` | a replay after an edge crash between Control's 201 and the meter is never billed (depth); the billing owner is to be informed |
+| ADR-6 ruling and X-20 gates | A8 | done | `675903067` (the `:-off` compose lines); the plan ruling in the D2-report docs commit | none for the ruling |
+| X-12 | B9 | prepared (flag `shadow`) | `1b701f99b`, `430ce8c0d`, `b4eef31e5`, `da897b09c` | stack proof script run, then `on` (runbook 3.1); the Model Plane 402 mapping (C17) |
+| D16-Q2 | B10 | prepared (flag `observe`) | `aa2f64988`, `3f9017d62`, `88d6a19e2` | rebuild, legacy count, observe week, rescue or backfill, then `enforce` (runbook 3.2) |
+| X-10 | B11 | prepared (flag `observe`) | `2ba69b8dc`, `14dedfdff`, `3ba650802`, `6572ce95d`, `717485032`, `4d6c7235a`, `3a04175f6` | e2e observe and enforce legs, the volume soak, then `enforce` in the production env (runbook 3.3) |
+| X-19 | B12 | partial: (a) and (b) built, (c) design only, (d) owed | `b40ee90b5`, `6ed112c12`, `5f31f565d` | retention or erasure path (needs a build and a Control Plane answer on user erasure); stack evidence (runbook 3.4); receipts stay off for real users |
+| ADR-6 proof | B13 | prepared (flag `off`) | `9c548a823`, `3253eb010`, `33b38087c`, `fe18840a9`, `c383153b9`, `795fef111` | the live lane and `make test-scrape-capture` on the evidence stack after SC1 to SC7 (runbook 3.5) |
+| X-9 | C14 | waits; the Control Plane ask is written | the ask: `X-9-control-plane-ask.md` (D2-report docs commit) | Control Plane consumer row and plan-change event; then the monitor half and the follow refusal after the stack session; counsel on prospective versus retroactive |
+| X-12 402 mapping, ADR-6 option D | C17 | waits | | Model Plane session |
+
+The fresh test run of 2026-10-28 (`D2-test-2026-10-28.md`): every non-Rust lane green and in line with 2026-10-27; the Rust test run did not finish because the Docker engine wedged (500), so there is no Rust count for this round. Its notes commit was also blocked by the same wedge.
+
 ## 5. Appendix: other owner-decision rows this round did not brief
 
 One line each, with where to find it. Rows already covered above are marked.
