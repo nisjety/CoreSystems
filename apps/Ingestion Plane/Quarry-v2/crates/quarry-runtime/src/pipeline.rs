@@ -519,6 +519,16 @@ impl PageRunner {
             .with_details(json!({ "denial": denial })))
     }
 
+    /// WS14.S4, D2-161: the robots decision for `url` before a page that is about to be
+    /// served from the page cache. The route reads the cache before any fetch, so without
+    /// this a cached page was served and metered without the fetch-time check ever running.
+    /// It is the same decision as `run` makes (one `record`, the same typed refusal and
+    /// `page_blocked` event), so a page gets one decision whether it is cached or fetched:
+    /// a run that fetches does not repeat it. `Ok` also covers observe and `Off`.
+    pub async fn precheck_robots(&self, run_id: &RunKind, url: &Url) -> QuarryResult<()> {
+        self.robots_check(run_id, url, "request").await.map(|_| ())
+    }
+
     async fn emit_page_event(
         &self,
         run_id: RunKind,
@@ -4240,5 +4250,85 @@ mod robots_gate_tests {
         let url: Url = "https://example.test/private/secret".parse().unwrap();
         h.runner.run(&run_id, &url, None).await.unwrap_err();
         assert!(gate.is_empty(), "ZDR reads and fills no robots cache");
+    }
+
+    #[tokio::test]
+    async fn a_cached_page_is_refused_before_it_is_served_under_enforce() {
+        let mut h = harness(gate(&[(ORIGIN, PRIVATE)]), Some(RobotsEnforceMode::Enforce), None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/private/secret".parse().unwrap();
+        let err = h.runner.precheck_robots(&run_id, &url).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+        let denial = &err.details.as_ref().unwrap()["denial"];
+        assert_eq!(denial["code"], "robots_disallowed");
+        assert_eq!(denial["path"], "/private/secret");
+        assert_eq!(h.calls.load(Ordering::SeqCst), 0, "the page driver is not asked");
+        assert_eq!(h.gate.stats().denied, 1);
+        let events = drain(&mut h.rx);
+        assert_eq!(count(&events, EventType::PageBlocked), 1, "exactly one PageBlocked");
+        let blocked = events.iter().find(|e| e.event_type == EventType::PageBlocked).unwrap();
+        assert_eq!(blocked.payload["stage"], "request");
+    }
+
+    #[tokio::test]
+    async fn a_cached_page_under_observe_is_counted_once_and_not_refused() {
+        let mut h = harness(gate(&[(ORIGIN, PRIVATE)]), Some(RobotsEnforceMode::Observe), None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/private/secret".parse().unwrap();
+        h.runner.precheck_robots(&run_id, &url).await.expect("observe never refuses");
+        let stats = h.gate.stats();
+        assert_eq!(stats.would_deny, 1);
+        assert_eq!(stats.total(), 1, "one decision for the cached page");
+        assert_eq!(h.calls.load(Ordering::SeqCst), 0, "the precheck fetches nothing");
+        assert!(drain(&mut h.rx).is_empty(), "observe emits no PageBlocked");
+    }
+
+    #[tokio::test]
+    async fn a_fetched_page_gets_one_decision_not_two() {
+        let h = harness(gate(&[(ORIGIN, PRIVATE)]), Some(RobotsEnforceMode::Observe), None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/private/secret".parse().unwrap();
+        h.runner.run(&run_id, &url, None).await.expect("observe fetches");
+        assert_eq!(h.gate.stats().total(), 1);
+        assert_eq!(h.gate.stats().would_deny, 1);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_robots_txt_under_observe_is_counted_as_would_unreachable() {
+        let unreachable: HashMap<String, RobotsFetch> =
+            [(ORIGIN.to_string(), RobotsFetch::Unreachable("status_5xx".into()))].into();
+        let gate = Arc::new(RobotsGate::with_fetcher(
+            Arc::new(MapFetcher(unreachable)),
+            RobotsGateConfig::default(),
+        ));
+        let h = harness(gate, Some(RobotsEnforceMode::Observe), None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/docs/a".parse().unwrap();
+        h.runner.run(&run_id, &url, None).await.expect("observe fetches");
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        let stats = h.gate.stats();
+        assert_eq!(stats.would_deny_unreachable, 1);
+        assert_eq!(stats.would_deny, 0);
+        assert_eq!(stats.denied_unreachable, 0);
+        assert_eq!(stats.total(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_cached_page_is_refused_under_enforce_before_it_is_served() {
+        let unreachable: HashMap<String, RobotsFetch> =
+            [(ORIGIN.to_string(), RobotsFetch::Unreachable("status_5xx".into()))].into();
+        let gate = Arc::new(RobotsGate::with_fetcher(
+            Arc::new(MapFetcher(unreachable)),
+            RobotsGateConfig::default(),
+        ));
+        let h = harness(gate, Some(RobotsEnforceMode::Enforce), None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/docs/a".parse().unwrap();
+        let err = h.runner.precheck_robots(&run_id, &url).await.unwrap_err();
+        let denial = &err.details.as_ref().unwrap()["denial"];
+        assert_eq!(denial["code"], "robots_unreachable");
+        assert_eq!(denial["host"], "example.test");
+        assert_eq!(h.gate.stats().denied_unreachable, 1);
+        assert_eq!(h.calls.load(Ordering::SeqCst), 0);
     }
 }

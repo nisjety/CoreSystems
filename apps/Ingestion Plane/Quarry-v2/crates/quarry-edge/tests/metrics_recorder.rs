@@ -299,3 +299,40 @@ async fn sampler_exports_run_gauges_the_drain_flag_and_pool_refusals() {
     );
     assert!(line(r#"quarry_lease_pool_waits_total{pool="refusal_test_pool"}"#).ends_with(" 1"));
 }
+
+#[tokio::test]
+async fn sampler_exports_each_robots_decision_under_its_mode_and_outcome() {
+    use quarry_runtime::{RobotsEnforceMode, RobotsGate, RobotsGateConfig};
+    use support::fixture_site::{FixtureSiteDriver, FIXTURE_A};
+
+    handle();
+    // Observe over the fixture site: one disallowed page (would_deny) and one allowed.
+    let gate = Arc::new(RobotsGate::new(
+        Arc::new(FixtureSiteDriver::standard_site()),
+        RobotsGateConfig {
+            mode: RobotsEnforceMode::Observe,
+            ..RobotsGateConfig::default()
+        },
+    ));
+    for path in ["/private/secret", "/docs/a"] {
+        let url: url::Url = format!("{FIXTURE_A}{path}").parse().unwrap();
+        let decision = gate.check(&url, "org_metrics", false).await;
+        gate.record(RobotsEnforceMode::Observe, &decision);
+    }
+    metrics::register_robots(gate.clone());
+    metrics::sample_all();
+
+    let addr = spawn_metrics(Some(TOKEN)).await;
+    let (_, body) = get(addr, "/metrics", Some(TOKEN)).await;
+    let line = |prefix: &str| {
+        body.lines()
+            .find(|line| line.starts_with(prefix))
+            .unwrap_or_else(|| panic!("{prefix} missing in {body}"))
+            .to_owned()
+    };
+    assert!(line(r#"quarry_robots_decisions_total{mode="observe",outcome="would_deny"}"#).ends_with(" 1"));
+    assert!(line(r#"quarry_robots_decisions_total{mode="any",outcome="allowed"}"#).ends_with(" 1"));
+    assert!(line(r#"quarry_robots_decisions_total{mode="observe",outcome="would_unreachable"}"#).ends_with(" 0"));
+    assert!(line(r#"quarry_robots_decisions_total{mode="enforce",outcome="denied"}"#).ends_with(" 0"));
+    assert!(line("quarry_robots_cache_entries").ends_with(" 1"));
+}

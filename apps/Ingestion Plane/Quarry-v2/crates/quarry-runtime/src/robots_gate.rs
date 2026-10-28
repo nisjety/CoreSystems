@@ -366,6 +366,18 @@ fn error_class(code: ErrorCode) -> &'static str {
     }
 }
 
+impl RobotsStats {
+    /// Every decision counted, whatever its outcome. The soak's go criterion (X-10) is
+    /// the share of this total that is `would_deny` or `would_deny_unreachable`.
+    pub fn total(&self) -> u64 {
+        self.allowed
+            + self.denied
+            + self.denied_unreachable
+            + self.would_deny
+            + self.would_deny_unreachable
+    }
+}
+
 /// The robots.txt gate: a cache of per-origin rules and the decision over them.
 #[derive(Clone)]
 pub struct RobotsGate {
@@ -808,6 +820,17 @@ mod tests {
                 would_deny_unreachable: 1,
             }
         );
+    }
+
+    #[test]
+    fn total_counts_every_recorded_decision_once_and_nothing_for_off() {
+        let gate = gate_over(StubDriver::status(200, PRIVATE_RULES));
+        let denied = RobotsDecision::Disallowed { token: "quarry".into(), path: "/p".into() };
+        gate.record(RobotsEnforceMode::Observe, &denied);
+        gate.record(RobotsEnforceMode::Enforce, &denied);
+        gate.record(RobotsEnforceMode::Off, &denied);
+        gate.record(RobotsEnforceMode::Observe, &RobotsDecision::NotApplicable);
+        assert_eq!(gate.stats().total(), 2, "off and not-applicable count nothing");
     }
 
     #[test]

@@ -1722,6 +1722,15 @@ async fn internal_run_page(
     if !zdr.is_active() && should_read(&req.cache) {
         if let (Some(prev), Some(cache)) = (req.prev_fingerprint.as_ref(), state.cache.as_ref()) {
             if let Some(cached) = cache.get(&org_id, prev).await {
+                // WS14.S4, D2-161: a cached page gets the robots.txt decision that a fetched
+                // page gets, before it is served or metered. A refusal is the fetch refusal.
+                if let Err(err) = runner.precheck_robots(&run_id, &url).await {
+                    return Err((
+                        StatusCode::from_u16(err.code.http_status())
+                            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                        Json(Envelope::<()>::err(&request_id, err)),
+                    ));
+                }
                 meter_crawl_page(&state, req.kind.as_deref(), &req.url, req.user_id.as_deref(), &run_id, &org_id, zdr).await;
                 return Ok(Json(with_crawl(
                     InternalRunPageResult::from_output(run_id.to_string(), &cached),

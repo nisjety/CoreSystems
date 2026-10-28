@@ -455,3 +455,179 @@ async fn map_with_an_unreachable_robots_txt_is_refused_under_the_disallow_policy
     let (status, body) = call_map(map_state(site, gate), claims, &format!("{FIXTURE_A}/")).await;
     assert_eq!(status, 403, "{body}");
 }
+
+// ── D2-161: a cached page gets the robots decision before it is served ───────
+
+use quarry_edge::cache::PageCache;
+use std::{collections::HashMap, sync::Mutex, time::Duration};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+type Store = Arc<Mutex<HashMap<String, Vec<u8>>>>;
+
+/// A minimal RESP2 server standing in for Redis, so the page cache runs on a host
+/// without one. `GET` and `SET`/`SETEX` work on a shared map; every other command
+/// (the client's connection setup, for one) answers `+OK`.
+async fn spawn_fake_redis() -> SocketAddr {
+    let store: Store = Arc::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            tokio::spawn(serve_resp(socket, store.clone()));
+        }
+    });
+    addr
+}
+
+async fn serve_resp(socket: tokio::net::TcpStream, store: Store) {
+    let (read, mut write) = socket.into_split();
+    let mut read = BufReader::new(read);
+    loop {
+        let mut header = String::new();
+        if read.read_line(&mut header).await.unwrap_or(0) == 0 {
+            return;
+        }
+        let Some(count) = header.trim_end().strip_prefix('*').and_then(|n| n.parse::<usize>().ok()) else {
+            return;
+        };
+        let mut args: Vec<Vec<u8>> = Vec::with_capacity(count);
+        for _ in 0..count {
+            let mut length = String::new();
+            if read.read_line(&mut length).await.unwrap_or(0) == 0 {
+                return;
+            }
+            let Some(len) = length.trim_end().strip_prefix('$').and_then(|n| n.parse::<usize>().ok()) else {
+                return;
+            };
+            let mut arg = vec![0u8; len + 2];
+            if read.read_exact(&mut arg).await.is_err() {
+                return;
+            }
+            arg.truncate(len);
+            args.push(arg);
+        }
+        if args.is_empty() {
+            continue;
+        }
+        let command = String::from_utf8_lossy(&args[0]).to_ascii_uppercase();
+        let reply: Vec<u8> = match command.as_str() {
+            "GET" if args.len() >= 2 => {
+                let key = String::from_utf8_lossy(&args[1]).into_owned();
+                let found = store.lock().unwrap().get(&key).cloned();
+                match found {
+                    Some(value) => {
+                        let mut out = format!("${}\r\n", value.len()).into_bytes();
+                        out.extend_from_slice(&value);
+                        out.extend_from_slice(b"\r\n");
+                        out
+                    }
+                    None => b"$-1\r\n".to_vec(),
+                }
+            }
+            "SET" if args.len() >= 3 => {
+                let key = String::from_utf8_lossy(&args[1]).into_owned();
+                store.lock().unwrap().insert(key, args[2].clone());
+                b"+OK\r\n".to_vec()
+            }
+            "SETEX" if args.len() >= 4 => {
+                let key = String::from_utf8_lossy(&args[1]).into_owned();
+                store.lock().unwrap().insert(key, args[3].clone());
+                b"+OK\r\n".to_vec()
+            }
+            _ => b"+OK\r\n".to_vec(),
+        };
+        if write.write_all(&reply).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// An edge whose page route is gated on robots.txt by `mode` and whose page cache is
+/// `cache`. It shares `site`, so its fetches show in the site's request log.
+async fn spawn_cached_edge(
+    site: FixtureSiteDriver,
+    mode: RobotsEnforceMode,
+    cache: PageCache,
+) -> (SocketAddr, FixtureSiteDriver, Arc<RobotsGate>) {
+    std::env::set_var("QUARRY_EDGE__RUNTIME_AUTH_TOKEN", RUNTIME_TOKEN);
+    let (tx, mut rx) = mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let driver = Arc::new(site.clone());
+    let config = RobotsGateConfig {
+        mode,
+        ..RobotsGateConfig::default()
+    };
+    let gate = Arc::new(RobotsGate::new(driver.clone(), config));
+    let state = AppState {
+        internal_signer: Some(Arc::new(InternalSigner::new(INTERNAL_SECRET).unwrap())),
+        robots: Some(gate.clone()),
+        cache: Some(cache),
+        ..support::base_state(driver, EventSink::new(tx))
+    };
+    let app = quarry_edge::routes::router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (addr, site, gate)
+}
+
+/// `run_page` with `prev_fingerprint` set, which is what makes the route read the page cache.
+async fn run_cached_page(addr: SocketAddr, url: &str, prev: &str) -> (u16, Value) {
+    let body = json!({
+        "url": url,
+        "org_id": ORG,
+        "crawl": { "v": 1, "depth": 0, "max_depth": 1, "scope_mode": "enforce", "robots": "respect" },
+        "prev_fingerprint": prev,
+    });
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/internal/run_page"))
+        .bearer_auth(RUNTIME_TOKEN)
+        .header("x-quarry-run-sig", run_sig(ORG, url))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    (status, response.json().await.unwrap())
+}
+
+fn page_fetches(site: &FixtureSiteDriver, path: &str) -> usize {
+    site.requests().iter().filter(|r| r.url.path() == path).count()
+}
+
+#[tokio::test]
+async fn a_cached_page_is_refused_under_enforce_and_counted_once_under_observe() {
+    let redis = spawn_fake_redis().await;
+    let conn = redis::aio::ConnectionManager::new(redis::Client::open(format!("redis://{redis}/")).unwrap())
+        .await
+        .unwrap();
+    let cache = PageCache::new(conn, Duration::from_secs(3600));
+    let url = format!("{FIXTURE_A}/private/secret");
+    let site = FixtureSiteDriver::standard_site();
+
+    // The observe edge fetches the disallowed page (observe blocks nothing) and caches it.
+    let (observe, observe_site, observe_gate) =
+        spawn_cached_edge(site.clone(), RobotsEnforceMode::Observe, cache.clone()).await;
+    let (status, first) = run_page(observe, &url, crawl_respecting_robots()).await;
+    assert_eq!(status, 200, "{first}");
+    let fingerprint = first["fingerprint"].as_str().expect("the fetch reports its fingerprint").to_string();
+    assert_eq!(observe_gate.stats().total(), 1, "the fetch is one decision");
+
+    // The next request is answered from the cache: one more decision, and no fetch.
+    let (status, second) = run_cached_page(observe, &url, &fingerprint).await;
+    assert_eq!(status, 200, "{second}");
+    let stats = observe_gate.stats();
+    assert_eq!(stats.would_deny, 2, "the cache hit is counted as a decision too");
+    assert_eq!(stats.total(), 2, "one decision per page, cached or fetched");
+    assert_eq!(page_fetches(&observe_site, "/private/secret"), 1, "the cache hit fetched nothing");
+
+    // An enforce edge over the same cache refuses the cached page before it is served.
+    let (enforce, enforce_site, enforce_gate) =
+        spawn_cached_edge(site, RobotsEnforceMode::Enforce, cache).await;
+    let (status, body) = run_cached_page(enforce, &url, &fingerprint).await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"]["code"], "SECURITY_BLOCKED");
+    assert_eq!(body["error"]["details"]["denial"]["code"], "robots_disallowed");
+    assert_eq!(enforce_gate.stats().denied, 1);
+    assert_eq!(page_fetches(&enforce_site, "/private/secret"), 1, "the refused page was not fetched");
+}
