@@ -1,0 +1,216 @@
+# qv2e: isolated evidence stack for the 2026-10-28 stack session (STACK-SESSION-RUNBOOK.md).
+# Images qv2e/quarry-*:${QV2E_REV} built from a frozen git archive of quarryv2-next.
+# Own Postgres, Dragonfly, NATS and Temporal on a private network; the live stack is only
+# read (auth-core JWKS at host.docker.internal:3011). Evidence-only flags live in qv2e-flags.env.
+name: qv2e
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "20m", max-file: "3" }
+
+services:
+  pg:
+    image: postgres:16.14-alpine3.24
+    container_name: qv2e-pg
+    environment:
+      POSTGRES_USER: ingestion_user
+      POSTGRES_PASSWORD: ${QV2E_PG_PASSWORD:?}
+      POSTGRES_DB: ingestion_plane_db
+    volumes:
+      - qv2e-pg:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    ports: ["127.0.0.1:38432:5432"]
+    networks: [net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ingestion_user -d quarry_edge"]
+      interval: 5s
+      retries: 20
+    logging: *logging
+
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
+    container_name: qv2e-dragonfly
+    command: --requirepass=${QV2E_DF_PASSWORD:?} --cache_mode=true --maxmemory=256mb --proactor_threads=1
+    networks: [net]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$QV2E_DF_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      retries: 20
+    environment:
+      QV2E_DF_PASSWORD: ${QV2E_DF_PASSWORD:?}
+    logging: *logging
+
+  nats:
+    image: nats:2.10.29-alpine3.22
+    container_name: qv2e-nats
+    command: ["--jetstream", "--store_dir=/data", "-m", "8222", "--auth", "${QV2E_NATS_TOKEN:?}"]
+    networks: [net]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 5s
+      retries: 20
+    logging: *logging
+
+  temporal-pg:
+    image: postgres:16.14-alpine3.24
+    container_name: qv2e-temporal-pg
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: ${QV2E_PG_PASSWORD:?}
+      POSTGRES_DB: temporal
+    networks: [net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal -d temporal"]
+      interval: 5s
+      retries: 20
+    logging: *logging
+
+  temporal:
+    image: temporalio/auto-setup:1.27.2
+    container_name: qv2e-temporal
+    environment:
+      DB: postgres12
+      POSTGRES_SEEDS: temporal-pg
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: ${QV2E_PG_PASSWORD:?}
+      DB_PORT: 5432
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+      LOG_LEVEL: warn
+    depends_on:
+      temporal-pg: { condition: service_healthy }
+    networks: [net]
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"]
+      interval: 10s
+      retries: 30
+      start_period: 30s
+    logging: *logging
+
+  control:
+    image: qv2e/quarry-control:${QV2E_REV:?}
+    container_name: qv2e-control
+    init: true
+    environment:
+      QUARRY_CONTROL_ADDR: ":8081"
+      QUARRY_CONTROL_DSN: postgres://ingestion_user:${QV2E_PG_PASSWORD}@pg:5432/quarry_v2?sslmode=disable
+      QUARRY_CONTROL_API_KEY: ${QV2E_CONTROL_API_KEY:?}
+      QUARRY_INTERNAL_SECRET: ${QV2E_INTERNAL_SECRET:?}
+      QUARRY_INTERNAL_HMAC_REQUIRED: "0"
+      QUARRY_JOB_ADMISSION: ${QV2E_JOB_ADMISSION:-off}
+      QUARRY_SCHEDULED_JOBS_ENABLED: "0"
+      TEMPORAL_ADDR: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: quarry-orchestrator
+      ENVIRONMENT: dev
+    depends_on:
+      pg: { condition: service_healthy }
+      temporal: { condition: service_healthy }
+    ports: ["127.0.0.1:38081:8081"]
+    networks: [net]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 -O /dev/null http://127.0.0.1:8081/health || exit 1"]
+      interval: 10s
+      retries: 10
+    logging: *logging
+
+  edge:
+    image: qv2e/quarry-edge:${QV2E_REV:?}
+    container_name: qv2e-edge
+    init: true
+    security_opt:
+      - seccomp=${QV2E_SECCOMP:?}
+    env_file:
+      - ./qv2e-flags.env
+    environment:
+      QUARRY_EDGE__PORT: "8082"
+      QUARRY_EDGE__USER_AGENT: "Quarry/2.0 (+https://triodelab.com/quarry)"
+      QUARRY_EDGE__RUN_SWEEPER_DRY_RUN: "1"
+      QUARRY_SCRAPE_SESSION_ISOLATION: "on"
+      QUARRY_EDGE__CONTROL_BASE_URL: http://control:8081
+      QUARRY_EDGE__CONTROL_API_KEY: ${QV2E_CONTROL_API_KEY}
+      QUARRY_EDGE__DATABASE_URL: postgres://ingestion_user:${QV2E_PG_PASSWORD}@pg:5432/quarry_edge?sslmode=disable
+      QUARRY_EDGE__PROFILE_STORE_KIND: postgres
+      QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QV2E_RUNTIME_TOKEN:?}
+      QUARRY_EDGE__INTERNAL_SECRET: ${QV2E_INTERNAL_SECRET}
+      QUARRY_EDGE__NATS_URL: nats://nats:4222
+      QUARRY_EDGE__NATS_TOKEN: ${QV2E_NATS_TOKEN}
+      QUARRY_EDGE__NATS_SUBJECT_PREFIX: quarry
+      QUARRY_EDGE__LOCAL_INDEX_DIR: /var/lib/quarry/home/.cache/local-index
+      AUTH_CORE_JWKS_URL: http://host.docker.internal:3011/api/convex-auth/jwks
+      AUTH_CORE_AUDIENCE: quarry
+      AUTH_CORE_ISSUER: http://localhost:3011/api/convex-auth
+      QUARRY_EDGE__AUTH_CORE_URL: http://host.docker.internal:3011
+      QUARRY_EDGE__QUARRY_SERVICE_API_KEY: ${QV2E_SERVICE_API_KEY:?}
+      QUARRY_EDGE__DRAGONFLY_URL: redis://:${QV2E_DF_PASSWORD}@dragonfly:6379/6
+      QUARRY_EDGE__REDIS_URL: redis://:${QV2E_DF_PASSWORD}@dragonfly:6379/6
+      QUARRY_EDGE__ARTIFACT_ROOT: /app/data/artifacts
+      QUARRY_EDGE__EDGE_INTERNAL_BASE_URL: http://edge:8082
+      QUARRY_EDGE__REDACTION_MODE: enforce
+      QUARRY_EDGE__METRICS_ENABLED: "1"
+      QUARRY_EDGE__METRICS_TOKEN: ${QV2E_METRICS_TOKEN:?}
+      QUARRY_EDGE__HTTP3_ENABLED: "1"
+      RUST_LOG: ${QV2E_RUST_LOG:-info}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on:
+      control: { condition: service_healthy }
+      pg: { condition: service_healthy }
+      dragonfly: { condition: service_healthy }
+      nats: { condition: service_healthy }
+    ports: ["127.0.0.1:38082:8082"]
+    networks: [net, fixture]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 -O /dev/null http://127.0.0.1:8082/health || exit 1"]
+      interval: 10s
+      retries: 12
+      start_period: 20s
+    logging: *logging
+
+  orchestrator:
+    image: qv2e/quarry-orchestrator:${QV2E_REV:?}
+    container_name: qv2e-orch
+    init: true
+    environment:
+      TEMPORAL_ADDR: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      RUNTIME_BASE_URL: http://edge:8082
+      CONTROL_BASE_URL: http://control:8081
+      RUNTIME_AUTH_TOKEN: ${QV2E_RUNTIME_TOKEN}
+      CONTROL_AUTH_TOKEN: ${QV2E_CONTROL_API_KEY}
+      QUARRY_INTERNAL_SECRET: ${QV2E_INTERNAL_SECRET}
+      ENVIRONMENT: dev
+    depends_on:
+      temporal: { condition: service_healthy }
+      edge: { condition: service_healthy }
+      control: { condition: service_healthy }
+    networks: [net]
+    logging: *logging
+
+  fixture-a:
+    # Baked image (a bind mount from the Temp dir gives nginx stat() I/O errors on Docker Desktop).
+    image: qv2e/fixture-a:${QV2E_REV}
+    container_name: qv2e-fixture-a
+    networks:
+      fixture:
+        aliases: [fixture-a.crawl.test, docs.fixture-a.crawl.test]
+    logging: *logging
+
+  fixture-b:
+    image: qv2e/fixture-b:${QV2E_REV}
+    container_name: qv2e-fixture-b
+    networks:
+      fixture:
+        aliases: [fixture-b.crawl.test]
+    logging: *logging
+
+networks:
+  net:
+    name: qv2e-net
+  fixture:
+    name: qv2e-fixture
+    ipam:
+      config:
+        - subnet: 192.88.99.0/24
+
+volumes:
+  qv2e-pg:

@@ -1,0 +1,28 @@
+== 1 ZDR scrape ==
+  HTTP 200
+  artifacts before=0 after=0
+  inline markdown starts: Fixture A ==========  [docs](/  scrape_id=null zdr=on
+  formats keys: ["links"]
+  log lines in window: 17
+  marker 'zdr-probe-4af3d3d0-135f-4a59-8a5a-1ecd65a33252': 0
+  'fixture-a': 0   'crawl.test': 0   'Fixture A' (title): 0
+== 1c control: zdr false ==
+  HTTP 200
+  artifacts before=0 after=4
+  log lines in window: 216
+  marker 'zdr-probe-b3fe93f2-8398-402a-8316-b4e6662f3423': 1
+  'fixture-a': 1   'crawl.test': 1   'Fixture A' (title): 1
+== 2 ZDR stream ==
+  HTTP 200
+  artifacts before=4 after=4; sse bytes=2457
+  log lines in window: 14
+  marker 'zdr-probe-a3e82442-c848-4ff7-9934-2bfa220a8665': 0
+  'fixture-a': 0   'crawl.test': 0   'Fixture A' (title): 0
+== 4 ZDR agent run + navigate ==
+  run run_01M6240HY3NMTY73QHB3MGMJ3F
+  navigate HTTP 200
+  close HTTP 200
+  artifacts before=4 after=4
+  log lines in window: 48
+  marker 'zdr-probe-ec0bc503-5332-4fd9-9a04-18b7954cb1f2': 0
+  'fixture-a': 0   'crawl.test': 0   'Fixture A' (title): 0

@@ -1,0 +1,47 @@
+event: action.started
+id: 2
+data: {"event_id":"evt_01M624M4DXHZHY8SCBWFJBR6JT","run_id":"run_01M624M2681DBR9FVFXJF05VC2","type":"action_started","ts":"2026-10-28T20:53:29.149784463Z","seq":2,"payload":{"action":{"type":"navigate","url":"http://fixture-a.crawl.test/"},"step":0},"idempotency_key":"run_01M624M2681DBR9FVFXJF05VC2:action:0:started"}
+
+event: observation.ready
+id: 3
+data: {"event_id":"evt_01M624M4RDSGF0EPWEZSH20ZFT","run_id":"run_01M624M2681DBR9FVFXJF05VC2","type":"observation_ready","ts":"2026-10-28T20:53:29.485962793Z","seq":3,"payload":{"has_evidence_delta":true,"has_screenshot":true,"step":0,"url":"http://fixture-a.crawl.test/"},"idempotency_key":"run_01M624M2681DBR9FVFXJF05VC2:observation:0:ready"}
+
+event: action.started
+id: 4
+data: {"event_id":"evt_01M624M4VVGVKX6VJ9BSZZX0B8","run_id":"run_01M624M2681DBR9FVFXJF05VC2","type":"action_started","ts":"2026-10-28T20:53:29.595872845Z","seq":4,"payload":{"action":{"type":"navigate","url":"http://fixture-a.crawl.test/"},"step":1},"idempotency_key":"run_01M624M2681DBR9FVFXJF05VC2:action:1:started"}
+
+event: observation.ready
+id: 5
+data: {"event_id":"evt_01M624M4ZA3NEZ088HABEKN8WY","run_id":"run_01M624M2681DBR9FVFXJF05VC2","type":"observation_ready","ts":"2026-10-28T20:53:29.706425938Z","seq":5,"payload":{"has_evidence_delta":true,"has_screenshot":true,"step":1,"url":"http://fixture-a.crawl.test/"},"idempotency_key":"run_01M624M2681DBR9FVFXJF05VC2:observation:1:ready"}
+
+event: action.started
+id: 6
+data: {"event_id":"evt_01M624M531FMP5ZRWVC5AF875Y","run_id":"run_01M624M2681DBR9FVFXJF05VC2","type":"action_started","ts":"2026-10-28T20:53:29.825608950Z","seq":6,"payload":{"action":{"type":"navigate","url":"http://fixture-a.crawl.test/"},"step":2},"idempotency_key":"run_01M624M2681DBR9FVFXJF05VC2:action:2:started"}
+
+event: observation.ready
+id: 7
+data: {"event_id":"evt_01M624M56GHR8AEG0VGJBTASDS","run_id":"run_01M624M2681DBR9FVFXJF05VC2","type":"observation_ready","ts":"2026-10-28T20:53:29.936847025Z","seq":7,"payload":{"has_evidence_delta":true,"has_screenshot":true,"step":2,"url":"http://fixture-a.crawl.test/"},"idempotency_key":"run_01M624M2681DBR9FVFXJF05VC2:observation:2:ready"}
+
+event: action.started
+id: 8
+data: {"event_id":"evt_01M624M59N6R04EC3FE3ND2BSH","run_id":"run_01M624M2681DBR9FVFXJF05VC2","type":"action_started","ts":"2026-10-28T20:53:30.037589073Z","seq":8,"payload":{"action":{"type":"navigate","url":"http://fixture-a.crawl.test/"},"step":3},"idempotency_key":"run_01M624M2681DBR9FVFXJF05VC2:action:3:started"}
+
+event: observation.ready
+id: 9
+data: {"event_id":"evt_01M624M5CVF5PP5XKF3NZ8N45Q","run_id":"run_01M624M2681DBR9FVFXJF05VC2","type":"observation_ready","ts":"2026-10-28T20:53:30.139855460Z","seq":9,"payload":{"has_evidence_delta":true,"has_screenshot":true,"step":3,"url":"http://fixture-a.crawl.test/"},"idempotency_key":"run_01M624M2681DBR9FVFXJF05VC2:observation:3:ready"}
+
+event: action.started
+id: 10
+data: {"event_id":"evt_01M624M5GACV9SHNM04NK1CZ1X","run_id":"run_01M624M2681DBR9FVFXJF05VC2","type":"action_started","ts":"2026-10-28T20:53:30.250391537Z","seq":10,"payload":{"action":{"type":"navigate","url":"http://fixture-a.crawl.test/"},"step":4},"idempotency_key":"run_01M624M2681DBR9FVFXJF05VC2:action:4:started"}
+
+event: observation.ready
+id: 11
+data: {"event_id":"evt_01M624M5M73SJS9321B17RHP72","run_id":"run_01M624M2681DBR9FVFXJF05VC2","type":"observation_ready","ts":"2026-10-28T20:53:30.375521724Z","seq":11,"payload":{"has_evidence_delta":true,"has_screenshot":true,"step":4,"url":"http://fixture-a.crawl.test/"},"idempotency_key":"run_01M624M2681DBR9FVFXJF05VC2:observation:4:ready"}
+
+event: agent.completed
+id: 13
+data: {"event_id":"evt_01M624M64H46XZJ98CJMY850CZ","run_id":"run_01M624M2681DBR9FVFXJF05VC2","type":"agent_completed","ts":"2026-10-28T20:53:30.897590403Z","seq":13,"payload":{},"idempotency_key":"run_01M624M2681DBR9FVFXJF05VC2:agent_completed"}
+
+event: done
+data: run_closed
+

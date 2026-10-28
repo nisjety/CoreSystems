@@ -1,0 +1,18 @@
+run run_01M6244QB9BP7JD3TBFDYVKZY0
+navigate: 200
+--- P1: click selector input[type=password], 10 keys, Enter
+click: 200
+q:200 l:200 i:200 v:200 e:200 p:200 a:200 s:200 s:200 7:200 
+Enter: 200
+--- P2: click_ref password, 10 keys, Enter
+click_ref Password (@e4 gen 12): 200
+q:200 l:200 i:200 v:200 e:200 p:200 a:200 s:200 s:200 7:200 
+Enter: 200
+--- S: click_ref search box, 9 keys, Enter
+click_ref Search (@e2 gen 24): 200
+z:200 e:200 b:200 r:200 a:200 f:200 i:200 s:200 h:200 
+Enter: 200
+--- T: type_ref into search box and into password
+click_ref Search (@e2 gen 35): 200
+type_ref search: 200
+close: 200

@@ -1,0 +1,6 @@
+quarry_robots_decisions_total{mode="any",outcome="allowed"} 7
+quarry_robots_decisions_total{mode="enforce",outcome="unreachable"} 0
+quarry_robots_decisions_total{mode="observe",outcome="would_unreachable"} 0
+quarry_robots_decisions_total{mode="observe",outcome="would_deny"} 2
+quarry_robots_decisions_total{mode="enforce",outcome="denied"} 0
+quarry_robots_cache_entries 3

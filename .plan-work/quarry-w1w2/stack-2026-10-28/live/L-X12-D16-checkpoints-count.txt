@@ -1,0 +1,13 @@
+ be | status | count 
+----+--------+-------
+    | closed |    23
+(1 row)
+
+ exhausted | status | count 
+-----------+--------+-------
+ (none)    | closed |    10
+ cost      | closed |     3
+ runtime   | closed |     2
+ steps     | closed |     2
+(4 rows)
+

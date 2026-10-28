@@ -1,0 +1,8 @@
+ exhausted | status | count 
+-----------+--------+-------
+ cost      | closed |     3
+ runtime   | closed |     2
+ steps     | closed |     4
+           | closed |    10
+(4 rows)
+
