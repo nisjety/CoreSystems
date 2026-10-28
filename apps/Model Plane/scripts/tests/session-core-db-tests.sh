@@ -32,8 +32,8 @@ set -euo pipefail
 # CI, MODEL_PLANE_RESIDENCY and UPDATE_AUDIT_CORE_FIXTURES. Other environment reads are not
 # cleared. The block is marked, and the contract test runs it under an empty environment.
 # An unfiltered run prints its pass count in a banner. The last full run recorded for
-# this harness, through a disposable Postgres, passed 893 tests with 0 failed (2026-10-28, after
-# Wave 2 batch W2-20; it was 867 on 2026-10-26;
+# this harness, through a disposable Postgres, passed 905 tests with 0 failed (2026-10-28, after
+# Wave 2 batch W2-21; 893 after W2-20 the same day; it was 867 on 2026-10-26;
 # it was 842 passed and 2 failed earlier that day, both fixed, and 719 on 2026-10-22;
 # it was 715 before the approval cause's four tests (WS13-S1), 688 before the run-question store's 27 tests (WS14-S3), 690 before the tool-completions allowlist replaced four NATS tests with two, 688
 # before the NATS filter review's two follow-up tests, 681 before the NATS ingress
@@ -245,7 +245,7 @@ run_selection() {
     # The unfiltered run is the whole suite, so its count goes where a person will read it.
     printf '\n============================================================\n'
     printf 'session-core DB tests, FULL RUN: %s passed, 0 failed\n' "$(count_passed "$LOG")"
-    printf 'last full run recorded for this harness: 893 passed, 0 failed; a different count means a test was added, removed or skipped\n'
+    printf 'last full run recorded for this harness: 905 passed, 0 failed; a different count means a test was added, removed or skipped\n'
     printf '============================================================\n\n'
   fi
   return 0

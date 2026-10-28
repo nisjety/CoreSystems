@@ -3567,7 +3567,8 @@ type UpsertAgentSkillResponse struct {
 	SkippedProtected bool `protobuf:"varint,3,opt,name=skipped_protected,json=skippedProtected,proto3" json:"skipped_protected,omitempty"`
 	// Why nothing was written, as a closed token: "memory_state",
 	// "org_policy", "zdr", "protected", "accepted_exists", "rejected_exists",
-	// "owner_required". Empty when the write happened.
+	// "owner_required", or "skill_policy:<rule>" when the content policy refused
+	// the text (WS26 S5). Empty when the write happened.
 	SkipReason string `protobuf:"bytes,4,opt,name=skip_reason,json=skipReason,proto3" json:"skip_reason,omitempty"`
 	// The row's revision number after the write, from the revision log; 0 when
 	// nothing was written.

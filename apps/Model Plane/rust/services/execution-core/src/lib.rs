@@ -58,3 +58,4 @@ pub mod workspace_cas;
 pub mod workspace_edit;
 pub mod workspace_hydrate;
 pub mod workspace_promote;
+pub mod workspace_tools;

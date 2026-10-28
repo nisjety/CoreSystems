@@ -303,6 +303,9 @@ services:
       # the bus degraded and behaving as off, never the gateway down. Roll back with false plus a restart.
       MODEL_GATEWAY_RUN_CONTROL_BUS: ${MODEL_GATEWAY_RUN_CONTROL_BUS:-true}
       MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS: ${MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS:-750}
+      # WS26-S1: sample rate (0 to 1) of the semantic shadow pass over external tool results. Telemetry only; ZDR turns
+      # never reach it. 0.2 is the code's own default, so declaring it changes nothing.
+      CONTENT_SAFETY_SHADOW_SAMPLE_RATE: ${CONTENT_SAFETY_SHADOW_SAMPLE_RATE:-0.2}
       # WS04-S6: durable send receipts (client_message_id on a send, dedupe in session-core, ids on the queued_input
       # delivery event). On by default since the WS04-S9 proof; only the literal `true` turns it on. Deploy order:
       # session-core (migration 0052) first, then model-gateway, then the BFF and frontend. Roll back with false plus a
@@ -1448,6 +1451,10 @@ services:
       # space:processes before any of them can actually start.
       # See apps/Frontend Plane/verevonv3/docs/S4_2_PROCESS_REGISTRY_DESIGN_2026-09-13.md §3.1.
       EXECUTION_CORE_PROCESS_HOST: ${EXECUTION_CORE_PROCESS_HOST:-}
+      # WS24-S3: read-only workspace tools for Space Do runs. `off` by default; only `read` or `all` turns them on (`all`
+      # offers the same read set until WS24-S4 adds writes), and cap.workspace.read stays unattested until then. ZDR and
+      # non-Space runs never get them.
+      WORKSPACE_TOOLS: ${WORKSPACE_TOOLS:-off}
       # Feature-gates QuarryAgentClient::from_env() (browser_agent loop) — the
       # env var this block's QUARRY_EDGE_URL comment already promises but that
       # was never actually wired here (Phase 2, found live: run_browser_agent_loop
