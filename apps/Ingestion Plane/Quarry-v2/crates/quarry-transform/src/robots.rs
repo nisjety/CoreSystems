@@ -60,6 +60,8 @@ impl RobotsTxt {
                         .or_default();
                 }
                 "allow" => {
+                    // An empty Allow is a rule line (RFC 9309 2.2, empty-pattern), so it ends the
+                    // user-agent list. It adds no pattern: an empty path would match every path.
                     if !value.is_empty() {
                         for ua in &current_agents {
                             out.groups
@@ -68,8 +70,8 @@ impl RobotsTxt {
                                 .allow
                                 .push(value.clone());
                         }
-                        after_agents = true;
                     }
+                    after_agents = true;
                 }
                 "disallow" => {
                     // Empty Disallow means allow-all; record the group anyway
@@ -447,5 +449,15 @@ mod tests {
         assert!(!split.is_allowed("quarrybot", "/a/x"));
         assert!(split.is_allowed("quarrybot", "/b/x"));
         assert!(!split.is_allowed("other", "/b/x"));
+    }
+
+    #[test]
+    fn an_empty_allow_line_ends_the_user_agent_list() {
+        // RFC 9309 section 2.2: `rule` includes `empty-pattern`, so an `Allow:` with no path is a
+        // rule line, like `Disallow:`. It ends the list, so the next user-agent line starts a new
+        // group and the Disallow below applies to `*` only.
+        let r = RobotsTxt::parse("User-agent: quarrybot\nAllow:\nUser-agent: *\nDisallow: /x\n");
+        assert!(r.is_allowed("quarrybot", "/x"));
+        assert!(!r.is_allowed("other", "/x"));
     }
 }
