@@ -12,9 +12,14 @@ package skillsink
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/services/capability-core/internal/learning"
+	"github.com/triodelab/model-plane/services/capability-core/internal/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/grpc"
 )
 
@@ -58,13 +63,32 @@ var policySkips = map[string]bool{
 	"owner_required": true,
 }
 
+// policyRefusalPrefix marks a skip session-core made under its content policy.
+// It is about this candidate's own text, not the owner or the organization.
+const policyRefusalPrefix = "skill_policy:"
+
+// skillPolicyRefused counts the candidates session-core's content policy refused,
+// labelled by the closed reason it returned. The candidate's text never reaches
+// the meter.
+var skillPolicyRefused, _ = otel.Meter(telemetry.MeterName).Int64Counter(
+	"learning_skill_policy_refused_total",
+	metric.WithDescription("Learned skill candidates refused by session-core's content policy, labelled by reason."),
+)
+
+// policyRefused records one refusal. It is a variable so a test can see each one.
+var policyRefused = func(ctx context.Context, reason string) {
+	skillPolicyRefused.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
+}
+
 // Persist writes each candidate via UpsertAgentSkill and returns the count
 // actually written. A candidate the server did not write (`skip_reason`: the
 // target is a human's skill, the owner already decided on it, or the owner's
 // state or the organization's policy no longer allows learning) is not counted
 // and is not an error: the loop yields, matching the DB-level guard and
 // learning.SelectForPersistence. A refusal that is about the owner or the
-// organization stops the batch.
+// organization stops the batch. A candidate the content policy refused is
+// counted by reason and skipped: it is not an error, so the delivery is not
+// retried, and the rest of the batch is still written.
 func (s *SessionCoreSink) Persist(ctx context.Context, skills []learning.SkillCandidate) (int, error) {
 	persisted := 0
 	for i, sk := range skills {
@@ -94,7 +118,12 @@ func (s *SessionCoreSink) Persist(ctx context.Context, skills []learning.SkillCa
 			continue
 		}
 		if resp.GetSkipReason() != "" || resp.GetSkippedProtected() {
-			if policySkips[resp.GetSkipReason()] {
+			reason := resp.GetSkipReason()
+			if strings.HasPrefix(reason, policyRefusalPrefix) {
+				policyRefused(ctx, reason)
+				continue
+			}
+			if policySkips[reason] {
 				break
 			}
 			continue

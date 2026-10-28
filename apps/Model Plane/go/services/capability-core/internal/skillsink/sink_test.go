@@ -130,5 +130,26 @@ func TestPersist_RpcErrorPropagates(t *testing.T) {
 	}
 }
 
+// A candidate the content policy refuses is counted with its closed reason. It is
+// neither an error, which would have the delivery retried, nor a reason to stop:
+// the policy judges that candidate's text, not the owner, so the rest of the
+// batch is still written.
+func TestPersist_CountsPolicySkip(t *testing.T) {
+	var refused []string
+	previous := policyRefused
+	policyRefused = func(_ context.Context, reason string) { refused = append(refused, reason) }
+	t.Cleanup(func() { policyRefused = previous })
+
+	candidates := []learning.SkillCandidate{{Name: "a", Content: "c"}, {Name: "b", Content: "c"}, {Name: "c", Content: "c"}}
+	f := &fakeUpserter{skipReasons: []string{"skill_policy:injection_marker", "", ""}}
+	n, err := NewSessionCoreSink(f, "org1", "user-1", "run-1", "thread-1").Persist(context.Background(), candidates)
+	if err != nil || n != 2 || len(f.reqs) != 3 {
+		t.Fatalf("a policy refusal must be neither an error nor the end of the batch: n=%d calls=%d err=%v", n, len(f.reqs), err)
+	}
+	if len(refused) != 1 || refused[0] != "skill_policy:injection_marker" {
+		t.Fatalf("the refusal must be counted with its reason, got %v", refused)
+	}
+}
+
 // Compile-time assertion that SessionCoreSink satisfies learning.Sink.
 var _ learning.Sink = (*SessionCoreSink)(nil)

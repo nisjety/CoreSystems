@@ -84,6 +84,14 @@ SQL
 )
 expect "${r:-EMPTY}" "EMPTY" "background_review cannot overwrite user skill (0 rows)"
 expect "$(q <<<"SELECT content FROM agent_skills WHERE org_id='org1' AND name='Runbook';")" "human" "user skill body preserved"
+# WS26 S5 refused enable: the content policy re-checks a learned skill before it is switched on,
+# and the switch itself must not turn on an undecided proposal, whatever the policy says.
+r=$(q <<SQL
+UPDATE agent_skills SET enabled = true WHERE id = 's1' AND (NOT true OR review_state = 'accepted') RETURNING 1;
+SQL
+)
+expect "${r:-EMPTY}" "EMPTY" "refused enable: an undecided learned proposal is not switched on (0 rows)"
+expect "$(q <<<"SELECT enabled::text || '/' || review_state FROM agent_skills WHERE id='s1';")" "false/proposed" "the refused enable left the proposal off"
 q >/dev/null <<SQL
 INSERT INTO agent_skills $COLS VALUES ('s4','org1','Decided','d','original','[]'::jsonb,'[]'::jsonb,'[]'::jsonb,false,'background_review','user','u1','accepted',now(),now());
 SQL
