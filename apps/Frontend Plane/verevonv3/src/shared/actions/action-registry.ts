@@ -817,6 +817,16 @@ const monitoringCheckNowInput = z.object({
   url: z.string().url(),
 })
 
+// The gateway accepts only the fixed cadences; Quarry derives the cron from them.
+const monitoringCreateMonitorInput = z.object({
+  url: z.string().url(),
+  preset: z.enum(['hourly', 'daily', 'weekly']).optional(),
+})
+
+const monitoringDeleteMonitorInput = z.object({
+  monitorId: z.string().min(1),
+})
+
 // The client always sends confirm: true itself and never lets the caller
 // override it (see eraseMyAccount); no input fields are meaningful here.
 const privacyEraseMyAccountInput = z.object({})
@@ -2516,6 +2526,28 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: monitoringCheckNowInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'monitoring.create_monitor',
+    label: 'Create change monitor',
+    description: 'Re-check a URL hourly, daily or weekly and record a baseline whenever its content changes.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: monitoringCreateMonitorInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'monitoring.delete_monitor',
+    label: 'Delete change monitor',
+    description: 'Stop and remove a recurring change monitor. Baselines already captured are kept.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: monitoringDeleteMonitorInput,
     outputSchema: envelopeStatusOutput,
   },
   {

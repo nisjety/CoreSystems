@@ -272,19 +272,19 @@ pub(crate) async fn check_now(
 // ── Recurring monitors (Phase 2 / C-FULL) ────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct CreateMonitorRequest {
+pub(crate) struct CreateMonitorRequest {
     #[serde(default)]
-    url: Option<String>,
+    pub(crate) url: Option<String>,
     /// Fixed cadence: "hourly" | "daily" | "weekly". The edge/control derive the
     /// 5-field cron from this — free-form cron is intentionally not accepted.
     #[serde(default)]
-    preset: Option<String>,
+    pub(crate) preset: Option<String>,
 }
 
 /// `POST /api/v1/monitoring/schedules` — create a recurring change monitor. The
 /// edge stamps org_id + the creator's user_id from the validated session token;
 /// we never trust a client-supplied tenant. The URL is SSRF-guarded.
-async fn create_monitor(
+pub(crate) async fn create_monitor(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -359,7 +359,7 @@ async fn list_monitors(
 }
 
 /// `DELETE /api/v1/monitoring/schedules/:id` — stop + remove a recurring monitor.
-async fn delete_monitor(
+pub(crate) async fn delete_monitor(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

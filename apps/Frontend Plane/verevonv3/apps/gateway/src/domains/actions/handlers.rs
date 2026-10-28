@@ -43,7 +43,9 @@ use super::dispatchers::{
     dispatch_leads_create_list, dispatch_leads_delete_list, dispatch_mcp_delete_server,
     dispatch_mcp_share_server, dispatch_membership_invite_member,
     dispatch_membership_remove_member, dispatch_membership_update_member_role,
-    dispatch_memory_delete, dispatch_monitoring_check_now, dispatch_navbar_create_calendar_event,
+    dispatch_memory_delete, dispatch_monitoring_check_now,
+    dispatch_monitoring_create_monitor, dispatch_monitoring_delete_monitor,
+    dispatch_navbar_create_calendar_event,
     dispatch_navbar_create_calendar_note, dispatch_navbar_mark_notification_read,
     dispatch_navbar_save_theme, dispatch_navbar_submit_support_request,
     dispatch_notification_delete, dispatch_notification_mark_all_read,
@@ -241,6 +243,12 @@ pub(super) async fn execute_action(
         "mcp.share_server" => dispatch_mcp_share_server(&state, &user, &headers, &body.input).await,
         "monitoring.check_now" => {
             dispatch_monitoring_check_now(&state, &user, &headers, &body.input).await
+        }
+        "monitoring.create_monitor" => {
+            dispatch_monitoring_create_monitor(&state, &user, &headers, &body.input).await
+        }
+        "monitoring.delete_monitor" => {
+            dispatch_monitoring_delete_monitor(&state, &user, &headers, &body.input).await
         }
         "privacy.erase_my_account" => {
             dispatch_privacy_erase_my_account(&state, &user, &body.input).await

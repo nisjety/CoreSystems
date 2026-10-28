@@ -101,6 +101,8 @@ export interface ScrapeRequest {
   only_main_content?: boolean
   include_tags?: string[]
   exclude_tags?: string[]
+  /** Upper bound for the whole fetch; quarry-edge applies its own default when absent. */
+  timeout_ms?: number
   /** When true, quarry-edge persists the fetched page into the knowledge base
    * (not just returns it). Omit/false for preview-only scrapes. */
   ingest?: boolean

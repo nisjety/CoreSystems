@@ -57,7 +57,9 @@ use crate::domains::knowledge::products::{extract_products, summarize_products};
 use crate::domains::knowledge::sync::register_sharepoint;
 use crate::domains::mcp::{delete_server as delete_mcp_server, share_server as share_mcp_server};
 use crate::domains::memory::delete_memory;
-use crate::domains::monitoring::{check_now, CheckRequest};
+use crate::domains::monitoring::{
+    check_now, create_monitor, delete_monitor, CheckRequest, CreateMonitorRequest,
+};
 use crate::domains::orchestration::{
     cancel_run as cancel_orchestration_run, decide_approval as decide_orchestration_approval,
     resume_run as resume_orchestration_run,
@@ -3672,6 +3674,54 @@ pub(super) async fn dispatch_monitoring_check_now(
     .await;
     let (status, payload) = response_to_status_and_json(response).await;
     owner_json_response_to_envelope("monitoring.check_now", user, status, payload)
+}
+
+// Reuses the real create_monitor so the SSRF guard and the hourly/daily/weekly
+// preset check stay in one place.
+pub(super) async fn dispatch_monitoring_create_monitor(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let url = ticket_string(input, "url");
+    if url.is_empty() {
+        return ticket_bad_request("monitoring.create_monitor requires a non-empty 'url'");
+    }
+    let preset = ticket_string(input, "preset");
+    let response = create_monitor(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(CreateMonitorRequest {
+            url: Some(url.to_owned()),
+            preset: (!preset.is_empty()).then(|| preset.to_owned()),
+        }),
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("monitoring.create_monitor", user, status, payload)
+}
+
+pub(super) async fn dispatch_monitoring_delete_monitor(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let monitor_id = ticket_string(input, "monitorId");
+    if monitor_id.is_empty() {
+        return ticket_bad_request("monitoring.delete_monitor requires a non-empty 'monitorId'");
+    }
+    let response = delete_monitor(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(monitor_id.to_owned()),
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("monitoring.delete_monitor", user, status, payload)
 }
 
 // Reuses the real erase handler rather than reconstructing its URL and
