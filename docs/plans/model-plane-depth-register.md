@@ -1766,6 +1766,30 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-526 | WS24-S3 | follow-up | P3 | 19 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-21.json | open |
 | D2-527 | WS24-S3 | test-gap | P2 | capability-core TestTenantScopeAndRiskMigrationQuarantinesMalformedLegacyScopes (internal/registry/migration_security_integration_test.go, -tags integration) fails before this batch too: it applies only 0003 and 0006 before 0007, but 0007 updates and alters `models`, which 0001 creates (ERROR relation "models" does not exist). Apply 0001 first in the test. | open |
 
+
+### Wave-mode batch W2-22 (2026-10-29)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-528 | WS26-S6 | test-gap | P1 | The semantic_screening test module and the ZDR guard have still not compiled or run: the lib test target is blocked by the WS23 E0027 and the grpc.rs mock E0063 in files this slice does not own. Test bodies here were never type-checked. | open |
+| D2-529 | WS26-S6 | risk | P1 | Carried from round 1, unchanged: the 6-call cap is per tool loop; gateway deep research and forced web search pass no inference bearer so they never run the inline pass; enforce withholds any flagged final web or browser payload. | open |
+| D2-530 | WS26-S6 | test-gap | P1 | Every model-gateway test this row names is unexecuted. The lib test target fails with only the 3 errors above (none in the slice's owned files), so the test bodies type-check, but none has run, including the ZDR call-site guard. | open |
+| D2-531 | WS26-S6 | live-proof | P1 | Inline tighten/enforce must be live-proven with CONTENT_SAFETY_SEMANTIC_INLINE=true on one deploy before any org opts in. The proof covers paraphrased injection flagged/withheld, the NATS event (needs the WS26-S1 publish grant) and no AnalyzeLanguage call on a ZDR turn. | open |
+| D2-532 | WS26-S6 | live-proof | P1 | The model-gateway lib test target still does not compile, so none of the 10 named semantic_screening/moderation tests, the security_events tests, the zdr_posture guard or the e2e test has run. Three errors remain: (1) the grpc.rs:3513 MockInferenceOk LanguageAnalysisResult literal needs `injection_json: String::new(),`; this is a shared-edit caused by this slice's proto tag. (2) zdr_features.rs:208 needs `connector_scope: _,` (WS23-S4.code). (3) The normalize.rs:505 test literal needs connector_scope (WS23). After those, run: cargo test -p model-gateway --lib semantic_screening ; --lib moderation ; --lib security_events ; --lib zdr_posture ; --test e2e_invoke_chain_test. | open |
+| D2-533 | WS26-S6 | live-proof | P1 | shared-edit apps/Model Plane/deploy/docker-compose.yml: add the five model-gateway switch lines (CONTENT_SAFETY_SEMANTIC_INLINE default false, MODE_DEFAULT frame, DEADLINE_MS 2500, MAX_CALLS_PER_RUN 6, INJECTION_MODEL empty). They are not present yet. | open |
+| D2-534 | WS26-S6 | live-proof | P1 | buf generate for inference.proto tag 14: the Go inference.pb.go and the Python inference_pb2.py are not regenerated. | open |
+| D2-535 | WS26-S6 | live-proof | P1 | Ledger entry in docs/decisions/ledger.md recording the DEC-31 defaults as built and the per-tool-loop budget deviation. | open |
+| D2-536 | WS26-S6 | follow-up | P3 | 17 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-22.json | open |
+| D2-537 | WS23-S4.code | test-gap | P1 | tests/zdr_feature_table.rs needs connector_scope case rows (lead_todo item 2). The review's four zdr_features.rs edits alone fail every_field_has_a_row_that_matches_its_treatment. Read from source, not run. | open |
+| D2-538 | WS23-S4.code | test-gap | P1 | No model-gateway test has run: connector_scope_refused_in_space_zdr_and_web_only, connector_selection_is_deduplicated_and_bounded, a_selection_reaches_the_run_request_only_when_made, and the zdr table. The crate does not build until items 1-4 land. | open |
+| D2-539 | WS23-S4.code | risk | P1 | Connector ids are not persisted to runs.metadata.connector_scope. That needs sessions.proto and the session-core RecordRunContext handler, which this slice does not own. Never under ZDR. | open |
+| D2-540 | WS23-S4.code | risk | P1 | An approval-resume request carries no selection, so a read tool offered in a paused Do snapshot is refused after resume. The selection must travel with the pause before paused Do runs get the read tool. | open |
+| D2-541 | WS23-S4.code | risk | P1 | Stale-target trap: clean the touched package before trusting any result. The round-1 gateway success was stale, and a clean check disproved it. | open |
+| D2-542 | WS23-S4.code | risk | P1 | Connector ids are never persisted to runs.metadata.connector_scope (the row's RecordRunContext path), so the audit and replay trail lacks the selection. | open |
+| D2-543 | WS23-S4.code | live-proof | P1 | Persistence half of the row is not built: connector_scope ids stored in runs.metadata through RecordRunContext (sessions.proto plus the session-core handler), never under ZDR. Assign it to an owner or a follow-up slice. | open |
+| D2-544 | WS23-S4.code | live-proof | P1 | Go bindings are not regenerated for RunAgentRequest field 23 / ConnectorScope (buf generate in apps/Model Plane/proto). | open |
+| D2-545 | WS23-S4.code | follow-up | P3 | 21 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-22.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -1924,3 +1948,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS26-S1.code | audit, zdr | W2-21 | no |
 | WS26-S5 | policy, authority | W2-21 | no |
 | WS24-S3 | zdr, authority, policy | W2-21 | no |
+| WS26-S6 | policy, zdr, money | W2-22 | no |
+| WS23-S4.code | authority, zdr, policy | W2-22 | no |
