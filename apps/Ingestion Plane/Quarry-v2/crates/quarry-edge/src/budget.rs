@@ -29,10 +29,14 @@
 //!   so a claim can never raise a bound. The applied claim is stored with the
 //!   ledger, so a resume cannot drop it.
 //!
-//! Everything numeric here is a placeholder pending the ratified budget numbers
-//! (plan decision X-12), which is why enforcement ships as `shadow`: it records
-//! what it *would* refuse, by class, and refuses nothing until an operator sets
-//! `QUARRY_EDGE__BUDGET_ENFORCEMENT=on` after reading that record.
+//! The numbers are the ones the owner ratified on 2026-10-28 (plan decision X-12):
+//! 60 steps, 900 s and 1 USD by default, ceilings of 300 steps, 3600 s and 20 USD,
+//! and 0.00003 USD per browser second as an estimate and not a price. Each is an
+//! env-tunable starting value (`BudgetLimits::from_env`). Enforcement still ships as
+//! `shadow`: it records what it *would* refuse, by class, and refuses nothing until an
+//! operator sets `QUARRY_EDGE__BUDGET_ENFORCEMENT=on`, which waits for the scripted
+//! stack proof (`scripts/x12-budget-stack-proof.mjs`). With `on`, a model-proposed step
+//! inside a person's session keeps the request's own step cap (`legacy_step_cap_applies`).
 
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -223,7 +227,8 @@ pub fn classify(is_service_principal: bool, initiated_by: Option<&str>) -> RunCl
     }
 }
 
-/// Defaults, ceilings and prices. Placeholders until X-12.
+/// Defaults, ceilings and prices: the values ratified in X-12 (2026-10-28), each overridable
+/// from the environment.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BudgetLimits {
     pub default_max_steps: u32,
@@ -1130,16 +1135,26 @@ impl RunBudget {
 
 /// Whether the request's own step cap (`constraints.max_steps`) still refuses
 /// with the legacy 429. It stops only where the gate owns the bound, and the gate
-/// owns it only once enforcement is `on`: an agent run is then refused with the
-/// typed 402 and a person's session is never capped. In `shadow` (the default)
-/// and `off` nothing about a run's refusals changes: every run, a person's
-/// included, keeps its request cap as it was before the gate existed. A person's
-/// cap lifting in `shadow` would change live human behaviour with a mode that is
-/// meant to refuse nothing (D2-014; the numbers and the move to `on` are X-12).
-pub fn legacy_step_cap_applies(budget: Option<&RunBudget>, mode: BudgetMode) -> bool {
+/// owns it only once enforcement is `on` and only for an agent-class run: that run
+/// is then refused with the typed 402, whoever drives it. `person_step` says the
+/// step is a person's own (initiator `human`).
+///
+/// - `off` and `shadow` (the default): nothing about a run's refusals changes. Every
+///   run keeps its request cap as it was before the gate existed. A person's cap
+///   lifting in `shadow` would change live human behaviour with a mode that is
+///   meant to refuse nothing (D2-014).
+/// - `on`, agent-class run: the typed gate owns the bound; the request cap steps aside.
+/// - `on`, person-class run, a person's own step: never capped (X-12: people are
+///   uncapped on steps). The admission gate does not even reach this question for it.
+/// - `on`, person-class run, an agent-initiated or system step (a model-proposed step
+///   inside a person's session): the request cap stays. The typed gate has no caps for a
+///   person-class run, so lifting the legacy cap would leave that step with no bound at
+///   all, a regression from `shadow` (X-12 edge guard, decision 3.3).
+pub fn legacy_step_cap_applies(budget: Option<&RunBudget>, mode: BudgetMode, person_step: bool) -> bool {
     match budget {
         None => true,
-        Some(_) => mode != BudgetMode::On,
+        Some(_) if mode != BudgetMode::On => true,
+        Some(budget) => budget.class == RunClass::Interactive && !person_step,
     }
 }
 
@@ -1504,16 +1519,27 @@ mod tests {
         let agent = RunBudget::start(&limits, RunClass::Agent, &constraints(5, None, None), None, now);
         let person = RunBudget::start(&limits, RunClass::Interactive, &constraints(12, None, None), None, now);
         // Off: no gate at all, so the request cap is what it always was, for everyone.
-        assert!(legacy_step_cap_applies(None, BudgetMode::Off));
-        assert!(legacy_step_cap_applies(Some(&agent), BudgetMode::Off));
-        assert!(legacy_step_cap_applies(Some(&person), BudgetMode::Off));
+        for person_step in [false, true] {
+            assert!(legacy_step_cap_applies(None, BudgetMode::Off, person_step));
+            assert!(legacy_step_cap_applies(Some(&agent), BudgetMode::Off, person_step));
+            assert!(legacy_step_cap_applies(Some(&person), BudgetMode::Off, person_step));
+        }
         // Shadow (the default) refuses nothing new: an agent and a person both keep the
         // request cap they had before the gate (D2-014: a person's cap lifts only with `on`).
-        assert!(legacy_step_cap_applies(Some(&agent), BudgetMode::Shadow));
-        assert!(legacy_step_cap_applies(Some(&person), BudgetMode::Shadow));
-        // On: the typed gate owns the agent bound; the person is then uncapped.
-        assert!(!legacy_step_cap_applies(Some(&agent), BudgetMode::On));
-        assert!(!legacy_step_cap_applies(Some(&person), BudgetMode::On));
+        for person_step in [false, true] {
+            assert!(legacy_step_cap_applies(Some(&agent), BudgetMode::Shadow, person_step));
+            assert!(legacy_step_cap_applies(Some(&person), BudgetMode::Shadow, person_step));
+        }
+        // On: the typed gate owns the agent-class run's bound, whoever drives it.
+        assert!(!legacy_step_cap_applies(Some(&agent), BudgetMode::On, false));
+        assert!(!legacy_step_cap_applies(Some(&agent), BudgetMode::On, true));
+        // On, person-class run: the person is uncapped, but an agent-initiated step inside
+        // the person's session keeps the request cap, its only bound (X-12 edge guard).
+        assert!(!legacy_step_cap_applies(Some(&person), BudgetMode::On, true));
+        assert!(legacy_step_cap_applies(Some(&person), BudgetMode::On, false));
+        // A run with no budget at all keeps the request cap in every mode.
+        assert!(legacy_step_cap_applies(None, BudgetMode::On, false));
+        assert!(legacy_step_cap_applies(None, BudgetMode::On, true));
     }
 
     #[test]

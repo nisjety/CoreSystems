@@ -579,13 +579,15 @@ async fn a_budget_refusal_comes_first_and_burns_no_single_use_approval() {
     assert_eq!(entry.summary.step, 0, "a refusal does not run the action");
 }
 
-/// D2-014: the request's own step cap (`constraints.max_steps`) refuses an agent-initiated step
-/// on a person-class run today (429; a person's own step has never been counted). Budget
-/// `shadow` is the default and is meant to refuse nothing new, so it must not lift that cap;
-/// only `on`, where the typed gate owns the bound and a person's run is never capped, does
-/// (X-12 is the decision to move to `on`).
+/// D2-014 and the X-12 edge guard: the request's own step cap (`constraints.max_steps`) refuses
+/// an agent-initiated step on a person-class run (429). Budget `shadow` is the default and is
+/// meant to refuse nothing new, so it does not lift that cap. In `on` a person's own step is
+/// never capped, but the agent-initiated step keeps the cap: the typed gate has no caps for a
+/// person-class run, so lifting it would leave a model-proposed step in a person's session with
+/// no bound at all. (This test used to assert that `on` lifted the cap for the agent-initiated
+/// step too; that contradicted the accepted decision 3.3, which asks for the guard.)
 #[tokio::test]
-async fn a_persons_request_step_cap_lifts_only_when_budget_enforcement_is_on() {
+async fn a_persons_own_steps_are_uncapped_in_on_but_an_agent_step_in_their_session_keeps_its_cap() {
     use crate::budget::{BudgetMode, RunBudget, RunClass};
     let person_run = || {
         let budget = RunBudget::start(
@@ -613,9 +615,16 @@ async fn a_persons_request_step_cap_lifts_only_when_budget_enforcement_is_on() {
     drop(_shadow);
 
     let _on = crate::budget::test_mode::pin(BudgetMode::On);
+    // The agent-initiated step inside the person's session keeps its only bound.
     let (result, _) = call_step_on(person_run(), respond_dialog(), Some(InitiatorHint::Agent)).await;
+    let (status, body) = result.expect_err("the agent-initiated step is still capped in on");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_ne!(body["error"]["code"], "BUDGET_EXHAUSTED", "the legacy 429, not a typed 402: {body}");
+    // The person's own step on the same run is uncapped: it goes on to the approval check,
+    // which refuses it for its own reason.
+    let (result, _) = call_step_on(person_run(), respond_dialog(), None).await;
     let (status, body) = result.expect_err("the step goes on to the approval check, which refuses it");
-    assert_ne!(status, StatusCode::TOO_MANY_REQUESTS, "on lifts a person's cap: {body}");
+    assert_ne!(status, StatusCode::TOO_MANY_REQUESTS, "a person is never capped: {body}");
     assert_ne!(body["error"]["code"], "BUDGET_EXHAUSTED", "{body}");
 }
 

@@ -442,7 +442,8 @@ pub(super) async fn admit_action(
     // gate, whose first refusal per segment is announced before the 402 is returned.
     let takeover = snapshot.mode == BrowserControlMode::HumanTakeover;
     if super::human_browse::counts_against_step_budget(input.initiator.class, takeover, entry.budget.as_ref()) {
-        if crate::budget::legacy_step_cap_applies(entry.budget.as_ref(), crate::budget::current_mode()) {
+        let person_step = input.initiator.class == StepInitiator::Human;
+        if crate::budget::legacy_step_cap_applies(entry.budget.as_ref(), crate::budget::current_mode(), person_step) {
             enforce_step_budget(entry)
                 .map_err(|message| QuarryError::new(ErrorCode::RateLimited, message))?;
         }
