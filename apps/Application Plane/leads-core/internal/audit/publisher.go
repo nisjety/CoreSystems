@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -135,6 +136,14 @@ func buildProviderLeadSyncPayload(eventID string, occurredAt time.Time, event pr
 	}
 }
 
+// hasOrgScope reports whether an audit payload names the org its audit chain
+// belongs to. It is the decision the outbox guard makes, kept pure so the rule
+// can be tested without a database.
+func hasOrgScope(payload map[string]any) bool {
+	orgID, _ := payload["org_id"].(string)
+	return strings.TrimSpace(orgID) != ""
+}
+
 func newEventID(kind string) (string, error) {
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {
@@ -145,6 +154,13 @@ func newEventID(kind string) (string, error) {
 
 func (p *NatsPublisher) enqueueAndDispatch(ctx context.Context, eventID, subject string, payload map[string]any) {
 	if p == nil || p.pool == nil || p.js == nil {
+		return
+	}
+	if !hasOrgScope(payload) {
+		// audit-core keeps each audit chain per org and refuses an event without
+		// org_id, so this event could never be delivered. Keep it out of the
+		// outbox instead of letting it dead-letter there.
+		log.Printf("leads-core: skip %v audit event %s: no org_id to scope it to", payload["event"], eventID)
 		return
 	}
 	encoded, err := json.Marshal(payload)

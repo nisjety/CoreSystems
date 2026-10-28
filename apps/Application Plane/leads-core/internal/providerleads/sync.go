@@ -53,14 +53,19 @@ func (s *Syncer) SetAudit(a AuditSink) { s.audit = a }
 // connection in this run (manual-trigger escape hatch for connections whose
 // providerContext does not carry an owner URN).
 func (s *Syncer) Sync(ctx context.Context, orgID, ownerOverride string) (*SyncResult, error) {
-	connections, err := s.gateway.ListConnections(ctx, strings.TrimSpace(orgID), ProviderKeyLinkedIn)
+	scopedOrg := strings.TrimSpace(orgID)
+	connections, err := s.gateway.ListConnections(ctx, scopedOrg, ProviderKeyLinkedIn)
 	if err != nil {
-		// A whole-run gateway failure previously left NO audit trail at all —
-		// only per-connection/per-org outcomes were ever published. Emit one
-		// so this failure mode is visible instead of silent.
-		if s.audit != nil {
+		// A named org's whole-run gateway failure is published into that org's
+		// own audit chain, so the failure is visible there. The all-org run has
+		// no org to scope an event to, and audit-core refuses an event without
+		// org_id, so publishing one would only dead-letter it. That failure is
+		// logged instead.
+		if scopedOrg == "" {
+			log.Printf("leads-core: provider-lead sync: all-org run could not list %s connections: %v", ProviderKeyLinkedIn, err)
+		} else if s.audit != nil {
 			s.audit.PublishProviderLeadSync(ctx, SyncAudit{
-				OrgID:       strings.TrimSpace(orgID),
+				OrgID:       scopedOrg,
 				ProviderKey: ProviderKeyLinkedIn,
 				Skipped:     []string{fmt.Sprintf("list linkedin connections: %v", err)},
 				Outcome:     "failed",
