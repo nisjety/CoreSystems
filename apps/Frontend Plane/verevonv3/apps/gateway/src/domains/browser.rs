@@ -265,19 +265,33 @@ pub(crate) enum BrowserActionActor {
 /// Who is on the other end of a browser call, as the gateway verified it (D2-012). It is
 /// a request extension the authentication layer inserts, never a field of the body.
 ///
-/// Nothing inserts `ServicePrincipal` yet: how the Model Plane authenticates to this
-/// gateway when it drives browser actions is an open owner decision. Until a producer
-/// exists every call is `User` and behaves exactly as before; the enforcement below is
-/// in place so that wiring the producer is the only step left.
+/// Decided 2026-10-28 (MP-GATEWAY-AUTH): the Model Plane gets no credential to this
+/// gateway. The gateway authenticates only a person's Better Auth session, and the Model
+/// Plane never calls `/api/v1/browser`: it drives Quarry directly with a `browser:execute`
+/// service token, and Quarry decides who the agent is from that verified token
+/// (`derive_initiator`: a service principal is always the agent, a person's token is the
+/// agent only when it says so). So nothing here produces `ServicePrincipal`; every call
+/// through this gateway is `User`, and the rules below are the gateway's own early
+/// refusals for an agent acting through a person's session (the SPA labels a model's
+/// action `actor: agent`). Each of them is also a Quarry check: reload is refused there
+/// (`agent_reload_denied`), and an agent action during a takeover gets `USER_TOOK_OVER`,
+/// but only while `QUARRY_EDGE__TAKEOVER_ENFORCEMENT` is on (off by default), so until it
+/// is switched on the gateway is the only refusing guard for takeover. Reopen
+/// D2-012 if a Model Plane to gateway browser path is ever planned; the class and
+/// `effective_actor` stay so that path has a place to land.
+///
+/// Accepted residual: a person's session can still state `human`, and no gateway design
+/// can tell a model acting through that session from the person.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum CallerClass {
     /// A person's session. It cannot prove it is not a model acting through the
     /// person's own session, so `body.actor` stays advisory and can only tighten.
     #[default]
     User,
-    /// A verified service principal (the Model Plane). Always the agent.
-    // reason: no authentication layer produces this class yet (open owner decision, D2-012);
-    // only the tests construct it until the producer lands.
+    /// A verified service principal. Always the agent. Not produced today (see the type
+    /// docs: the Model Plane goes to Quarry, not through this gateway).
+    // reason: no authentication layer produces this class, by decision (D2-012,
+    // MP-GATEWAY-AUTH); only the tests construct it, to pin the rule a producer would get.
     #[allow(dead_code)]
     ServicePrincipal,
 }

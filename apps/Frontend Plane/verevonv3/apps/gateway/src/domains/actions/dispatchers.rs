@@ -5318,7 +5318,8 @@ pub(super) async fn dispatch_browser_create_tab(
     let response = new_browser_tab(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
-        // D2-012: no verified caller class reaches the dispatcher yet (see CallerClass).
+        // D2-012, decided: the Model Plane has no credential to this gateway, so no caller
+        // class is produced here (see CallerClass); Quarry decides the agent from its token.
         None,
         headers.clone(),
         PathExtractor(session_id.to_owned()),
@@ -5347,7 +5348,8 @@ pub(super) async fn dispatch_browser_select_tab(
     let response = select_browser_tab(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
-        // D2-012: no verified caller class reaches the dispatcher yet (see CallerClass).
+        // D2-012, decided: the Model Plane has no credential to this gateway, so no caller
+        // class is produced here (see CallerClass); Quarry decides the agent from its token.
         None,
         headers.clone(),
         PathExtractor((session_id.to_owned(), tab_id.to_owned())),
@@ -5376,7 +5378,8 @@ pub(super) async fn dispatch_browser_close_tab(
     let response = close_browser_tab(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
-        // D2-012: no verified caller class reaches the dispatcher yet (see CallerClass).
+        // D2-012, decided: the Model Plane has no credential to this gateway, so no caller
+        // class is produced here (see CallerClass); Quarry decides the agent from its token.
         None,
         headers.clone(),
         PathExtractor((session_id.to_owned(), tab_id.to_owned())),
@@ -5423,7 +5426,8 @@ pub(super) async fn dispatch_browser_run_action(
     let response = run_browser_action(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
-        // D2-012: no verified caller class reaches the dispatcher yet (see CallerClass).
+        // D2-012, decided: the Model Plane has no credential to this gateway, so no caller
+        // class is produced here (see CallerClass); Quarry decides the agent from its token.
         None,
         headers.clone(),
         PathExtractor(session_id.to_owned()),
