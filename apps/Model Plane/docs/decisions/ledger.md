@@ -887,6 +887,16 @@ Z-14 (decision endpoint, claim, kill switch), Z-15 to Z-18 (plane enforcement), 
 Z-21b (BFF and SPA; Z-21a is the session-core aggregate behind the counts), Z-31 and Z-32 (end-to-end specs, launcher wiring). Not done: Z-40 (attestation) and Z-60 (live
 proof). The final documents task re-reads this list.
 
+*2026-10-28: Z-60 pass 1 run.* On the developer stack, with the wave deployed in order and
+waiver minting off on every service, one turn from the dedicated `ZDR-TEST` organisation
+(ZDR on, nothing attested, `claude-sonnet-5-5` selected, web search off) was refused
+`zdr_unavailable` by inference-core before any model call, streamed no content, and left
+threads, messages, runs, feedback, the audit outbox and the `mp:gw:cache:*` keyspace
+unchanged (`docs/compliance/evidence/live-proof-wave1-zdr-2026-10-28.txt` at the repository
+root). That proves the fail-closed half only. It does not flip this entry: its trigger is
+the waiver path, which stays off and unbuilt, and pass 2 (an attested answer) waits for
+Z-40.
+
 **Trigger to flip to `implemented`.** On a dedicated ZDR test organisation (plan pro,
 operator-seeded, real organisation service) and on `gpt-5.6-terra` through
 `openai-codex-subscription` only, never Verevon Balance, about 7 to 10 model rounds: a
@@ -906,9 +916,14 @@ middleware and tokens captured from the real mint.
 
 ## 2026-10-03 — The organisation's ZDR switch is gated on an attested provider
 
-**State:** `proposed`
-(built; the running gateway binary carries it, string check of 2026-10-06; flips to
-`implemented` at **Trigger to flip**)
+**State:** `implemented`
+(flipped 2026-10-28: the trigger below was met on the developer stack, twice, on the
+dedicated `ZDR-TEST wave1 proof` organisation: the first two tests of
+`tests/e2e/zdr-org-switch-gate.spec.ts` pass against the live catalogue, and the refused
+PATCH answers 409 `zdr_no_attested_provider` and leaves the organisation row unchanged.
+Evidence: `docs/compliance/evidence/live-proof-wave1-zdr-2026-10-28.txt` at the
+repository root. Before that: `proposed`, built, the running gateway binary carried it,
+string check of 2026-10-06)
 
 **The decision.** An admin could switch organisation ZDR on with only the plan checked,
 while no provider was attested. inference-core fails a ZDR request closed, so every chat

@@ -63,6 +63,8 @@ ZDR_LIVE_TURN=1 pnpm exec playwright test tests/e2e/zdr-live-turn.spec.ts
 
 It refuses to send unless the signed-in org is named `ZDR-TEST...` with ZDR on and the live catalogue lists no ZDR chat model. It sends one turn and passes when the stream ends in `zdr_unavailable` or `zdr_connection_not_supported`, no content frame was streamed, and the page tells the reader the request was not sent to a model.
 
+The spec switches web search off before the turn: model-gateway refuses it under ZDR on its own (`zdr_feature_not_supported`, feature `web_search`) before the request reaches inference-core, so with it on the attestation check is never reached. The composer sends no web search for a ZDR org since D1-815; the spec does it too, so a failed org read in the composer cannot spoil the proof. On a stack that may only use one model, pin it with `ZDR_LIVE_TURN_MODEL=<model id>` (2026-10-28: `claude-sonnet-5-5`); otherwise the composer's default mode is sent. On a Vite dev server, open `/chat` once before the proof: the first visit can re-bundle dependencies and reload the page, and the spec then times out before it sends anything.
+
 Then the gate half, on the same org (the third test sends one PATCH that must be refused `409 zdr_no_attested_provider` and writes nothing):
 
 ```bash

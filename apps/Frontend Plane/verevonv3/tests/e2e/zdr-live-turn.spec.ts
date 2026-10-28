@@ -20,6 +20,14 @@ import { expect, test, type Page } from '@playwright/test'
  * so they run only for the dedicated test org, never for a real one: each reads the signed-in
  * session's org and refuses to send unless its name starts with `ZDR-TEST` and its ZDR switch is on.
  * The test org is seeded with `apps/gateway/scripts/zdr-seed-test-org.mjs`, never through here.
+ *
+ * Web search is switched off before the turn. ZDR refuses it on its own (`zdr_feature_not_supported`,
+ * feature `web_search`) in model-gateway, before the request reaches inference-core: with it on, pass 1
+ * never reaches the attestation check and pass 2 can never be answered (first live run, 2026-10-28).
+ * The composer itself sends no web search for a ZDR org since D1-815; the spec still switches it off,
+ * so a failed org read in the composer cannot turn this proof into a web-search refusal.
+ * `ZDR_LIVE_TURN_MODEL` (optional) pins the composer's model for the test org, so a stack that may only
+ * use one model is not sent the composer's default mode.
  */
 
 const CHAT = '/chat'
@@ -36,6 +44,10 @@ const CHAT_STORAGE_KEYS = [
   'verevon.chat.threadTranscripts.v1',
   'verevon.chat.pendingLaunch',
 ]
+/** The composer's web-search preference (`CHAT_BROWSE_WEB_KEY`); '0' is the explicit opt-out. */
+const BROWSE_WEB_KEY = 'verevon.chat.browseWeb.v1'
+/** The composer's stored model choice per org (`src/shared/ai/model-selection.ts`). */
+const MODEL_SELECTION_PREFIX = 'verevon.ai-model-selection.v1:'
 
 type Frame = {
   event?: string
@@ -79,8 +91,11 @@ function isAttestedChatModel(model: CatalogueModel): boolean {
   return model.modality === 'chat' && (model.features ?? []).includes('zdr')
 }
 
-/** The signed-in session's org must be the dedicated ZDR-TEST org with ZDR on. Both tests run it first. */
-async function expectZdrTestOrg(page: Page): Promise<void> {
+/**
+ * The signed-in session's org must be the dedicated ZDR-TEST org with ZDR on. Both tests run it first.
+ * Returns the org id.
+ */
+async function expectZdrTestOrg(page: Page): Promise<string> {
   const current = await page.request.get('/api/v1/session/current')
   expect(current.status(), 'a signed-in session is needed').toBe(200)
   const orgId = ((await current.json()) as { data?: { org?: { id?: string | null } | null } }).data?.org?.id
@@ -96,6 +111,7 @@ async function expectZdrTestOrg(page: Page): Promise<void> {
   const zdr = (orgBody.data?.metadata ?? orgBody.metadata)?.interactiveRetention?.zdr === true
   expect(name, 'this spec sends a turn only for a ZDR-TEST org').toMatch(/^\s*ZDR-TEST/i)
   expect(zdr, 'the ZDR-TEST org must have ZDR on (zdr-seed-test-org.mjs --apply)').toBe(true)
+  return orgId as string
 }
 
 /** The live model catalogue as the signed-in session sees it. */
@@ -105,14 +121,20 @@ async function loadCatalogue(page: Page): Promise<CatalogueModel[]> {
   return ((await models.json()) as { models?: CatalogueModel[] }).models ?? []
 }
 
-/** Open a fresh chat with the chat storage cleared, and wait for the composer. */
-async function openFreshChat(page: Page): Promise<void> {
+/**
+ * Open a fresh chat with the chat storage cleared and web search off, and wait for the composer.
+ * With `ZDR_LIVE_TURN_MODEL` set, the composer's model for this org is that model.
+ */
+async function openFreshChat(page: Page, orgId: string): Promise<void> {
+  const model = process.env.ZDR_LIVE_TURN_MODEL?.trim() ?? ''
   await page.addInitScript(
-    ([keys]) => {
+    ([keys, browseWebKey, selectionKey, pinned]) => {
       window.localStorage.setItem('verevon.locale', 'en')
       for (const key of keys as string[]) window.localStorage.removeItem(key)
+      window.localStorage.setItem(browseWebKey as string, '0')
+      if (pinned) window.localStorage.setItem(selectionKey as string, JSON.stringify({ model: pinned, label: pinned }))
     },
-    [CHAT_STORAGE_KEYS] as const,
+    [CHAT_STORAGE_KEYS, BROWSE_WEB_KEY, `${MODEL_SELECTION_PREFIX}${orgId}`, model] as const,
   )
   await page.goto(CHAT)
   await expect(page.locator(COMPOSER)).toBeVisible()
@@ -162,7 +184,7 @@ test.describe('ZDR live turn (Z-60)', () => {
     test.setTimeout(120_000)
 
     // The org must be the dedicated test org with ZDR on. A turn from any other org is never sent.
-    await expectZdrTestOrg(page)
+    const orgId = await expectZdrTestOrg(page)
 
     // The model catalogue must agree that nothing is attested: if a chat model carries the zdr
     // feature this turn would be answered, and that is pass 2.
@@ -172,7 +194,7 @@ test.describe('ZDR live turn (Z-60)', () => {
       'a chat model is attested for ZDR: this is not the fail-closed state (set ZDR_LIVE_TURN_EXPECT=answer for pass 2)',
     ).toBe(false)
 
-    await openFreshChat(page)
+    await openFreshChat(page, orgId)
     const { status, body: text } = await sendTurn(page, 'Say hello.')
 
     // The refusal arrives either as the HTTP error body or as a RUN_ERROR / error frame.
@@ -209,7 +231,7 @@ test.describe('ZDR live turn (Z-60)', () => {
     test.setTimeout(120_000)
 
     // The same org guard as pass 1: a turn is sent only from the dedicated ZDR-TEST org with ZDR on.
-    await expectZdrTestOrg(page)
+    const orgId = await expectZdrTestOrg(page)
 
     // Pass 2 starts from an attested catalogue. A catalogue with no zdr chat model is still pass 1 territory.
     const attested = (await loadCatalogue(page)).find(isAttestedChatModel)
@@ -218,7 +240,7 @@ test.describe('ZDR live turn (Z-60)', () => {
       'no chat model lists zdr: this is pass 1 territory (leave ZDR_LIVE_TURN_EXPECT unset until a deployment is attested)',
     ).toBeDefined()
 
-    await openFreshChat(page)
+    await openFreshChat(page, orgId)
     // Pick the attested model when the composer offers that choice; otherwise the default model is sent.
     if (await hasModelChoice(page)) {
       await pickModel(page, attested?.name ?? attested?.id ?? '')
