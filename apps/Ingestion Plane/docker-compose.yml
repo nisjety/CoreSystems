@@ -36,6 +36,10 @@ services:
       QUARRY_EDGE__SCRAPE_INLINE_MAX_BYTES: "${QUARRY_EDGE_SCRAPE_INLINE_MAX_BYTES:-1048576}"
       QUARRY_EDGE__SCRAPE_OPTIONS_ENABLED: "${QUARRY_EDGE_SCRAPE_OPTIONS_ENABLED:-1}"
       QUARRY_EDGE__SCRAPE_CAPTURE: "${QUARRY_EDGE_SCRAPE_CAPTURE:-off}"
+      # ADR-6 (owner ruling 2026-10-28): scrape-time actions default off and stay off in
+      # production. user admits user tokens on the dev/evidence stack only (fixture or
+      # owned hosts); on also needs a verified Model caller (D2-012) and an approval gate.
+      QUARRY_EDGE__SCRAPE_ACTIONS: "${QUARRY_EDGE_SCRAPE_ACTIONS:-off}"
       QUARRY_EDGE__SCRAPE_CAPTURE_INLINE_MAX_BYTES: "${QUARRY_EDGE_SCRAPE_CAPTURE_INLINE_MAX_BYTES:-6291456}"
       # Caps on live runs and the sweeper that releases idle ones (docs/RUNBOOKS.md,
       # "Run caps and the run sweeper"). The caps are live from the first deploy; the
@@ -162,27 +166,30 @@ services:
       QUARRY_EDGE__REDIS_URL: redis://:${INGESTION_DRAGONFLY_PASSWORD:?INGESTION_DRAGONFLY_PASSWORD is required}@dragonfly:6379/6
       QUARRY_EDGE__ARTIFACT_BACKEND: ${QUARRY_EDGE_ARTIFACT_BACKEND:-memory}
       QUARRY_EDGE__ARTIFACT_ROOT: /app/data/artifacts
-      # Model Plane gateway. EdgeConfig field is `model_plane_url` (NOT *_base_url) —
-      # the config crate maps QUARRY_EDGE__MODEL_PLANE_URL → model_plane_url. Serves
-      # /v1/invoke for answer synthesis; the gateway chooses the model (no model id needed).
-      QUARRY_EDGE__MODEL_PLANE_URL: ${MODEL_PLANE_URL:-http://model-gateway:8080}
-      # Exa-style search-quality layers (need MODEL_PLANE_URL, set above).
-      # Both default ON now: they shipped defaulted to 0, so the deployed stack
-      # served the raw SERP merge while the quality code sat unused. Each layer
-      # is degrade-safe on its own — main.rs logs a warn and keeps the original
-      # query / result order when the Model Plane client cannot be built, and
-      # the rewriter and reranker fall back to their inputs on any per-request
-      # failure — so a Model Plane outage costs latency, never results. Set the
-      # override to 0 to get the plain merge back without a rebuild.
+      # Model Plane gateway, opt-in. EdgeConfig field is model_plane_url (NOT
+      # *_base_url); the config crate maps QUARRY_EDGE__MODEL_PLANE_URL to it. Empty,
+      # the default, means no Model Plane: quarry-edge reads an empty value as unset
+      # (config.rs, from_env). Set MODEL_PLANE_URL (for example http://model-gateway:8080)
+      # to opt in. Set, it serves /v1/invoke for answer synthesis; the gateway chooses
+      # the model (no model id needed).
+      QUARRY_EDGE__MODEL_PLANE_URL: ${MODEL_PLANE_URL:-}
+      # Model Plane switches (decision 3.12 of 2026-10-27, accepted 2026-10-28): all
+      # off by default, and each one also needs MODEL_PLANE_URL above. Answer
+      # synthesis, AI extract formats, search suggest and audio have no switch: they
+      # run whenever MODEL_PLANE_URL is set (QB-T17, still pending).
       # Autoprompt: rewrite verbose Research/Comparative queries before fan-out.
-      QUARRY_EDGE__AUTOPROMPT: "${QUARRY_EDGE_AUTOPROMPT:-1}"
+      QUARRY_EDGE__AUTOPROMPT: "${QUARRY_EDGE_AUTOPROMPT:-0}"
       QUARRY_EDGE__AUTOPROMPT_MODEL: ${QUARRY_AUTOPROMPT_MODEL:-}
-      # Semantic rerank: reorder top-N merged results by relevance + attach a
-      # query-relevant highlight per result. TOP_N stays at 10 because it is
-      # what bounds the per-query LLM cost (one call over N titles/snippets).
-      QUARRY_EDGE__SEMANTIC_RERANK: "${QUARRY_EDGE_SEMANTIC_RERANK:-1}"
+      # Semantic rerank through the Model Plane: reorder the top-N merged results by
+      # relevance and attach a short highlight per result. Degrade-safe: without a
+      # Model Plane the merge order is kept.
+      QUARRY_EDGE__SEMANTIC_RERANK: "${QUARRY_EDGE_SEMANTIC_RERANK:-0}"
       QUARRY_EDGE__SEMANTIC_RERANK_MODEL: ${QUARRY_SEMANTIC_RERANK_MODEL:-}
       QUARRY_EDGE__SEMANTIC_RERANK_TOP_N: ${QUARRY_SEMANTIC_RERANK_TOP_N:-10}
+      # LLM intent classification for queries the rules do not settle.
+      QUARRY_EDGE__LLM_CLASSIFY_INTENT: "${QUARRY_EDGE_LLM_CLASSIFY_INTENT:-0}"
+      # Page titles and short summaries from the Model Plane for pages without a usable title.
+      QUARRY_EDGE__PAGE_TITLE_ENRICH: "${QUARRY_EDGE_PAGE_TITLE_ENRICH:-0}"
       # Data residency: set to 1 to refuse external SERP SaaS (Brave/Serper) so
       # web-search queries never leave the cluster (in-infra providers only).
       QUARRY_EDGE__ZERO_SAAS_SEARCH: "${QUARRY_EDGE_ZERO_SAAS_SEARCH:-0}"

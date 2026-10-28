@@ -93,6 +93,16 @@ services:
       # Read only when the explicit cross-plane development bypass is enabled.
       QUARRY_EDGE__DATA_PLANE_SERVICE_TOKEN: ${DATA_PLANE_SERVICE_TOKEN:-}
       QUARRY_EDGE__MODEL_PLANE_TOKEN: ${MODEL_PLANE_TOKEN:-}
+      # Model Plane gateway, opt-in: empty (the default) keeps it off, and quarry-edge reads
+      # an empty value as unset. Set MODEL_PLANE_URL, with QUARRY_SERVICE_API_KEY, to opt in.
+      QUARRY_EDGE__MODEL_PLANE_URL: ${MODEL_PLANE_URL:-}
+      # Model Plane switches, off (decision 3.12 of 2026-10-27). Each one also needs MODEL_PLANE_URL.
+      QUARRY_EDGE__AUTOPROMPT: "${QUARRY_EDGE_AUTOPROMPT:-0}"
+      QUARRY_EDGE__SEMANTIC_RERANK: "${QUARRY_EDGE_SEMANTIC_RERANK:-0}"
+      QUARRY_EDGE__LLM_CLASSIFY_INTENT: "${QUARRY_EDGE_LLM_CLASSIFY_INTENT:-0}"
+      QUARRY_EDGE__PAGE_TITLE_ENRICH: "${QUARRY_EDGE_PAGE_TITLE_ENRICH:-0}"
+      # ADR-6 (owner ruling 2026-10-28): scrape-time actions default off; see the Ingestion compose.
+      QUARRY_EDGE__SCRAPE_ACTIONS: "${QUARRY_EDGE_SCRAPE_ACTIONS:-off}"
       # SmartRouter web-search primary. Quarry-v2 owns its searxng (defined
       # below) so this dev stack does web search self-contained — no reliance
       # on a searxng started by another plane / the root mega-stack.
