@@ -1,5 +1,7 @@
 # Decision round 2026-10-27: Quarry v2 and the in-app browser
 
+**Status: ACCEPTED BY THE OWNER on 2026-10-28.** The owner answered "yes to all the recommendations in the checklist" (section 4, all 13 lines, as written there) and ordered: build list A now (OPENAPI-NULL first) and prepare list B for the stack session. List B flags stay off until the stack-evidence session.
+
 Date: 2026-10-27 (written 2026-10-28). Branch `quarryv2-next`. Plan: `docs/plans/quarry-browser-build-plan-2026-10-14.md`.
 
 On 2026-10-27 the owner asked for a recommendation on each open decision: X-10, X-12, D16 Q2, X-19, X-9 and ADR-6, plus the new decisions from the depth round (STATUS-2026-10-24.md section 7.5 item 2). Each item was handled in two steps. First, one agent wrote a brief and checked it against the code, not only the notes. Then an independent challenger tried to prove the brief wrong. The recommendation below is the final one. Where the challenger amended or reversed the brief, the challenger's version is used, and each section says plainly where the brief was wrong. **Nothing changes in code, flags or compose until the owner says yes.** All of this is still dark: Wave 1 and most of Wave 2 are built, sit mostly behind flags that default off, and nothing has been proven on a live stack.

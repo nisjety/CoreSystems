@@ -4041,3 +4041,25 @@ The user said "you decide the optimal build"; the coordinating session decided t
 8. WS1.A2 is treated as built at integration level. The W2 queue gate on it is lifted for CODE work (E3.1-b, E3.2-e1, E3.7.10), behind default-off flags. No production-effect or deployment claim until X-1 (Control sign-off) and an L2 run exist.
 
 Build rules of the same date: one wave at a time, wave mode (no review-fix loops, no per-slice docker rebuilds or live proofs, one light test pass at the end of the wave), Haiku 5.5 for mechanical slices and Sonnet 5.5 high for authority, audit, ZDR, money and data-loss slices, no Opus, at most 3 agents at a time, usage checked between batches.
+
+## Owner decisions of 2026-10-28 (decision round of 2026-10-27)
+
+The owner accepted all 13 recommendations of `.plan-work/quarry-w1w2/DECISIONS-ROUND-2026-10-27.md` (section 4, owner checklist), as written there. In short:
+
+| Id | Decision |
+|---|---|
+| X-10 | Obey robots.txt on crawl, batch and map after a volume-based observe soak; unreachable robots.txt counts as disallow; D2-161 fixed and map checked on the e2e enforce leg before the flip; switched on through the production compose env. |
+| ROBOTS-RFC | e5e14bb6c stands (a blank line does not split a group, RFC 9309); the BOM, Crawl-delay and empty-Allow gaps are fixed before the soak; percent-encoding (D2-184) separate. |
+| X-12 | Run-budget numbers ratified as env-tunable starting values (60 steps / 900 s / 1 USD; ceilings 300 / 3600 s / 20 USD; 0.00003 USD/s estimator only); people uncapped on steps; flip to on after the edge guard, agent_run_budget.rs and a scripted stack proof; the Model Plane 402 mapping follows. |
+| TAKEOVER-BUDGET | A person's takeover steps stay exempt (7d78ab2e8); a counter of exempt takeover steps and seconds is added; the residual (an agent on a person's session token) is tied to D2-012. |
+| D16 Q2 | Option C: the profile owner is stamped at run start for human users only; model runs never own a profile; the stamp honours tombstones; default scope user_private in every store; legacy private rows hidden, not deleted; legacy count on the stack, an observe week, then enforce. |
+| X-19 | Receipt default `sensitive`; receipts for real users only after the event follows the flag, D2-065 is fixed, a retention or erasure path exists and the stack evidence passes. |
+| X-9 | Event-driven: quarry-control consumes Control Plane's ZDR-enabled event (no cross-tenant scope for Quarry); Control Plane also emits it on a plan change; the monitor half and the follow=true refusal (D2-057) first, after the stack session; S3 to S5 wait; counsel decides prospective versus retroactive before enforce. |
+| ADR-6 / X-20 | Ratified: closed, capped, declarative action lists, no Evaluate; X-20 gates rewritten in the same ruling; `user` mode only on the dev/evidence stack against fixture or owned hosts after SC1 to SC7; production off. |
+| MP-GATEWAY-AUTH (D2-012) | No Model Plane credential to the verevonv3 gateway; Quarry decides who the agent is from the verified token; Quarry refuses an agent reload before D2-012 is closed. |
+| OPENAPI-NULL | openapi.yaml ProfileCookieView.value becomes `type: [string, 'null']`; generator 7.22.0 kept; first among the spec changes. |
+| BILLING-IDEMPOTENCY (D2-033) | Crawl/batch only: key by Control's job id, no bill on a replay, no bill on a failed handoff; billing-core unchanged; sync retries stay billable; no Redis scheme. |
+| DATAPLANE-OPTION-B | Flags-off compose now (the four flags 0, MODEL_PLANE_URL opt-in); QB-T17 stays pending; option B lands later from main after the search_suggest ZDR and token-retention review. |
+| OPENAPI-INTERNAL | Internal routes leave the public spec and the SDKs (docs/openapi-internal.yaml, a guard test); the Go control routes follow with the D2-050 secret split. |
+
+Build order (owner, 2026-10-28): list A of the decision document now (OPENAPI-NULL first); list B prepared in code for the stack session, every flag staying off until the stack evidence; list C waits for other planes, counsel or go-live.
