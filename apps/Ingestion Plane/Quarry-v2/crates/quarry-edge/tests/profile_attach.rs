@@ -95,3 +95,169 @@ async fn observe_mode_serves_a_non_owner_start_run_as_before() {
         .await;
     assert_eq!(reply.status, 200, "{}", reply.body);
 }
+
+// ── D16 Q2: the owner is stamped at run start, for a person's run only ──────
+
+/// The profile id a started run reports.
+fn started_profile(reply: &Reply) -> ProfileKind {
+    reply.data()["profile_id"]
+        .as_str()
+        .expect("the start reply names the profile")
+        .parse()
+        .expect("a profile id")
+}
+
+#[tokio::test]
+async fn a_persistent_person_run_creates_its_profile_owned_by_the_person_user_private() {
+    for mode in [OwnerEnforce::Observe, OwnerEnforce::Enforce] {
+        let edge = edge(mode).await;
+        let owner = member_token();
+        let reply = edge
+            .post(&owner, "/v1/agent/runs", json!({ "persist_profile": true }))
+            .await;
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        let id = started_profile(&reply);
+
+        // The row exists before the run saves anything, with the person as owner. The run's
+        // `ephemeral` default scope is stored as user_private, never as `ephemeral`.
+        assert!(edge.state.profiles.exists(ORG, &id).await.unwrap());
+        let stored = edge
+            .state
+            .profiles
+            .load_metadata(ORG, &id)
+            .await
+            .unwrap()
+            .expect("metadata");
+        assert_eq!(stored.owner.as_deref(), Some(OWNER), "{mode:?}");
+        assert_eq!(stored.scope, ProfileScope::UserPrivate, "{mode:?}");
+        assert!(stored.name.is_none());
+
+        // So under enforce the creator keeps their profile and another member does not get it.
+        let attach = edge
+            .post(
+                &owner,
+                "/v1/agent/runs",
+                json!({ "profile_id": id.to_string() }),
+            )
+            .await;
+        assert_eq!(attach.status, 200, "{}", attach.body);
+        let other = edge
+            .post(
+                &other_member_token(),
+                "/v1/agent/runs",
+                json!({ "profile_id": id.to_string() }),
+            )
+            .await;
+        let expected = if mode == OwnerEnforce::Enforce { 404 } else { 200 };
+        assert_eq!(other.status, expected, "{mode:?} {}", other.body);
+    }
+}
+
+#[tokio::test]
+async fn a_named_new_profile_and_an_org_shared_scope_are_stamped_as_asked() {
+    let edge = edge(OwnerEnforce::Enforce).await;
+    let id: ProfileKind = quarry_core::ids::Id::new();
+    let reply = edge
+        .post(
+            &member_token(),
+            "/v1/agent/runs",
+            json!({ "profile_id": id.to_string(), "profile_scope": "org_shared" }),
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let stored = edge
+        .state
+        .profiles
+        .load_metadata(ORG, &id)
+        .await
+        .unwrap()
+        .expect("metadata");
+    assert_eq!(stored.owner.as_deref(), Some(OWNER));
+    assert_eq!(stored.scope, ProfileScope::OrgShared);
+}
+
+#[tokio::test]
+async fn a_run_that_keeps_no_profile_creates_no_row() {
+    let edge = edge(OwnerEnforce::Observe).await;
+    let reply = edge.post(&member_token(), "/v1/agent/runs", json!({})).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let id = started_profile(&reply);
+    assert!(!edge.state.profiles.exists(ORG, &id).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_service_principal_run_never_creates_an_owned_profile() {
+    // A model-driven run: `actor_id()` is the shared service id, so stamping it would make the
+    // service the owner of those cookies and hide them from the person (D16 Q2).
+    let edge = edge(OwnerEnforce::Enforce).await;
+    let reply = edge
+        .post(&service_token(), "/v1/agent/runs", json!({ "persist_profile": true }))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let id = started_profile(&reply);
+    let owner = match edge.state.profiles.load_metadata(ORG, &id).await.unwrap() {
+        None => None,
+        Some(stored) => stored.owner,
+    };
+    assert_eq!(owner, None, "a service run was stamped as an owner");
+}
+
+#[tokio::test]
+async fn the_stamp_is_off_when_the_owner_check_is_off() {
+    let edge = edge(OwnerEnforce::Off).await;
+    let reply = edge
+        .post(&member_token(), "/v1/agent/runs", json!({ "persist_profile": true }))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let id = started_profile(&reply);
+    assert!(!edge.state.profiles.exists(ORG, &id).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_zdr_run_that_names_a_profile_is_refused_and_creates_no_row() {
+    let edge = edge(OwnerEnforce::Observe).await;
+    let id: ProfileKind = quarry_core::ids::Id::new();
+    let reply = edge
+        .post(
+            &zdr_member_token(),
+            "/v1/agent/runs",
+            json!({ "profile_id": id.to_string() }),
+        )
+        .await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    assert!(
+        !edge
+            .state
+            .profiles
+            .exists("org-zdr-golden", &id)
+            .await
+            .unwrap(),
+        "a refused ZDR start left a profile row"
+    );
+}
+
+#[tokio::test]
+async fn the_stamp_never_changes_a_profile_that_already_exists() {
+    let edge = edge(OwnerEnforce::Observe).await;
+    let id = saved_profile(&edge, ProfileScope::OrgShared).await;
+    let parsed: ProfileKind = id.parse().unwrap();
+    // Another member of the org starts a persistent run on the owner's shared profile.
+    let reply = edge
+        .post(
+            &other_member_token(),
+            "/v1/agent/runs",
+            json!({ "profile_id": id, "persist_profile": true, "profile_scope": "user_private" }),
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let stored = edge
+        .state
+        .profiles
+        .load_metadata(ORG, &parsed)
+        .await
+        .unwrap()
+        .expect("metadata");
+    assert_eq!(stored.owner.as_deref(), Some(OWNER));
+    assert_eq!(stored.scope, ProfileScope::OrgShared);
+    assert_eq!(stored.name.as_deref(), Some("Work"));
+}

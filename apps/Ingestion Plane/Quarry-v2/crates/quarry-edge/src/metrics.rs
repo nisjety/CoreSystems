@@ -226,6 +226,57 @@ pub fn record_run_denied(reason: &str) {
     metrics::counter!("quarry_agent_run_denied_total", "reason" => reason).increment(1);
 }
 
+/// What the profile owner check decided (WS17.P2, D16 Q2). `outcome` is `would_deny` (the
+/// mode is `observe`: the request was served) or `denied` (`enforce`: the caller got the 404);
+/// `op` is a `ProfileOp` label and `reason` a `DenyReason` label. All three come from closed
+/// sets, never a profile id, a name or an owner id. The observe week reads this series to see
+/// which denials would reach real users before `enforce` is turned on.
+pub fn record_profile_owner_decision(outcome: &str, op: &str, reason: &str, count: u64) {
+    let outcome = match outcome {
+        "would_deny" => "would_deny",
+        "denied" => "denied",
+        _ => "other",
+    };
+    let op = match op {
+        "list" => "list",
+        "create" => "create",
+        "import" => "import",
+        "read" => "read",
+        "update" => "update",
+        "probe" => "probe",
+        "delete" => "delete",
+        "attach" => "attach",
+        _ => "other",
+    };
+    let reason = match reason {
+        "not_owner" => "not_owner",
+        "legacy_ownerless" => "legacy_ownerless",
+        _ => "other",
+    };
+    metrics::counter!(
+        "quarry_profile_owner_decisions_total",
+        "outcome" => outcome,
+        "op" => op,
+        "reason" => reason
+    )
+    .increment(count);
+}
+
+/// What the owner stamp at run start did (WS17.P2, D16 Q2): `stamped`, `already_exists`,
+/// `tombstone`, `failed`, or `skipped_service` (a model-driven run persists a profile that
+/// stays ownerless, and therefore hidden under `enforce`).
+pub fn record_profile_owner_stamp(outcome: &str) {
+    let outcome = match outcome {
+        "stamped" => "stamped",
+        "already_exists" => "already_exists",
+        "tombstone" => "tombstone",
+        "failed" => "failed",
+        "skipped_service" => "skipped_service",
+        _ => "other",
+    };
+    metrics::counter!("quarry_profile_owner_stamps_total", "outcome" => outcome).increment(1);
+}
+
 /// `count` runs ended without a client closing them. `reason` is the
 /// `agent.expired` reason: `idle`, `ttl`, `takeover_idle`, `max_age` or `shutdown`.
 pub fn record_run_expired(reason: &str, count: u64) {
@@ -371,6 +422,14 @@ fn describe_all() {
     describe_counter!(
         "quarry_agent_run_denied_total",
         "Agent run starts refused, by the typed reason (a cap or an allowance)."
+    );
+    describe_counter!(
+        "quarry_profile_owner_decisions_total",
+        "Profile owner check decisions by outcome (would_deny under observe, denied under enforce), op and reason."
+    );
+    describe_counter!(
+        "quarry_profile_owner_stamps_total",
+        "Owner stamps at run start by outcome (stamped, already_exists, tombstone, failed, skipped_service)."
     );
     describe_counter!(
         "quarry_agent_run_expired_total",

@@ -105,6 +105,9 @@ pub async fn start_run(
         crate::metrics::record_run_start("", "draining");
         return Err(driver_err(&request_id, error));
     }
+    // The start of this request: the owner stamp below is ordered against a delete by it, as a
+    // save is by its capture start (WS17.P2).
+    let requested_at = chrono::Utc::now();
     let org_id = claims.org_id.clone();
     let actor_id = claims.actor_id().to_owned();
     let execution_tier = body.execution_tier;
@@ -589,6 +592,20 @@ pub async fn start_run(
             }
         }
     }
+
+    // WS17.P2 (D16 Q2): the run's profile gets its owner after the caps, the policy and the
+    // lease: a start refused by one of those leaves no row (a later checkpoint failure still can).
+    // A person's run only; the row the run saves at its end keeps this owner (insert-only).
+    crate::profile_guard::stamp_run_owner(
+        &state,
+        &claims,
+        &lease.profile_id,
+        crate::profile_guard::stamp_scope(profile_scope),
+        requested_at,
+        persist_profile,
+        resume_checkpoint.is_some(),
+    )
+    .await;
 
     let budget_mode = crate::budget::current_mode();
     let budget = (budget_mode != crate::budget::BudgetMode::Off).then(|| {

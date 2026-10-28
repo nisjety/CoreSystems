@@ -22,11 +22,16 @@
 //!
 //! Logs carry the op and the reason class only: never a profile id, a name or an owner id.
 //!
+//! The owner of a profile a run creates is stamped at run start, for a person's run only
+//! (`stamp_run_owner`, D16 Q2): insert-only, refused by a deletion tombstone newer than the
+//! request, and never for a service principal (a model-driven run). A profile saved without
+//! metadata is `user_private` in every store (`ProfileMetadata::stored_default`).
+//!
 //! The attach path is the start of a run that names a `profile_id` (`agent_routes::lifecycle`):
 //! it calls `authorize` with `ProfileOp::Attach` (D2-045, `tests/profile_attach.rs`). The WS8.F
 //! agent attachment (`POST /v1/agent/runs/{id}/attach`) names no profile, so it has no call.
 
-use quarry_browser::session::{ProfileScope, ProfileStore, ProfileSummary};
+use quarry_browser::session::{ProfileMetadata, ProfileScope, ProfileStore, ProfileSummary};
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::ids::kinds::ProfileKind;
 use quarry_core::QuarryResult;
@@ -214,8 +219,8 @@ pub fn precheck(
 pub struct ProfileFacts {
     /// Whether a snapshot row or a metadata row exists.
     pub exists: bool,
-    /// The stored scope. A profile with no metadata row reads as `Ephemeral`, which is
-    /// not `OrgShared`, so it is treated as owner-only.
+    /// The stored scope. A profile with no metadata row reads as `UserPrivate`
+    /// (`ProfileMetadata::stored_default`, D16 Q2), so it is treated as owner-only.
     pub scope: ProfileScope,
     /// The owner's actor id; `None` on a legacy row.
     pub owner: Option<String>,
@@ -281,6 +286,12 @@ pub fn allowed(mode: OwnerEnforce, op: ProfileOp, denial: Option<DenyReason>) ->
                 reason = reason.as_str(),
                 "profile.owner.would_deny"
             );
+            crate::metrics::record_profile_owner_decision(
+                "would_deny",
+                op.as_str(),
+                reason.as_str(),
+                1,
+            );
             true
         }
         OwnerEnforce::Enforce => {
@@ -288,6 +299,12 @@ pub fn allowed(mode: OwnerEnforce, op: ProfileOp, denial: Option<DenyReason>) ->
                 op = op.as_str(),
                 reason = reason.as_str(),
                 "profile.owner.denied"
+            );
+            crate::metrics::record_profile_owner_decision(
+                "denied",
+                op.as_str(),
+                reason.as_str(),
+                1,
             );
             false
         }
@@ -306,7 +323,7 @@ pub async fn load_facts(
     let metadata = store
         .load_metadata(org_id, profile_id)
         .await?
-        .unwrap_or_default();
+        .unwrap_or_else(ProfileMetadata::stored_default);
     Ok(ProfileFacts {
         exists,
         scope: metadata.scope,
@@ -373,6 +390,24 @@ pub fn filter_listing(
         }
     }
     if not_owner + legacy_ownerless > 0 {
+        let outcome = if mode == OwnerEnforce::Enforce {
+            "denied"
+        } else {
+            "would_deny"
+        };
+        for (reason, count) in [
+            (DenyReason::NotOwner, not_owner),
+            (DenyReason::LegacyOwnerless, legacy_ownerless),
+        ] {
+            if count > 0 {
+                crate::metrics::record_profile_owner_decision(
+                    outcome,
+                    "list",
+                    reason.as_str(),
+                    count as u64,
+                );
+            }
+        }
         if mode == OwnerEnforce::Enforce {
             tracing::info!(
                 op = "list",
@@ -390,6 +425,99 @@ pub fn filter_listing(
         }
     }
     kept
+}
+
+/// Why a run start stamps no owner on its profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StampSkip {
+    /// The run keeps no persistent profile.
+    NotPersistent,
+    /// A resumed run keeps the profile (and the owner) its checkpoint holds.
+    Resumed,
+    /// The owner check is `off`: the routes behave as before WS17.P2.
+    Off,
+    /// A model-driven (service principal) run. It names no person: `Claims::actor_id()` is the
+    /// shared service id, and stamping it would make every model run in the org the owner of
+    /// those cookies, hidden from the person (D16 Q2, challenger). Until an acting-user claim
+    /// exists the profile it saves stays ownerless, and so hidden under `enforce`.
+    ServicePrincipal,
+}
+
+/// Decides whether a run start stamps the owner (D16 Q2, option C). Pure, so the table is
+/// unit-tested without a store. `None` means stamp.
+pub fn stamp_skip(
+    mode: OwnerEnforce,
+    claims: &Claims,
+    persist_profile: bool,
+    resumed: bool,
+) -> Option<StampSkip> {
+    if resumed {
+        Some(StampSkip::Resumed)
+    } else if !persist_profile {
+        Some(StampSkip::NotPersistent)
+    } else if mode == OwnerEnforce::Off {
+        Some(StampSkip::Off)
+    } else if claims.is_service() || claims.actor_id().trim().is_empty() {
+        Some(StampSkip::ServicePrincipal)
+    } else {
+        None
+    }
+}
+
+/// The scope a run's profile row is created with. A run's `profile_scope` of `ephemeral` (the
+/// request default) is not a scope a stored row may carry, so it becomes `user_private`, as in
+/// every store (D16 Q2).
+pub fn stamp_scope(requested: quarry_runtime::step_receipts::BrowserProfileScope) -> ProfileScope {
+    use quarry_runtime::step_receipts::BrowserProfileScope as Requested;
+    match requested {
+        Requested::Ephemeral | Requested::UserPrivate => ProfileScope::UserPrivate,
+        Requested::OrgShared => ProfileScope::OrgShared,
+        Requested::RunScoped => ProfileScope::RunScoped,
+    }
+}
+
+/// Stamps the caller as the owner of the profile a run is starting on (WS17.P2, D16 Q2): a
+/// person's run only, insert-only (an existing row, owned or not, is never touched), and
+/// refused by a tombstone newer than `requested_at` (the start of the request), as `save` is.
+/// Never fails the run start: a store error is counted and logged as a class, and the row
+/// the run saves later has no owner (hidden under `enforce`, found by the legacy count).
+pub async fn stamp_run_owner(
+    state: &AppState,
+    claims: &Claims,
+    profile_id: &ProfileKind,
+    scope: ProfileScope,
+    requested_at: chrono::DateTime<chrono::Utc>,
+    persist_profile: bool,
+    resumed: bool,
+) {
+    match stamp_skip(state.profile_owner_enforce, claims, persist_profile, resumed) {
+        Some(StampSkip::ServicePrincipal) => {
+            crate::metrics::record_profile_owner_stamp("skipped_service");
+            return;
+        }
+        Some(_) => return,
+        None => {}
+    }
+    let metadata = ProfileMetadata {
+        name: None,
+        scope,
+        owner: Some(claims.actor_id().to_owned()),
+    };
+    match state
+        .profiles
+        .stamp_owner(&claims.org_id, profile_id, &metadata, requested_at)
+        .await
+    {
+        Ok(outcome) => {
+            tracing::info!(outcome = outcome.reason_class(), "profile.owner.stamp");
+            crate::metrics::record_profile_owner_stamp(outcome.reason_class());
+        }
+        Err(_) => {
+            // The error text can carry a row or an id: only the class leaves this function.
+            tracing::warn!(outcome = "failed", "profile.owner.stamp");
+            crate::metrics::record_profile_owner_stamp("failed");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -593,6 +721,61 @@ mod tests {
             Some(DenyReason::NotOwner)
         ));
         assert!(allowed(OwnerEnforce::Enforce, ProfileOp::Delete, None));
+    }
+
+    #[test]
+    fn a_stored_row_without_metadata_is_owner_only_not_open() {
+        // D16 Q2: a row with no metadata reads as user_private, never as a scope that is open.
+        let stored = ProfileMetadata::stored_default();
+        assert_eq!(stored.scope, ProfileScope::UserPrivate);
+        let f = ProfileFacts {
+            exists: true,
+            scope: stored.scope,
+            owner: Some(OWNER.to_owned()),
+        };
+        assert_eq!(decide(&f, OTHER, ProfileOp::Read), Some(DenyReason::NotOwner));
+        assert_eq!(decide(&f, OWNER, ProfileOp::Read), None);
+    }
+
+    #[test]
+    fn the_stamp_is_for_a_persistent_fresh_run_of_a_person_only() {
+        let person = principal(false, &[]);
+        let service = principal(true, &[]);
+        let observe = OwnerEnforce::Observe;
+        assert_eq!(stamp_skip(observe, &person, true, false), None);
+        assert_eq!(stamp_skip(OwnerEnforce::Enforce, &person, true, false), None);
+        assert_eq!(
+            stamp_skip(observe, &service, true, false),
+            Some(StampSkip::ServicePrincipal)
+        );
+        assert_eq!(
+            stamp_skip(observe, &person, false, false),
+            Some(StampSkip::NotPersistent)
+        );
+        assert_eq!(
+            stamp_skip(observe, &person, true, true),
+            Some(StampSkip::Resumed)
+        );
+        assert_eq!(
+            stamp_skip(OwnerEnforce::Off, &person, true, false),
+            Some(StampSkip::Off)
+        );
+        // A token with no actor id names no person.
+        let mut nameless = principal(false, &[]);
+        nameless.user_id = String::new();
+        assert_eq!(
+            stamp_skip(observe, &nameless, true, false),
+            Some(StampSkip::ServicePrincipal)
+        );
+    }
+
+    #[test]
+    fn a_runs_ephemeral_scope_is_stamped_user_private() {
+        use quarry_runtime::step_receipts::BrowserProfileScope as Requested;
+        assert_eq!(stamp_scope(Requested::Ephemeral), ProfileScope::UserPrivate);
+        assert_eq!(stamp_scope(Requested::UserPrivate), ProfileScope::UserPrivate);
+        assert_eq!(stamp_scope(Requested::OrgShared), ProfileScope::OrgShared);
+        assert_eq!(stamp_scope(Requested::RunScoped), ProfileScope::RunScoped);
     }
 
     #[test]
