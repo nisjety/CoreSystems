@@ -1658,6 +1658,39 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-440 | WS13-S3 | live-proof | P1 | Lead: regenerate apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go with native protoc-gen-go and buf (not runnable by me); then go vet and go test in services that import model_plane/v1. | open |
 | D2-441 | WS13-S3 | follow-up | P3 | 23 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-18.json | open |
 
+
+### Wave-mode batch W2-19 (2026-10-28)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-442 | WS13-S4 | risk | P1 | The denial lookup calls ListApprovals with the run bearer. If execution-core's bearer lacks orchestration:read for service callers, the read fails, the call still pauses, and the switch silently does nothing. Needs a live check before the switch is on. | open |
+| D2-443 | WS13-S4 | risk | P1 | declined_earlier_in_run calls ListApprovals with ctx.session_bearer, and nobody has checked live that this bearer has the read scope. If it is refused, the warn path returns false and denial memory silently does nothing. | open |
+| D2-444 | WS13-S4 | live-proof | P1 | shared-edit apps/Model Plane/deploy/docker-compose.yml: add `APPROVAL_DENIAL_MEMORY_ENABLED: ${APPROVAL_DENIAL_MEMORY_ENABLED:-false}` in the execution-core environment block (beside EXECUTION_LOOP_PARKING_ENABLED); the compose file is still unmodified | open |
+| D2-445 | WS13-S4 | live-proof | P1 | Live proof per the row: rebuild execution-core with the switch on, deny a call, have the model re-propose it, and confirm the psql approvals count stays 1 and the transcript shows the typed denial; different arguments still pause | open |
+| D2-446 | WS13-S4 | live-proof | P1 | Live check that execution-core's run/session bearer is allowed to call ListApprovals for its own run; otherwise the read fails closed to 'not declined' and the switch has no visible effect | open |
+| D2-447 | WS13-S4 | test-gap | P2 | a_subagent_never_consults_denial_memory passes because the leaf-role blocklist (agent.rs around line 3363) refuses delete_records at depth 1 before any awaiting_approval outcome, so the phase-3 denial lookup is never reached. The depth guard that keeps subagents out of denial memory is structural (`if ctx.depth == 0`, agent.rs around line 4206) and no test isolates it; exercising it directly needs a call that reaches awaiting_approval at depth > 0. | open |
+| D2-448 | WS13-S4 | test-gap | P2 | No unit test covers the ListApprovals error path (answers not-declined) or the zdr/waived guard in declined_earlier_in_run. The S8 golden cases cover ZDR only at the contract level. | open |
+| D2-449 | WS13-S4 | follow-up | P2 | A denial answered from memory writes no tool-step record, so the Agent Run Console shows no row for it. | open |
+| D2-450 | WS13-S4 | follow-up | P3 | 6 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-19.json | open |
+| D2-451 | WS13-S5 | risk | P1 | No producer sets ApprovalCause.step_up_required: execution-core creates causes at its pause sites but never sets the step-up bit, so under APPROVAL_STEP_UP_ENFORCED=enforce nothing is refused, including owner_effect_reserved (tickets.create); needs the step-up set computed at agent.rs pause_for_approval, runtime_loop/mod.rs resolve_write_approval and gate returns, grpc.rs:959 and browser_events.rs require_approval. | open |
+| D2-452 | WS13-S5 | risk | P1 | The posture-auto path (execution-core runtime_loop/mod.rs auto_posture_decision_request, around line 2315) records a GRANTED decision for provider writes with the user's bearer, outside the HTTP gate, so enforce does not cover it; needs an owner decision on whether provider writes under auto posture keep needing no confirmation. | open |
+| D2-453 | WS13-S5 | risk | P1 | model-gateway gRPC approve_approval (grpc.rs around line 1663) persists grants through persist_approval_decision_authenticated with no step-up check, so the HTTP-only gate is bypassed; the gRPC auth path (grpc_auth.rs Claims) does not carry step_up. | open |
+| D2-454 | WS13-S5 | risk | P1 | DecideApprovalRequest has no step_up_verified field and 4.3 reserves no tag for it, so session-core always writes metadata.decision.step_up_verified=false and the approval_decided audit row says false; the slice DoD (step_up_verified in metadata.decision and audit) is unmet until the integrator reserves a tag and session-core reads it. | open |
+| D2-455 | WS13-S5 | follow-up | P1 | Wiring not yet live: convex-token.service.ts must emit the step_up claim (shared-edit), app.module.ts must register StepUpController (shared-edit), the BFF route POST /api/v1/auth/step-up must proxy to auth-core, and the BFF per-user model token cache (audience_tokens.rs, TTL minus 60 s) must be evicted on step-up success, otherwise a decide right after step-up presents a pre-step-up token and is refused again. | open |
+| D2-456 | WS13-S5 | follow-up | P1 | The parent decide handler (use-chat-controller.ts around line 2150) removes the card optimistically and does not handle a 403 step_up_required; a gateway refusal would drop the approval silently, so the parent must re-open the confirmation. | open |
+| D2-457 | WS13-S5 | risk | P1 | Nothing in execution-core sets ApprovalCause.step_up_required (grep finds only test literals), so the gate refuses nothing under enforce until the producer slice sets it at each pause site. | open |
+| D2-458 | WS13-S5 | risk | P1 | model-gateway/src/grpc.rs approve_approval and the POSTURE_AUTO grant in execution-core runtime_loop/mod.rs both record grants outside the HTTP step-up gate. only_the_gateway_calls_decide_approval allowlists both, so the gate can be bypassed through them once it is on. | open |
+| D2-459 | WS13-S5 | follow-up | P3 | 36 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-19.json | open |
+| D2-460 | WS18-S2 | risk | P0 | load_graph_grounding (model-gateway retrieval.rs ~963-1040, request built ~940-961) posts to /v1/retrieve/graph with the user bearer and x-org-id only and no space decision, so every scoped turn with a valid decision still receives org-wide graph entities and community summaries; fix is in unowned retrieval.rs. | open |
+| D2-461 | WS18-S2 | risk | P0 | inject_personal_thread_context (spaces.rs) returns Ok(()) when a follow-up omits space_ref, so the turn carries no decision and retrieves org-wide; the server never resolves the thread's Space (the plan's space_scope_for_thread helper is not built). | open |
+| D2-462 | WS18-S2 | risk | P0 | load_graph_grounding in model-gateway retrieval.rs posts /v1/retrieve/graph with no Space decision, so even a correctly scoped follow-up (and first turn) still gets org-wide graph entities and community summaries; that is outside this slice's files. | open |
+| D2-463 | WS18-S2 | risk | P0 | inject_personal_thread_context returns Ok(()) with no context when a follow-up omits space_ref, so a client that drops space_ref on turn 2 gets org-wide retrieval; the server-side thread-to-Space resolution (space_scope_for_thread) is not built. | open |
+| D2-464 | WS18-S2 | risk | P1 | ZDR: zdr_features.rs:89 classifies space_append_context as Inert and the ZDR matrix is stale once the MG switch is on; decide refuse-vs-scope for ZDR follow-ups and update zdr-posture-matrix.json and zdr-contract-sync before enabling. | open |
+| D2-465 | WS18-S2 | decision | P1 | Owner/lead to choose between keeping the second MG switch and the preferred follow-up: make session_flow.rs ThreadSpaceContext.retrieval_decision_token Option<String> with #[serde(default)] (lines 142, 172, 283) and drop the MG switch so the BFF switch alone gives the kill-switch semantics K3-18 describes. | open |
+| D2-466 | WS18-S2 | decision | P1 | The second switch MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL departs from the plan row; it is safe (an absent token with the MG switch on deserializes to "" and suppresses grounding rather than widening it), but the K3-18 kill-switch meaning changes: BFF=false with MG=true suppresses follow-up grounding and does not re-expose org documents. The lead should choose this design or session_flow.rs retrieval_decision_token: Option<String>. | open |
+| D2-467 | WS18-S2 | risk | P1 | zdr_features.rs still marks space_append_context Inert and api/contracts/zdr-posture-matrix.json is not updated, even though with the MG switch on the append context now scopes retrieval; update both before enabling. | open |
+| D2-468 | WS18-S2 | follow-up | P3 | 21 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-19.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -1807,3 +1840,6 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS09-S9 | zdr | W1-25 | no |
 | WS09-S8 | zdr, auth, authority | W1-25 | no |
 | WS02-S10.code | zdr | W1-26 | no |
+| WS13-S4 | authority | W2-19 | no |
+| WS13-S5 | auth, authority | W2-19 | no |
+| WS18-S2 | authority, policy | W2-19 | no |
