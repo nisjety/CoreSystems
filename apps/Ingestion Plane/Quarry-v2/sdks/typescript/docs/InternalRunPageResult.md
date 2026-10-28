@@ -10,6 +10,7 @@ Name | Type
 `status` | number
 `fingerprint` | string
 `links` | Array&lt;string&gt;
+`crawl` | [CrawlReport](CrawlReport.md)
 
 ## Example
 
@@ -22,6 +23,7 @@ const example = {
   "status": null,
   "fingerprint": null,
   "links": null,
+  "crawl": null,
 } satisfies InternalRunPageResult
 
 console.log(example)

@@ -15,6 +15,9 @@ Name | Type
 `probe` | string
 `probeMs` | number
 `screenshot` | string
+`maskMs` | number
+`oopifFrames` | number
+`rects` | number
 
 ## Example
 
@@ -31,6 +34,9 @@ const example = {
   "probe": null,
   "probeMs": null,
   "screenshot": null,
+  "maskMs": null,
+  "oopifFrames": null,
+  "rects": null,
 } satisfies RedactionStamp
 
 console.log(example)

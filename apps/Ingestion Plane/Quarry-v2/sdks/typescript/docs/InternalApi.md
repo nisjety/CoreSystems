@@ -72,6 +72,7 @@ No authorization required
 |-------------|-------------|------------------|
 | **200** | Page execution result |  -  |
 | **400** | Invalid request |  -  |
+| **403** | The page was refused before it was fetched (WS14.S4). error.code is SECURITY_BLOCKED, error.retryable is false and error.details.denial says why (see RobotsFetchDenial). Only a request whose crawl.robots is respect is checked, and only when QUARRY_EDGE__CRAWL_ROBOTS is enforce; in observe the page is fetched and the would-be refusal is counted. |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 

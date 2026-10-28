@@ -15,6 +15,7 @@ Name | Type
 `resumeRunId` | string
 `initiatedBy` | string
 `executionTier` | string
+`policy` | [RequestAsk](RequestAsk.md)
 `driverRequirements` | [BrowserDriverCapabilities](BrowserDriverCapabilities.md)
 
 ## Example
@@ -33,6 +34,7 @@ const example = {
   "resumeRunId": null,
   "initiatedBy": null,
   "executionTier": null,
+  "policy": null,
   "driverRequirements": null,
 } satisfies StartAgentRunRequest
 

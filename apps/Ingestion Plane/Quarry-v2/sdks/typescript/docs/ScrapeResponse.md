@@ -23,6 +23,11 @@ Name | Type
 `omitted` | Array&lt;string&gt;
 `effectiveOptions` | object
 `warnings` | [Array&lt;ScrapeResponseAllOfWarnings&gt;](ScrapeResponseAllOfWarnings.md)
+`screenshot` | object
+`pdf` | object
+`captures` | object
+`scrapeId` | string
+`actions` | [Array&lt;ScrapeActionOutcome&gt;](ScrapeActionOutcome.md)
 
 ## Example
 
@@ -47,6 +52,11 @@ const example = {
   "omitted": null,
   "effectiveOptions": null,
   "warnings": null,
+  "screenshot": null,
+  "pdf": null,
+  "captures": null,
+  "scrapeId": null,
+  "actions": null,
 } satisfies ScrapeResponse
 
 console.log(example)

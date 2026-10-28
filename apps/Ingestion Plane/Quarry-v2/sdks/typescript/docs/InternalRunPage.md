@@ -14,6 +14,7 @@ Name | Type
 `signals` | [DriverSignals](DriverSignals.md)
 `ingest` | boolean
 `orgId` | string
+`crawl` | [CrawlContext](CrawlContext.md)
 
 ## Example
 
@@ -30,6 +31,7 @@ const example = {
   "signals": null,
   "ingest": null,
   "orgId": null,
+  "crawl": null,
 } satisfies InternalRunPage
 
 console.log(example)

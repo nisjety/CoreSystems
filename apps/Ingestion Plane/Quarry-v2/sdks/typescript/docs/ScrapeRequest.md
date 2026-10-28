@@ -10,6 +10,7 @@ Name | Type
 `privacy` | object
 `render` | [ScrapeRequestRender](ScrapeRequestRender.md)
 `preferHttp3` | boolean
+`policy` | [RequestAsk](RequestAsk.md)
 `url` | string
 `prevFingerprint` | string
 `cache` | [CachePolicy](CachePolicy.md)
@@ -17,7 +18,7 @@ Name | Type
 `signals` | [DriverSignals](DriverSignals.md)
 `ingest` | boolean
 `orgId` | string
-`formats` | Array&lt;string&gt;
+`formats` | [Array&lt;ScrapeRequestFormatsInner&gt;](ScrapeRequestFormatsInner.md)
 `onlyMainContent` | boolean
 `includeTags` | Array&lt;string&gt;
 `excludeTags` | Array&lt;string&gt;
@@ -25,6 +26,8 @@ Name | Type
 `extractor` | string
 `timeoutMs` | number
 `maxInlineBytes` | number
+`actions` | [Array&lt;ScrapeRequestActionsInner&gt;](ScrapeRequestActionsInner.md)
+`actionsOnError` | string
 
 ## Example
 
@@ -36,6 +39,7 @@ const example = {
   "privacy": null,
   "render": null,
   "preferHttp3": null,
+  "policy": null,
   "url": https://example.com/article,
   "prevFingerprint": null,
   "cache": null,
@@ -51,6 +55,8 @@ const example = {
   "extractor": null,
   "timeoutMs": null,
   "maxInlineBytes": null,
+  "actions": null,
+  "actionsOnError": null,
 } satisfies ScrapeRequest
 
 console.log(example)

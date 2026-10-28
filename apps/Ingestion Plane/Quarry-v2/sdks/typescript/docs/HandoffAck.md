@@ -8,6 +8,8 @@ Name | Type
 ------------ | -------------
 `jobId` | string
 `acceptedAt` | Date
+`rejected` | [Array&lt;HandoffAckRejectedInner&gt;](HandoffAckRejectedInner.md)
+`effective` | [HandoffAckEffective](HandoffAckEffective.md)
 `limits` | [HandoffAckLimits](HandoffAckLimits.md)
 
 ## Example
@@ -19,6 +21,8 @@ import type { HandoffAck } from '@quarry/client'
 const example = {
   "jobId": null,
   "acceptedAt": null,
+  "rejected": null,
+  "effective": null,
   "limits": null,
 } satisfies HandoffAck
 

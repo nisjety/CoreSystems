@@ -17,6 +17,7 @@ Name | Type
 `challengeObservationCount` | number
 `challengeRatePerMille` | number
 `verifiedActionCostMicroUsd` | number
+`profileRestore` | [ProfileRestoreSummary](ProfileRestoreSummary.md)
 
 ## Example
 
@@ -35,6 +36,7 @@ const example = {
   "challengeObservationCount": null,
   "challengeRatePerMille": null,
   "verifiedActionCostMicroUsd": null,
+  "profileRestore": null,
 } satisfies BrowserTelemetry
 
 console.log(example)

@@ -8,6 +8,7 @@ Name | Type
 ------------ | -------------
 `requested` | number
 `effective` | number
+`remaining` | number
 `clampedBy` | Array&lt;string&gt;
 
 ## Example
@@ -19,6 +20,7 @@ import type { CrawlBound } from '@quarry/client'
 const example = {
   "requested": null,
   "effective": null,
+  "remaining": null,
   "clampedBy": null,
 } satisfies CrawlBound
 

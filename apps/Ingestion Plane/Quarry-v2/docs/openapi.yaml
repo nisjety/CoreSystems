@@ -3195,7 +3195,7 @@ components:
           minimum: 0
           description: Length of the stored value in bytes.
         value:
-          type: 'null'
+          type: [string, 'null']
           description: Always null. A cookie value is never returned.
     ProfileOriginView:
       type: object

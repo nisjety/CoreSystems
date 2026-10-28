@@ -26,6 +26,7 @@ Name | Type
 `deltaY` | number
 `url` | string
 `key` | string
+`ignoreCache` | boolean
 `dialogId` | string
 `accept` | boolean
 `promptText` | string
@@ -59,6 +60,7 @@ const example = {
   "deltaY": null,
   "url": null,
   "key": null,
+  "ignoreCache": null,
   "dialogId": null,
   "accept": null,
   "promptText": null,

@@ -9,6 +9,7 @@ Name | Type
 `step` | number
 `action` | { [key: string]: any; }
 `expectedOutcome` | string
+`redactedInput` | boolean
 
 ## Example
 
@@ -20,6 +21,7 @@ const example = {
   "step": null,
   "action": null,
   "expectedOutcome": null,
+  "redactedInput": null,
 } satisfies BrowserProcedureStepsInner
 
 console.log(example)

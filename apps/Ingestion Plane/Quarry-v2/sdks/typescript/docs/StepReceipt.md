@@ -20,6 +20,7 @@ Name | Type
 `initiatedBy` | string
 `controlEpoch` | number
 `agent` | [AgentIdentity](AgentIdentity.md)
+`redactionRuleVersion` | string
 
 ## Example
 
@@ -42,6 +43,7 @@ const example = {
   "initiatedBy": null,
   "controlEpoch": null,
   "agent": null,
+  "redactionRuleVersion": null,
 } satisfies StepReceipt
 
 console.log(example)
