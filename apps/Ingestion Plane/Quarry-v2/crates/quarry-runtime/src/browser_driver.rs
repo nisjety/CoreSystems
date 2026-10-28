@@ -111,6 +111,30 @@ fn capture_failure_reason(error: &QuarryError) -> String {
 /// that makes more requests than this under-counts.
 const CAPTURE_EGRESS_SCAN: usize = 1024;
 
+/// WS13.4b, WS13.5: how many requests the egress policy blocked on this session. A
+/// count only, never a URL. A bound: a page that makes more requests than
+/// `CAPTURE_EGRESS_SCAN` under-counts. A failed read counts as none, since the page is
+/// still returned.
+async fn count_blocked_requests(
+    inner: &(dyn BrowserDriverTrait + Send + Sync),
+    session: &BrowserSession,
+) -> u32 {
+    match inner.egress_receipts(session, 0, CAPTURE_EGRESS_SCAN).await {
+        Ok(receipts) => receipts
+            .iter()
+            .filter(|receipt| {
+                matches!(
+                    receipt.decision,
+                    quarry_core::contracts::BrowserEgressDecision::Block
+                )
+            })
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX),
+        Err(_) => 0,
+    }
+}
+
 /// WS13.4b: take what the request asked for from the settled page. Each
 /// capture is independent. A failure is a warning, never an error, so the
 /// extracted page is still returned.
@@ -157,20 +181,7 @@ async fn take_captures(
         }
     }
     // Counts only: the blocked URLs never leave the driver.
-    out.blocked_requests = match inner.egress_receipts(session, 0, CAPTURE_EGRESS_SCAN).await {
-        Ok(receipts) => receipts
-            .iter()
-            .filter(|receipt| {
-                matches!(
-                    receipt.decision,
-                    quarry_core::contracts::BrowserEgressDecision::Block
-                )
-            })
-            .count()
-            .try_into()
-            .unwrap_or(u32::MAX),
-        Err(_) => 0,
-    };
+    out.blocked_requests = count_blocked_requests(inner, session).await;
     out.final_url = match inner.current_url(session).await {
         Ok(Some(raw)) => raw.parse::<Url>().ok().filter(|reached| reached != url),
         _ => None,
@@ -749,6 +760,12 @@ impl BrowserDriverAdapter {
                 }
                 caps.actions = run.outcomes;
                 caps.action_outputs = run.outputs;
+                // WS13.5: a run without a capture plan never reaches take_captures, so its
+                // blocked requests are counted here, as a capture would count them.
+                if hints.render.capture.is_none() {
+                    caps.blocked_requests =
+                        count_blocked_requests(self.inner.as_ref(), session).await;
+                }
                 match self.inner.current_url(session).await {
                     Ok(Some(raw)) => raw.parse::<Url>().unwrap_or_else(|_| url.clone()),
                     _ => url.clone(),
