@@ -1,6 +1,6 @@
 # wf-D2-B-adr6-proof: continuation pointer
 
-Unit D2-B-adr6-proof (decision 3.8, ADR-6 proof, list B item 13). The offline part is complete and committed on `quarryv2-next`: `9c548a823` (runtime fix), `3253eb010` (real-token tests), `33b38087c` (`scrape_actions_live`), and the notes commit that adds this file.
+Unit D2-B-adr6-proof (decision 3.8, ADR-6 proof, list B item 13). The offline part is complete and committed on `quarryv2-next`: `9c548a823` (runtime fix), `3253eb010` (real-token tests), `33b38087c` (`scrape_actions_live`), `c383153b9` (the real-token tests, gated behind the evidence flag), and the notes commit that adds this file.
 
 Read first: `.plan-work/quarry-w1w2/D2-B-adr6-proof-progress.md` (verified results, the stack-session steps, the fixture page).
 

@@ -7,6 +7,7 @@ Status: the code and the offline tests are COMMITTED (local, branch `quarryv2-ne
 - `9c548a823` fix(quarry-runtime): an actions-only run counts its blocked requests (WS13.5, ADR-6). Root-cause fix found while writing check 8: the count was taken only for a capture plan, so an actions-only run always reported `blocked_requests` 0.
 - `3253eb010` test(quarry-edge): real-token scrape actions tests beside zdr_claim_floor (WS13.5, ADR-6). Decision 3.8 step 4. Also one word in `tests/support/zdr_harness.rs` (`token_with_scopes` is `pub`).
 - `33b38087c` test(quarry-edge): scrape_actions_live, the env-gated evidence lane (WS13.5, ADR-6). Decision 3.8 step 3. Also the header of `tests/scrape_actions.rs`, which named a runtime live run that does not exist.
+- `c383153b9` test(quarry-edge): the ADR-6 real-token tests are evidence-gated and skipped by default (WS13.5, ADR-6). The brief asks for both proof tests to be skipped by default; the real-token ones ran in every `cargo test` until this commit.
 - the notes commit that adds this file, its pointer and `depth/D2-B-adr6-proof.md`.
 
 Files of this unit: `crates/quarry-runtime/src/browser_driver.rs`; `crates/quarry-edge/tests/scrape_actions_live.rs` (new); `crates/quarry-edge/tests/scrape_actions_real_token.rs` (new); `crates/quarry-edge/tests/scrape_actions_real_token_user_mode.rs` (new); `crates/quarry-edge/tests/support/actions_real_auth.rs` (new); `crates/quarry-edge/tests/support/zdr_harness.rs` (one word); `crates/quarry-edge/tests/scrape_actions.rs` (header only).
@@ -15,7 +16,7 @@ Not this unit's, left alone: `tests/support/fixture_site.rs` (modified by anothe
 
 ## What runs where
 
-- `tests/scrape_actions_real_token.rs` (switch `on`) and `tests/scrape_actions_real_token_user_mode.rs` (switch `user`): real RS256 tokens through the real `require_auth`, golden claim sets, browser double. They run in any `cargo test`, with no stack and no Chromium.
+- `tests/scrape_actions_real_token.rs` (switch `on`) and `tests/scrape_actions_real_token_user_mode.rs` (switch `user`): real RS256 tokens through the real `require_auth`, golden claim sets, browser double. `#[ignore]`d and gated by `QUARRY_EVIDENCE_STACK=1` like the live lane (`evidence_lane()`), so a plain `cargo test` reports them as ignored. They need no stack and no Chromium: `QUARRY_EVIDENCE_STACK=1 cargo test -p quarry-edge --test scrape_actions_real_token --test scrape_actions_real_token_user_mode -- --ignored`.
 - `tests/scrape_actions_live.rs`: `#[ignore]`; returns at once unless `QUARRY_EVIDENCE_STACK=1`; with the flag, a missing variable fails the test. It drives a running edge over HTTP with a real Chromium. NOT RUN.
 
 ## Verified (qtest, rust:1 container, this session)
@@ -25,8 +26,9 @@ Not this unit's, left alone: `tests/support/fixture_site.rs` (modified by anothe
 - Gate, flag on, no `E2E_*` variables: panics `QUARRY_EVIDENCE_STACK=1 needs E2E_EDGE set ...` (rc 101, as intended).
 - `cargo test -p quarry-edge --lib scrape_actions`: 12 passed.
 - `cargo test -p quarry-runtime --lib browser_driver`: 27 passed (after the blocked-count fix).
-- `cargo check --workspace --all-targets`: Finished, rc 0. The warnings are in other units' files; none point at the new test files.
-- rustfmt 1.9.0 `--check`: the three new test files and `actions_real_auth.rs` are clean. The two binaries still report diffs in their child modules (`support/zdr_harness.rs`, `support/fixture_site.rs`), which were already unformatted and were not reformatted here.
+- `cargo check --workspace --all-targets`: Finished, rc 0 (run before the two last test-only edits, which were then compiled and run as listed here). The warnings are in other units' files; none point at the new test files.
+- Gate, real-token binaries (`c383153b9`): default `cargo test`: 7 ignored. `-- --ignored` with no flag: 7 skip lines, 5 and 2 passed. `QUARRY_EVIDENCE_STACK=1 ... -- --ignored`: 5 passed and 2 passed.
+- rustfmt 1.9.0 `--check`: `scrape_actions_live.rs` and `support/actions_real_auth.rs` are clean; the two real-token binaries have no diff of their own. `--check` reports diffs only in their child modules (`support/zdr_harness.rs`, `support/fixture_site.rs`), which were already unformatted and were not reformatted here.
 - NOT RUN: `make test-scrape-capture` (`Quarry-v2/scripts/e2e-scrape-capture.sh`), and `scrape_actions_live`. Both need the stack.
 
 ## Stack session: steps (do them only after SC1 to SC7; nothing below was run)
