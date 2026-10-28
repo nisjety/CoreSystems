@@ -172,12 +172,13 @@ async fn profile_list_includes_saved_profile() {
         "{ids:?} missing {saved_id}"
     );
     // A profile saved through the plain snapshot path has no metadata
-    // recorded yet — must default to `ephemeral`, not error/omit.
+    // recorded yet — must default to `user_private` (owner decision D16 Q2,
+    // 2026-10-28), not error/omit.
     let saved_summary = profiles
         .iter()
         .find(|p| p["profile_id"].as_str() == Some(saved_id.as_str()))
         .unwrap();
-    assert_eq!(saved_summary["scope"].as_str(), Some("ephemeral"));
+    assert_eq!(saved_summary["scope"].as_str(), Some("user_private"));
     assert!(saved_summary.get("name").is_none() || saved_summary["name"].is_null());
 }
 
