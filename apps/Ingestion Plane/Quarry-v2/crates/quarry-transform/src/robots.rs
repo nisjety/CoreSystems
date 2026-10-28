@@ -33,7 +33,8 @@ impl RobotsTxt {
         // RFC 9309 section 2.2 grammar: a group is `startgroupline *(startgroupline / emptyline)
         // *(rule / emptyline)`. A blank line is skipped and never ends a group. Consecutive
         // user-agent lines share the rules that follow them; only a rule line ends that list,
-        // so the next user-agent line after a rule starts a new group.
+        // so the next user-agent line after a rule starts a new group. Other records, such as
+        // Crawl-delay, do not end the list (RFC 9309 section 2.2.4).
         for raw in input.lines() {
             let line = strip_comment(raw).trim();
             if line.is_empty() {
@@ -81,12 +82,12 @@ impl RobotsTxt {
                     after_agents = true;
                 }
                 "crawl-delay" => {
+                    // An other record (RFC 9309 2.2.4) does not end the user-agent list.
                     if let Ok(n) = value.parse::<f64>() {
                         for ua in &current_agents {
                             out.groups.entry(ua.clone()).or_default().crawl_delay_s = Some(n);
                         }
                     }
-                    after_agents = true;
                 }
                 "sitemap" => {
                     out.sitemaps.push(value);
@@ -369,7 +370,7 @@ mod tests {
     #[test]
     fn crawl_delay_any_takes_the_longest_and_ignores_garbage() {
         let r = RobotsTxt::parse(
-            "User-agent: quarrybot\nCrawl-delay: 2\n\nUser-agent: quarry\nCrawl-delay: 5\n",
+            "User-agent: quarrybot\nCrawl-delay: 2\nDisallow:\n\nUser-agent: quarry\nCrawl-delay: 5\n",
         );
         assert_eq!(r.crawl_delay_any(&["quarrybot", "quarry"]), Some(5.0));
         let neg = RobotsTxt::parse("User-agent: *\nCrawl-delay: -3\n");
@@ -427,5 +428,24 @@ mod tests {
         let with_bom = RobotsTxt::parse("\u{feff}User-agent: *\nDisallow: /\n");
         assert!(!with_bom.is_allowed("quarrybot", "/private/x"));
         assert_eq!(with_bom, RobotsTxt::parse("User-agent: *\nDisallow: /\n"));
+    }
+
+    #[test]
+    fn a_crawl_delay_line_does_not_end_the_user_agent_list() {
+        // RFC 9309 section 2.2.4: other records MUST NOT interfere with the defined records, and
+        // a Sitemaps record MUST NOT terminate a group. Crawl-delay is such a record here.
+        let shared = RobotsTxt::parse(
+            "User-agent: quarrybot\nCrawl-delay: 2\nUser-agent: *\nDisallow: /private\n",
+        );
+        assert!(!shared.is_allowed("quarrybot", "/private/x"));
+        assert!(!shared.is_allowed("other", "/private/x"));
+        assert_eq!(shared.crawl_delay_any(&["quarrybot"]), Some(2.0));
+        // A Crawl-delay after a rule line still leaves the next user-agent line a new group.
+        let split = RobotsTxt::parse(
+            "User-agent: quarrybot\nDisallow: /a\nCrawl-delay: 2\nUser-agent: *\nDisallow: /b\n",
+        );
+        assert!(!split.is_allowed("quarrybot", "/a/x"));
+        assert!(split.is_allowed("quarrybot", "/b/x"));
+        assert!(!split.is_allowed("other", "/b/x"));
     }
 }
