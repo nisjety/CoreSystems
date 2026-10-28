@@ -29,7 +29,9 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{
+    decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, TokenData, Validation,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{error, warn};
@@ -104,6 +106,30 @@ pub struct Claims {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
+
+/// The `step_up` claim: the holder re-proved their password at `at` (Unix seconds), so a
+/// high-risk approval may be granted within its short validity (build plan WS13 S5). Auth Core
+/// mints it only after a fresh check, and only while that check is recent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepUpClaim {
+    pub at: i64,
+    pub method: String,
+}
+
+/// The payload of a verified model token: the identity claims and the optional step-up proof.
+/// Both come from the one signature check, so no path reads a proof from an unverified token.
+#[derive(Debug, Deserialize)]
+struct ModelTokenPayload {
+    #[serde(flatten)]
+    identity: Claims,
+    #[serde(default)]
+    step_up: Option<StepUpClaim>,
+}
+
+/// The step-up proof the verified model token carried, if any. `require_auth` inserts it beside
+/// the [`Claims`]; the development bypass verifies nothing and so inserts none.
+#[derive(Debug, Clone, Default)]
+pub struct VerifiedStepUp(pub Option<StepUpClaim>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PrincipalKind {
@@ -1148,6 +1174,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
         req.extensions_mut().insert(claims);
         req.extensions_mut()
             .insert(VerifiedModelBearer::new(&token));
+        req.extensions_mut().insert(VerifiedStepUp::default());
         // Delegated bearers are passed through ONLY when the caller supplied
         // and they verified. The bypass deliberately cannot MINT one — see
         // `dev_bypass_cannot_supply_a_data_plane_bearer`. A gateway dev flag
@@ -1245,10 +1272,15 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
         })?;
     validation.set_audience(&[expected_aud]);
 
-    let token_data = decode::<Claims>(&token, &decoding_key, &validation).map_err(|e| {
+    let decoded = decode::<ModelTokenPayload>(&token, &decoding_key, &validation).map_err(|e| {
         warn!(error = %e, "JWT validation failed");
         StatusCode::UNAUTHORIZED
     })?;
+    let step_up = VerifiedStepUp(decoded.claims.step_up);
+    let token_data = TokenData {
+        header: decoded.header,
+        claims: decoded.claims.identity,
+    };
 
     if token_data.claims.org_id.is_empty() {
         warn!("JWT claims missing org_id");
@@ -1314,6 +1346,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
             )
         }
     };
+    req.extensions_mut().insert(step_up);
     req.extensions_mut().insert(token_data.claims);
     req.extensions_mut()
         .insert(VerifiedModelBearer::new(&token));
@@ -1442,6 +1475,42 @@ pub fn require_scope(
                 Err(StatusCode::FORBIDDEN)
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod step_up_payload_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn the_step_up_claim_is_read_beside_the_identity_it_belongs_to() {
+        let identity = json!({
+            "sub": "user-1",
+            "iss": "auth-core",
+            "exp": 1_900_000_000_i64,
+            "org_id": "org-1",
+            "user_id": "user-1",
+            "zdr": false,
+        });
+        let mut stepped_up = identity.clone();
+        stepped_up["step_up"] = json!({ "at": 1_800_000_000_i64, "method": "password" });
+
+        let parsed: ModelTokenPayload =
+            serde_json::from_value(stepped_up).expect("a stepped-up token payload parses");
+        assert_eq!(
+            parsed.step_up,
+            Some(StepUpClaim {
+                at: 1_800_000_000,
+                method: "password".to_owned(),
+            })
+        );
+        assert_eq!(parsed.identity.org_id, "org-1");
+
+        let plain: ModelTokenPayload =
+            serde_json::from_value(identity).expect("a payload without the claim parses");
+        assert_eq!(plain.step_up, None);
+        assert_eq!(plain.identity.user_id, "user-1");
     }
 }
 

@@ -136,6 +136,7 @@ import { streamActivityLabel, type StreamActivity } from '@/features/chat/lib/st
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { approvalHeadline, approvalReason } from '@/shared/approvals/approval-copy'
+import { confirmStepUp } from '@/shared/approvals/step-up'
 import { createPlayingSpeechId, speechPlayer } from '@/features/voice/speech-playback'
 import { readAloudBlockedMessage, readAloudUnavailableMessage } from '@/features/voice/voice-mode-state'
 
@@ -2028,6 +2029,60 @@ export function ApprovalRequests(props: {
   onDecide: (approvalId: string, decision: ApprovalDecision) => void
 }) {
   const i18n = useI18n()
+  // An approval whose cause asks for a fresh password confirmation before it is granted (build
+  // plan WS13 S5). Only the grant asks; a denial never does.
+  const [confirming, setConfirming] = createSignal<string | null>(null)
+  const [password, setPassword] = createSignal('')
+  const [confirmError, setConfirmError] = createSignal<string | null>(null)
+  const [confirmBusy, setConfirmBusy] = createSignal(false)
+
+  const cancelConfirmation = () => {
+    setConfirming(null)
+    setPassword('')
+    setConfirmError(null)
+  }
+
+  const approve = (approval: Approval) => {
+    if (approval.cause?.stepUpRequired) {
+      setConfirmError(null)
+      setConfirming(approval.id)
+      return
+    }
+    props.onDecide(approval.id, 'approve')
+  }
+
+  const confirmationFailure = (error: unknown): string => {
+    const code = error instanceof ApiError ? error.code : null
+    if (code === 'INVALID_PASSWORD') {
+      return i18n.tr('Passordet stemmer ikke.', 'That password is not correct.')
+    }
+    if (code === 'RATE_LIMITED') {
+      return i18n.tr('For mange forsøk. Prøv igjen senere.', 'Too many attempts. Try again later.')
+    }
+    if (code === 'STEP_UP_METHOD_UNAVAILABLE') {
+      return i18n.tr('Kontoen har ikke noe passord å bekrefte med.', 'This account has no password to confirm with.')
+    }
+    return i18n.tr('Bekreftelsen lyktes ikke. Prøv igjen.', 'The confirmation failed. Try again.')
+  }
+
+  const confirmAndApprove = async (approval: Approval) => {
+    const entered = password()
+    if (entered.length === 0 || confirmBusy()) return
+    setConfirmBusy(true)
+    setConfirmError(null)
+    try {
+      await confirmStepUp(entered)
+    } catch (error) {
+      setConfirmError(confirmationFailure(error))
+      return
+    } finally {
+      setConfirmBusy(false)
+      setPassword('')
+    }
+    cancelConfirmation()
+    props.onDecide(approval.id, 'approve')
+  }
+
   return (
     <div class="verevon-chat-approvals" role="group" aria-label={i18n.tr('Godkjenninger', 'Approvals')}>
       <For each={props.approvals}>
@@ -2040,22 +2095,72 @@ export function ApprovalRequests(props: {
             <Show when={approvalReason(approval, i18n)}>
               {(reason) => <p class="verevon-chat-approval__detail">{reason()}</p>}
             </Show>
-            <div class="verevon-chat-approval__actions">
-              <button
-                type="button"
-                class="verevon-chat-approval__approve"
-                onClick={() => props.onDecide(approval.id, 'approve')}
+            <Show
+              when={confirming() === approval.id}
+              fallback={
+                <div class="verevon-chat-approval__actions">
+                  <button
+                    type="button"
+                    class="verevon-chat-approval__approve"
+                    onClick={() => approve(approval)}
+                  >
+                    {i18n.tr('Godkjenn', 'Approve')}
+                  </button>
+                  <button
+                    type="button"
+                    class="verevon-chat-approval__reject"
+                    onClick={() => props.onDecide(approval.id, 'reject')}
+                  >
+                    {i18n.tr('Avvis', 'Reject')}
+                  </button>
+                </div>
+              }
+            >
+              <form
+                class="verevon-chat-approval__confirm"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void confirmAndApprove(approval)
+                }}
               >
-                {i18n.tr('Godkjenn', 'Approve')}
-              </button>
-              <button
-                type="button"
-                class="verevon-chat-approval__reject"
-                onClick={() => props.onDecide(approval.id, 'reject')}
-              >
-                {i18n.tr('Avvis', 'Reject')}
-              </button>
-            </div>
+                <label class="verevon-chat-approval__confirm-label">
+                  {i18n.tr('Bekreft passordet ditt for å godkjenne', 'Confirm your password to approve')}
+                  <input
+                    type="password"
+                    autocomplete="current-password"
+                    required
+                    disabled={confirmBusy()}
+                    value={password()}
+                    onInput={(event) => setPassword(event.currentTarget.value)}
+                  />
+                </label>
+                <Show when={confirmError()}>
+                  {(message) => (
+                    <p class="verevon-chat-approval__error" role="alert">
+                      {message()}
+                    </p>
+                  )}
+                </Show>
+                <div class="verevon-chat-approval__actions">
+                  <button
+                    type="submit"
+                    class="verevon-chat-approval__approve"
+                    disabled={confirmBusy() || password().length === 0}
+                  >
+                    {confirmBusy()
+                      ? i18n.tr('Bekrefter…', 'Confirming…')
+                      : i18n.tr('Bekreft og godkjenn', 'Confirm and approve')}
+                  </button>
+                  <button
+                    type="button"
+                    class="verevon-chat-approval__reject"
+                    onClick={cancelConfirmation}
+                  >
+                    {i18n.tr('Avbryt', 'Cancel')}
+                  </button>
+                </div>
+              </form>
+            </Show>
           </div>
         )}
       </For>

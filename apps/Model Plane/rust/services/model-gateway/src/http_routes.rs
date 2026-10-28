@@ -48,10 +48,10 @@ use tracing::{debug, info, warn};
 use crate::{
     approvals,
     auth::{
-        self, Claims, VerifiedCapabilityBearer, VerifiedCostBearer,
+        self, Claims, StepUpClaim, VerifiedCapabilityBearer, VerifiedCostBearer,
         VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer,
         VerifiedInferenceBearer, VerifiedSandboxBearer,
-        VerifiedSessionBearer as VerifiedModelBearer,
+        VerifiedSessionBearer as VerifiedModelBearer, VerifiedStepUp,
     },
     gateway_metrics, normalize, rate_limit,
     readiness::GrpcReadiness,
@@ -1821,6 +1821,80 @@ fn require_once_scope(scope: &str) -> Result<(), HttpJsonError> {
     ))
 }
 
+/// The approval step-up switch (build plan WS13 S5). `off` changes nothing; `shadow` counts a grant
+/// that lacks a fresh re-authentication and lets it through; `enforce` refuses it. Only the literal
+/// values `shadow` and `enforce` turn anything on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalStepUpGate {
+    Off,
+    Shadow,
+    Enforce,
+}
+
+impl ApprovalStepUpGate {
+    const ENV: &'static str = "APPROVAL_STEP_UP_ENFORCED";
+
+    fn from_env() -> Self {
+        Self::from_raw(std::env::var(Self::ENV).ok().as_deref())
+    }
+
+    fn from_raw(raw: Option<&str>) -> Self {
+        match raw {
+            Some("shadow") => Self::Shadow,
+            Some("enforce") => Self::Enforce,
+            _ => Self::Off,
+        }
+    }
+}
+
+/// A step-up claim is fresh while it is at most [`STEP_UP_MAX_AGE_SECS`] old. A claim dated a
+/// little ahead of this clock is tolerated for [`STEP_UP_CLOCK_SKEW_SECS`] (build plan WS13 S5).
+const STEP_UP_MAX_AGE_SECS: i64 = 120;
+const STEP_UP_CLOCK_SKEW_SECS: i64 = 30;
+
+fn step_up_is_fresh(claim: Option<&StepUpClaim>, now: i64) -> bool {
+    claim.is_some_and(|claim| {
+        let age = now - claim.at;
+        (-STEP_UP_CLOCK_SKEW_SECS..=STEP_UP_MAX_AGE_SECS).contains(&age)
+    })
+}
+
+/// Whether a decision is a grant its approval's cause makes conditional on a fresh
+/// re-authentication, and the caller brought none. A denial never needs one: refusing a call is
+/// always within the caller's authority.
+fn step_up_missing(
+    target_state: ApprovalState,
+    prior: Option<&Approval>,
+    claim: Option<&StepUpClaim>,
+    now: i64,
+) -> bool {
+    matches!(target_state, ApprovalState::Granted)
+        && prior
+            .and_then(|approval| approval.cause.as_ref())
+            .is_some_and(|cause| cause.step_up_required)
+        && !step_up_is_fresh(claim, now)
+}
+
+/// Whether a client is asked for a password confirmation before granting this cause. Only while
+/// the gate enforces it: under `off` and `shadow` the grant goes through as it always did, so no
+/// client prompts for a confirmation the gateway would not check (build plan WS13 S5).
+fn step_up_projected(cause: &ApprovalCause, gate: ApprovalStepUpGate) -> bool {
+    cause.step_up_required && gate == ApprovalStepUpGate::Enforce
+}
+
+/// The typed refusal of a grant that lacks a fresh re-authentication. The method names the proof
+/// the client should ask for.
+fn step_up_required_error() -> HttpJsonError {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "error": {
+            "code": "step_up_required",
+            "message": "Confirm your password before approving this.",
+            "details": { "method": "password" },
+        } })),
+    )
+}
+
 /// The durable decision this gateway records for a browser decision (build plan WS13 S3). The
 /// source is always USER: the body has no field for it, so a client-supplied value cannot
 /// reach the record. The scope is ONCE, the only scope the body can name today.
@@ -1848,6 +1922,7 @@ async fn decide_approval(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     session_bearer: VerifiedModelBearer,
+    step_up: Option<Extension<VerifiedStepUp>>,
     Path(approval_id): Path<String>,
     Json(body): Json<DecideApprovalBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
@@ -1882,6 +1957,29 @@ async fn decide_approval(
     } else {
         None
     };
+    let step_up_claim = step_up.and_then(|Extension(VerifiedStepUp(claim))| claim);
+    if step_up_missing(
+        target_state,
+        prior_approval.as_ref(),
+        step_up_claim.as_ref(),
+        Utc::now().timestamp(),
+    ) {
+        match ApprovalStepUpGate::from_env() {
+            ApprovalStepUpGate::Off => {}
+            ApprovalStepUpGate::Shadow => {
+                let cause = prior_approval
+                    .as_ref()
+                    .and_then(|approval| approval.cause.as_ref())
+                    .map_or("", |cause| CauseCode::from_wire(&cause.code).as_str());
+                metrics::counter!("approval_step_up_missing_total", "cause" => cause).increment(1);
+                info!(approval_id = %approval_id, "a grant lacks a fresh step-up (shadow)");
+            }
+            ApprovalStepUpGate::Enforce => {
+                info!(approval_id = %approval_id, "a grant lacks a fresh step-up; refused");
+                return Err(step_up_required_error());
+            }
+        }
+    }
     let resp = state
         .orchestration_client
         .clone()
@@ -6888,8 +6986,211 @@ fn approval_cause_value(cause: &ApprovalCause) -> Value {
         "risk_category": empty_to_null(&cause.risk_category),
         "rule_id": empty_to_null(&cause.rule_id),
         "scope_options": cause.scope_options,
-        "step_up_required": cause.step_up_required,
+        "step_up_required": step_up_projected(cause, ApprovalStepUpGate::from_env()),
     })
+}
+
+#[cfg(test)]
+mod approval_step_up_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    const NOW: i64 = 1_800_000_000;
+
+    fn approval_needing_step_up() -> Approval {
+        Approval {
+            id: "appr_1".to_owned(),
+            cause: Some(ApprovalCause {
+                code: "owner_effect_reserved".to_owned(),
+                step_up_required: true,
+                ..ApprovalCause::default()
+            }),
+            ..Approval::default()
+        }
+    }
+
+    fn claim_at(at: i64) -> StepUpClaim {
+        StepUpClaim {
+            at,
+            method: "password".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_grant_needing_step_up_without_the_claim_is_refused() {
+        assert!(step_up_missing(
+            ApprovalState::Granted,
+            Some(&approval_needing_step_up()),
+            None,
+            NOW,
+        ));
+    }
+
+    #[test]
+    fn a_denial_never_needs_step_up() {
+        assert!(!step_up_missing(
+            ApprovalState::Denied,
+            Some(&approval_needing_step_up()),
+            None,
+            NOW,
+        ));
+    }
+
+    #[test]
+    fn a_stale_step_up_claim_is_refused() {
+        let approval = approval_needing_step_up();
+        assert!(step_up_missing(
+            ApprovalState::Granted,
+            Some(&approval),
+            Some(&claim_at(NOW - STEP_UP_MAX_AGE_SECS - 1)),
+            NOW,
+        ));
+        assert!(!step_up_missing(
+            ApprovalState::Granted,
+            Some(&approval),
+            Some(&claim_at(NOW - STEP_UP_MAX_AGE_SECS)),
+            NOW,
+        ));
+    }
+
+    #[test]
+    fn a_claim_dated_a_little_ahead_is_tolerated_and_a_far_future_one_is_not() {
+        let approval = approval_needing_step_up();
+        assert!(!step_up_missing(
+            ApprovalState::Granted,
+            Some(&approval),
+            Some(&claim_at(NOW + STEP_UP_CLOCK_SKEW_SECS)),
+            NOW,
+        ));
+        assert!(step_up_missing(
+            ApprovalState::Granted,
+            Some(&approval),
+            Some(&claim_at(NOW + STEP_UP_CLOCK_SKEW_SECS + 1)),
+            NOW,
+        ));
+    }
+
+    #[test]
+    fn a_grant_whose_cause_asks_no_step_up_needs_none() {
+        let plain = Approval {
+            cause: Some(ApprovalCause {
+                code: "hook_ask".to_owned(),
+                ..ApprovalCause::default()
+            }),
+            ..Approval::default()
+        };
+        assert!(!step_up_missing(
+            ApprovalState::Granted,
+            Some(&plain),
+            None,
+            NOW
+        ));
+        assert!(!step_up_missing(ApprovalState::Granted, None, None, NOW));
+    }
+
+    #[test]
+    fn step_up_off_changes_nothing() {
+        assert_eq!(ApprovalStepUpGate::from_raw(None), ApprovalStepUpGate::Off);
+        for raw in ["off", "true", "ENFORCE", " enforce", "enforced", ""] {
+            assert_eq!(
+                ApprovalStepUpGate::from_raw(Some(raw)),
+                ApprovalStepUpGate::Off,
+                "{raw:?} must not enable the gate"
+            );
+        }
+        assert_eq!(
+            ApprovalStepUpGate::from_raw(Some("shadow")),
+            ApprovalStepUpGate::Shadow
+        );
+        assert_eq!(
+            ApprovalStepUpGate::from_raw(Some("enforce")),
+            ApprovalStepUpGate::Enforce
+        );
+    }
+
+    #[test]
+    fn the_step_up_prompt_is_offered_only_while_enforced() {
+        let asked = ApprovalCause {
+            step_up_required: true,
+            ..ApprovalCause::default()
+        };
+        assert!(!step_up_projected(&asked, ApprovalStepUpGate::Off));
+        assert!(!step_up_projected(&asked, ApprovalStepUpGate::Shadow));
+        assert!(step_up_projected(&asked, ApprovalStepUpGate::Enforce));
+        assert!(!step_up_projected(
+            &ApprovalCause::default(),
+            ApprovalStepUpGate::Enforce
+        ));
+    }
+
+    #[test]
+    fn a_refused_grant_is_the_typed_step_up_error() {
+        let (status, Json(body)) = step_up_required_error();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "step_up_required");
+        assert_eq!(body["error"]["details"]["method"], "password");
+    }
+
+    /// Every production caller of session-core's `DecideApproval` in the Model Plane, reviewed
+    /// (build plan WS13 S5, K3-22). A new caller fails here until it is listed with its reason, so
+    /// a path that can record a grant outside the HTTP step-up gate cannot appear unnoticed.
+    #[test]
+    fn only_the_gateway_calls_decide_approval() {
+        let services = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut callers = BTreeSet::new();
+        for entry in std::fs::read_dir(&services)
+            .expect("the services directory is readable")
+            .flatten()
+        {
+            collect_decide_callers(&entry.path().join("src"), &services, &mut callers);
+        }
+        let expected: BTreeSet<&str> = [
+            // The browser gate records a denial when its run is cancelled and a timeout when its
+            // wait budget runs out. Neither is a grant.
+            "execution-core/src/browser_events.rs",
+            // The chat posture records the interactive user's decision for them (POSTURE_AUTO),
+            // a grant that never passes the HTTP gate. Tracked as a depth finding.
+            "execution-core/src/runtime_loop/mod.rs",
+            // The gateway's durable persist of a decision it has already resolved.
+            "model-gateway/src/approvals.rs",
+            // The gRPC approval RPCs persist a grant through the same helper, outside the HTTP
+            // gate. Tracked as a depth finding.
+            "model-gateway/src/grpc.rs",
+            // The HTTP decide route, where the step-up gate sits.
+            "model-gateway/src/http_routes.rs",
+        ]
+        .into_iter()
+        .collect();
+        let found: BTreeSet<&str> = callers.iter().map(String::as_str).collect();
+        assert_eq!(found, expected);
+    }
+
+    fn collect_decide_callers(
+        dir: &std::path::Path,
+        services: &std::path::Path,
+        callers: &mut BTreeSet<String>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_decide_callers(&path, services, callers);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let source = std::fs::read_to_string(&path).unwrap_or_default();
+                let calls_decide = source.lines().any(|line| {
+                    !line.contains("fn ")
+                        && (line.contains(".decide_approval(")
+                            || line.contains("persist_approval_decision"))
+                });
+                if calls_decide {
+                    let relative = path.strip_prefix(services).unwrap_or(&path);
+                    callers.insert(relative.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
