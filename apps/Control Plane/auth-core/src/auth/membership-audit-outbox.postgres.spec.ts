@@ -95,7 +95,17 @@ postgresDescribe('membership audit outbox with Postgres', () => {
     });
     mockFlushDb.client = rawTimestamps as unknown as typeof mockFlushDb.client;
     await fixture.unsafe(`
-      CREATE TABLE "user" (id TEXT PRIMARY KEY, email TEXT NOT NULL);
+      -- name stays nullable because these seeds insert users without a display
+      -- name. The 020, 023 and 025 triggers read or watch name, email_verified,
+      -- banned and ban_reason, so those columns must exist.
+      CREATE TABLE "user" (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        email TEXT NOT NULL,
+        email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+        banned BOOLEAN DEFAULT FALSE,
+        ban_reason TEXT
+      );
       CREATE TABLE account (
         id TEXT PRIMARY KEY,
         provider_id TEXT NOT NULL,
@@ -130,14 +140,25 @@ postgresDescribe('membership audit outbox with Postgres', () => {
         team_id TEXT
       );
     `);
+    // Production applies gdpr_hard_delete.sql before the numbered migrations,
+    // and 023 and 025 harden or rename the routines it creates, so it goes
+    // first here too. 020 creates the identity outbox that 025 extends, so the
+    // run is contiguous from 014 through 027.
     for (const migration of [
+      'gdpr_hard_delete.sql',
       '014_normalized_identity_email.sql',
       '015_organization_projection_outbox.sql',
       '016_unique_organization_membership.sql',
       '017_invitation_acceptance_repair.sql',
       '018_historical_owner_preflight.sql',
       '019_membership_audit_outbox.sql',
+      '020_auth_identity_event_outbox.sql',
+      '021_invitation_created_at.sql',
       '022_membership_audit_actor_recovery.sql',
+      '023_gdpr_outbox_erasure.sql',
+      '024_revisioned_cross_plane_projection.sql',
+      '025_gdpr_outbox_publish_fence.sql',
+      '026_invitation_removal_preflight.sql',
       '027_membership_mutation_intents.sql',
     ]) {
       await fixture.unsafe(
