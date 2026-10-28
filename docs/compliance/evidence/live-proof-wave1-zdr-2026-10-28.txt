@@ -4,7 +4,7 @@ are built from that commit on a clean tree.
 Verification level: LIVE-VERIFIED on a developer stack. Not production. No secrets, tokens, tenant ids or payload
 content below. Rows: D1-220, D1-221, D1-222, D1-223 (already resolved), D1-224, D1-225, D1-330
 (docs/plans/model-plane-depth-register.md). New rows: D1-813, D1-814, D1-815, D1-816.
-Machine output of the proof script: live-reads-zdr-2026-10-28.txt in this folder (runs A to I, each headed there).
+Machine output of the proof script: live-reads-zdr-2026-10-28.txt in this folder (runs A to J, each headed there).
 Model policy: the stack runs Anthropic only, from the owner's test env file outside the repos; the only model a turn
 named on purpose was claude-sonnet-5-5. No turn reached a model (every turn below was refused before a model call).
 
@@ -31,8 +31,9 @@ VERDICTS
   D1-330 OPEN, BLOCKED. Pass 2 needs an attested deployment: D1-327 (no written Microsoft or Anthropic ZDR contract,
     no owner-named reviewer, so the six *_ZDR_* fields cannot be filled in a signed policy) and the WS01-S12 signed
     candidate (D1-302, D1-307: key ceremony, candidate, rehearsal). Today's catalogue lists no `zdr` chat model (both
-    specs check it). Also in its way: D1-815 (web search on by default would refuse every pass 2 turn from the SPA) and
-    D1-813 (a candidate built from a clean checkout cannot boot session-core on this database).
+    specs check it). Also in its way: D1-813 (a candidate built from a clean checkout cannot boot session-core on this
+    database). D1-815, which would have refused every pass 2 turn from the SPA, is fixed (part 2 below).
+  D1-815 RESOLVED (part 2): the composer sends no web search for a ZDR org or a Temporary chat turn.
 
 SAFETY NET (before anything changed)
   pg_dump (custom format) to C:/dev/backups/zdr-live-proof-2026-10-28 (outside both checkouts): session_core
@@ -169,3 +170,28 @@ FINAL STATE (17:20 UTC)
   zdr-0b5d2b7b6 tags.
   Test data left: the account zdr-test@verevon.dev and its org "ZDR-TEST wave1 proof" (plan pro, ZDR OFF), kept for the
   next ZDR proof (pass 2). The refused turns wrote no row anywhere.
+
+PART 2 - D1-815: THE COMPOSER SENDS NO WEB SEARCH UNDER ZDR (2026-10-28, 19:00-19:20 UTC)
+  The defect (run F above): Søk is on by default (`readBrowseWebPreference`), nothing turned it off for an org with ZDR
+  on, and model-gateway refuses web search under ZDR, so every default turn of a ZDR org was refused
+  zdr_feature_not_supported (web_search), also after a provider is attested.
+  The fix, apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx: the composer reads the
+  active org's stored ZDR intent (getOrganizationZdr, the signal AiModelPicker uses too) and, while the org has ZDR on
+  or the turn is a Temporary chat, sends no web search and shows Søk disabled with the reason ("Nettsøk er ikke
+  tilgjengelig med nullagring ennå" / "Web search is not available with zero data retention yet"), the way it already
+  treats the subscription route. The user's own Søk preference is kept, only not sent; a failed org read leaves Søk as
+  the user set it, and the gateway's refusal stays the guard.
+  Tests: new DashboardComposer.zero-retention-web.test.tsx, 4 pass (org ZDR on: disabled with the reason and no
+  `search` tool in the payload; org ZDR off: unchanged; Temporary chat: disabled; failed org read: unchanged).
+  Mutation check: without the mask in browseWeb() the two ZDR cases fail. vitest src/features/dashboard/home 45 files /
+  572 tests pass; src/features/chat 97 files / 1440 tests pass. `pnpm typecheck` shows only the errors that exist
+  without this change (quarry-client.ts 21, RemoteSupportPage.tsx 12, schedule-contract.test.ts 1).
+  Live, RUN J in live-reads-zdr-2026-10-28.txt (worktree SPA with the fix on :5199; the ZDR-TEST org switched ON at
+  19:16:05 and OFF again at 19:17:23; the four wave services unchanged since run D; the BFF had been rebuilt by another
+  session at 19:08): a turn with the web-search preference at its DEFAULT (no stored key), model pinned to
+  claude-sonnet-5-5:
+    Søk: disabled, aria-pressed false, title "Web search is not available with zero data retention yet".
+    request: browse_web false, tools [] (before the fix: browse_web true, tools [web_search]).
+    stream: HTTP 200, event error, code zdr_unavailable, "... The request was not sent to a model." The turn now
+      reaches inference-core's attestation check instead of being refused for web search.
+    page: shows "not sent to a model". Counters: delta 0 on all seven.

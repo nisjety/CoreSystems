@@ -1,4 +1,4 @@
-Machine output of apps/Model Plane/scripts/tests/zdr-live-proof.sh on the developer stack, 2026-10-28 (UTC), runs A to I.
+Machine output of apps/Model Plane/scripts/tests/zdr-live-proof.sh on the developer stack, 2026-10-28 (UTC), runs A to J.
 ZDR_WAVE_COMMIT=ae4f8b936 (WS01-S7 code). Lines starting with ######## or "# spec" / "# gate" are the operator's run headers;
 everything else is the script's own output. Narrative and verdicts: live-proof-wave1-zdr-2026-10-28.txt (this folder).
 
@@ -330,3 +330,62 @@ CHECK no-waived-run PASS 0 rows
 CHECK no-zdr-row-in-outbox PASS 0 rows
 
 ## phase=preflight checks=6 failures=0
+
+
+######## RUN J (D1-815): the composer fix, live. Worktree SPA on :5199 with the fix; the ZDR-TEST org switched ON again at 19:16:03 UTC; a turn sent with the web-search preference at its DEFAULT (no verevon.chat.browseWeb.v1 key), model pinned to claude-sonnet-5-5. Counters before and after. The BFF had been rebuilt by another session at 19:08 UTC; the four wave services are unchanged since run D.
+# ZDR live proof, phase before. Read-only: SELECT (read-only transaction), docker inspect, one redis-cli --scan.
+# Counts, names, revisions, timestamps. No content, no tenant identifier, no credential.
+# Read at 2026-10-28T19:16:58Z
+
+## COUNTERS
+## command: select count(*) from threads, messages, runs, feedback_ratings, session_audit_outbox; count of ZDR rows in the outbox; redis-cli --scan --pattern 'mp:gw:cache:*' (count only, key names are not printed)
+threads=1197
+messages=3897
+runs=2011
+feedback_ratings=20
+session_audit_outbox=5043
+outbox_zdr_rows=0
+cache_keys=0
+# recorded in C:/dev/backups/zdr-live-proof-2026-10-28/j.state
+
+## phase=before checks=0 failures=0
+# turn: Search button: disabled=true aria-pressed=false title="Web search is not available with zero data retention yet"
+# turn: request: model=claude-sonnet-5-5 browse_web=false tools=[] features=["usage","citations","reasoning","steps","artifacts","memory","tools"]
+# turn: frame: HTTP 200 event=error type=- code=zdr_unavailable feature=- message="Zero data retention applies to this request, but no model deployment is attested to provide it. The request was not sent to a model."
+# turn: page shows: "not sent to a model"
+# turn script exit=0
+# ZDR live proof, phase after. Read-only: SELECT (read-only transaction), docker inspect, one redis-cli --scan.
+# Counts, names, revisions, timestamps. No content, no tenant identifier, no credential.
+# Read at 2026-10-28T19:17:07Z
+
+## COUNTERS
+## command: select count(*) from threads, messages, runs, feedback_ratings, session_audit_outbox; count of ZDR rows in the outbox; redis-cli --scan --pattern 'mp:gw:cache:*' (count only, key names are not printed)
+threads=1197
+messages=3897
+runs=2011
+feedback_ratings=20
+session_audit_outbox=5043
+outbox_zdr_rows=0
+cache_keys=0
+
+## DELTA
+## command: after minus before, from C:/dev/backups/zdr-live-proof-2026-10-28/j.state
+threads: before=1197 after=1197 delta=0
+CHECK unchanged-threads PASS 1197
+messages: before=3897 after=3897 delta=0
+CHECK unchanged-messages PASS 3897
+runs: before=2011 after=2011 delta=0
+CHECK unchanged-runs PASS 2011
+feedback_ratings: before=20 after=20 delta=0
+CHECK unchanged-feedback_ratings PASS 20
+session_audit_outbox: before=5043 after=5043 delta=0
+CHECK unchanged-session_audit_outbox PASS 5043
+outbox_zdr_rows: before=0 after=0 delta=0
+CHECK unchanged-outbox_zdr_rows PASS 0
+cache_keys: before=0 after=0 delta=0
+CHECK unchanged-cache_keys PASS 0
+CHECK no-zdr-row-in-outbox PASS 0 rows
+
+## MANUAL (needs a user session, not read here): the Playwright spec tests/e2e/zdr-live-turn.spec.ts saw the typed refusal and no streamed content; the PATCH of the org switch was refused 409 zdr_no_attested_provider (tests/e2e/zdr-org-switch-gate.spec.ts with ZDR_GATE_LIVE_PATCH=1); the ZDR-TEST org was switched back off with zdr-seed-test-org.mjs --zdr false --apply.
+## phase=after checks=8 failures=0
+# switched back off with zdr-seed-test-org.mjs --zdr false --apply ("ZDR is now OFF"); org_core zdr=false updated_at=19:17:23

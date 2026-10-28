@@ -155,6 +155,7 @@ import { translateApiError, useI18n } from "@/shared/i18n";
 import { ApiError } from "@/shared/api/http";
 import { cn } from "@/shared/lib/cn";
 import { getSession } from "@/shared/session/session-store";
+import { getOrganizationZdr } from "@/shared/api/organization-client";
 import {
 	lastKnownAiModelPrivacyTier,
 	readAiModelSelection,
@@ -987,7 +988,8 @@ export function DashboardComposer(props: {
 	// switch to "Kun samtalen" — mirrors the `temporaryChat()` reset pattern
 	// used elsewhere in this file.
 	createEffect(() => conversationOnly(), (restricted) => { if (restricted) setInternalRetrievalScope('auto'); });
-	const browseWeb = () => !subscriptionBacked() && (props.browseWeb ?? internalBrowseWeb());
+	const browseWeb = () =>
+		!subscriptionBacked() && !zeroRetentionTurn() && (props.browseWeb ?? internalBrowseWeb());
 	const setBrowseWeb = (next: boolean | ((current: boolean) => boolean)) => {
 		const value = typeof next === "function" ? next(browseWeb()) : next;
 		if (props.browseWeb === undefined) setInternalBrowseWeb(value);
@@ -1137,6 +1139,30 @@ export function DashboardComposer(props: {
 	const subscriptionConnectionPending = createMemo(() =>
 		subscriptionBacked() && (!activeOrgId() || subscriptionConnections.loading || subscriptionConnections() === undefined),
 	);
+	// Zero data retention refuses web search: model-gateway answers
+	// `zdr_feature_not_supported` (feature `web_search`) before any model call.
+	// Søk is on by default, so without this every ordinary turn of an org with
+	// ZDR on, and every Temporary chat turn, is refused (D1-815). The org's
+	// stored ZDR intent is read, the signal `AiModelPicker` uses too. A failed
+	// read leaves Søk as the user set it: the gateway's refusal stays the guard.
+	// The user's own Søk preference is not overwritten, only not sent.
+	const [orgZeroRetention] = createResource(
+		activeOrgId,
+		async (orgId) => {
+			try {
+				return await getOrganizationZdr(orgId);
+			} catch {
+				return false;
+			}
+		},
+	);
+	const zeroRetentionTurn = () =>
+		Boolean(props.temporaryChatLocked || props.temporaryChat) || orgZeroRetention() === true;
+	const zeroRetentionWebTitle = () =>
+		i18n.tr(
+			"Nettsøk er ikke tilgjengelig med nullagring ennå",
+			"Web search is not available with zero data retention yet",
+		);
 	// Chat-capable models grouped by family/provider. Non-chat modalities
 	// (image/video/embeddings/transcribe) are filtered out by `groupChatModels`.
 	const chatModelGroups = createMemo<ModelGroup[]>(() =>
@@ -3716,23 +3742,33 @@ export function DashboardComposer(props: {
 								aria-label={
 									subscriptionBacked()
 										? `${i18n.tr("Søk på nett", "Browse web")} — ${subscriptionDisabledTitle()}`
-										: retrievalScope() === 'web_only'
-											? `${i18n.tr("Søk på nett", "Browse web")} — ${webOnlyForcedTitle()}`
-											: i18n.tr("Søk på nett", "Browse web")
+										: zeroRetentionTurn()
+											? `${i18n.tr("Søk på nett", "Browse web")} — ${zeroRetentionWebTitle()}`
+											: retrievalScope() === 'web_only'
+												? `${i18n.tr("Søk på nett", "Browse web")} — ${webOnlyForcedTitle()}`
+												: i18n.tr("Søk på nett", "Browse web")
 								}
 								title={
 									subscriptionBacked()
 										? subscriptionDisabledTitle()
-										: retrievalScope() === 'web_only'
-											? webOnlyForcedTitle()
-											: i18n.tr("Søk på nett", "Browse web")
+										: zeroRetentionTurn()
+											? zeroRetentionWebTitle()
+											: retrievalScope() === 'web_only'
+												? webOnlyForcedTitle()
+												: i18n.tr("Søk på nett", "Browse web")
 								}
-								disabled={subscriptionBacked() || conversationOnly() || retrievalScope() === 'web_only'}
+								disabled={subscriptionBacked() || zeroRetentionTurn() || conversationOnly() || retrievalScope() === 'web_only'}
 								onClick={() =>
 									setBrowseWeb((current) => !current)
 								}
 								class={composerWebButtonClass(browseWeb() || retrievalScope() === 'web_only')}
-								style={retrievalScope() === 'web_only' ? { opacity: 0.85, cursor: "not-allowed" } : subscriptionDisabledStyle()}
+								style={
+									retrievalScope() === 'web_only'
+										? { opacity: 0.85, cursor: "not-allowed" }
+										: zeroRetentionTurn()
+											? { opacity: 0.5, cursor: "not-allowed" }
+											: subscriptionDisabledStyle()
+								}
 							>
 								<Globe2 class="size-4" />
 								{i18n.tr("Søk", "Search")}

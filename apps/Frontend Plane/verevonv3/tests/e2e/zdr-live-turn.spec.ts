@@ -22,10 +22,12 @@ import { expect, test, type Page } from '@playwright/test'
  * The test org is seeded with `apps/gateway/scripts/zdr-seed-test-org.mjs`, never through here.
  *
  * Web search is switched off before the turn. ZDR refuses it on its own (`zdr_feature_not_supported`,
- * feature `web_search`) in model-gateway, before the request reaches inference-core, and the composer
- * sends it by default: with it on, pass 1 never reaches the attestation check and pass 2 can never be
- * answered (first live run, 2026-10-28). `ZDR_LIVE_TURN_MODEL` (optional) pins the composer's model for
- * the test org, so a stack that may only use one model is not sent the composer's default mode.
+ * feature `web_search`) in model-gateway, before the request reaches inference-core: with it on, pass 1
+ * never reaches the attestation check and pass 2 can never be answered (first live run, 2026-10-28).
+ * The composer itself sends no web search for a ZDR org since D1-815; the spec still switches it off,
+ * so a failed org read in the composer cannot turn this proof into a web-search refusal.
+ * `ZDR_LIVE_TURN_MODEL` (optional) pins the composer's model for the test org, so a stack that may only
+ * use one model is not sent the composer's default mode.
  */
 
 const CHAT = '/chat'
