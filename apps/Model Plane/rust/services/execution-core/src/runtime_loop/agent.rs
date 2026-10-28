@@ -5743,6 +5743,7 @@ fn record_delegation_memory(parent: &LoopContext<'_>, goal: &str, outcome: &str)
         org_id: parent.req.org_id.clone(),
         memory_id: String::new(),
         user_id: parent.req.user_id.clone(),
+        origin: "delegation".to_owned(),
     };
     let channel = parent.session_channel.clone();
     let run_id = parent.req.run_id.clone();

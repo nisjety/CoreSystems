@@ -165,6 +165,13 @@ message IndexMemoryRequest {
   // semantic backend so a later DeleteMemory(memory_id) removes both. When
   // empty the backend assigns its own id.
   string memory_id = 6;
+
+  // Who asked for this write, for the content policy (WS26-S4): "user" (the
+  // person, through the app), "model_tool" (save_memory), "delegation" (a
+  // subagent's outcome) or "workflow" (an orchestrator write). Empty, and any
+  // other value, is read as "model_tool", so only "user" may write org-wide
+  // memory.
+  string origin = 7;
 }
 
 message IndexMemoryResponse {

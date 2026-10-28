@@ -869,6 +869,7 @@ func (a *Activities) WriteConsolidatedMemoryActivity(ctx context.Context, input 
 			Topic:    "MEMORY",
 			Content:  entry.Content,
 			OrgId:    entry.OrgID,
+			Origin:   "workflow",
 		})
 		if err != nil {
 			return err

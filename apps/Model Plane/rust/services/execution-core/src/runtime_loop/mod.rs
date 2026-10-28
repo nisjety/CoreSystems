@@ -2789,6 +2789,8 @@ async fn execute_save_memory(
         // Empty means "mint a fresh id" — this call site never updates.
         memory_id: String::new(),
         user_id: user_id.to_owned(),
+        // The model's own tool call. The content policy gives it no org-wide scope.
+        origin: "model_tool".to_owned(),
     };
     let request = match authenticated_session_request(request, &bearer) {
         Ok(r) => r,
@@ -2814,15 +2816,23 @@ async fn execute_save_memory(
 
 /// The tool error for a refused `IndexMemory`. session-core answers a user who
 /// paused or switched memory off (or whose org disabled it) with
-/// `memory_not_enabled:<reason>`; the model is told that, plainly, so it does not
-/// report "saved" or retry as if the call had merely failed.
+/// `memory_not_enabled:<reason>`, and a write its content policy refuses with
+/// `memory_policy:<rule>`. The model is told either plainly, so it does not
+/// report "saved" or retry as if the call had merely failed. The rule's name is
+/// given, never the content.
 fn save_memory_refusal(status: &tonic::Status) -> String {
-    match status.message().strip_prefix("memory_not_enabled:") {
-        Some(reason) => format!(
+    let message = status.message();
+    if let Some(reason) = message.strip_prefix("memory_not_enabled:") {
+        return format!(
             "save_memory: memory is not enabled for this user ({reason}); nothing was saved"
-        ),
-        None => format!("save_memory failed: {}", status.message()),
+        );
     }
+    if let Some(rule) = message.strip_prefix("memory_policy:") {
+        return format!(
+            "save_memory: the content was refused by the memory policy ({rule}); nothing was saved"
+        );
+    }
+    format!("save_memory failed: {message}")
 }
 
 /// `plan.propose` — input JSON
@@ -3065,6 +3075,17 @@ mod tests {
         );
         let other = tonic::Status::internal("boom");
         assert_eq!(save_memory_refusal(&other), "save_memory failed: boom");
+    }
+
+    /// A write the content policy refuses names the rule, never the content, and is
+    /// never reported as saved.
+    #[test]
+    fn save_memory_maps_policy_refusal() {
+        let refused = tonic::Status::failed_precondition("memory_policy:injection_marker");
+        assert_eq!(
+            save_memory_refusal(&refused),
+            "save_memory: the content was refused by the memory policy (injection_marker); nothing was saved"
+        );
     }
 
     #[test]
