@@ -26,6 +26,9 @@ impl RobotsTxt {
         let mut out = RobotsTxt::default();
         let mut current_agents: Vec<String> = Vec::new();
         let mut after_agents = false;
+        // A UTF-8 byte order mark is not White_Space, so `trim` would leave it on the first line
+        // and hide a leading `User-agent:` line. The sitemap scanner strips it the same way.
+        let input = input.strip_prefix('\u{feff}').unwrap_or(input);
 
         // RFC 9309 section 2.2 grammar: a group is `startgroupline *(startgroupline / emptyline)
         // *(rule / emptyline)`. A blank line is skipped and never ends a group. Consecutive
@@ -414,5 +417,15 @@ mod tests {
         let r = RobotsTxt::parse(txt);
         assert!(!r.is_allowed("Quarry", "/file.pdf"));
         assert!(r.is_allowed("Quarry", "/file.pdf.html"));
+    }
+
+    #[test]
+    fn a_leading_utf8_bom_does_not_hide_the_first_user_agent_line() {
+        // U+FEFF is not White_Space, so `trim` keeps it on the first line and the `user-agent`
+        // key is never recognised. The rules below it then belong to no group, so a file that
+        // disallows everything would allow everything.
+        let with_bom = RobotsTxt::parse("\u{feff}User-agent: *\nDisallow: /\n");
+        assert!(!with_bom.is_allowed("quarrybot", "/private/x"));
+        assert_eq!(with_bom, RobotsTxt::parse("User-agent: *\nDisallow: /\n"));
     }
 }
