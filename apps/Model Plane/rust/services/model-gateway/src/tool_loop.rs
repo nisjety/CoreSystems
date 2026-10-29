@@ -2424,7 +2424,7 @@ fn builtin_argument_problem(
     None
 }
 
-fn with_authorization<T>(value: T, bearer: &str) -> tonic::Request<T> {
+pub(crate) fn with_authorization<T>(value: T, bearer: &str) -> tonic::Request<T> {
     let mut request = tonic::Request::new(value);
     if bearer.is_empty() {
         return request;
@@ -2782,6 +2782,167 @@ pub async fn dispatch_tool(
         allow_paid_providers, call, ingestion_bearer, sandbox_bearer, None,
         data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(), None,
     ).await
+}
+
+/// Lowercase hex SHA-256 of `bytes`, the spelling a bundle manifest records.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    use std::fmt::Write as _;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            write!(hex, "{byte:02x}").expect("writing to a String");
+            hex
+        })
+}
+
+/// `skill_file`: one bounded read of one file of a skill's bundle (WS19-S7).
+///
+/// Every refusal that needs no I/O comes first (the switch, the name, the path,
+/// the credential), so a bad call costs no capability-core read. The path is
+/// checked against the bundle's own manifest, so only a file the bundle holds can
+/// be read, and bytes whose digest differs from the manifest are refused.
+async fn skill_file_outcome(
+    state: &AppState,
+    enabled: bool,
+    org_id: &str,
+    user_id: &str,
+    capability_bearer: Option<&str>,
+    call: &ToolCall,
+) -> ToolOutcome {
+    use mp_contracts::model_plane::v1::{GetSkillBlobRequest, GetSkillBundleManifestRequest};
+    use mp_contracts::skill_bundle::{read_piece, validate_bundle_path, OffsetRefusal, Piece};
+
+    let answer = |output: String| ToolOutcome {
+        call_id: call.id.clone(),
+        name: call.name.clone(),
+        provenance: crate::moderation::ToolProvenance::unscreened(&call.name, &output),
+        output,
+        error: None,
+    };
+    if !enabled {
+        return err_outcome(call, "skill_file is not enabled on this deployment");
+    }
+    let name = arg_str(&call.arguments_json, "skill");
+    if name.trim().is_empty() {
+        return err_outcome(
+            call,
+            "skill_file requires the skill's 'name' as shown in its block",
+        );
+    }
+    let path = arg_str(&call.arguments_json, "path");
+    let listing = path.trim().is_empty();
+    if !listing {
+        if let Err(refusal) = validate_bundle_path(&path) {
+            return err_outcome(
+                call,
+                format!("skill_file refused this path: {}", refusal.detail()),
+            );
+        }
+    }
+    let Ok(offset) = usize::try_from(arg_i64(&call.arguments_json, "offset").unwrap_or(0)) else {
+        return err_outcome(call, "skill_file's offset must be zero or more");
+    };
+    let Some(bearer) = capability_bearer.filter(|bearer| !bearer.trim().is_empty()) else {
+        return err_outcome(call, "skill_file requires a verified capability credential");
+    };
+    let Some(skill) =
+        crate::skills::usable_skill_named(&state.skills, org_id, &state.ownership, user_id, &name)
+    else {
+        return answer(crate::skills::render_bundle_status(
+            "not_found",
+            &name,
+            "no skill by that name is available to this user; use a skill name exactly as its block shows it",
+        ));
+    };
+    let manifest = match state
+        .capability_client
+        .clone()
+        .get_skill_bundle_manifest(with_authorization(
+            GetSkillBundleManifestRequest {
+                skill_id: skill.id.clone(),
+            },
+            bearer,
+        ))
+        .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(status) if status.code() == tonic::Code::NotFound => {
+            return answer(crate::skills::render_bundle_status(
+                "no_bundle",
+                &skill.name,
+                "this skill has no bundle; its instructions are all there is",
+            ));
+        }
+        Err(status) => {
+            tracing::warn!(code = ?status.code(), %org_id, "skill_file: bundle manifest read failed");
+            return err_outcome(
+                call,
+                "skill_file could not read this skill's bundle right now",
+            );
+        }
+    };
+    if listing {
+        return answer(crate::skills::render_bundle_listing(
+            &skill.name,
+            &manifest.files,
+        ));
+    }
+    let Some(file) = manifest.files.iter().find(|file| file.path == path) else {
+        return answer(crate::skills::render_bundle_status(
+            "not_found",
+            &skill.name,
+            "this bundle has no file at that path; call again without a path to list its files",
+        ));
+    };
+    if file.binary {
+        return answer(crate::skills::render_bundle_binary(&skill.name, file));
+    }
+    let bytes = match state
+        .capability_client
+        .clone()
+        .get_skill_blob(with_authorization(
+            GetSkillBlobRequest {
+                skill_id: skill.id.clone(),
+                sha256: file.sha256.clone(),
+            },
+            bearer,
+        ))
+        .await
+    {
+        Ok(response) => response.into_inner().content,
+        Err(status) => {
+            tracing::warn!(code = ?status.code(), %org_id, "skill_file: bundle blob read failed");
+            return err_outcome(call, "skill_file could not read this file right now");
+        }
+    };
+    if sha256_hex(&bytes) != file.sha256 {
+        return err_outcome(
+            call,
+            "skill_file refused this file: its stored bytes do not match the digest in the bundle manifest",
+        );
+    }
+    match read_piece(&bytes, offset) {
+        Ok(Piece::Text {
+            content,
+            next_offset,
+        }) => answer(crate::skills::render_bundle_text(
+            &skill.name,
+            &file.path,
+            offset,
+            &content,
+            next_offset,
+            bytes.len(),
+        )),
+        Ok(Piece::Binary) => answer(crate::skills::render_bundle_binary(&skill.name, file)),
+        Err(OffsetRefusal::PastEnd) => {
+            err_outcome(call, "skill_file's offset is past the end of this file")
+        }
+        Err(OffsetRefusal::NotCharBoundary) => err_outcome(
+            call,
+            "skill_file's offset falls inside a character; pass the next_offset from the previous read",
+        ),
+    }
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -3722,6 +3883,22 @@ async fn dispatch_tool_with_cost(
                 output,
                 error: None,
             }
+        }
+        // Read one file of a skill's bundle (WS19-S7). The bundle's files are not in
+        // the prompt: the skill block only says a bundle exists, and the model asks
+        // for the file it needs. Read-only and org-scoped: the skill is resolved in
+        // this org's catalogue under the injection path's visibility rule, and every
+        // bundle read carries the verified capability credential.
+        "skill_file" => {
+            skill_file_outcome(
+                state,
+                mp_contracts::skill_bundle::enabled(),
+                org_id,
+                user_id,
+                capability_bearer,
+                call,
+            )
+            .await
         }
         // Knowledge-base RAG — searches the org's OWN ingested documents via
         // Data Plane v2 retrieval (canonical owner). org-scoped: `org_id` is the
@@ -4734,7 +4911,7 @@ pub const MAX_READ_ARTIFACT_CHARS: usize = 24_000;
 /// A task-scoped source boundary, also enforced against the final offered tool
 /// set before dispatch. Calculation runs in the existing networkless sandbox.
 pub fn conversation_tool_allowed(name: &str) -> bool {
-    matches!(name, "create_artifact" | "read_artifact" | "update_artifact" | "count_words" | "code_interpreter" | "reattach_context")
+    matches!(name, "create_artifact" | "read_artifact" | "update_artifact" | "count_words" | "code_interpreter" | "reattach_context" | "skill_file")
 }
 
 /// The public-web-search half of the retrieval-scope tool buckets
@@ -4808,6 +4985,11 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
             name: "reattach_skill".to_owned(),
             description: "Read one of this organization's skill instructions back IN FULL. Use it when a skill block in your context ends with a truncation marker, or when a rule you are about to follow looks cut off — acting on half an instruction is worse than pausing to read the rest. Give the skill's name exactly as it appears in the block.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"name":{"type":"string","description":"The skill's name, exactly as shown in its block"}},"required":["name"]}"#.to_owned(),
+        },
+        ToolDefinition {
+            name: "skill_file".to_owned(),
+            description: "Read one file from a skill's bundle: the scripts, templates and reference documents that a skill's instructions point to. Use it when a skill block says its bundle has files and the instructions name one you need. Give the skill's name exactly as it appears in its block. Omit the path to list the bundle's files. Give a path to read that file: a long file comes back in pieces of up to 32 KiB, and the result says where the next piece starts. This reads files only; it never runs them.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"skill":{"type":"string","description":"The skill's name, exactly as shown in its block"},"path":{"type":"string","description":"A file path inside the bundle, as the listing shows it. Omit to list the files."},"offset":{"type":"integer","minimum":0,"description":"Byte offset to start reading from: the next_offset of the previous read. Defaults to 0."}},"required":["skill"]}"#.to_owned(),
         },
         ToolDefinition {
             name: "web_search".to_owned(),
@@ -11791,7 +11973,7 @@ mod tests {
         for name in ["web_search", "fetch_url", "knowledge_search", "knowledge_graph_search", "knowledge_wiki_search", "inbox_search", "inbox_get_conversation", "result_query", "mcp_call", "action_execute", "browser_agent"] {
             assert!(!conversation_tool_allowed(name), "{name} escaped source restriction");
         }
-        for name in ["create_artifact", "read_artifact", "update_artifact", "code_interpreter", "reattach_context"] {
+        for name in ["create_artifact", "read_artifact", "update_artifact", "code_interpreter", "reattach_context", "skill_file"] {
             assert!(conversation_tool_allowed(name));
         }
     }
@@ -13838,6 +14020,94 @@ mod tests {
 
     /// A turn with no durable thread has no history to recover. Saying so beats
     /// returning an empty result the model would read as "there was nothing".
+    /// `skill_file` refuses a path that climbs out of the bundle before any read,
+    /// and says which rule it broke.
+    #[tokio::test]
+    async fn skill_file_refuses_traversal() {
+        let state = crate::state::AppState::new();
+        let outcome = skill_file_outcome(
+            &state,
+            true,
+            "org_test",
+            "user_test",
+            Some("capability-bearer"),
+            &tool_call(
+                "skill_file",
+                r#"{"skill":"Deploy Runbook","path":"../secret.env"}"#,
+            ),
+        )
+        .await;
+        let error = outcome.error.unwrap_or_default();
+        assert!(
+            error.contains("'..'"),
+            "expected the traversal reason, got {error:?}"
+        );
+    }
+
+    /// With the switch off the tool says so, before any skill is resolved.
+    #[tokio::test]
+    async fn skill_file_says_so_while_its_switch_is_off() {
+        let state = crate::state::AppState::new();
+        let outcome = skill_file_outcome(
+            &state,
+            false,
+            "org_test",
+            "user_test",
+            Some("capability-bearer"),
+            &tool_call("skill_file", r#"{"skill":"Deploy Runbook"}"#),
+        )
+        .await;
+        let error = outcome.error.unwrap_or_default();
+        assert!(error.contains("not enabled"), "{error:?}");
+    }
+
+    /// Every bundle read carries the verified capability credential. Without one
+    /// nothing is read, because an unauthenticated read would look like "no bundle".
+    #[tokio::test]
+    async fn skill_file_without_a_credential_reads_nothing() {
+        let state = crate::state::AppState::new();
+        let outcome = skill_file_outcome(
+            &state,
+            true,
+            "org_test",
+            "user_test",
+            None,
+            &tool_call("skill_file", r#"{"skill":"Deploy Runbook"}"#),
+        )
+        .await;
+        let error = outcome.error.unwrap_or_default();
+        assert!(
+            error.contains("verified capability credential"),
+            "{error:?}"
+        );
+    }
+
+    /// A skill outside this org's catalogue reads no bundle and is reported as absent.
+    #[tokio::test]
+    async fn skill_file_for_an_unknown_skill_reads_nothing() {
+        let state = crate::state::AppState::new();
+        let outcome = skill_file_outcome(
+            &state,
+            true,
+            "org_test",
+            "user_test",
+            Some("capability-bearer"),
+            &tool_call("skill_file", r#"{"skill":"Deploy Runbook"}"#),
+        )
+        .await;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        let output: serde_json::Value = serde_json::from_str(&outcome.output).expect("valid JSON");
+        assert_eq!(output["status"], "not_found");
+    }
+
+    #[test]
+    fn sha256_hex_is_the_spelling_the_manifest_records() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
     #[tokio::test]
     async fn reattach_context_without_a_thread_says_so() {
         let state = crate::state::AppState::new();

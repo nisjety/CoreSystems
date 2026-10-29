@@ -2597,9 +2597,11 @@ pub async fn invoke_stream_sse(
         requested_ids: requested_skill_ids,
         skills_truncated,
         skills_dropped,
+        skill_file_offered,
     } = if conversation_only || retrieval_scope == crate::normalize::RetrievalScope::WebOnly { SkillContext::default() } else { fetch_skill_context(
         &state,
         &model_bearer,
+        capability_bearer.as_ref().map(VerifiedCapabilityBearer::as_str),
         &org_id,
         &user_id,
         &req.content,
@@ -2750,6 +2752,9 @@ pub async fn invoke_stream_sse(
                 continue;
             }
             if builtin.name == "reattach_context" && !thread_was_compacted {
+                continue;
+            }
+            if builtin.name == "skill_file" && !skill_file_offered {
                 continue;
             }
             if !defs.iter().any(|d| d.name == builtin.name) {
@@ -5448,6 +5453,8 @@ struct SkillContext {
     /// Blocks shortened, and blocks left out, to fit the context budget.
     skills_truncated: usize,
     skills_dropped: usize,
+    /// A skill this turn injected has a bundle, so `skill_file` is worth offering (WS19-S7).
+    skill_file_offered: bool,
 }
 const DEFAULT_CONTEXT_ASSEMBLY_TOKENS: u32 = 4096;
 const MIN_CONTEXT_ASSEMBLY_TOKENS: u32 = 512;
@@ -6660,6 +6667,7 @@ async fn budget_compacted_thread(
 async fn fetch_skill_context(
     state: &AppState,
     bearer: &VerifiedModelBearer,
+    capability_bearer: Option<&str>,
     org_id: &str,
     user_id: &str,
     query: &str,
@@ -6737,12 +6745,24 @@ async fn fetch_skill_context(
             }
         }
     }
-    // Bounded by SIZE as well as count — see `skills::fit_skill_blocks`.
-    let fitted = crate::skills::fit_skill_blocks(
+    // A skill with a bundle says so in its block; the bundle's files are read on demand (WS19-S7).
+    let skill_ids: Vec<String> = chosen.iter().map(|s| s.id.clone()).collect();
+    let bundles = skill_bundle_summaries(state, capability_bearer, org_id, &skill_ids).await;
+    // Bounded by SIZE as well as count — see `skills::fit_skill_blocks_with_footers`.
+    let fitted = crate::skills::fit_skill_blocks_with_footers(
         chosen
             .into_iter()
             .filter(|s| !s.body.trim().is_empty())
-            .map(|s| crate::skills::format_skill_block(&s))
+            .map(|s| {
+                let footer = bundles
+                    .iter()
+                    .find(|bundle| bundle.skill_id == s.id)
+                    .map(|bundle| {
+                        crate::skills::bundle_footer(&s.name, bundle.file_count, bundle.total_bytes)
+                    })
+                    .unwrap_or_default();
+                (crate::skills::format_skill_block(&s), footer)
+            })
             .collect(),
     );
     if fitted.truncated > 0 || fitted.dropped > 0 {
@@ -6759,6 +6779,45 @@ async fn fetch_skill_context(
         requested_ids,
         skills_truncated: fitted.truncated,
         skills_dropped: fitted.dropped,
+        skill_file_offered: !bundles.is_empty(),
+    }
+}
+
+/// The bundles of the skills a turn injected (WS19-S7). Asked only while
+/// `SKILL_FILE_TOOL_ENABLED` is on, so the switch off makes no extra call. Advisory
+/// like the rest of skill injection: a failed read costs the footers and the tool,
+/// never the turn.
+async fn skill_bundle_summaries(
+    state: &AppState,
+    capability_bearer: Option<&str>,
+    org_id: &str,
+    skill_ids: &[String],
+) -> Vec<mp_contracts::model_plane::v1::SkillBundleSummary> {
+    use mp_contracts::model_plane::v1::ListSkillBundlesRequest;
+
+    let Some(bearer) = capability_bearer.filter(|bearer| !bearer.trim().is_empty()) else {
+        return Vec::new();
+    };
+    if skill_ids.is_empty() || !mp_contracts::skill_bundle::enabled() {
+        return Vec::new();
+    }
+    let request = crate::tool_loop::with_authorization(
+        ListSkillBundlesRequest {
+            skill_ids: skill_ids.to_vec(),
+        },
+        bearer,
+    );
+    match state
+        .capability_client
+        .clone()
+        .list_skill_bundles(request)
+        .await
+    {
+        Ok(response) => response.into_inner().bundles,
+        Err(error) => {
+            tracing::warn!(%error, %org_id, "list_skill_bundles failed; skills injected without bundle footers");
+            Vec::new()
+        }
     }
 }
 

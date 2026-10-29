@@ -406,9 +406,39 @@ pub fn resolve_requested_skills(
     out
 }
 
+/// The skill a `skill_file` call names, resolved the way the injection path
+/// resolves a skill (WS19-S7): this org's catalogue, under the same visibility
+/// rule. A skill the turn could not have been given cannot have its bundle read.
+/// Matched like `reattach_skill`: case-insensitive and whitespace-trimmed, first
+/// usable match.
+#[must_use]
+pub fn usable_skill_named(
+    store: &SkillStore,
+    org_id: &str,
+    ownership: &crate::ownership::OwnershipStore,
+    caller_user_id: &str,
+    name: &str,
+) -> Option<Skill> {
+    let wanted = name.trim().to_lowercase();
+    store.list(org_id).into_iter().find(|skill| {
+        skill.name.trim().to_lowercase() == wanted
+            && skill_usable(ownership, org_id, skill, caller_user_id)
+    })
+}
+
 #[must_use]
 pub fn format_skill_block(s: &Skill) -> String {
     format!("## Skill: {}\n{}", s.name, s.body)
+}
+
+/// The footer that tells the model a skill's bundle exists and how to read it
+/// (WS19-S7). The bundle's files stay out of the prompt: the model asks for the
+/// ones it needs, through `skill_file`.
+#[must_use]
+pub fn bundle_footer(name: &str, file_count: i32, total_bytes: i64) -> String {
+    format!(
+        "\n[Bundle: {file_count} files, {total_bytes} bytes. Read them with skill_file, naming \"{name}\": without a path it lists the files; with a path it reads that file.]"
+    )
 }
 
 /// Keyword overlap score. Lowercases everything and counts how many
@@ -1125,6 +1155,103 @@ pub fn render_recovered_skill(recovered: &mp_contracts::skill_recovery::Recovere
     }
 }
 
+/// What `skill_file` says when it cannot read a bundle: no such skill for this
+/// caller, no bundle, or no file at the path asked for. Each is a fact, and says
+/// which one it is.
+#[must_use]
+pub fn render_bundle_status(status: &str, skill: &str, detail: &str) -> String {
+    serde_json::json!({
+        "status": status,
+        "skill": skill,
+        "detail": detail,
+    })
+    .to_string()
+}
+
+/// The files a bundle holds, for a read that names no path. Packed into one
+/// read's cap, so a bundle of the largest allowed shape still answers in one
+/// result; `truncated` says when the listing could not hold every file.
+#[must_use]
+pub fn render_bundle_listing(
+    skill: &str,
+    files: &[mp_contracts::model_plane::v1::SkillBundleFile],
+) -> String {
+    let mut listed = Vec::new();
+    let mut used = 0usize;
+    for file in files {
+        let entry = serde_json::json!({
+            "path": file.path,
+            "size_bytes": file.size_bytes,
+            "binary": file.binary,
+            "executable": file.executable,
+        });
+        let size = entry.to_string().len();
+        if used + size > mp_contracts::skill_bundle::MAX_READ_BYTES {
+            break;
+        }
+        used += size;
+        listed.push(entry);
+    }
+    serde_json::json!({
+        "status": "listing",
+        "skill": skill,
+        "total_files": files.len(),
+        "truncated": listed.len() < files.len(),
+        "files": listed,
+        "detail": "read one file by passing its path",
+    })
+    .to_string()
+}
+
+/// One read of a file (WS19-S7). A read that stops short says where the next one
+/// starts, so a long file is reachable in full and a partial read is never taken
+/// for a whole one.
+#[must_use]
+pub fn render_bundle_text(
+    skill: &str,
+    path: &str,
+    offset: usize,
+    text: &str,
+    next_offset: Option<usize>,
+    total_bytes: usize,
+) -> String {
+    let detail = match next_offset {
+        Some(next) => format!(
+            "the file goes on; call skill_file again with this path and offset {next} for the rest, before relying on it"
+        ),
+        None => "end of the file".to_owned(),
+    };
+    serde_json::json!({
+        "status": "ok",
+        "skill": skill,
+        "path": path,
+        "offset": offset,
+        "total_bytes": total_bytes,
+        "content": text,
+        "truncated": next_offset.is_some(),
+        "next_offset": next_offset,
+        "detail": detail,
+    })
+    .to_string()
+}
+
+/// A file that is not text: its path, size and digest, never its bytes (WS19-S7).
+#[must_use]
+pub fn render_bundle_binary(
+    skill: &str,
+    file: &mp_contracts::model_plane::v1::SkillBundleFile,
+) -> String {
+    serde_json::json!({
+        "status": "binary",
+        "skill": skill,
+        "path": file.path,
+        "size_bytes": file.size_bytes,
+        "sha256": file.sha256,
+        "detail": "this file is not text, so its content is not returned; describe it from its path and size",
+    })
+    .to_string()
+}
+
 pub const TRUNCATION_MARKER: &str =
     "\n[… skill truncated to fit the context budget. Call reattach_skill with this \
      skill's name to read the rest before acting on it.]";
@@ -1144,28 +1271,44 @@ pub struct FittedSkills {
 /// to back, so ordering decides what survives.
 #[must_use]
 pub fn fit_skill_blocks(blocks: Vec<String>) -> FittedSkills {
+    fit_skill_blocks_with_footers(
+        blocks
+            .into_iter()
+            .map(|block| (block, String::new()))
+            .collect(),
+    )
+}
+
+/// [`fit_skill_blocks`] for blocks that end in a footer (WS19-S7). The footer
+/// counts against the budget like the rest of its block, but it is never cut: a
+/// truncated block keeps its footer after the truncation marker, so the model
+/// still learns that the bundle exists. With empty footers the result is exactly
+/// what `fit_skill_blocks` returns.
+#[must_use]
+pub fn fit_skill_blocks_with_footers(blocks: Vec<(String, String)>) -> FittedSkills {
     let mut kept = Vec::new();
     let mut truncated = 0usize;
     let mut dropped = 0usize;
     let mut remaining = SKILL_CONTEXT_BUDGET_CHARS;
     let marker_len = TRUNCATION_MARKER.chars().count();
 
-    for block in blocks {
-        let len = block.chars().count();
+    for (block, footer) in blocks {
+        let footer_len = footer.chars().count();
+        let len = block.chars().count() + footer_len;
         if len <= remaining {
             remaining -= len;
-            kept.push(block);
+            kept.push(format!("{block}{footer}"));
             continue;
         }
-        if remaining <= marker_len + MIN_SKILL_CHARS {
+        if remaining <= marker_len + footer_len + MIN_SKILL_CHARS {
             dropped += 1;
             continue;
         }
-        let keep = remaining - marker_len;
+        let keep = remaining - marker_len - footer_len;
         let head: String = block.chars().take(keep).collect();
         remaining = 0;
         truncated += 1;
-        kept.push(format!("{head}{TRUNCATION_MARKER}"));
+        kept.push(format!("{head}{TRUNCATION_MARKER}{footer}"));
     }
 
     FittedSkills {
@@ -1312,5 +1455,123 @@ mod skill_budget_tests {
         let requested: Vec<String> = (0..6).map(|i| format!("sk-{i}")).collect();
         let got = resolve_requested_skills(&store, "org", &ownership, "user-1", &requested, 4);
         assert_eq!(got.len(), 4);
+    }
+}
+
+#[cfg(test)]
+mod skill_file_tests {
+    use super::{
+        bundle_footer, render_bundle_binary, render_bundle_listing, render_bundle_text,
+        usable_skill_named, SkillStore,
+    };
+    use crate::ownership::OwnershipStore;
+    use mp_contracts::model_plane::v1::{Skill, SkillBundleFile};
+
+    fn skill(id: &str, name: &str) -> Skill {
+        Skill {
+            id: id.into(),
+            name: name.into(),
+            body: format!("Instructions for {name}."),
+            tags: Vec::new(),
+            source_path: String::new(),
+            min_score: 0.0,
+        }
+    }
+
+    fn file(path: &str, size_bytes: i64, binary: bool) -> SkillBundleFile {
+        SkillBundleFile {
+            path: path.into(),
+            sha256: "ab".repeat(32),
+            size_bytes,
+            executable: false,
+            binary,
+        }
+    }
+
+    #[test]
+    fn skill_file_reads_only_this_orgs_bundle() {
+        let store = SkillStore::new();
+        store.upsert("org-a", skill("sk-1", "Deploy Runbook"));
+        let ownership = OwnershipStore::new();
+        assert_eq!(
+            usable_skill_named(&store, "org-a", &ownership, "alice", "  deploy runbook ")
+                .map(|found| found.id),
+            Some("sk-1".to_owned())
+        );
+        assert!(
+            usable_skill_named(&store, "org-b", &ownership, "alice", "Deploy Runbook").is_none(),
+            "another org's skill must not resolve, so its bundle is never asked for"
+        );
+    }
+
+    #[test]
+    fn a_bundle_footer_names_the_skill_and_the_way_in() {
+        let footer = bundle_footer("Deploy Runbook", 12, 84_000);
+        assert!(footer.contains("12 files, 84000 bytes"), "{footer}");
+        assert!(
+            footer.contains("skill_file, naming \"Deploy Runbook\""),
+            "{footer}"
+        );
+    }
+
+    #[test]
+    fn skill_file_refuses_binary_content_by_describing_it() {
+        let rendered: serde_json::Value = serde_json::from_str(&render_bundle_binary(
+            "Brand",
+            &file("templates/logo.png", 2_048, true),
+        ))
+        .expect("valid JSON");
+        assert_eq!(rendered["status"], "binary");
+        assert_eq!(rendered["size_bytes"], 2_048);
+        assert!(rendered.get("content").is_none(), "{rendered}");
+    }
+
+    #[test]
+    fn skill_file_pages_at_the_cap_with_a_marker() {
+        let partial: serde_json::Value = serde_json::from_str(&render_bundle_text(
+            "Deploy Runbook",
+            "references/long.md",
+            0,
+            "first piece",
+            Some(32_768),
+            80_000,
+        ))
+        .expect("valid JSON");
+        assert_eq!(partial["truncated"], true);
+        assert_eq!(partial["next_offset"], 32_768);
+        assert!(
+            partial["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("offset 32768"),
+            "{partial}"
+        );
+
+        let whole: serde_json::Value = serde_json::from_str(&render_bundle_text(
+            "Deploy Runbook",
+            "SKILL.md",
+            0,
+            "all of it",
+            None,
+            10,
+        ))
+        .expect("valid JSON");
+        assert_eq!(whole["truncated"], false);
+        assert!(whole["next_offset"].is_null());
+    }
+
+    #[test]
+    fn a_listing_names_every_file_that_fits_one_read() {
+        let listing: serde_json::Value = serde_json::from_str(&render_bundle_listing(
+            "Deploy Runbook",
+            &[
+                file("SKILL.md", 120, false),
+                file("scripts/run.py", 900, false),
+            ],
+        ))
+        .expect("valid JSON");
+        assert_eq!(listing["total_files"], 2);
+        assert_eq!(listing["truncated"], false);
+        assert_eq!(listing["files"].as_array().map(Vec::len), Some(2));
     }
 }
