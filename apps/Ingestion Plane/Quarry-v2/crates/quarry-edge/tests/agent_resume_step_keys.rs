@@ -4,12 +4,14 @@
 //! checkpoint's `step` counts completed steps only. A resumed run used to seed its keys from
 //! `step`, so a run with a failed step handed a used key out again: live, the receipts of
 //! one run showed step 1 twice (a completed wait before the resume, a failed wait after
-//! it). Every checkpoint now stores the next key (`next_step`), and a resume starts at the
-//! highest of that, `step` and one past the run's last receipt (a key that failed after the
-//! last save, or a run checkpointed by older code). `step` keeps its meaning: the step cap
-//! counts completed steps only, as before.
+//! it). Every checkpoint now stores the next key (`next_step`), a failed step saves one
+//! too (its receipt may not be kept), and a resume starts at the highest of `next_step`,
+//! `step` and one past the run's last receipt step (a key whose checkpoint save failed, or
+//! a run checkpointed by older code), read as an aggregate so no receipt payload is
+//! decoded. `step` keeps its meaning: the step cap counts completed steps only, as before.
 //!
-//! The browser is the recording driver: `time_out_next_goto` fails the next navigate.
+//! The browser is the recording driver: `time_out_next_goto` fails the next navigate. The
+//! receipt store is the in-memory one behind [`Flaky`], which fails chosen writes and reads.
 
 #![cfg(feature = "browser-agent")]
 
@@ -17,11 +19,104 @@
 mod agent_harness;
 mod support;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use agent_harness::*;
+use async_trait::async_trait;
+use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
+use quarry_core::ids::kinds::RunKind;
 use quarry_edge::agent_routes::sweep_once;
 use quarry_edge::run_limits::RunLimits;
-use quarry_runtime::step_receipts::AgentRunCheckpoint;
+use quarry_edge::state::AppState;
+use quarry_runtime::step_receipts::{
+    AgentRunCheckpoint, BrowserTimelineEvent, StepReceipt, StepReceiptStore,
+};
+use quarry_runtime::InMemoryStepReceiptStore;
 use serde_json::{json, Value};
+
+/// The in-memory receipt store, with switches that fail receipt writes, checkpoint saves or
+/// receipt listings (a historical row that no longer decodes). The last receipt step is an
+/// aggregate, as in Postgres, so a failing listing does not touch it.
+#[derive(Default)]
+struct Flaky {
+    inner: InMemoryStepReceiptStore,
+    fail_appends: AtomicBool,
+    fail_checkpoints: AtomicBool,
+    fail_listings: AtomicBool,
+}
+
+fn broken(what: &str) -> QuarryError {
+    QuarryError::new(ErrorCode::Internal, format!("test store: {what} failed"))
+}
+
+#[async_trait]
+impl StepReceiptStore for Flaky {
+    async fn append(&self, receipt: StepReceipt) -> QuarryResult<()> {
+        if self.fail_appends.load(Ordering::SeqCst) {
+            return Err(broken("append"));
+        }
+        self.inner.append(receipt).await
+    }
+
+    async fn list(&self, run_id: &RunKind) -> QuarryResult<Vec<StepReceipt>> {
+        if self.fail_listings.load(Ordering::SeqCst) {
+            return Err(broken("decode receipt"));
+        }
+        self.inner.list(run_id).await
+    }
+
+    async fn last_step_for_org(&self, org_id: &str, run_id: &RunKind) -> QuarryResult<Option<u32>> {
+        self.inner.last_step_for_org(org_id, run_id).await
+    }
+
+    async fn append_browser_timeline_event(&self, event: BrowserTimelineEvent) -> QuarryResult<()> {
+        self.inner.append_browser_timeline_event(event).await
+    }
+
+    async fn list_browser_timeline_events(
+        &self,
+        org_id: &str,
+        actor_id: &str,
+        run_id: &RunKind,
+    ) -> QuarryResult<Vec<BrowserTimelineEvent>> {
+        self.inner
+            .list_browser_timeline_events(org_id, actor_id, run_id)
+            .await
+    }
+
+    async fn get(&self, receipt_id: &str) -> QuarryResult<Option<StepReceipt>> {
+        self.inner.get(receipt_id).await
+    }
+
+    async fn save_run_checkpoint(&self, checkpoint: AgentRunCheckpoint) -> QuarryResult<()> {
+        if self.fail_checkpoints.load(Ordering::SeqCst) {
+            return Err(broken("checkpoint save"));
+        }
+        self.inner.save_run_checkpoint(checkpoint).await
+    }
+
+    async fn load_run_checkpoint(
+        &self,
+        org_id: &str,
+        run_id: &RunKind,
+    ) -> QuarryResult<Option<AgentRunCheckpoint>> {
+        self.inner.load_run_checkpoint(org_id, run_id).await
+    }
+
+    async fn close_run_checkpoint(&self, org_id: &str, run_id: &RunKind) -> QuarryResult<()> {
+        self.inner.close_run_checkpoint(org_id, run_id).await
+    }
+}
+
+/// An edge whose receipt store is `store`.
+async fn edge_on(store: Arc<Flaky>) -> Edge {
+    Edge::start_with(idle_limits(60), move |state| AppState {
+        receipts: store,
+        ..state
+    })
+    .await
+}
 
 /// The org of the standard-org member (`org-standard-golden`).
 const MEMBER_ORG: &str = "org-standard-golden";
@@ -147,21 +242,24 @@ async fn a_resume_after_a_failed_step_hands_out_new_step_keys() {
     assert_eq!((saved.step, saved.next_step), (2, 4));
 }
 
-/// A step that fails after the run's last checkpoint save is not in the checkpoint's
-/// `next_step`; its receipt is, and the resume starts past it.
+/// A failed step whose own checkpoint save fails is not in the checkpoint's `next_step`;
+/// its receipt is, and the resume starts past it.
 #[tokio::test]
 async fn a_key_that_failed_after_the_last_checkpoint_is_not_reused() {
-    let edge = Edge::start(idle_limits(60)).await;
+    let store = Arc::new(Flaky::default());
+    let edge = edge_on(store.clone()).await;
     let person = member_token();
     let run = edge.start_run(&person, run_on_example_test(0)).await;
     edge.driver.set_page_url(Some("https://example.test/"));
 
     step_ok(&edge, &person, &run, wait_action()).await;
+    store.fail_checkpoints.store(true, Ordering::SeqCst);
     navigate_times_out(&edge, &person, &run).await;
+    store.fail_checkpoints.store(false, Ordering::SeqCst);
     assert_eq!(
         checkpoint(&edge, &run).await.next_step,
         1,
-        "a failed step saves no checkpoint"
+        "the failed step's checkpoint save did not land"
     );
 
     expire_and_resume(&edge, &person, &run).await;
@@ -274,4 +372,68 @@ async fn max_steps_still_counts_completed_steps_across_a_resume() {
         projection.body
     );
     assert_eq!(keyed(&edge, &person, &run).await.len(), 4);
+}
+
+/// A failed step whose receipt is not kept (here its write fails; a person's step under
+/// `HUMAN_RECEIPT_MODE=none` keeps none either) still spent its key: its checkpoint carries
+/// the next one, so the resume does not hand it out again.
+#[tokio::test]
+async fn a_failed_step_without_a_receipt_still_checkpoints_its_key() {
+    let store = Arc::new(Flaky::default());
+    let edge = edge_on(store.clone()).await;
+    let person = member_token();
+    let run = edge.start_run(&person, run_on_example_test(0)).await;
+    edge.driver.set_page_url(Some("https://example.test/"));
+
+    step_ok(&edge, &person, &run, wait_action()).await;
+    store.fail_appends.store(true, Ordering::SeqCst);
+    edge.driver.time_out_next_goto();
+    let failed = edge
+        .step(
+            &person,
+            &run,
+            navigate("https://example.test/slow"),
+            Some("agent"),
+        )
+        .await;
+    store.fail_appends.store(false, Ordering::SeqCst);
+    assert_ne!(failed.status, 200, "{}", failed.body);
+    let saved = checkpoint(&edge, &run).await;
+    assert_eq!(
+        (saved.step, saved.next_step),
+        (1, 2),
+        "the failed step's key is saved, its step is not counted"
+    );
+
+    expire_and_resume(&edge, &person, &run).await;
+    let observed = step_ok(&edge, &person, &run, wait_action()).await;
+    assert_eq!(observed["step"], 2, "key 1 was spent by the failed step");
+    assert_eq!(
+        keyed(&edge, &person, &run).await,
+        vec![row(0, "wait", "completed"), row(2, "wait", "completed")]
+    );
+}
+
+/// A resume reads only the run's last receipt step, never the receipt payloads: a run whose
+/// listing fails (a historical row that no longer decodes) still resumes, past its keys.
+#[tokio::test]
+async fn a_resume_does_not_decode_the_run_receipts() {
+    let store = Arc::new(Flaky::default());
+    let edge = edge_on(store.clone()).await;
+    let person = member_token();
+    let run = edge.start_run(&person, run_on_example_test(0)).await;
+    edge.driver.set_page_url(Some("https://example.test/"));
+
+    navigate_times_out(&edge, &person, &run).await;
+    step_ok(&edge, &person, &run, wait_action()).await;
+    assert_eq!(sweep_once(&edge.state, later(120_000)).await.expired, 1);
+
+    store.fail_listings.store(true, Ordering::SeqCst);
+    let resumed = edge
+        .post(&person, "/v1/agent/runs", json!({ "resume_run_id": run }))
+        .await;
+    assert_eq!(resumed.status, 200, "{}", resumed.body);
+    let observed = step_ok(&edge, &person, &run, wait_action()).await;
+    assert_eq!(observed["step"], 2);
+    store.fail_listings.store(false, Ordering::SeqCst);
 }

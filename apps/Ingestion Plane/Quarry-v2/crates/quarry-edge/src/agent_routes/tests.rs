@@ -2590,8 +2590,6 @@ async fn event_keys_are_unique_across_lanes() {
 /// highest (a legacy checkpoint has `next_step` 0).
 #[test]
 fn a_resume_starts_past_every_step_key_the_run_used() {
-    let receipt =
-        |step: u32| ReceiptBuilder::start("run".to_owned(), step).skip(AgentAction::Back, "test");
     let mut checkpoint = gone_checkpoint(
         &RunKind::new(),
         "user",
@@ -2600,23 +2598,23 @@ fn a_resume_starts_past_every_step_key_the_run_used() {
     );
     checkpoint.next_step = 0;
     assert_eq!(
-        resume_next_step(&checkpoint, &[]),
+        resume_next_step(&checkpoint, None),
         2,
         "no receipts: the completed steps"
     );
     assert_eq!(
-        resume_next_step(&checkpoint, &[receipt(0), receipt(4), receipt(1)]),
+        resume_next_step(&checkpoint, Some(4)),
         5,
-        "a legacy checkpoint: one past the last receipt, in any order"
+        "a legacy checkpoint: one past the last receipt"
     );
     checkpoint.next_step = 9;
     assert_eq!(
-        resume_next_step(&checkpoint, &[receipt(4)]),
+        resume_next_step(&checkpoint, Some(4)),
         9,
         "keys with no receipt"
     );
     assert_eq!(
-        resume_next_step(&checkpoint, &[receipt(u32::MAX)]),
+        resume_next_step(&checkpoint, Some(u32::MAX)),
         u32::MAX,
         "no overflow"
     );

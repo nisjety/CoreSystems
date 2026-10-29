@@ -99,12 +99,11 @@ pub(super) fn resumed_run_class(
 /// before it existed), its `step`, and one past the run's last receipt (a key that failed
 /// after the last save, or any key of a run checkpointed by older code). `step` itself is
 /// unchanged: it still drives the step cap, the projection and the skipped receipt's key.
-pub(super) fn resume_next_step(checkpoint: &AgentRunCheckpoint, receipts: &[StepReceipt]) -> u32 {
-    let after_receipts = receipts
-        .iter()
-        .map(|receipt| receipt.step.saturating_add(1))
-        .max()
-        .unwrap_or(0);
+pub(super) fn resume_next_step(
+    checkpoint: &AgentRunCheckpoint,
+    last_receipt_step: Option<u32>,
+) -> u32 {
+    let after_receipts = last_receipt_step.map_or(0, |step| step.saturating_add(1));
     checkpoint
         .next_step
         .max(checkpoint.step)
@@ -225,13 +224,14 @@ pub async fn start_run(
             checkpoint.current_url.clear();
         }
         // D2: the resumed run's step keys start past every key the run already used. The
-        // receipts live in the same store as the checkpoint just read.
-        let receipts = state
+        // receipts live in the same store as the checkpoint just read; only their highest
+        // step is read, never their payloads.
+        let last_receipt_step = state
             .receipts
-            .list_for_org(&org_id, run_id)
+            .last_step_for_org(&org_id, run_id)
             .await
             .map_err(|error| driver_err(&request_id, error))?;
-        checkpoint.next_step = resume_next_step(&checkpoint, &receipts);
+        checkpoint.next_step = resume_next_step(&checkpoint, last_receipt_step);
         Some(checkpoint)
     } else {
         None

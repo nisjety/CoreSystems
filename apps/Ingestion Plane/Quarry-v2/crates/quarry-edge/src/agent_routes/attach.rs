@@ -792,6 +792,8 @@ pub(super) async fn delegate_step(
             // zdr-log-ok: a ZDR run has no delegate (attach is refused for it); the store error text is what an operator needs
             tracing::warn!(%error, "could not record the receipt of a delegate step whose attachment ended");
         }
+        // D2: the spent key is saved (skipped when the run itself closed).
+        checkpoint_failed_step(state, &entry, &handle.live).await;
         return Err(not_found());
     }
     // The landed page is checked before the receipt and the checkpoint (T4b-1), against the
@@ -841,11 +843,10 @@ pub(super) async fn delegate_step(
                 .tab(Some(tab_id.clone()), Some(attach_id.clone()))
                 .typed_field(typed_kind)
                 .fail(receipt_action, &error);
-            state
-                .receipts
-                .append(receipt)
-                .await
-                .map_err(|error| driver_err(request_id, error))?;
+            let appended = state.receipts.append(receipt).await;
+            // D2: the spent key is saved whether or not its receipt was kept.
+            checkpoint_failed_step(state, &entry, &handle.live).await;
+            appended.map_err(|error| driver_err(request_id, error))?;
             return Err(driver_err(request_id, error));
         }
     };

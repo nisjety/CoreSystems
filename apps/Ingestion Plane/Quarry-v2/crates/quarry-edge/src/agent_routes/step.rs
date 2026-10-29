@@ -243,13 +243,14 @@ pub async fn step(
                 .cost_source(failed_source)
                 .typed_field(typed_kind)
                 .fail_maybe_metadata(metadata_only, receipt_action, &error);
-            if receipt_plan != super::human_browse::ReceiptPlan::Skip {
-                state
-                    .receipts
-                    .append(receipt)
-                    .await
-                    .map_err(|e| driver_err(&request_id, e))?;
-            }
+            let appended = if receipt_plan != super::human_browse::ReceiptPlan::Skip {
+                state.receipts.append(receipt).await
+            } else {
+                Ok(())
+            };
+            // D2: the spent key is saved whether or not its receipt was kept.
+            checkpoint_failed_step(&state, &entry, &handle.live).await;
+            appended.map_err(|e| driver_err(&request_id, e))?;
             return Err(driver_err(&request_id, error));
         }
     };
@@ -402,6 +403,7 @@ pub(super) async fn execute_ws_action(
                 );
             }
             lane.ctx.last_egress_sequence = egress_cursor;
+            let mut appended = Ok(());
             if receipt_plan != super::human_browse::ReceiptPlan::Skip {
                 let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
                     .org_id(org_id.clone())
@@ -410,8 +412,11 @@ pub(super) async fn execute_ws_action(
                     .agent(admitted.agent.clone())
                     .typed_field(typed_kind)
                     .fail_maybe_metadata(metadata_only, receipt_action, &error);
-                state.receipts.append(receipt).await?;
+                appended = state.receipts.append(receipt).await;
             }
+            // D2: the spent key is saved whether or not its receipt was kept.
+            checkpoint_failed_step(state, &entry, &handle.live).await;
+            appended?;
             return Err(error);
         }
     };

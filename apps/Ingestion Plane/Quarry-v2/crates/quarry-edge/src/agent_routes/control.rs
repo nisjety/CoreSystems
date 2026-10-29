@@ -37,6 +37,29 @@ pub(super) fn checkpoint_for_entry(entry: &RunEntry, live: &RunLive) -> AgentRun
     }
 }
 
+/// D2: the checkpoint a failed step leaves, with the caller holding the run entry. The step's
+/// key is spent (its events and proof id used it) even when its receipt is not kept (a
+/// person's step under `HUMAN_RECEIPT_MODE=none`, or a failed receipt write), so the next
+/// key is saved here, with the failed charge in the budget snapshot. Nothing else changes: a
+/// failed step records no observation. Not for a ZDR run (it keeps no checkpoint) or a
+/// closed one (an `active` save would reopen it). Errors are logged, never returned: the
+/// caller returns the step's own error.
+pub(super) async fn checkpoint_failed_step(state: &AppState, entry: &RunEntry, live: &RunLive) {
+    if entry.zdr.is_active() || entry.closed {
+        return;
+    }
+    if let Err(error) = state
+        .receipts
+        .save_run_checkpoint(checkpoint_for_entry(entry, live))
+        .await
+    {
+        tracing::warn!(
+            error_class = crate::zdr_log::class(&error),
+            "could not checkpoint a failed step"
+        );
+    }
+}
+
 pub(super) fn caller_owns_browser_run(
     run_org_id: &str,
     run_actor_id: &str,

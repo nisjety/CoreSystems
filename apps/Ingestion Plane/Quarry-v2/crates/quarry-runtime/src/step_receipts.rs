@@ -536,6 +536,19 @@ pub trait StepReceiptStore: Send + Sync {
         Ok(receipts)
     }
 
+    /// D2: the highest `step` among one tenant's receipts of a run, `None` when it has none.
+    /// A resume reads only this, so it does not decode (or depend on decoding) every
+    /// historical receipt payload. The default folds `list_for_org`; durable stores
+    /// override it with an aggregate.
+    async fn last_step_for_org(&self, org_id: &str, run_id: &RunKind) -> QuarryResult<Option<u32>> {
+        Ok(self
+            .list_for_org(org_id, run_id)
+            .await?
+            .iter()
+            .map(|receipt| receipt.step)
+            .max())
+    }
+
     /// User/service-actor-aware receipt listing. Do not fall back to
     /// tenant-only history: records written before actor binding cannot be
     /// safely attributed and must remain unavailable to actor-scoped callers.
@@ -1189,6 +1202,31 @@ mod tests {
         })
         .unwrap();
         assert_eq!(written["next_step"], 4, "the field is always written");
+    }
+
+    /// D2: the last receipt step of one tenant's run, for a resume's first key.
+    #[tokio::test]
+    async fn last_step_for_org_is_the_highest_step_or_none() {
+        let store = InMemoryStepReceiptStore::new();
+        let run_id: RunKind = Id::new();
+        assert_eq!(
+            store.last_step_for_org("org_a", &run_id).await.unwrap(),
+            None
+        );
+        for step in [0, 3, 1] {
+            let receipt = ReceiptBuilder::start(run_id.to_string(), step)
+                .org_id("org_a")
+                .complete(sample_action(), None, 0.0);
+            store.append(receipt).await.unwrap();
+        }
+        assert_eq!(
+            store.last_step_for_org("org_a", &run_id).await.unwrap(),
+            Some(3)
+        );
+        assert!(
+            store.last_step_for_org("org_b", &run_id).await.is_err(),
+            "another org's run is refused, as its listing is"
+        );
     }
 
     #[tokio::test]
