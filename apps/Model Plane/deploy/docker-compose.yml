@@ -315,6 +315,9 @@ services:
       CONTENT_SAFETY_SEMANTIC_DEADLINE_MS: ${CONTENT_SAFETY_SEMANTIC_DEADLINE_MS:-2500}
       CONTENT_SAFETY_SEMANTIC_MAX_CALLS_PER_RUN: ${CONTENT_SAFETY_SEMANTIC_MAX_CALLS_PER_RUN:-6}
       CONTENT_SAFETY_INJECTION_MODEL: ${CONTENT_SAFETY_INJECTION_MODEL:-}
+      # WS19-S7: the skill_file tool reads a matched skill's bundle from capability-core. Off by default; only the literal
+      # `true` turns it on. A skill has a bundle only once an admin uploaded one (SKILL_BUNDLES_ENABLED on capability-core).
+      SKILL_FILE_TOOL_ENABLED: ${SKILL_FILE_TOOL_ENABLED:-false}
       # WS04-S6: durable send receipts (client_message_id on a send, dedupe in session-core, ids on the queued_input
       # delivery event). On by default since the WS04-S9 proof; only the literal `true` turns it on. Deploy order:
       # session-core (migration 0052) first, then model-gateway, then the BFF and frontend. Roll back with false plus a
@@ -1717,6 +1720,9 @@ services:
       # consumer; the service credentials above are untouched. Set
       # LEARNING_REVIEW_ENABLED=true to turn learning back on.
       LEARNING_REVIEW_ENABLED: ${LEARNING_REVIEW_ENABLED:-false}
+      # WS19-S6: the skill bundle HTTP routes (PUT, GET and DELETE /api/v1/skills/{id}/bundle). Off by default (404);
+      # only the literal `true` turns them on.
+      SKILL_BUNDLES_ENABLED: ${SKILL_BUNDLES_ENABLED:-false}
       # Cost controls for the learning review (WS07-S10). Off unless the switch is
       # exactly true; the bounds apply only then. With no counter store wired the
       # day caps skip every review (budget_unavailable), so keep the switch false.
