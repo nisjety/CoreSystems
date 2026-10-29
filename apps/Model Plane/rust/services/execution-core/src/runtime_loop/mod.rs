@@ -1,6 +1,7 @@
 //! Runtime loop orchestration for one execution step.
 
 pub mod agent;
+pub(crate) mod browser_grant_approval;
 pub(crate) mod closers;
 pub(crate) mod effect;
 pub(crate) mod fold;
@@ -660,6 +661,21 @@ pub(crate) async fn execute_step_with_result_handles(
     .await
 }
 
+/// capability-core's deny reason when it is a slug (`health_not_attested`,
+/// `tool_not_bound`, `tool_policy_*`), else `policy_denied`: only a slug is
+/// logged or shown, never a sentence that may carry content.
+fn policy_reason_code(reason: &str) -> &str {
+    let mut chars = reason.chars();
+    let is_slug = reason.len() <= 64
+        && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if is_slug {
+        reason
+    } else {
+        "policy_denied"
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn execute_step_inner(
     tool_name: &str,
@@ -731,6 +747,9 @@ async fn execute_step_inner(
     // The class and floor this call's policy decision carried. A governed MCP call is
     // compared with them at dispatch (`execute_governed_mcp`).
     let signed_class: crate::mcp_gateway::SignedToolClass;
+    // Set when the user's broker-validated run grant satisfied the high-risk ask
+    // (`browser_grant_approval`); recorded on the run once every later gate passed.
+    let mut grant_approval: Option<browser_grant_approval::GrantApproval> = None;
     match capability_policy
         .evaluate_tool_call(tool_name, run_id, org_id, user_id)
         .await
@@ -762,22 +781,72 @@ async fn execute_step_inner(
                 &evaluation.approval_floor,
             );
             if !released {
-                // capability-core answers `ask` for a high-risk capability, and,
-                // once the tool class gate names the tool, for a tool whose class
-                // or approval floor asks. The second is the same pause the
-                // permission gate below raises, so it is shown under that gate's
-                // cause rather than as a high-risk capability.
-                let cause = if evaluation.policy_source == "approval_floor" {
-                    permission_pause_cause(permission::RunGate::for_run(org_id, run_id), tool_name)
-                } else {
-                    CauseCode::CapabilityHighRisk
+                // A managed browser run's start was already approved by its user, in
+                // a narrower form: a derived run grant the broker just validated.
+                // That satisfies only this ask; the hook and permission gates below
+                // still run.
+                grant_approval = browser_grant_approval::satisfies_high_risk_ask(
+                    tool_name,
+                    tool_input,
+                    &evaluation,
+                    browser_grant,
+                    user_id,
+                    run_id,
+                );
+                let Some(approval) = &grant_approval else {
+                    // capability-core answers `ask` for a high-risk capability, and,
+                    // once the tool class gate names the tool, for a tool whose class
+                    // or approval floor asks. The second is the same pause the
+                    // permission gate below raises, so it is shown under that gate's
+                    // cause rather than as a high-risk capability.
+                    let cause = if evaluation.policy_source == "approval_floor" {
+                        permission_pause_cause(
+                            permission::RunGate::for_run(org_id, run_id),
+                            tool_name,
+                        )
+                    } else {
+                        CauseCode::CapabilityHighRisk
+                    };
+                    return StepOutcome::awaiting_approval(cause);
                 };
-                return StepOutcome::awaiting_approval(cause);
+                // Metadata only: no URL, domain, goal or prompt.
+                tracing::info!(
+                    run_id,
+                    step_id,
+                    plan_id = %approval.plan_id,
+                    decision_id = %approval.decision_id,
+                    capability_version = %approval.capability_version,
+                    approval_basis = "browser_run_grant",
+                    grant_kind = "run",
+                    grant_ref = %approval.grant_ref,
+                    "high-risk capability ask satisfied by a broker-validated browser run grant"
+                );
             }
             // The user approved this exact call: the ask gate is satisfied.
         }
-        Ok(_evaluation) => {
-            return StepOutcome::permission_denied();
+        Ok(evaluation) => {
+            let reason_code = policy_reason_code(&evaluation.reason);
+            let capability_id = if evaluation.capability_id.is_empty() {
+                "unbound"
+            } else {
+                evaluation.capability_id.as_str()
+            };
+            // Ids and codes only: a deny's reason sentence and the tool input can
+            // carry URLs and content.
+            tracing::warn!(
+                run_id,
+                plan_id = %format!("plan_{run_id}"),
+                step_id,
+                tool = tool_name,
+                capability_id,
+                decision_id = %evaluation.decision_id,
+                reason_code,
+                policy_source = %evaluation.policy_source,
+                "tool dispatch denied by capability policy"
+            );
+            return StepOutcome::permission_denied_with_reason(format!(
+                "permission denied by policy ({capability_id}: {reason_code})"
+            ));
         }
         Err(error) => {
             tracing::warn!(
@@ -845,6 +914,14 @@ async fn execute_step_inner(
     // and timed-out loops cannot accidentally become `completed` when their
     // old bridge representation had no `error` value.
     if tool_name == BROWSER_AGENT_TOOL {
+        // Every gate passed, so the start the run grant authorized happens now.
+        // Recorded on the run's timeline unless the run or the grant is ZDR.
+        if let (Some(approval), Some(sink)) = (&grant_approval, browser_event_sink) {
+            if !zdr && !approval.grant_zdr {
+                sink.run_start_authorized(run_id, &approval.plan_id, user_id)
+                    .await;
+            }
+        }
         return browser_execution_to_step_outcome(
             tool_bridge::execute_browser_agent(
                 tool_input,
@@ -3148,6 +3225,9 @@ mod tests {
                 policy_source: String::new(),
                 side_effect_class: String::new(),
                 approval_floor: String::new(),
+                capability_id: String::new(),
+                reason: String::new(),
+                ask_evidence_verified: false,
             })
         }
     }
@@ -3181,8 +3261,321 @@ mod tests {
                 policy_source: self.0.to_owned(),
                 side_effect_class: String::new(),
                 approval_floor: String::new(),
+                capability_id: String::new(),
+                reason: String::new(),
+                ask_evidence_verified: true,
             })
         }
+    }
+
+    /// Answers what capability-core answers for a browser tool while the
+    /// capability is attested: a verified high-risk `ask` on `cap.browser.open`.
+    /// Or, with `deny_reason` set, a deny with that reason.
+    struct BrowserPolicy {
+        deny_reason: Option<&'static str>,
+    }
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for BrowserPolicy {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, tonic::Status> {
+            Ok(crate::capability_policy::CapabilityDecision::Ask)
+        }
+
+        async fn evaluate_tool_call(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+            _user_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityEvaluation, tonic::Status> {
+            let (decision, reason) = match self.deny_reason {
+                Some(reason) => (crate::capability_policy::CapabilityDecision::Deny, reason),
+                None => (
+                    crate::capability_policy::CapabilityDecision::Ask,
+                    "capability requires approval",
+                ),
+            };
+            Ok(crate::capability_policy::CapabilityEvaluation {
+                decision,
+                decision_id: "pdec_test".to_owned(),
+                capability_version: "1.0.0".to_owned(),
+                evidence_verified: true,
+                policy_source: "risk_level".to_owned(),
+                side_effect_class: String::new(),
+                approval_floor: String::new(),
+                capability_id: "cap.browser.open".to_owned(),
+                reason: reason.to_owned(),
+                ask_evidence_verified: decision
+                    == crate::capability_policy::CapabilityDecision::Ask,
+            })
+        }
+    }
+
+    /// Records the runs whose start a grant authorized; every other event is
+    /// ignored and every in-loop approval is refused.
+    #[derive(Default)]
+    struct StartAuthorizedSink {
+        authorized: std::sync::Mutex<Vec<(String, String, String)>>,
+    }
+
+    #[tonic::async_trait]
+    impl crate::browser_agent::BrowserEventSink for StartAuthorizedSink {
+        async fn action_dispatched(
+            &self,
+            _: &crate::browser_agent::PlanConfig,
+            _: &crate::browser_agent::BrowserAction,
+        ) {
+        }
+        async fn observation_received(
+            &self,
+            _: &crate::browser_agent::PlanConfig,
+            _: &crate::browser_agent::BrowserObservation,
+        ) {
+        }
+        async fn run_paused(&self, _: &crate::browser_agent::PlanConfig) {}
+        async fn run_resumed(&self, _: &crate::browser_agent::PlanConfig) {}
+        async fn require_approval(
+            &self,
+            _: &crate::browser_agent::PlanConfig,
+            _: &crate::browser_agent::RiskyActionDetail,
+        ) -> crate::browser_agent::ApprovalOutcome {
+            crate::browser_agent::ApprovalOutcome::Denied("not in this test".to_owned())
+        }
+        async fn run_start_authorized(&self, run_id: &str, plan_id: &str, decided_by: &str) {
+            self.authorized.lock().expect("authorized lock").push((
+                run_id.to_owned(),
+                plan_id.to_owned(),
+                decided_by.to_owned(),
+            ));
+        }
+    }
+
+    async fn browser_step(
+        tool_name: &str,
+        policy: &BrowserPolicy,
+        grant: Option<&tool_bridge::ValidatedBrowserGrant>,
+        sink: &StartAuthorizedSink,
+        zdr: bool,
+    ) -> StepOutcome {
+        let tool_input = serde_json::json!({
+            "grant_id": "grant-run",
+            "run_id": "run_test",
+            "plan_id": "plan_test",
+        })
+        .to_string();
+        execute_step_with_browser_grant(
+            tool_name,
+            &tool_input,
+            "auto",
+            "",
+            "org_test",
+            "user_test",
+            "run_test",
+            "step_test",
+            "",
+            None,
+            Some(sink),
+            None,
+            zdr,
+            false,
+            0,
+            None,
+            None,
+            None,
+            policy,
+            grant,
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_validated_run_grant_satisfies_the_high_risk_ask_for_browser_agent_only() {
+        let policy = BrowserPolicy { deny_reason: None };
+        let grant = tool_bridge::ValidatedBrowserGrant::for_test(
+            "grant-run",
+            "run",
+            "grant-session",
+            "user_test",
+            false,
+        );
+
+        let sink = StartAuthorizedSink::default();
+        let out = browser_step(BROWSER_AGENT_TOOL, &policy, Some(&grant), &sink, false).await;
+        assert_ne!(out.status, "awaiting_approval", "{out:?}");
+        assert!(out.cause.is_none(), "{out:?}");
+        assert_eq!(
+            *sink.authorized.lock().unwrap(),
+            [(
+                "run_test".to_owned(),
+                "plan_test".to_owned(),
+                "user_test".to_owned()
+            )]
+        );
+
+        // Same capability, same grant, another browser tool: still parked.
+        let sink = StartAuthorizedSink::default();
+        let out = browser_step(QUARRY_MCP_BROWSER_ACT_TOOL, &policy, Some(&grant), &sink, false).await;
+        assert_eq!(out.status, "awaiting_approval");
+        assert_eq!(out.cause, Some(CauseCode::CapabilityHighRisk));
+        assert!(sink.authorized.lock().unwrap().is_empty());
+
+        // No validated grant: still parked.
+        let sink = StartAuthorizedSink::default();
+        let out = browser_step(BROWSER_AGENT_TOOL, &policy, None, &sink, false).await;
+        assert_eq!(out.status, "awaiting_approval");
+        assert_eq!(out.cause, Some(CauseCode::CapabilityHighRisk));
+
+        // Another user's grant: still parked.
+        let theirs = tool_bridge::ValidatedBrowserGrant::for_test(
+            "grant-run",
+            "run",
+            "grant-session",
+            "user_other",
+            false,
+        );
+        let out = browser_step(BROWSER_AGENT_TOOL, &policy, Some(&theirs), &sink, false).await;
+        assert_eq!(out.status, "awaiting_approval");
+    }
+
+    #[tokio::test]
+    async fn a_grant_lifted_start_under_zdr_records_nothing_on_the_run() {
+        let policy = BrowserPolicy { deny_reason: None };
+        let run_zdr = tool_bridge::ValidatedBrowserGrant::for_test(
+            "grant-run",
+            "run",
+            "grant-session",
+            "user_test",
+            false,
+        );
+        let sink = StartAuthorizedSink::default();
+        let out = browser_step(BROWSER_AGENT_TOOL, &policy, Some(&run_zdr), &sink, true).await;
+        assert_ne!(out.status, "awaiting_approval", "{out:?}");
+        assert!(sink.authorized.lock().unwrap().is_empty());
+
+        let grant_zdr = tool_bridge::ValidatedBrowserGrant::for_test(
+            "grant-run",
+            "run",
+            "grant-session",
+            "user_test",
+            true,
+        );
+        let out = browser_step(BROWSER_AGENT_TOOL, &policy, Some(&grant_zdr), &sink, false).await;
+        assert_ne!(out.status, "awaiting_approval", "{out:?}");
+        assert!(sink.authorized.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_hook_ask_still_holds_a_grant_lifted_browser_start() {
+        let policy = BrowserPolicy { deny_reason: None };
+        let grant = tool_bridge::ValidatedBrowserGrant::for_test(
+            "grant-run",
+            "run",
+            "grant-session",
+            "user_test",
+            false,
+        );
+        let hook_asks = r#"{"rules":[{"event":"pre_tool_use","tools":"browser_agent","decision":"ask","reason":"r"}]}"#;
+        let sink = StartAuthorizedSink::default();
+        let tool_input = serde_json::json!({
+            "grant_id": "grant-run",
+            "run_id": "run_test",
+            "plan_id": "plan_test",
+        })
+        .to_string();
+        let out = execute_step_with_browser_grant(
+            BROWSER_AGENT_TOOL,
+            &tool_input,
+            "auto",
+            hook_asks,
+            "org_test",
+            "user_test",
+            "run_test",
+            "step_test",
+            "",
+            None,
+            Some(&sink),
+            None,
+            false,
+            false,
+            0,
+            None,
+            None,
+            None,
+            &policy,
+            Some(&grant),
+            None,
+        )
+        .await;
+        assert_eq!(out.status, "awaiting_approval");
+        assert_eq!(out.cause, Some(CauseCode::HookAsk));
+        assert!(
+            sink.authorized.lock().unwrap().is_empty(),
+            "nothing is recorded as granted while a later gate holds the start"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_capability_deny_names_the_capability_and_a_slug_reason() {
+        let sink = StartAuthorizedSink::default();
+        let out = browser_step(
+            BROWSER_AGENT_TOOL,
+            &BrowserPolicy {
+                deny_reason: Some("health_not_attested"),
+            },
+            None,
+            &sink,
+            false,
+        )
+        .await;
+        assert_eq!(out.status, "permission_denied");
+        assert_eq!(
+            out.error,
+            "permission denied by policy (cap.browser.open: health_not_attested)"
+        );
+
+        let out = browser_step(
+            BROWSER_AGENT_TOOL,
+            &BrowserPolicy {
+                deny_reason: Some("Capability is unavailable for https://example.com/secret"),
+            },
+            None,
+            &sink,
+            false,
+        )
+        .await;
+        assert_eq!(out.status, "permission_denied");
+        assert_eq!(
+            out.error,
+            "permission denied by policy (cap.browser.open: policy_denied)"
+        );
+    }
+
+    #[test]
+    fn only_a_slug_survives_as_a_deny_reason_code() {
+        for slug in ["health_not_attested", "tool_not_bound", "tool_policy_deny", "a", "x9_"] {
+            assert_eq!(policy_reason_code(slug), slug);
+        }
+        let long = "a".repeat(65);
+        for other in [
+            "",
+            "Health_not_attested",
+            "9lives",
+            "_lead",
+            "has space",
+            "dash-ed",
+            "https://example.com",
+            "ok\n",
+            long.as_str(),
+        ] {
+            assert_eq!(policy_reason_code(other), "policy_denied", "{other:?}");
+        }
+        assert_eq!(policy_reason_code(&"a".repeat(64)), "a".repeat(64));
     }
 
     /// A class or approval floor that asks is the pause the permission gate raises

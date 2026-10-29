@@ -228,6 +228,27 @@ impl BrowserEventSink for OrchestrationEventSink {
         self.publish(&config.run_id, event).await;
     }
 
+    /// The run-level gate's decision, on the same event the in-loop gates use.
+    /// `start_run` is the synthetic action slug for a run-level browser gate, and
+    /// `approval_id` stays empty because no durable Approval row exists: the
+    /// user's run grant was the approval.
+    async fn run_start_authorized(&self, run_id: &str, plan_id: &str, decided_by: &str) {
+        if run_id.is_empty() {
+            return;
+        }
+        let event = orchestration_event::Event::BrowserActionDecided(
+            orchestration_event::BrowserActionDecided {
+                run_id: run_id.to_owned(),
+                plan_id: plan_id.to_owned(),
+                action_id: "start_run".to_owned(),
+                approval_id: String::new(),
+                decision: "granted".to_owned(),
+                decided_by: decided_by.to_owned(),
+            },
+        );
+        self.publish(run_id, event).await;
+    }
+
     /// Phase 5 in-loop HITL gate: create a durable approval via the SAME
     /// general `CreateApproval` RPC the outer whole-tool `ask` gate uses
     /// (`kind = DESTRUCTIVE`, matching `grpc.rs`'s own call), publish the
@@ -518,6 +539,8 @@ mod tests {
         decide_calls: DecideCapture,
         /// Every `CreateApproval` the gate sent, in order.
         created: Arc<Mutex<Vec<CreateApprovalRequest>>>,
+        /// Every `RecordOrchestrationEvent` the sink sent, in order.
+        recorded: Arc<Mutex<Vec<RecordOrchestrationEventRequest>>>,
     }
 
     #[tonic::async_trait]
@@ -763,8 +786,9 @@ mod tests {
         }
         async fn record_orchestration_event(
             &self,
-            _: TonicRequest<RecordOrchestrationEventRequest>,
+            request: TonicRequest<RecordOrchestrationEventRequest>,
         ) -> Result<Response<RecordOrchestrationEventResponse>, Status> {
+            self.recorded.lock().unwrap().push(request.into_inner());
             Ok(Response::new(RecordOrchestrationEventResponse {
                 event_id: "evt-test".into(),
             }))
@@ -921,6 +945,44 @@ mod tests {
             .expect("decide_approval was called");
         assert_eq!(decision, pb::ApprovalState::TimedOut as i32);
         assert_eq!(decided_by, "system:approval-timeout");
+    }
+
+    #[tokio::test]
+    async fn a_run_start_authorized_by_its_grant_is_recorded_as_a_granted_start_run() {
+        let recorded = Arc::default();
+        let channel = spawn_mock(NeverResolvingOrchestration {
+            recorded: Arc::clone(&recorded),
+            ..Default::default()
+        })
+        .await;
+        let sink = OrchestrationEventSink::new(channel, None).with_verified_bearer("test-bearer");
+
+        sink.run_start_authorized("run_001", "plan_001", "user_001")
+            .await;
+        // No run, no run-scoped event.
+        sink.run_start_authorized("", "plan_001", "user_001").await;
+
+        let sent = recorded.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        let event = sent[0]
+            .event
+            .as_ref()
+            .and_then(|event| event.event.as_ref())
+            .expect("an event body");
+        let orchestration_event::Event::BrowserActionDecided(decided) = event else {
+            panic!("expected BrowserActionDecided, got {event:?}");
+        };
+        assert_eq!(
+            decided,
+            &orchestration_event::BrowserActionDecided {
+                run_id: "run_001".to_owned(),
+                plan_id: "plan_001".to_owned(),
+                action_id: "start_run".to_owned(),
+                approval_id: String::new(),
+                decision: "granted".to_owned(),
+                decided_by: "user_001".to_owned(),
+            }
+        );
     }
 
     #[tokio::test]

@@ -36,6 +36,13 @@ pub(crate) enum BrowserAgentExecution {
 pub(crate) struct ValidatedBrowserGrant {
     grant_id: String,
     allowed_domains: Vec<String>,
+    // What the broker said about the grant itself. Read only to decide whether a
+    // derived run grant stands in for a high-risk `ask`
+    // (`runtime_loop::browser_grant_approval`); never authority on their own.
+    kind: String,
+    parent_grant_id: String,
+    owner_id: String,
+    zdr: bool,
 }
 
 impl ValidatedBrowserGrant {
@@ -62,7 +69,32 @@ impl ValidatedBrowserGrant {
         Ok(Self {
             grant_id: requested_grant_id.to_owned(),
             allowed_domains: canonical,
+            kind: response.kind.clone(),
+            parent_grant_id: response.parent_grant_id.clone(),
+            owner_id: response.owner_id.clone(),
+            zdr: response.zdr,
         })
+    }
+
+    /// A grant as the broker would have validated it, for tests that need one
+    /// without a broker.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn for_test(
+        grant_id: &str,
+        kind: &str,
+        parent_grant_id: &str,
+        owner_id: &str,
+        zdr: bool,
+    ) -> Self {
+        Self {
+            grant_id: grant_id.to_owned(),
+            allowed_domains: vec!["example.com".to_owned()],
+            kind: kind.to_owned(),
+            parent_grant_id: parent_grant_id.to_owned(),
+            owner_id: owner_id.to_owned(),
+            zdr,
+        }
     }
 
     #[must_use]
@@ -73,6 +105,30 @@ impl ValidatedBrowserGrant {
     #[must_use]
     pub(crate) fn allowed_domains(&self) -> &[String] {
         &self.allowed_domains
+    }
+
+    /// `session`, `run` or `sensitive_approval`, as the broker reported it.
+    #[must_use]
+    pub(crate) fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    /// The session grant a derived run grant descends from; empty otherwise.
+    #[must_use]
+    pub(crate) fn parent_grant_id(&self) -> &str {
+        &self.parent_grant_id
+    }
+
+    /// The user (or service actor) the broker issued the grant to.
+    #[must_use]
+    pub(crate) fn owner_id(&self) -> &str {
+        &self.owner_id
+    }
+
+    /// Whether the broker holds the grant under Zero Data Retention.
+    #[must_use]
+    pub(crate) fn zdr(&self) -> bool {
+        self.zdr
     }
 }
 
@@ -984,6 +1040,43 @@ mod tests {
             },
         );
         assert!(mismatched.is_err());
+    }
+
+    #[test]
+    fn broker_response_carries_the_grants_lineage_owner_and_retention() {
+        let grant = ValidatedBrowserGrant::from_broker_response(
+            "grant-1",
+            &ValidateGrantResponse {
+                grant_id: "grant-1".to_owned(),
+                active: true,
+                allowed_domains: vec!["example.com".to_owned()],
+                parent_grant_id: "grant-session".to_owned(),
+                kind: "run".to_owned(),
+                owner_id: "user-1".to_owned(),
+                zdr: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(grant.kind(), "run");
+        assert_eq!(grant.parent_grant_id(), "grant-session");
+        assert_eq!(grant.owner_id(), "user-1");
+        assert!(grant.zdr());
+
+        let bare = ValidatedBrowserGrant::from_broker_response(
+            "grant-1",
+            &ValidateGrantResponse {
+                grant_id: "grant-1".to_owned(),
+                active: true,
+                allowed_domains: vec!["example.com".to_owned()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(bare.kind(), "");
+        assert_eq!(bare.parent_grant_id(), "");
+        assert_eq!(bare.owner_id(), "");
+        assert!(!bare.zdr());
     }
 
     #[test]

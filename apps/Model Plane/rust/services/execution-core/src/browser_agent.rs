@@ -420,6 +420,12 @@ pub trait BrowserEventSink: Send + Sync {
         config: &PlanConfig,
         detail: &RiskyActionDetail,
     ) -> ApprovalOutcome;
+    /// Record on the run that its high-risk `ask` to start was satisfied by the
+    /// user's broker-validated run grant rather than a durable approval, decided
+    /// by `decided_by` (the user the run acts for). Best-effort metadata, never a
+    /// gate; never called under ZDR. The default records nothing, so a sink that
+    /// keeps no timeline need not implement it.
+    async fn run_start_authorized(&self, _run_id: &str, _plan_id: &str, _decided_by: &str) {}
 }
 
 #[derive(Debug, Clone)]
