@@ -17,6 +17,10 @@ use axum::response::sse::Event;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::Sender;
 
+// Declared here, not in lib.rs, so this slice stays inside its owned files (WS27-S6).
+#[path = "run_ceiling.rs"]
+pub mod run_ceiling;
+
 /// Who processed one answer, as the server stamped it. It rides on the `usage`
 /// frame so the answer meta can say where an answer was processed, from
 /// server-stamped values only: the client never infers residency from a model
@@ -404,6 +408,9 @@ pub enum ChatEvent {
         phase: crate::usage_meter::CallPhase,
         /// The turn so far, the call included.
         snapshot: crate::usage_meter::Snapshot,
+        /// The turn's run ceiling, on the frames that carry one (WS27-S6). `None` leaves the frame
+        /// as it was before the ceiling existed.
+        ceiling: Option<crate::sse_events::run_ceiling::CeilingProgress>,
     },
     // ---- end usage progress (WS27) ----
     // ---- lifecycle (WS15) ----
@@ -786,7 +793,11 @@ impl ChatEvent {
                 "request_id": request_id,
             }),
             // ---- usage progress (WS27) ----
-            ChatEvent::UsageProgress { phase, snapshot } => {
+            ChatEvent::UsageProgress {
+                phase,
+                snapshot,
+                ceiling,
+            } => {
                 let mut payload = json!({
                     "calls": snapshot.calls,
                     "phase": phase.as_str(),
@@ -804,6 +815,22 @@ impl ChatEvent {
                 // Stated only once a call went unpriced, so a frame whose calls are all priced keeps its shape.
                 if snapshot.unpriced_calls > 0 {
                     payload["unpriced_calls"] = json!(snapshot.unpriced_calls);
+                }
+                // Each ceiling key rides only a frame that carries a value for it, so a frame without a
+                // ceiling keeps the shape it had before.
+                if let Some(ceiling) = ceiling {
+                    if let Some(usd) = ceiling.ceiling_usd {
+                        payload["ceiling_usd"] = json!(usd);
+                    }
+                    if let Some(tokens) = ceiling.ceiling_tokens {
+                        payload["ceiling_tokens"] = json!(tokens);
+                    }
+                    if let Some(fraction) = ceiling.fraction {
+                        payload["fraction"] = json!(fraction);
+                    }
+                    if let Some(warning) = ceiling.warning {
+                        payload["warning"] = json!(warning.as_str());
+                    }
                 }
                 payload
             }
@@ -988,8 +1015,12 @@ pub struct RichEventSink {
     /// Whether this turn streams a `usage_progress` frame for each call it records (WS27 S3). The
     /// handler that builds the sink sets it once, from the switch, so every site reads one answer.
     usage_progress: bool,
-    /// The running total of the calls this sink has recorded, which each progress frame states.
-    meter: std::sync::Mutex<crate::usage_meter::UsageMeter>,
+    /// Whether a run ceiling is tracked on this turn (WS27-S6). A tracked ceiling needs every call
+    /// priced and counted, streamed or not, so the sink says whether it records calls at all.
+    ceiling_tracked: bool,
+    /// The running total of the calls this sink has recorded, which each progress frame states, and
+    /// the turn's run ceiling. One lock, so a frame never states a total its ceiling does not match.
+    tally: std::sync::Mutex<RunTally>,
     /// The turn's clock, shared the same way, so the tool loop and the draft
     /// checks it runs can time their calls without new parameters.
     timing: Option<crate::turn_timing::TurnTiming>,
@@ -1010,6 +1041,36 @@ pub struct RichEventSink {
             crate::subscription_failure::FailureContext,
         )>,
     >,
+}
+
+/// What a sink keeps of a turn's calls: the running total every progress frame states, and the turn's
+/// run ceiling when one is tracked.
+#[derive(Default)]
+struct RunTally {
+    meter: crate::usage_meter::UsageMeter,
+    ceiling: Option<crate::sse_events::run_ceiling::CeilingTracker>,
+}
+
+/// The tokens a call adds to a token cap: its input and output when it is metered. A subscription
+/// call's tokens are usage, not spend, so it adds none, as cost-core counts them.
+#[must_use]
+pub fn metered_tokens(call: &crate::usage_meter::CallUsage) -> u64 {
+    if call.basis != crate::pricing::CostBasis::Metered {
+        return 0;
+    }
+    let count = |tokens: i64| u64::try_from(tokens.max(0)).unwrap_or(0);
+    count(call.input).saturating_add(count(call.output))
+}
+
+/// The metered tokens of a set of calls, as a token cap counts them.
+#[must_use]
+pub fn metered_tokens_of<'a>(
+    calls: impl IntoIterator<Item = &'a crate::usage_meter::CallUsage>,
+) -> u64 {
+    calls
+        .into_iter()
+        .map(metered_tokens)
+        .fold(0, u64::saturating_add)
 }
 
 /// Where a sink buffers what it sends: the same store, key and `id:` cursor
@@ -1117,7 +1178,8 @@ impl RichEventSink {
             artifacts: std::sync::Arc::default(),
             overhead: std::sync::Arc::default(),
             usage_progress: false,
-            meter: std::sync::Mutex::new(crate::usage_meter::UsageMeter::default()),
+            ceiling_tracked: false,
+            tally: std::sync::Mutex::new(RunTally::default()),
             timing: None,
             connector_turn: None,
             resume: None,
@@ -1337,33 +1399,88 @@ impl RichEventSink {
         self
     }
 
-    /// Whether this sink streams usage progress. A caller prices a call for [`Self::record_call`]
-    /// only when this is true, so a turn with the switch off reads the price catalogue no more often
-    /// than it did before.
+    /// Whether this sink streams usage progress.
     #[must_use]
     pub fn streams_usage_progress(&self) -> bool {
         self.usage_progress
     }
 
-    /// Record a provider call the turn made and stream the turn's running total after it. Does
-    /// nothing unless the sink streams usage progress.
+    /// Attach the turn's run ceiling (WS27-S6), when the handler resolved one. The tracker carries
+    /// the switches, so the sink records calls exactly when it holds one.
+    #[must_use]
+    pub fn with_run_ceiling(mut self, ceiling: Option<crate::sse_events::run_ceiling::CeilingTracker>) -> Self {
+        self.ceiling_tracked = ceiling.is_some();
+        if let Ok(tally) = self.tally.get_mut() {
+            tally.ceiling = ceiling;
+        }
+        self
+    }
+
+    /// Whether this sink records the calls it is given: it streams usage progress, or it tracks a run
+    /// ceiling. A caller prices a call for [`Self::record_call`] only then, so a turn with neither reads
+    /// the price catalogue no more often than it did before.
+    #[must_use]
+    pub fn records_calls(&self) -> bool {
+        self.usage_progress || self.ceiling_tracked
+    }
+
+    /// Record a provider call the turn made and, when the sink streams usage progress, stream the turn's
+    /// running total after it. Does nothing unless the sink records calls.
     pub async fn record_call(
         &self,
         call: &crate::usage_meter::CallUsage,
         priced: &crate::pricing::Priced,
     ) {
-        if !self.usage_progress {
+        if !self.records_calls() {
             return;
         }
-        // The lock is released before the emit below: a frame is never sent while the meter is held.
-        let Ok(snapshot) = self.meter.lock().map(|mut meter| meter.record(call, priced)) else {
+        // The lock is released before the emit below: a frame is never sent while the tally is held.
+        let Ok((snapshot, ceiling)) = self.tally.lock().map(|mut tally| {
+            let snapshot = tally.meter.record(call, priced);
+            let ceiling = tally
+                .ceiling
+                .as_mut()
+                .and_then(|ceiling| ceiling.record(metered_tokens(call), snapshot.cost_usd));
+            (snapshot, ceiling)
+        }) else {
             return;
         };
-        self.emit(ChatEvent::UsageProgress {
-            phase: call.phase,
-            snapshot,
+        if self.usage_progress {
+            self.emit(ChatEvent::UsageProgress {
+                phase: call.phase,
+                snapshot,
+                ceiling,
+            })
+            .await;
+        }
+    }
+
+    /// The run ceiling as the closing answer frame states it: the turn's own total, and the metered
+    /// tokens of every call the turn counts, the answer's included, since the answer is not in the tally
+    /// yet. `None` unless the ceiling reports on frames.
+    #[must_use]
+    pub fn run_ceiling_at_turn_end(
+        &self,
+        turn: &crate::usage_meter::Snapshot,
+        turn_metered_tokens: u64,
+    ) -> Option<crate::sse_events::run_ceiling::CeilingProgress> {
+        let mut tally = self.tally.lock().ok()?;
+        tally
+            .ceiling
+            .as_mut()?
+            .progress(turn.cost_usd, turn_metered_tokens)
+    }
+
+    /// Whether the tool phase ends before its next round: enforcement is on and the run has reached a
+    /// cap. The tool loop asks at each round boundary.
+    #[must_use]
+    pub fn run_ceiling_stops_tool_phase(&self) -> bool {
+        self.tally.lock().is_ok_and(|tally| {
+            tally
+                .ceiling
+                .as_ref()
+                .is_some_and(|ceiling| ceiling.stops_tool_phase(tally.meter.snapshot().cost_usd))
         })
-        .await;
     }
 
     /// The artifacts seen so far, one entry per id carrying its LATEST version,
@@ -1853,6 +1970,7 @@ mod tests {
         let progress = ChatEvent::UsageProgress {
             phase: crate::usage_meter::CallPhase::ToolRound,
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.01))]),
+            ceiling: None,
         };
         assert!(progress.should_emit(&feats));
         // Not opted in:
@@ -1929,6 +2047,7 @@ mod tests {
         ChatEvent::UsageProgress {
             phase: crate::usage_meter::CallPhase::Overhead,
             snapshot: running_total(calls),
+            ceiling: None,
         }
         .payload("req-1")
         .as_object()
@@ -2001,6 +2120,7 @@ mod tests {
         let event = ChatEvent::UsageProgress {
             phase: crate::usage_meter::CallPhase::Answer,
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.25))]),
+            ceiling: None,
         };
         assert_eq!(event.family(), Some("usage"));
         assert_eq!(event.name(), "usage_progress");
@@ -2051,6 +2171,115 @@ mod tests {
         assert_eq!(frames_sent(true, &[]).await, 0, "a client that did not ask for usage gets none");
     }
 
+    /// A sink whose ceiling is enforced counts the calls it is given without a progress stream, and the
+    /// tool phase ends once a recorded call takes the run to its cap.
+    #[tokio::test]
+    async fn run_ceiling_stops_the_tool_phase_once_a_recorded_call_reaches_the_cap() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let cap = crate::sse_events::run_ceiling::RunCeiling {
+            usd: Some(0.2),
+            tokens: None,
+        };
+        let sink = RichEventSink::new(tx, Vec::new(), "req-ceiling".to_owned()).with_run_ceiling(
+            crate::sse_events::run_ceiling::CeilingTracker::for_turn(cap, false, true),
+        );
+        assert!(
+            sink.records_calls(),
+            "an enforced ceiling counts calls without a stream"
+        );
+        assert!(!sink.streams_usage_progress());
+        let call = crate::usage_meter::CallUsage {
+            phase: crate::usage_meter::CallPhase::ToolRound,
+            model: "gpt-5".into(),
+            provider: "openai".into(),
+            basis: crate::pricing::CostBasis::Metered,
+            input: 1_000,
+            output: 100,
+            cache_read: 0,
+            cache_write: 0,
+        };
+        let priced = crate::pricing::Priced {
+            usd: Some(0.1),
+            by_category: Some(crate::pricing::CategoryCost {
+                input_usd: 0.1,
+                cache_read_usd: 0.0,
+                cache_write_usd: 0.0,
+                output_usd: 0.0,
+            }),
+            source: crate::pricing::PriceSource::Exact,
+        };
+        sink.record_call(&call, &priced).await;
+        assert!(
+            !sink.run_ceiling_stops_tool_phase(),
+            "half of the cap is not the cap"
+        );
+        sink.record_call(&call, &priced).await;
+        assert!(
+            sink.run_ceiling_stops_tool_phase(),
+            "two calls reach the cap"
+        );
+    }
+
+    /// The ceiling's keys ride a frame that carries a ceiling, and no other frame states them.
+    #[test]
+    fn usage_progress_states_the_ceiling_keys_only_when_it_carries_one() {
+        let carried = ChatEvent::UsageProgress {
+            phase: crate::usage_meter::CallPhase::ToolRound,
+            snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.04))]),
+            ceiling: Some(crate::sse_events::run_ceiling::CeilingProgress {
+                ceiling_usd: Some(0.05),
+                ceiling_tokens: Some(20_000),
+                fraction: Some(0.8),
+                warning: Some(crate::sse_events::run_ceiling::CeilingWarning::Eighty),
+            }),
+        }
+        .payload("req-1");
+        assert_eq!(carried["ceiling_usd"], json!(0.05));
+        assert_eq!(carried["ceiling_tokens"], json!(20_000));
+        assert_eq!(carried["fraction"], json!(0.8));
+        assert_eq!(carried["warning"], json!("run_ceiling_80"));
+        let plain = progress_payload(&[(crate::pricing::CostBasis::Metered, Some(0.04))]);
+        for key in ["ceiling_usd", "ceiling_tokens", "fraction", "warning"] {
+            assert!(
+                !plain.contains_key(key),
+                "{key} is stated only on a frame that carries a ceiling"
+            );
+        }
+    }
+
+    /// A token cap counts the input and output of metered calls only: a subscription call's tokens are
+    /// usage, and cost-core never lets them exhaust the cap.
+    #[test]
+    fn a_token_cap_counts_metered_calls_and_never_a_subscription_call() {
+        let call = |basis| crate::usage_meter::CallUsage {
+            phase: crate::usage_meter::CallPhase::ToolRound,
+            model: "m".into(),
+            provider: "p".into(),
+            basis,
+            input: 800,
+            output: 200,
+            cache_read: 500,
+            cache_write: 0,
+        };
+        assert_eq!(
+            metered_tokens(&call(crate::pricing::CostBasis::Metered)),
+            1_000,
+            "the input already folds in the cache legs, and the output adds to it"
+        );
+        assert_eq!(
+            metered_tokens(&call(crate::pricing::CostBasis::Subscription)),
+            0
+        );
+        assert_eq!(
+            metered_tokens_of([
+                &call(crate::pricing::CostBasis::Metered),
+                &call(crate::pricing::CostBasis::Subscription),
+                &call(crate::pricing::CostBasis::Metered),
+            ]),
+            2_000
+        );
+    }
+
     #[test]
     fn tools_family_covers_both_call_and_result() {
         let feats = families(&["tools"]);
@@ -2097,6 +2326,7 @@ mod tests {
         let progress = ChatEvent::UsageProgress {
             phase: crate::usage_meter::CallPhase::Answer,
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.01))]),
+            ceiling: None,
         };
         assert_eq!(progress.name(), "usage_progress");
 
@@ -2852,6 +3082,17 @@ mod payload_contract {
         basis: Option<crate::pricing::CostBasis>,
         unpriced_calls: u32,
     ) -> ChatEvent {
+        usage_progress_with_ceiling(calls, cost_usd, basis, unpriced_calls, None)
+    }
+
+    /// A progress frame of the same turn, carrying the run ceiling it states.
+    fn usage_progress_with_ceiling(
+        calls: u32,
+        cost_usd: Option<f64>,
+        basis: Option<crate::pricing::CostBasis>,
+        unpriced_calls: u32,
+        ceiling: Option<crate::sse_events::run_ceiling::CeilingProgress>,
+    ) -> ChatEvent {
         ChatEvent::UsageProgress {
             phase: crate::usage_meter::CallPhase::ToolRound,
             snapshot: crate::usage_meter::Snapshot {
@@ -2870,6 +3111,7 @@ mod payload_contract {
                     output_usd: 0.0005,
                 }),
             },
+            ceiling,
         }
     }
 
@@ -2986,6 +3228,19 @@ mod payload_contract {
             usage_progress(2, None, Some(crate::pricing::CostBasis::Metered), 1),
             // A mixed total states its cost and no basis, which is why the golden must mark `cost_basis` optional.
             usage_progress(4, Some(0.25), None, 0),
+            // A frame that states the run ceiling: the share used, and the 80% warning it is the first to carry.
+            usage_progress_with_ceiling(
+                3,
+                Some(0.002_456),
+                Some(crate::pricing::CostBasis::Metered),
+                0,
+                Some(crate::sse_events::run_ceiling::CeilingProgress {
+                    ceiling_usd: Some(0.05),
+                    ceiling_tokens: Some(20_000),
+                    fraction: Some(0.8),
+                    warning: Some(crate::sse_events::run_ceiling::CeilingWarning::Eighty),
+                }),
+            ),
             turn_timing(false),
             turn_timing(true),
             ChatEvent::Title { title: s("") },

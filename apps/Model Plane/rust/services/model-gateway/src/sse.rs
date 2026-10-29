@@ -1720,6 +1720,20 @@ pub async fn invoke_stream_sse(
         );
     }
 
+    // The turn's run ceiling (WS27-S6): the caps the request and the org set, resolved the way the
+    // budget gate above resolves them. The tracker exists only when a switch acts on it, and its
+    // frames carry the ceiling only with the progress stream they ride on.
+    let run_ceiling = crate::sse_events::run_ceiling::CeilingTracker::for_turn(
+        crate::sse_events::run_ceiling::RunCeiling::resolve(
+            normalized.max_cost_usd,
+            normalized.max_tokens,
+            org_limits.max_cost_usd,
+            org_limits.max_tokens,
+        ),
+        run_ceiling_warn_switch() && usage_progress_switch(),
+        run_ceiling_enforce_switch(),
+    );
+
     // Resolve the harness profile → approval posture. Recorded on the opened
     // envelope so the run loop and operator surfaces agree (HARNESS_PHASE1 §1).
     //
@@ -3092,6 +3106,7 @@ pub async fn invoke_stream_sse(
             retrieval_scope.is_auto() && !conversation_only,
         ))
         .with_usage_progress(usage_progress_switch())
+        .with_run_ceiling(run_ceiling)
         .buffering(stream_buffers.clone(), buffer_key.clone(), seq);
 
         // Grounding's citations were already sent on the wire above (chat-
@@ -3895,6 +3910,7 @@ pub async fn invoke_stream_sse(
                 head_summary.as_ref(),
                 retention_class,
                 &tool_usage,
+                &sink,
             )
             .await;
             finish_stream_registrations(&cancels, &queued_inputs, &req_id);
@@ -5141,6 +5157,14 @@ pub async fn invoke_stream_sse(
                     // The answer call's progress frame comes just before the usage frame that closes the turn,
                     // and states the same total. A turn whose answer made no provider call has none.
                     if answer_call.is_some() && sink.streams_usage_progress() {
+                        // The answer is not in the sink's tally until this frame, so its ceiling is
+                        // read from the turn's total, which counts every call the turn made.
+                        let turn_metered = crate::sse_events::metered_tokens_of(
+                            tool_usage
+                                .iter()
+                                .chain(overhead.iter())
+                                .chain(answer_call.iter()),
+                        );
                         emit_and_buffer(
                             &tx,
                             &stream_buffers,
@@ -5151,6 +5175,7 @@ pub async fn invoke_stream_sse(
                             crate::sse_events::ChatEvent::UsageProgress {
                                 phase: crate::usage_meter::CallPhase::Answer,
                                 snapshot: turn,
+                                ceiling: sink.run_ceiling_at_turn_end(&turn, turn_metered),
                             },
                         )
                         .await;
@@ -7628,6 +7653,8 @@ async fn run_infer_fallback(
     retention_class: Option<crate::sse_events::RetentionClass>,
     // The tool phase's provider calls, which the fallback answer's total includes.
     tool_usage: &[crate::usage_meter::CallUsage],
+    // The turn's sink: the fallback answer's frame states the turn's run ceiling through it (WS27-S6).
+    sink: &crate::sse_events::RichEventSink,
 ) {
     let publisher = state.publisher.clone();
     let buffers = state.stream_buffers.clone();
@@ -8101,26 +8128,26 @@ async fn run_infer_fallback(
             // never a list price on a subscription turn.
             // Phase 7 B6 — confidence is the heuristic answer-quality score.
             // The turn's total: the tool phase's calls and this answer, which made one call.
-            let turn = turn_usage(
-                &state.pricing,
-                tool_usage,
-                &[],
-                Some(crate::usage_meter::CallUsage {
-                    phase: crate::usage_meter::CallPhase::Answer,
-                    model: model_used.clone(),
-                    provider: resp.provider_used.clone(),
-                    basis: cost_basis,
-                    input: i64::from(input_tokens),
-                    output: i64::from(output_tokens),
-                    cache_read: i64::from(cache_read_tokens),
-                    cache_write: i64::from(cache_creation_tokens),
-                }),
-            )
-            .await;
+            let answer_usage = crate::usage_meter::CallUsage {
+                phase: crate::usage_meter::CallPhase::Answer,
+                model: model_used.clone(),
+                provider: resp.provider_used.clone(),
+                basis: cost_basis,
+                input: i64::from(input_tokens),
+                output: i64::from(output_tokens),
+                cache_read: i64::from(cache_read_tokens),
+                cache_write: i64::from(cache_creation_tokens),
+            };
+            let turn =
+                turn_usage(&state.pricing, tool_usage, &[], Some(answer_usage.clone())).await;
             let cost_usd = frame_cost_usd(&turn);
             // The fallback answer is a provider call of its own, so it gets the progress frame the
             // stream's answer gets, just before the usage frame that carries the same total.
             if usage_progress_switch() {
+                // The answer is the turn's last call, so its ceiling is read from the turn's total.
+                let turn_metered = crate::sse_events::metered_tokens_of(
+                    tool_usage.iter().chain(std::iter::once(&answer_usage)),
+                );
                 emit_and_buffer(
                     tx,
                     &buffers,
@@ -8131,6 +8158,7 @@ async fn run_infer_fallback(
                     crate::sse_events::ChatEvent::UsageProgress {
                         phase: crate::usage_meter::CallPhase::Answer,
                         snapshot: turn,
+                        ceiling: sink.run_ceiling_at_turn_end(&turn, turn_metered),
                     },
                 )
                 .await;
@@ -12618,6 +12646,16 @@ fn usage_progress_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
 /// it through here, so the handler itself reads no environment.
 fn usage_progress_switch() -> bool {
     usage_progress_enabled(&|key| std::env::var(key).ok())
+}
+
+/// The run ceiling's two switches as this process's environment states them (WS27-S6). The turn reads
+/// them once, when it resolves its ceiling, so the handler itself reads no environment.
+fn run_ceiling_warn_switch() -> bool {
+    crate::sse_events::run_ceiling::warn_enabled(&|key| std::env::var(key).ok())
+}
+
+fn run_ceiling_enforce_switch() -> bool {
+    crate::sse_events::run_ceiling::enforce_enabled(&|key| std::env::var(key).ok())
 }
 
 /// The turn's usage as one meter: every call of the tool phase, the overhead calls beside the

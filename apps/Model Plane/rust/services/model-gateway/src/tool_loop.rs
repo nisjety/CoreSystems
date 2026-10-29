@@ -182,6 +182,14 @@ const TOOL_PHASE_OVERFLOW_NOTICE: &str =
      could not verify, and suggest a new thread for anything that needs a lookup — do not \
      present an unverified answer as confirmed.";
 
+/// Told to the model when enforcement ended the tool phase at the run's spend ceiling (WS27-S6). It
+/// names the cause, so a half-finished lookup is not mistaken for a completed one.
+const RUN_CEILING_NOTICE: &str =
+    "NOTE: the tool phase ended early because this run reached its spend ceiling, not because the \
+     available information was sufficient. Tools you intended to call never ran. Answer with what \
+     you can actually support, state plainly which part you could not verify, and suggest asking \
+     again for anything that needs a lookup — do not present an unverified answer as confirmed.";
+
 /// Cap on a single tool result inlined into the loop's context.
 ///
 /// Load-bearing now that the round budget above is generous: every round
@@ -5564,15 +5572,15 @@ pub(crate) fn metered_call(
     }
 }
 
-/// Streams the running total after one provider call the tool phase made, when the turn's sink streams
-/// usage progress. The call is priced only then, so a turn with the switch off reads the catalogue no
-/// more often than it did before.
+/// Records one provider call the tool phase made and streams the turn's running total after it, when the
+/// turn's sink records calls: it streams usage progress or tracks a run ceiling (WS27-S6). The call is
+/// priced only then, so a turn with neither reads the catalogue no more often than it did before.
 pub(crate) async fn stream_call_usage(
     state: &AppState,
     sink: &crate::sse_events::RichEventSink,
     call: &crate::usage_meter::CallUsage,
 ) {
-    if !sink.streams_usage_progress() {
+    if !sink.records_calls() {
         return;
     }
     let priced = state
@@ -7773,6 +7781,19 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     ChatEvent::QueuedInput { messages: queued }
                 })
                 .await;
+        }
+
+        // Enforcement ends the tool phase at the round boundary once the run has reached its spend
+        // ceiling (WS27-S6): no further round starts, and the answer still streams. The model is told
+        // why the lookups stopped, as it is when a round fails.
+        if sink.is_some_and(crate::sse_events::RichEventSink::run_ceiling_stops_tool_phase) {
+            messages.push(ChatMessage {
+                compaction_summary: String::new(),
+                role: "user".to_owned(),
+                content: RUN_CEILING_NOTICE.to_owned(),
+                name: String::new(),
+            });
+            break;
         }
 
         // Read/update have no valid target until a first artifact exists.
