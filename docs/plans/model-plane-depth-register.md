@@ -1892,6 +1892,39 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-628 | WS17-S9 | follow-up | P3 | 20 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-25.json | open |
 | D2-629 | WS17-S9 | test-gap | P1 | The refusal vocabulary gained `message_versions` (mp-contracts zdr_refusal.rs, the zdr-refusals.json golden, its pins, the SPA's copy and its label map in zdr-refusals.ts) in the W2-25 shared-edit commit, so zdr_feature_table passes 10/10; the SPA's zdr-refusals.test.ts digest constant moved with it. The version turn itself still has no ZDR live proof. | open |
 
+
+### Wave-mode batch W2-26 (2026-10-29)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-630 | WS23-S6.code | risk | P1 | The admission regeneration touches a canonical golden, its .sha256 pin, the sync-script digest and three Model Plane copies, not only the SPA file the review listed. Skipping any of them fails the admission sync rows, which are all ok today. | open |
+| D2-631 | WS23-S6.code | risk | P1 | Space-bound threads show the Connected apps chip row until spaceScoped is wired (lead item 8). The chat client's wire guard drops the picks on Space turns, so the chips do nothing there. The plan (DEC-06) says the row is omitted in Space rooms. | open |
+| D2-632 | WS23-S6.code | risk | P1 | spaceScoped is not wired: the composer reads props.spaceScoped, but neither use-chat-controller.ts nor ChatPage.tsx supplies it. Space-bound threads therefore show selectable chips instead of the DEC-06 block, and the chat-client wire guard silently drops the picks because spaceRef is set. | open |
+| D2-633 | WS23-S6.code | risk | P1 | The Home path (writePendingChatLaunch, then the pending launch read by use-chat-controller) was not verified to carry payload.connectorScope through pending-chat-launch.ts, so picks made on the dashboard composer may be lost even after the controller edit. | open |
+| D2-634 | WS23-S6.code | live-proof | P1 | Playwright tests/e2e/connected-apps.spec.ts is not run. It needs a second Vite dev server on this worktree (:5173 is the main checkout), and it can only pass after the controller pass-through edit. | open |
+| D2-635 | WS23-S6.code | live-proof | P1 | cargo test --manifest-path apps/gateway/Cargo.toml --all-targets browse does not compile now: 8 E0425 errors in apps/gateway/src/domains/chat/shared.rs, where the test module cannot find browser_do_enabled_from, browser_do_offered and browser_token. The slice owns no Rust file, so another slice's uncommitted gateway edits caused this. The lead must fix it before the plan's cargo command can count as green. | open |
+| D2-636 | WS23-S6.code | live-proof | P1 | The composer never shows chips in a real deployment until some backend lists 'connector_scope' among a chat model's features (catalogue, gated by CONNECTOR_ASK_READS_ENABLED). Live proof belongs to WS23-S7. | open |
+| D2-637 | WS23-S6.code | live-proof | P1 | Admission regeneration, after lead item 1: cd C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3 and run VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts. It writes src/shared/api/contracts/agent-action-admission.json (LF). Check the three new rows: registry true, eligible false, exemptReason set. | open |
+| D2-638 | WS23-S6.code | follow-up | P3 | 24 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-26.json | open |
+| D2-639 | WS19-S8 | live-proof | P1 | Still unproven: the bwrap --ro-bind of /skills, EROFS on write, no network, temp tree removed after the call, and apps/Model Plane/scripts/verify-sandbox-isolation.sh. These need the compose switch and rebuilt model-gateway and execution-core images, so the lead runs them. | open |
+| D2-640 | WS19-S8 | risk | P1 | The model is never told the mount path: neither the bundle footer nor the code_interpreter tool text names /skills/<name>. Keep SKILL_BUNDLE_MOUNT_ENABLED off until one of them does. | open |
+| D2-641 | WS19-S8 | decision | P1 | execution-core reads bundles with a capability:read token minted for the org. The owner must confirm that scope and that capability-core refuses a skill the request did not name. | open |
+| D2-642 | WS19-S8 | decision | P1 | skill_mounts::GrpcSkillBundleSource reads bundles with an org-wide capability:read service token minted for req.org_id. execution-core itself does not check that the user may see the skill; it trusts the gateway's handle_get_skill ownership filter. The owner should confirm this scope and that capability-core scopes GetSkillBundleManifest/GetSkillBlob to the token's org. | open |
+| D2-643 | WS19-S8 | live-proof | P1 | Live proof per the row's DoD: rebuild model-gateway and execution-core with SKILL_BUNDLE_MOUNT_ENABLED=true and a sample bundle on an Ask turn. Show the bwrap argv --ro-bind <tree> /skills, `python /skills/<name>/scripts/x.py` running, a write under /skills failing with EROFS, no network, no verevon-skills-* temp dir left afterwards, and apps/Model Plane/scripts/verify-sandbox-isolation.sh green. | open |
+| D2-644 | WS19-S8 | live-proof | P1 | The Linux-gated tests (code_interpreter::a_skill_bundle_is_readable_at_skills_and_not_writable and the cfg(unix) mode assertions in skill_mounts::a_skill_tree_is_read_only_and_names_its_scripts) only skip or pass trivially on this Windows host. Run them in a rust:1 container with bwrap and a /skills mount point. | open |
+| D2-645 | WS19-S8 | live-proof | P1 | The /skills mount point must already exist in the execution-core image (WS19-S4 Dockerfile). Until it does, an enabled mount has nowhere to bind on the read-only root. | open |
+| D2-646 | WS19-S8 | live-proof | P1 | Shared edit to apps/Model Plane/deploy/docker-compose.yml: add SKILL_BUNDLE_MOUNT_ENABLED: ${SKILL_BUNDLE_MOUNT_ENABLED:-false} beside SKILL_FILE_TOOL_ENABLED (line 320). Unset already means off. | open |
+| D2-647 | WS19-S8 | follow-up | P3 | 24 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-26.json | open |
+| D2-648 | WS21-S2 | risk | P1 | With BROWSER_DO_ENABLED and EXECUTION_DO_BROWSER_ENABLED both on, Do runs are offered browser.observe and browser.act, but their dispatch still refuses until WS21-S5a. Do not enable the pair before S5a (carried over). | open |
+| D2-649 | WS21-S2 | risk | P1 | The BFF mint does not consult site policy (K3-24) until WS21-S3 and S4 land, so a personal agentic turn gets a browser bearer whenever the switch is on (carried over). | open |
+| D2-650 | WS21-S2 | risk | P1 | The browser bearer (about 300 s, DEC-02) is not in RunDeadline and has no expiry margin. WS21-S5a must add the margin check and the typed browser_credential_expired path (carried over). | open |
+| D2-651 | WS21-S2 | risk | P1 | An approval continuation whose retained snapshot includes browser tool definitions dispatches them without a bearer (continue_run passes None), which fails closed. The WS03 continue path must carry or revalidate the bearer before S5a turns browser tools on across pauses (carried over). | open |
+| D2-652 | WS21-S2 | risk | P1 | S2 offers browser.observe and browser.act whenever a verified bearer is held and EXECUTION_DO_BROWSER_ENABLED=1 (agent.rs offered_tools, held = browser_bearer.is_some()). Their dispatch still fails closed until WS21-S5a, so the two flags must not be turned on together before S5a. | open |
+| D2-653 | WS21-S2 | risk | P1 | The BFF browser_token() decides the mint from the switch, an agentic non-ZDR turn and a non-Space scope only. K3-24's 'site policy not all-deny' cannot be checked until WS21-S3/S4, so with the switch on every personal agentic turn costs one browser-broker mint from auth-core. | open |
+| D2-654 | WS21-S2 | live-proof | P1 | Live proof of the S2 definition of done has not been run. Rebuild the Verevon gateway, model-gateway and execution-core, then turn on BROWSER_DO_ENABLED=true and EXECUTION_DO_BROWSER_ENABLED=1. One personal agentic turn should log 'browser bearer present' with no token value, and a ZDR turn must carry no x-browser-authorization header. With both flags off, auth-core must record zero /api/browser-broker/token mints. | open |
+| D2-655 | WS21-S2 | live-proof | P1 | Deploy wiring is missing. No compose file declares BROWSER_DO_ENABLED for the Verevon gateway, and no compose line declares EXECUTION_DO_BROWSER_ENABLED (the S1 compose line) for execution-core. Both default off, so nothing breaks, but the flags cannot be turned on until the lead adds these lines. | open |
+| D2-656 | WS21-S2 | follow-up | P3 | 11 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-26.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -2059,3 +2092,6 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS23-S5.code | authority, zdr, audit, policy | W2-25 | no |
 | WS24-S4 | data-loss, zdr, authority, policy | W2-25 | no |
 | WS17-S9 | zdr, data-loss | W2-25 | no |
+| WS23-S6.code | zdr, authority | W2-26 | no |
+| WS19-S8 | authority, auth, zdr | W2-26 | no |
+| WS21-S2 | auth, zdr | W2-26 | no |
