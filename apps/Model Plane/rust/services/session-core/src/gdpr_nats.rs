@@ -18,7 +18,7 @@
 //! [`crate::nats_connection::connect_shared`]) pointed at
 //! `control-shared-nats`, under the narrowly-scoped `session-core-gdpr`
 //! identity — never session-core's own Model-Plane-local `NATS_URL`
-//! connection (that broker does not host `AQENCIA_CONTROLPLANE`). This
+//! connection (that broker does not host `CONTROLPLANE`). This
 //! mirrors documents-api-go's dual-client split: one client for its own
 //! plane-local domain events, a second, separately-credentialed client only
 //! for the cross-plane GDPR consumer.
@@ -27,7 +27,7 @@
 //! this module binds to ([`DURABLE_NAME`] on [`STREAM_NAME`], filtering
 //! [`SUBJECT`]) does not exist yet. `audit-core`'s
 //! `internal/provisioner/provisioner.go` (`ProvisionControlSharedRuntime`)
-//! owns `AQENCIA_CONTROLPLANE`'s fixed consumers today — see
+//! owns `CONTROLPLANE`'s fixed consumers today — see
 //! `gdprDocumentsConsumerConfig` there for the sibling Data-Plane consumer on
 //! the same subject. A PULL consumer entry (no `DeliverSubject`, unlike that
 //! push/queue one) for `session-core-gdpr-erasure-v1` needs to be added
@@ -51,7 +51,7 @@ use tracing::{error, info, warn};
 use crate::gdpr::{parse_erasure_event, purge_organization_data};
 use crate::store::Pool;
 
-const STREAM_NAME: &str = "AQENCIA_CONTROLPLANE";
+const STREAM_NAME: &str = "CONTROLPLANE";
 const SUBJECT: &str = "verevon.gdpr.erasure.requested";
 const DURABLE_NAME: &str = "session-core-gdpr-erasure-v1";
 

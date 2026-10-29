@@ -1,0 +1,48 @@
+config { type: "assertion", schema: "dw_1_silver_xero_assertions", name: "xero_gold_fixed_asset_safety" }
+
+WITH inventory_assets AS (
+  SELECT tenant_id, JSON_VALUE(payload_json, '$.assetId') AS asset_id
+  FROM ${ref("dw_bronze_xero", "xero_raw_record_current")}
+  WHERE endpoint = 'assets_assets'
+), detail_assets AS (
+  SELECT tenant_id, JSON_VALUE(payload_json, '$.assetId') AS asset_id
+  FROM ${ref("dw_bronze_xero", "xero_raw_record_current")}
+  WHERE endpoint = 'assets_asset_details'
+), source_assets AS (
+  SELECT tenant_id, asset_id
+  FROM inventory_assets
+  WHERE asset_id IS NOT NULL
+), detailed_assets AS (
+  SELECT tenant_id, asset_id
+  FROM detail_assets
+  WHERE asset_id IS NOT NULL
+), gold_assets AS (
+  SELECT tenant_id, asset_id
+  FROM ${ref("xero_gold_finance", "dim_fixed_asset")}
+), invalid_gold_rows AS (
+  SELECT tenant_id
+  FROM ${ref("xero_gold_finance", "fact_fixed_asset_value_observation")}
+  WHERE asset_observation_key IS NULL OR asset_key IS NULL OR asset_id IS NULL
+  GROUP BY tenant_id
+)
+SELECT COALESCE(inventory.tenant_id, detail.tenant_id) AS tenant_id,
+       COALESCE(inventory.asset_id, detail.asset_id) AS asset_id,
+       IF(detail.asset_id IS NULL, 'inventory_without_detail', 'detail_without_inventory') AS issue
+FROM source_assets AS inventory
+FULL OUTER JOIN detailed_assets AS detail
+  ON inventory.tenant_id = detail.tenant_id
+ AND inventory.asset_id = detail.asset_id
+WHERE inventory.asset_id IS NULL OR detail.asset_id IS NULL
+UNION ALL
+SELECT COALESCE(inventory.tenant_id, gold.tenant_id) AS tenant_id,
+       COALESCE(inventory.asset_id, gold.asset_id) AS asset_id,
+       IF(gold.asset_id IS NULL, 'inventory_without_gold_dimension',
+          'gold_dimension_without_inventory') AS issue
+FROM source_assets AS inventory
+FULL OUTER JOIN gold_assets AS gold
+  ON inventory.tenant_id = gold.tenant_id
+ AND inventory.asset_id = gold.asset_id
+WHERE inventory.asset_id IS NULL OR gold.asset_id IS NULL
+UNION ALL
+SELECT tenant_id, NULL, 'invalid_observation_key' AS issue
+FROM invalid_gold_rows

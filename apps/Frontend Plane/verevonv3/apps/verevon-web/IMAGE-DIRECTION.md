@@ -444,12 +444,5 @@ peker til Unsplash-fotosiden, ikke en `i.pinimg.com`-fil.
   `hourglass-glass-render.jpg`, `glitched-vision-city.jpg` og
   `undo-control-hand-warm.jpg` (runde 6-vinnerne, erstattet av tre
   Unsplash-foto i runde 7 — se runde 7-notatet) — og
-  `public/verevon-layers/infrastructure-layer.png` +
-  `orchestration-layer.png` (de to varemerke-versjonene — behold til
-  erstatningene er godkjent, men de brukes ikke i kode lenger).
-- **Fortsatt i bruk andre steder — ikke slett:** `warm-flight.png` (VisualPanel +
-  `v3/ProblemSectionV3`), `human-haze.png` (FeatureCardsSection, `v3/ProductLoopSectionV3`,
-  `extras/trust-scroll`), og galakse-stillsene `71fc9723…`, `b41e5460…`,
-  `00631c87…`, `27aab72a…` (alle i `v3/ProblemSectionV3`). `v3/`-variantene
-  er egne sider som ikke er del av denne omgangen — de har fortsatt de gamle
-  bildene og den gamle stemningen.
+- **Fortsatt i bruk andre steder — ikke slett:** `warm-flight.png` (VisualPanel)
+  og `human-haze.png` (FeatureCardsSection og `extras/trust-scroll`).

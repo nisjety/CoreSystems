@@ -81,6 +81,10 @@ services:
       AUDIT_CORE_SERVICE_TOKEN: ${INTEGRATION_AUDIT_CORE_SERVICE_TOKEN:?INTEGRATION_AUDIT_CORE_SERVICE_TOKEN is required}
       INTEGRATION_SERVICE_API_KEY: ${INTEGRATION_SERVICE_API_KEY:?INTEGRATION_SERVICE_API_KEY is required}
       INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:?INTEGRATION_CREDENTIALS_ENCRYPTION_KEY is required}
+      # A public HTTPS origin is mandatory in production; integration-corev2
+      # validates the scheme and rejects loopback/HTTP before it can serve an
+      # OAuth callback. Do not inherit the development localhost fallback.
+      INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_PUBLIC_BASE_URL:?INTEGRATION_PUBLIC_BASE_URL must be the public HTTPS OAuth callback origin}
   shipping-core:
     <<: *hardened-runtime
     build:
@@ -132,6 +136,14 @@ services:
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
       AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:?AUTH_CORE_INTERNAL_API_KEY is required}
       FINSPO_SERVICE_API_KEY: ${FINSPO_SERVICE_API_KEY:?FINSPO_SERVICE_API_KEY is required}
+  anbud-api:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    ports: !reset []
+    environment:
+      ENVIRONMENT: production
   autocomplete-core:
     <<: *hardened-runtime
     build:

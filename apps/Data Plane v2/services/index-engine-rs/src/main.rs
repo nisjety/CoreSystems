@@ -111,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("admin server on {admin_addr}");
 
     // Cross-plane GDPR organization-erasure consumer. Binds to
-    // AQENCIA_CONTROLPLANE on the shared cross-plane broker
+    // CONTROLPLANE on the shared cross-plane broker
     // (control-shared-nats) under the dedicated index-engine-gdpr identity —
     // never this service's own Data-Plane-local NATS_URL/DATAPLANE_NATS_TOKEN
     // connection to data-nats, which does not host that stream. Left unset,

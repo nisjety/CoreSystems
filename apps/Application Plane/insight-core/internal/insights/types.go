@@ -16,10 +16,13 @@ const (
 	SurfaceCampaigns         = "campaigns"
 	SurfaceExternalAnalytics = "external_analytics"
 
-	ConnectorStatusNative             = "native"
-	ConnectorStatusPlanned            = "planned"
-	ConnectorStatusRequiresTokenLease = "requires_token_lease"
-	ConnectorStatusDisabled           = "disabled"
+	ConnectorStatusNative                   = "native"
+	ConnectorStatusPlanned                  = "planned"
+	ConnectorStatusRequiresTokenLease       = "requires_token_lease"
+	ConnectorStatusRequiresGovernedAction   = "requires_governed_action"
+	ConnectorStatusRequiresCredentialBroker = "requires_credential_broker"
+	ConnectorStatusRequiresEvidenceAdapter  = "requires_evidence_adapter"
+	ConnectorStatusDisabled                 = "disabled"
 )
 
 var ErrInvalidInput = errors.New("invalid input")
@@ -50,31 +53,39 @@ type OverviewQuery struct {
 }
 
 type IngestMetricEventInput struct {
-	ID            string         `json:"id"`
-	OrgID         string         `json:"org_id"`
-	ActorUserID   string         `json:"actor_user_id,omitempty"`
-	Surface       string         `json:"surface"`
-	Metric        string         `json:"metric"`
-	Value         float64        `json:"value"`
-	Unit          string         `json:"unit,omitempty"`
-	Source        string         `json:"source,omitempty"`
-	ConnectorType string         `json:"connector_type,omitempty"`
-	Dimensions    map[string]any `json:"dimensions,omitempty"`
-	OccurredAt    time.Time      `json:"occurred_at"`
+	ID             string         `json:"id"`
+	OrgID          string         `json:"org_id"`
+	ActorUserID    string         `json:"actor_user_id,omitempty"`
+	Surface        string         `json:"surface"`
+	Metric         string         `json:"metric"`
+	Value          float64        `json:"value"`
+	Unit           string         `json:"unit,omitempty"`
+	Source         string         `json:"source,omitempty"`
+	ConnectorType  string         `json:"connector_type,omitempty"`
+	Dimensions     map[string]any `json:"dimensions,omitempty"`
+	TimeWindow     *TimeWindow    `json:"time_window,omitempty"`
+	ObservedAt     time.Time      `json:"observed_at,omitempty"`
+	SourceTraceRef string         `json:"source_trace_ref,omitempty"`
+	RetentionClass string         `json:"retention_class,omitempty"`
+	OccurredAt     time.Time      `json:"occurred_at"`
 }
 
 type MetricEvent struct {
-	ID            string         `json:"id"`
-	OrgID         string         `json:"org_id"`
-	ActorUserID   string         `json:"actor_user_id,omitempty"`
-	Surface       string         `json:"surface"`
-	Metric        string         `json:"metric"`
-	Value         float64        `json:"value"`
-	Unit          string         `json:"unit,omitempty"`
-	Source        string         `json:"source,omitempty"`
-	ConnectorType string         `json:"connector_type,omitempty"`
-	Dimensions    map[string]any `json:"dimensions,omitempty"`
-	OccurredAt    time.Time      `json:"occurred_at"`
+	ID             string         `json:"id"`
+	OrgID          string         `json:"org_id"`
+	ActorUserID    string         `json:"actor_user_id,omitempty"`
+	Surface        string         `json:"surface"`
+	Metric         string         `json:"metric"`
+	Value          float64        `json:"value"`
+	Unit           string         `json:"unit,omitempty"`
+	Source         string         `json:"source,omitempty"`
+	ConnectorType  string         `json:"connector_type,omitempty"`
+	Dimensions     map[string]any `json:"dimensions,omitempty"`
+	TimeWindow     *TimeWindow    `json:"time_window,omitempty"`
+	ObservedAt     time.Time      `json:"observed_at"`
+	SourceTraceRef string         `json:"source_trace_ref,omitempty"`
+	RetentionClass string         `json:"retention_class,omitempty"`
+	OccurredAt     time.Time      `json:"occurred_at"`
 }
 
 type Overview struct {
@@ -124,15 +135,52 @@ type Scorecard struct {
 }
 
 type ConnectorSlot struct {
-	Type               string              `json:"type"`
-	DisplayName        string              `json:"display_name"`
-	Surface            string              `json:"surface"`
-	Status             string              `json:"status"`
-	Authorization      string              `json:"authorization"`
-	TokenLeaseAudience string              `json:"token_lease_audience,omitempty"`
-	RequiredEnv        []string            `json:"required_env,omitempty"`
-	ReferenceURLs      []string            `json:"reference_urls,omitempty"`
-	Contracts          []ConnectorContract `json:"contracts"`
+	Type                     string                    `json:"type"`
+	DisplayName              string                    `json:"display_name"`
+	Surface                  string                    `json:"surface"`
+	Status                   string                    `json:"status"`
+	Authorization            string                    `json:"authorization"`
+	TokenLeaseAudience       string                    `json:"token_lease_audience,omitempty"`
+	RequiredCapabilities     []string                  `json:"required_capabilities,omitempty"`
+	RequiredEnv              []string                  `json:"required_env,omitempty"`
+	ReferenceURLs            []string                  `json:"reference_urls,omitempty"`
+	Contracts                []ConnectorContract       `json:"contracts"`
+	ModelGrounding           ModelGroundingContract    `json:"model_grounding,omitempty"`
+	IntegrationSteps         []IntegrationStep         `json:"integration_steps,omitempty"`
+	AdvisoryInstructionPacks []AdvisoryInstructionPack `json:"advisory_instruction_packs,omitempty"`
+}
+
+// IntegrationStep is a declarative onboarding step. FixedOperation is
+// informational for clients; the Integration Core readiness endpoint never
+// accepts an operation from the caller.
+type IntegrationStep struct {
+	ID                   string   `json:"id"`
+	Label                string   `json:"label"`
+	Purpose              string   `json:"purpose"`
+	EndpointTemplate     string   `json:"endpoint_template,omitempty"`
+	Method               string   `json:"method,omitempty"`
+	FixedOperation       string   `json:"fixed_operation,omitempty"`
+	RequiredCapabilities []string `json:"required_capabilities,omitempty"`
+}
+
+// AdvisoryInstructionPack maps reviewed marketing-skill identifiers to small,
+// credential-free guidance. It does not load a local skill file, invoke an
+// agent, execute a command, or grant any provider capability.
+type AdvisoryInstructionPack struct {
+	ID                string   `json:"id"`
+	Mode              string   `json:"mode"`
+	RequiresReadiness bool     `json:"requires_readiness"`
+	SkillIDs          []string `json:"skill_ids"`
+	Instructions      []string `json:"instructions"`
+}
+
+// ModelGroundingContract names the credential-free evidence shape that a
+// Model Plane recommendation must receive. The registry declares what can be
+// grounded; it neither runs a model nor transfers source content.
+type ModelGroundingContract struct {
+	Contract                  string   `json:"contract,omitempty"`
+	RequiredFields            []string `json:"required_fields,omitempty"`
+	ExcludesZeroDataRetention bool     `json:"excludes_zero_data_retention,omitempty"`
 }
 
 type ConnectorContract struct {

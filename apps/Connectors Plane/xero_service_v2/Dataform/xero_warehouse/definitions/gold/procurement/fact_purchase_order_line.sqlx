@@ -1,0 +1,32 @@
+config {
+  type: "table",
+  schema: "xero_gold_procurement",
+  description: "Xero purchase order lines; mismatched child sets are excluded from additive commitment measures.",
+  assertions: { nonNull: ["tenant_id", "purchase_order_id", "line_item_id", "purchase_order_line_key"], uniqueKey: ["purchase_order_line_key"] }
+}
+
+SELECT FARM_FINGERPRINT(l.tenant_id) AS company_key,
+       FARM_FINGERPRINT(CAST(l.order_date_local AS STRING)) AS date_key,
+       p.contact_key, p.supplier_key,
+       l.purchase_order_line_key, l.purchase_order_key,
+       l.tenant_id, l.purchase_order_id, l.line_item_id,
+       l.purchase_order_number, l.status, l.is_deleted,
+       l.is_billed, l.is_open_commitment, l.is_line_set_ambiguous,
+       l.is_current_line_set_observed, l.is_removed_from_source,
+       l.item_code, l.account_code, l.description, l.quantity, l.unit_amount,
+       l.currency_code, l.line_amount_raw,
+       l.net_amount_in_currency AS source_net_amount_in_currency,
+       IF(l.is_open_commitment AND NOT l.is_billed AND NOT l.is_line_set_ambiguous
+          AND NOT l.is_removed_from_source
+          AND l.currency_code IS NOT NULL, l.net_amount_in_currency, NULL) AS committed_net_amount_in_currency,
+       l.tax_amount AS source_vat_in_currency,
+       IF(l.tracking_category_1_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.tracking_category_1_id))) AS tracking_category_1_key,
+       IF(l.tracking_option_1_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.tracking_option_1_id))) AS tracking_option_1_key,
+       IF(l.tracking_category_2_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.tracking_category_2_id))) AS tracking_category_2_key,
+       IF(l.tracking_option_2_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.tracking_option_2_id))) AS tracking_option_2_key,
+       l.tracking_category_1_id, l.tracking_option_1_id,
+       l.tracking_category_2_id, l.tracking_option_2_id,
+       'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_purchase_order_line")} AS l
+LEFT JOIN ${ref("xero_gold_procurement", "fact_purchase_order")} AS p
+  ON l.tenant_id = p.tenant_id AND l.purchase_order_id = p.purchase_order_id

@@ -2,6 +2,8 @@ pub mod agent_routes;
 pub mod answer_routes;
 pub mod api_error;
 pub mod audio_routes;
+pub mod audit_page;
+mod audit_seo;
 pub mod auth;
 pub mod cache;
 pub mod canary;

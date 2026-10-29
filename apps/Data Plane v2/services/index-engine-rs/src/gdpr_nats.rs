@@ -1,6 +1,6 @@
 //! NATS `JetStream` consumer for the cross-plane GDPR organization-erasure
 //! fan-out (`verevon.gdpr.erasure.requested`) on the shared cross-plane
-//! broker (`control-shared-nats`, stream `AQENCIA_CONTROLPLANE`).
+//! broker (`control-shared-nats`, stream `CONTROLPLANE`).
 //!
 //! Decoding, subject-type gating (organization-only — see `gdpr.rs`'s
 //! module docs for why per-user events must NOT trigger this purge), and the
@@ -13,7 +13,7 @@
 //! identity — never index-engine-rs's own Data-Plane-local
 //! `NATS_URL`/`DATAPLANE_NATS_TOKEN` connection to `data-nats` via
 //! `nats_connection::connect` (that broker does not host
-//! `AQENCIA_CONTROLPLANE`), and never any other service's shared-broker
+//! `CONTROLPLANE`), and never any other service's shared-broker
 //! identity.
 //!
 //! This binds to the pre-provisioned consumer via
@@ -22,13 +22,13 @@
 //! **without** first calling `Context::get_stream`
 //! (`STREAM.INFO.<stream>`) — the crate's own docs note this saves a
 //! server round trip when binding to a single consumer. This identity
-//! therefore does not need `$JS.API.STREAM.INFO.AQENCIA_CONTROLPLANE`
+//! therefore does not need `$JS.API.STREAM.INFO.CONTROLPLANE`
 //! permission at all, deliberately avoiding the `get_stream`-before-
 //! `get_consumer` pattern that required an extra permission grant for
 //! Model Plane session-core's `gdpr_nats.rs` (`apps/Model Plane/rust/
 //! services/session-core/src/gdpr_nats.rs`, which calls `js.get_stream(..)`
 //! before `stream.get_consumer(..)` and consequently needs
-//! `$JS.API.STREAM.INFO.AQENCIA_CONTROLPLANE` granted to `session-core-gdpr`
+//! `$JS.API.STREAM.INFO.CONTROLPLANE` granted to `session-core-gdpr`
 //! in `control-shared-nats.conf`). Runtime credentials here can only
 //! bind/pull/ACK a pre-existing consumer — never create or mutate JetStream
 //! topology (no `CONSUMER.CREATE`/`STREAM.CREATE` rights).
@@ -49,7 +49,7 @@ use tracing::{error, info, warn};
 
 use crate::gdpr::{parse_erasure_event, purge_organization_data};
 
-const STREAM_NAME: &str = "AQENCIA_CONTROLPLANE";
+const STREAM_NAME: &str = "CONTROLPLANE";
 const SUBJECT: &str = "verevon.gdpr.erasure.requested";
 const DURABLE_NAME: &str = "index-engine-org-erasure";
 const INBOX_PREFIX: &str = "_INBOX.INDEX_ENGINE_GDPR";
@@ -155,7 +155,7 @@ async fn handle_message(pool: &PgPool, payload: &[u8]) -> anyhow::Result<Outcome
 /// `nats-connection-rs` shared crate used by `main.rs` for index-engine's
 /// own Data-Plane-local `data-nats` broker under a bearer token) — that
 /// connection is a different NATS session, under different credentials,
-/// against a different broker that does not host `AQENCIA_CONTROLPLANE`.
+/// against a different broker that does not host `CONTROLPLANE`.
 /// `NATS_SHARED_USER`/`NATS_SHARED_PASSWORD` are read directly with no
 /// fallback, so a missing/misconfigured shared identity fails the
 /// connection attempt (retried by the caller's supervised background loop)

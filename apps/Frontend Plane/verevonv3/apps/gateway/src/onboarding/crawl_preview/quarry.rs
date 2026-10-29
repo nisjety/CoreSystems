@@ -1,189 +1,144 @@
-use anyhow::Result;
-use axum::response::sse::Event;
-use chrono::Utc;
+use crate::{config::AppState, public_url::normalize_public_http_url};
+use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::time::{sleep, Duration};
 
-use crate::{
-    config::AppState,
-    envelope::unwrap_data,
-    onboarding::crawl_preview::{
-        normalize::normalize_quarry_payload, sse::sse_json, types::CrawlPayload,
-    },
-};
-
-/// All onboarding crawl traffic goes through `quarry-edge` — the only
-/// sanctioned cross-plane Ingestion entrypoint. Edge verifies the Bearer JWT
-/// against auth-core and derives the org from the verified claims, so no
-/// org/tenant fields travel in request bodies.
-fn bearer(request: reqwest::RequestBuilder, token: Option<&str>) -> reqwest::RequestBuilder {
-    match token {
-        Some(token) => request.bearer_auth(token),
-        None => request,
-    }
+pub(super) struct PreviewReceipt {
+    pub snippet: Value,
+    pub elements: usize,
+}
+#[derive(Deserialize)]
+struct Page {
+    final_url: String,
+    status: u16,
+    run_id: String,
+    metadata: Metadata,
+    headings: Vec<Heading>,
+}
+#[derive(Deserialize)]
+struct Metadata {
+    title: Option<String>,
+    description: Option<String>,
+}
+#[derive(Deserialize)]
+struct Heading {
+    text: String,
 }
 
-pub(super) async fn forward_seed_scrape(
+pub(super) async fn capture_preview(
     state: &AppState,
-    token: Option<&str>,
+    token: &str,
     url: &str,
-) -> Result<Vec<Event>> {
-    let response = bearer(
-        state
-            .client
-            .post(format!("{}/v1/scrape/stream", state.quarry_edge_url)),
-        token,
-    )
-    .json(&json!({ "url": url }))
-    .send()
-    .await?;
-
-    let mut out = Vec::new();
-    let text = response.text().await.unwrap_or_default();
-    for packet in text.split("\n\n") {
-        let mut event_name = "message";
-        let mut data = None::<String>;
-        for line in packet.lines() {
-            if let Some(value) = line.strip_prefix("event:") {
-                event_name = value.trim();
-            }
-            if let Some(value) = line.strip_prefix("data:") {
-                data = Some(value.trim().to_owned());
-            }
-        }
-        let Some(data) = data else { continue };
-        let json = serde_json::from_str::<Value>(&data).unwrap_or_else(|_| json!({}));
-        if let Some(payload) = normalize_quarry_payload(json, event_name, "seed") {
-            out.push(sse_json(
-                &payload.kind,
-                payload.value.unwrap_or_else(|| json!({})),
-            ));
-        }
-    }
-    Ok(out)
-}
-
-pub(super) async fn create_crawl_job(
-    state: &AppState,
-    token: Option<&str>,
-    url: &str,
-    max_pages: u32,
-) -> Result<String> {
-    // Edge crawl handoff. The old direct-control body also carried `org_id`
-    // and `auto_commit`; org now comes from the verified JWT claims and
-    // `auto_commit` was a dead param the orchestrator never read. `ingest` is
-    // deliberately absent: a preview stays working-set only.
-    let body = json!({
-        "url": url,
-        "max_pages": max_pages,
-        "max_depth": 1,
-    });
-    let response = bearer(
-        state
-            .client
-            .post(format!("{}/v1/crawl", state.quarry_edge_url)),
-        token,
-    )
-    .header("content-type", "application/json")
-    .json(&body)
-    .send()
-    .await?;
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
-    let data = unwrap_data(&body);
-    // Edge returns a control job record; prefer explicit job-id fields, then
-    // the generic `id` the HandoffAck envelope uses.
-    let job_id = ["job_id", "jobId", "id"]
-        .iter()
-        .find_map(|key| data.get(key).and_then(Value::as_str))
-        .unwrap_or_default();
-    if job_id.is_empty() {
-        anyhow::bail!("crawl job missing id");
-    }
-    Ok(job_id.to_owned())
-}
-
-/// Poll quarry-edge's job-event log and forward each normalized event to `tx`
-/// the moment it is read, so the onboarding SSE streams live progress instead
-/// of buffering the whole crawl and emitting it at the end. Edge serves the
-/// log as a drain-once SSE stream (`event: <type>` / `data: <event json>`
-/// frames plus a terminal `data: done` marker), so each poll parses frames and
-/// skips those at or below the local `seq` watermark (edges that honor
-/// `after_seq` filter server-side; older ones re-send the whole log). Returns
-/// when the run hits a terminal event, the 18s budget elapses, or the receiver
-/// is dropped (client disconnected). An upstream request error propagates as
-/// `Err` so the handler can surface an "ingestion unreachable" warning.
-pub(super) async fn poll_crawl_events(
-    state: &AppState,
-    token: Option<&str>,
-    job_id: &str,
-    tx: tokio::sync::mpsc::Sender<CrawlPayload>,
-) -> Result<()> {
-    let mut after_seq = 0u64;
-    let started_at = Utc::now().timestamp_millis();
-
-    loop {
-        if Utc::now().timestamp_millis() - started_at > 18_000 {
-            break;
-        }
-        let response = bearer(
-            state.client.get(format!(
-                "{}/v1/jobs/{}/events?after_seq={}&limit=100",
-                state.quarry_edge_url,
-                urlencoding::encode(job_id),
-                after_seq
-            )),
-            token,
-        )
+) -> Result<PreviewReceipt> {
+    let mut response = state
+        .client
+        .post(format!("{}/v1/audit/page", state.quarry_edge_url))
+        .bearer_auth(token)
+        .timeout(std::time::Duration::from_secs(15))
+        .json(&json!({"url":url}))
         .send()
-        .await?;
-        let text = response.text().await.unwrap_or_default();
-
-        let mut terminal = false;
-        for packet in text.split("\n\n") {
-            let mut data = None::<String>;
-            for line in packet.lines() {
-                if let Some(value) = line.strip_prefix("data:") {
-                    data = Some(value.trim().to_owned());
-                }
-            }
-            let Some(data) = data else { continue };
-            if data == "done" {
-                // Edge's end-of-drain marker, not a crawl event.
-                continue;
-            }
-            let Ok(item) = serde_json::from_str::<Value>(&data) else {
-                continue;
-            };
-            let seq = item.get("seq").and_then(Value::as_u64).unwrap_or(0);
-            if seq != 0 && seq <= after_seq {
-                continue;
-            }
-            after_seq = after_seq.max(seq);
-            let event_type = item
-                .get("type")
-                .or_else(|| item.get("event_type"))
-                .and_then(Value::as_str)
-                .unwrap_or("event")
-                .to_owned();
-            let payload = item.get("payload").cloned().unwrap_or_else(|| item.clone());
-            if let Some(mapped) = normalize_quarry_payload(payload, &event_type, "live") {
-                terminal = terminal
-                    || event_type == "run_completed"
-                    || event_type == "run_failed"
-                    || event_type == "run_cancelled";
-                // Receiver dropped → client disconnected; stop polling.
-                if tx.send(mapped).await.is_err() {
-                    return Ok(());
-                }
-            }
+        .await?
+        .error_for_status()?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len() + chunk.len() > 512 * 1024 {
+            bail!("preview response exceeds limit");
         }
-
-        if terminal {
-            break;
-        }
-
-        sleep(Duration::from_millis(750)).await;
+        bytes.extend_from_slice(&chunk);
     }
+    preview_receipt(serde_json::from_slice(&bytes).context("invalid public preview")?)
+}
 
-    Ok(())
+fn preview_receipt(page: Page) -> Result<PreviewReceipt> {
+    if !(200..300).contains(&page.status)
+        || page.headings.len() > 200
+        || page.run_id.is_empty()
+        || page.run_id.len() > 128
+    {
+        bail!("public preview did not capture a page");
+    }
+    let url = normalize_public_http_url(&page.final_url)
+        .map_err(|_| anyhow::anyhow!("invalid preview URL"))?;
+    let title = page.metadata.title.filter(|s| !s.trim().is_empty());
+    let description = page.metadata.description.filter(|s| !s.trim().is_empty());
+    if title.as_ref().is_some_and(|s| s.len() > 4096)
+        || description.as_ref().is_some_and(|s| s.len() > 16384)
+        || page.headings.iter().any(|h| h.text.len() > 4096)
+    {
+        bail!("public preview fields exceed limit");
+    }
+    let excerpt = description.unwrap_or_else(|| {
+        page.headings
+            .iter()
+            .take(4)
+            .map(|h| h.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" · ")
+    });
+    if title.is_none() && excerpt.trim().is_empty() {
+        bail!("public preview contains no text evidence");
+    }
+    Ok(PreviewReceipt {
+        elements: page.headings.len(),
+        snippet: json!({"id":page.run_id,"kind":"text","title":title.unwrap_or_else(|| url.clone()),
+            "excerpt":excerpt,"url":url,"source":"seed","contentType":"text/html","elementCount":page.headings.len()}),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::{
+        matchers::{body_json, header, method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+    fn page(status: u16) -> Value {
+        json!({"final_url":"https://www.triodelab.no/","status":status,"run_id":"run_test","metadata":{"title":"Triodelab","description":null},"headings":[{"text":"Digitale tjenester"}]})
+    }
+    #[tokio::test]
+    async fn preview_uses_only_bounded_quarry_capture_and_verified_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audit/page"))
+            .and(header("authorization", "Bearer test-preview-token"))
+            .and(body_json(json!({"url":"https://triodelab.no/"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page(200)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = server.uri();
+        let receipt = capture_preview(&state, "test-preview-token", "https://triodelab.no/")
+            .await
+            .unwrap();
+        assert_eq!(receipt.snippet["url"], "https://www.triodelab.no/");
+        assert_eq!(receipt.snippet["excerpt"], "Digitale tjenester");
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+    #[tokio::test]
+    async fn upstream_denial_is_not_a_successful_empty_preview() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = server.uri();
+        assert!(
+            capture_preview(&state, "test-preview-token", "https://triodelab.no/")
+                .await
+                .is_err()
+        );
+    }
+    #[test]
+    fn unsuccessful_missing_or_private_evidence_is_rejected() {
+        assert!(preview_receipt(serde_json::from_value(page(404)).unwrap()).is_err());
+        let mut empty = page(200);
+        empty["metadata"]["title"] = Value::Null;
+        empty["headings"] = json!([]);
+        assert!(preview_receipt(serde_json::from_value(empty).unwrap()).is_err());
+        let mut private = page(200);
+        private["final_url"] = json!("http://127.0.0.1/");
+        assert!(preview_receipt(serde_json::from_value(private).unwrap()).is_err());
+    }
 }

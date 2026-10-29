@@ -1,0 +1,143 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: visma_v2
+      POSTGRES_PASSWORD: visma_v2
+      POSTGRES_DB: visma_v2
+    ports:
+      - "127.0.0.1:${VSV2_POSTGRES_HOST_PORT:-55433}:5432"
+    volumes:
+      - vsv2_pg:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U visma_v2"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:${VSV2_REDIS_HOST_PORT:-56380}:6379"
+    volumes:
+      - vsv2_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── vsv2 CLI / scheduler ───────────────────────────────────────────────────
+  vsv2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: vsv2:local
+    # Default: the scheduler for every tenant in config/tenants (hourly, daily and weekly full
+    # passes, writing raw JSON to BigQuery staging). Override CMD per task, e.g.:
+    #   docker compose run --rm vsv2 token
+    #   docker compose run --rm vsv2 schedule --once      # one pass, then exit
+    #   docker compose run --rm vsv2 sync --full --tenant <id> --endpoint <name>
+    command:
+      - "schedule"
+      - "--config-dir"
+      - "config/endpoints"
+      - "--tenants-dir"
+      - "config/tenants"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # ── Postgres ──────────────────────────────────────────────────────────
+      VSV2_DATABASE_URL: "postgres://visma_v2:visma_v2@postgres:5432/visma_v2"
+      # ── Redis ─────────────────────────────────────────────────────────────
+      VSV2_REDIS_URL: "redis://redis:6379"
+      # ── Logging ───────────────────────────────────────────────────────────
+      RUST_LOG: "${RUST_LOG:-info,vsv2=debug}"
+      # ── BigQuery staging (raw JSON per endpoint) ─────────────────────────
+      # Setting the staging dataset selects the staging writer; the project must be set too.
+      VSV2_BIGQUERY_PROJECT: "${VSV2_BIGQUERY_PROJECT:-aquatiq-datavarehus}"
+      VSV2_BIGQUERY_DATASET_STAGING: "${VSV2_BIGQUERY_DATASET_STAGING:-dw_staging_visma}"
+      VSV2_BIGQUERY_LOCATION: "${VSV2_BIGQUERY_LOCATION:-europe-north2}"
+      GOOGLE_APPLICATION_CREDENTIALS: "/run/secrets/gcp.json"
+      # ── Local dry-run sink: off, staging is the destination ──────────────
+      VSV2_LOCAL_BRONZE_POSTGRES_ENABLED: "${VSV2_LOCAL_BRONZE_POSTGRES_ENABLED:-false}"
+      # ── ERP request budget for the whole scheduler (one limiter, shared by all tenants) ───
+      # The .env values (60/min, 5000/day) suit a single manual sync; the scheduler's weekly full
+      # pass alone needs far more. Visma allows 15000 requests per hour per tenant, 240/min stays
+      # under that even if one tenant had the budget to itself. The day cap is minute * 1440.
+      VSV2_RATELIMIT_ERP_REST_RPM: "${VSV2_SCHEDULER_ERP_RPM:-240}"
+      VSV2_RATELIMIT_ERP_REST_RPD: "${VSV2_SCHEDULER_ERP_RPD:-345600}"
+      VSV2_RATELIMIT_DATAMART_RPM: "${VSV2_SCHEDULER_DM_RPM:-120}"
+      VSV2_RATELIMIT_DATAMART_RPD: "${VSV2_SCHEDULER_DM_RPD:-172800}"
+      # ── Scheduler: how often to look for due work, tenants in parallel ───
+      VSV2_SCHEDULE_POLL_SECS: "${VSV2_SCHEDULE_POLL_SECS:-60}"
+      VSV2_SCHEDULE_PARALLEL_TENANTS: "${VSV2_SCHEDULE_PARALLEL_TENANTS:-4}"
+      # ── Optional schedule overrides for fast local testing ─────────────
+      # VSV2_SCHEDULE_TIER1_SECS: "60"
+      # VSV2_SCHEDULE_TIER2_SECS: "300"
+      # VSV2_SCHEDULE_TIER4_SECS: "600"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - "CMD"
+        - "/usr/local/bin/vsv2"
+        - "healthcheck"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    # Time to finish a write before the container is killed (Docker's default is 10 s). Checkpoints
+    # only advance after a successful write, so a kill is safe, but a graceful stop avoids a replay.
+    stop_grace_period: 120s
+    volumes:
+      - ./config:/app/config:ro
+      # Google credentials, read-only and outside the image. The default is the gcloud ADC file of
+      # whoever runs compose; on a server point VSV2_GCP_CREDENTIALS_FILE at a service-account key
+      # the container user (uid 1001) can read.
+      - ${VSV2_GCP_CREDENTIALS_FILE:-~/.config/gcloud/application_default_credentials.json}:/run/secrets/gcp.json:ro
+
+  vsv2-http:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: vsv2:local
+    entrypoint:
+      - "/usr/local/bin/vsv2-http"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      VSV2_DATABASE_URL: "postgres://visma_v2:visma_v2@postgres:5432/visma_v2"
+      VSV2_REDIS_URL: "redis://redis:6379"
+      VSV2_HTTP_BIND_ADDR: "0.0.0.0:8080"
+      VSV2_HTTP_BEARER_TOKEN: "${VSV2_HTTP_BEARER_TOKEN}"
+      VSV2_HTTP_BACKFILL_TIMEOUT_SECS: "${VSV2_HTTP_BACKFILL_TIMEOUT_SECS:-300}"
+      RUST_LOG: "${RUST_LOG:-info,vsv2=debug}"
+      VSV2_BIGQUERY_PROJECT: "${VSV2_BIGQUERY_PROJECT:-aquatiq-datavarehus}"
+      VSV2_BIGQUERY_DATASET_STAGING: "${VSV2_BIGQUERY_DATASET_STAGING:-dw_staging_visma}"
+      VSV2_BIGQUERY_LOCATION: "${VSV2_BIGQUERY_LOCATION:-europe-north2}"
+      GOOGLE_APPLICATION_CREDENTIALS: "/run/secrets/gcp.json"
+      VSV2_LOCAL_BRONZE_POSTGRES_ENABLED: "${VSV2_LOCAL_BRONZE_POSTGRES_ENABLED:-false}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${VSV2_HTTP_HOST_PORT:-28080}:8080"
+    volumes:
+      - ./config:/app/config:ro
+      - ${VSV2_GCP_CREDENTIALS_FILE:-~/.config/gcloud/application_default_credentials.json}:/run/secrets/gcp.json:ro
+
+volumes:
+  vsv2_pg:
+  vsv2_redis:

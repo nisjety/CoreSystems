@@ -1,12 +1,15 @@
-import { Route, Router, useNavigate, type RouteSectionProps } from '@solidjs/router'
+import { Navigate, Route, Router, useNavigate, type RouteSectionProps } from '@solidjs/router'
 import { createEffect, lazy, Show, type JSX } from 'solid-js'
 import { AppShell } from '@/app/shell/AppShell'
 import { hasWorkspaceAdminAccess } from '@/shared/session/access'
 import { getSession } from '@/shared/session/session-store'
+import { shouldEnableSceneMode } from '@/demo/scene-mode'
 
 const DashboardPage = lazy(() => import('@/features/dashboard/components/DashboardPage'))
 const ChatPage = lazy(() => import('@/features/chat/components/ChatPage'))
 const StudioPage = lazy(() => import('@/features/studio/components/StudioPage'))
+const EngagementPage = lazy(() => import('@/features/visibility/components/EngagementPage'))
+const VisibilityPage = lazy(() => import('@/features/visibility/components/VisibilityPage'))
 const InboxPage = lazy(() => import('@/features/inbox/components/InboxPage'))
 const TicketingPage = lazy(() => import('@/features/tickets/components/TicketingPage'))
 const SupportPage = lazy(() => import('@/features/support/components/SupportPage'))
@@ -25,6 +28,7 @@ const SharedWithMePage = lazy(() => import('@/features/knowledge/components/Shar
 const SpacePage = lazy(() => import('@/features/spaces/components/SpacePage'))
 const SpacesIndexPage = lazy(() => import('@/features/spaces/components/SpacesIndexPage'))
 const LeadsPage = lazy(() => import('@/features/leads/components/LeadsPage'))
+const AnbudPage = lazy(() => import('@/features/anbud/components/AnbudPage'))
 const VerevonIngestionsPage = lazy(() => import('@/features/ingestions/components/VerevonIngestionsPage'))
 const AuthPage = lazy(() => import('@/features/auth/components/AuthPage'))
 const AcceptInvitationPage = lazy(() => import('@/features/auth/components/AcceptInvitationPage'))
@@ -32,6 +36,10 @@ const OnboardingPage = lazy(() => import('@/features/onboarding/components/Onboa
 const AccountSettingsPage = lazy(() => import('@/features/settings/components/AccountSettingsPage'))
 const SettingsPage = lazy(() => import('@/features/settings/components/SettingsPage'))
 const NotFoundPage = lazy(() => import('@/app/routes/NotFoundPage'))
+// Scene capture is available only in the explicitly enabled development build.
+const ScenePage = import.meta.env.DEV && shouldEnableSceneMode(import.meta.env.VITE_SCENE_MODE, true, window.location.pathname)
+  ? lazy(() => import('@/demo/ScenePage'))
+  : undefined
 
 function SessionLoading() {
   return (
@@ -134,6 +142,7 @@ export default function App() {
       <Route path="/login" component={AuthPage} />
       <Route path="/reset-password" component={AuthPage} />
       <Route path="/accept-invitation/:invitationId" component={AcceptInvitationPage} />
+      {ScenePage ? <Route path="/scene/:id" component={ScenePage} /> : null}
       <Route
         path="/onboarding"
         component={() => (
@@ -153,6 +162,13 @@ export default function App() {
         <Route path="/spaces/:spaceId" component={SpacePage} />
         <Route path="/studio" component={() => <StudioPage section="canvas" />} />
         <Route path="/studio/canvas" component={() => <StudioPage section="canvas" />} />
+        <Route path="/engagement" component={EngagementPage} />
+        <Route path="/engagement/visibility" component={VisibilityPage} />
+<Route path="/engagement/visibility/pages" component={VisibilityPage} />
+<Route path="/engagement/visibility/groups" component={VisibilityPage} />
+<Route path="/engagement/visibility/links" component={VisibilityPage} />
+<Route path="/engagement/visibility/competitors" component={VisibilityPage} />
+        <Route path="/studio/pulse" component={() => <Navigate href="/engagement/visibility" />} />
         <Route path="/studio/campaigns" component={() => <StudioPage section="campaigns" />} />
         <Route path="/studio/templates" component={() => <StudioPage section="templates" />} />
         <Route path="/inbox" component={InboxPage} />
@@ -190,6 +206,8 @@ export default function App() {
         <Route path="/knowledge" component={KnowledgePage} />
         <Route path="/knowledge/shared" component={SharedWithMePage} />
         <Route path="/leads" component={LeadsPage} />
+        <Route path="/anbud" component={() => <AnbudPage section="matches" />} />
+        <Route path="/anbud/radar" component={() => <AnbudPage section="radar" />} />
         <Route path="/account" component={AccountSettingsPage} />
         <Route path="/settings" component={() => <RequireWorkspaceAdmin><SettingsPage /></RequireWorkspaceAdmin>} />
         <Route path="/settings/:section" component={() => <RequireWorkspaceAdmin><SettingsPage /></RequireWorkspaceAdmin>} />

@@ -20,7 +20,7 @@ export function WebsiteStepContent(props: WebsiteStepContentProps) {
     <section class="onboarding-copy onboarding-copy--website">
       <p class="onboarding-eyebrow">Nettside</p>
       <h1>Legg Til Nettside</h1>
-      <p>Lim inn firmaets URL. Vi leser de offentlige sidene og gjør dem til agentens første kunnskapsbase. Du kan legge til flere kilder rett etterpå.</p>
+      <p>Lim inn firmaets URL. Vi leser en avgrenset forhåndsvisning av den offentlige forsiden. Nettsiden lagres i Marketing når arbeidsområdet er klart.</p>
 
       <OnboardingField label="Nettside-URL" class="onboarding-field--url">
         <div class="onboarding-url-control">
@@ -136,7 +136,7 @@ export function WebsiteStepVisual(props: { website: OnboardingState['website'] }
         <span>
           <Switch fallback="Quarry henter strukturert tekst, bilder og filer fra nettstedet ditt.">
             <Match when={props.website.status === 'completed'}>
-              Rask forhåndsvisning fra forsiden din. Hele nettstedet indekseres når arbeidsområdet er klart.
+              Målt forhåndsvisning fra forsiden. Dette er ikke en full gjennomgang eller en indeksert kunnskapsbase.
             </Match>
           </Switch>
         </span>

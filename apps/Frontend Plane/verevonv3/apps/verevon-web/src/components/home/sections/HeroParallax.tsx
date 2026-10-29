@@ -28,39 +28,49 @@ export function HeroParallax() {
 			return;
 		}
 
-		const reduceMotion = window.matchMedia(
-			"(prefers-reduced-motion: reduce)",
-		).matches;
+		const fullMotionIsEnabled =
+			document.documentElement.dataset.motion === "full";
+		let refreshFrame: number | null = null;
 
-		if (reduceMotion) {
+		if (
+			window.matchMedia("(prefers-reduced-motion: reduce)").matches &&
+			!fullMotionIsEnabled
+		) {
 			gsap.set([media, copy], { clearProps: "transform" });
 			return;
 		}
 
 		const context = gsap.context(() => {
-			const timeline = gsap.timeline({
-				defaults: { ease: "none", force3D: true },
-				scrollTrigger: {
-					trigger: hero,
-					start: "top top",
-					end: "bottom top",
-					scrub: true,
-					id: "verevon-hero-parallax",
-					invalidateOnRefresh: true,
-				},
-			});
+			const scrollTrigger = {
+				trigger: hero,
+				start: "top top",
+				end: "bottom top",
+				scrub: true,
+				id: "verevon-hero-parallax",
+				invalidateOnRefresh: true,
+			};
 
-			timeline
-				.fromTo(media, { yPercent: 0 }, { yPercent: 80, duration: 1 }, 0)
-				.fromTo(copy, { yPercent: 0 }, { yPercent: 40, duration: 1 }, 0);
+			// A restrained depth shift keeps the video alive without moving it out
+			// from beneath the content as the hero leaves the viewport.
+			gsap.fromTo(
+				media,
+				{ scale: 1.06, yPercent: 0 },
+				{ scale: 1.12, yPercent: 10, ease: "none", force3D: true, scrollTrigger },
+			);
+			gsap.fromTo(
+				copy,
+				{ yPercent: 0 },
+				{ yPercent: 6, ease: "none", force3D: true, scrollTrigger },
+			);
 		}, hero);
 
-		const refreshFrame = window.requestAnimationFrame(() =>
-			ScrollTrigger.refresh(),
-		);
+		refreshFrame = window.requestAnimationFrame(() => ScrollTrigger.refresh());
 
 		return () => {
-			window.cancelAnimationFrame(refreshFrame);
+			if (refreshFrame !== null) {
+				window.cancelAnimationFrame(refreshFrame);
+			}
+
 			context.revert();
 		};
 	}, []);

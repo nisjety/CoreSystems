@@ -1,0 +1,19 @@
+{
+  "endpoint_name": "vats",
+  "bigquery_table": "visma_vats",
+  "primary_key": "vatId",
+  "source": "erp_rest",
+  "api_method": "get_vats",
+  "api_endpoint": "/v1/vat",
+  "pagination_profile": "numbertoread_skip",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "vatId",
+    "description",
+    "type",
+    "lastModifiedDateTime"
+  ],
+  "notes": "VAT/tax code configuration keyed by vatId. Incremental by lastModifiedDateTime filter; endpoint has no orderBy or count support. createdDateTime is not present in the response DTO."
+}

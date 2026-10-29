@@ -1,0 +1,48 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_supplier_payments",
+  description: "Bronze: Supplier (AP) payment documents and applications from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.str("applicationDate")} AS `applicationDate`,
+  ${bronze.str("applicationPeriod")} AS `applicationPeriod`,
+  ${bronze.float("appliedAmount")} AS `appliedAmount`,
+  ${bronze.float("balance")} AS `balance`,
+  ${bronze.str("branch")} AS `branch`,
+  ${bronze.str("cashAccount")} AS `cashAccount`,
+  ${bronze.str("currency")} AS `currency`,
+  ${bronze.str("description")} AS `description`,
+  ${bronze.float("financeCharges")} AS `financeCharges`,
+  ${bronze.bool("hold")} AS `hold`,
+  ${bronze.str("lastModifiedDateTime")} AS `lastModifiedDateTime`,
+  ${bronze.str("location")} AS `location`,
+  ${bronze.str("metadata")} AS `metadata`,
+  ${bronze.float("paymentAmount")} AS `paymentAmount`,
+  ${bronze.str("paymentLines")} AS `paymentLines`,
+  ${bronze.str("paymentMethod")} AS `paymentMethod`,
+  ${bronze.str("refNbr")} AS `refNbr`,
+  ${bronze.bool("released")} AS `released`,
+  ${bronze.str("status")} AS `status`,
+  ${bronze.str("supplier")} AS `supplier`,
+  ${bronze.str("timeStamp")} AS `timeStamp`,
+  ${bronze.str("type")} AS `type`,
+  ${bronze.float("unappliedBalance")} AS `unappliedBalance`,
+  ${bronze.str("paymentRef")} AS `paymentRef`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`  -- v2 does not fetch this field
+FROM ${ref("dw_staging_visma", "supplier_payments")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

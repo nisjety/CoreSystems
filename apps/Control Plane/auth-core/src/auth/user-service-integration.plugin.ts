@@ -12,6 +12,11 @@ import { sql } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { AuthIntegrationService } from '../internal/auth-integration.service';
+import {
+  oauthCallbackPrincipal,
+  providerIdFromCallbackPath,
+  type OAuthCallbackContext,
+} from './oauth-callback-principal';
 
 let authIntegrationService: AuthIntegrationService | null = null;
 
@@ -120,8 +125,8 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
           matcher: ({ path }) =>
             path === '/sign-in/email' || path === '/sign-in',
           handler: createAuthMiddleware(async (ctx) => {
-            const user = ctx.context.user;
             const newSession = ctx.context.newSession;
+            const user = newSession?.user ?? ctx.context.user;
             if (!user || !newSession?.session) return;
             if (!authIntegrationService) return;
             const headers = ctx.request?.headers;
@@ -182,15 +187,17 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
         {
           matcher: ({ path }) => (path ?? '').startsWith('/callback/'),
           handler: createAuthMiddleware(async (ctx) => {
-            // `user`/`account` are untyped on the after-hook context; narrow
-            // them once to the structural shapes this handler reads.
-            const user = ctx.context.user as OAuthCallbackUser | undefined;
-            const account = ctx.context.account as
-              | OAuthCallbackAccount
-              | undefined;
-            const newSession = ctx.context.newSession;
-            if (!user || !account) return;
             if (!authIntegrationService) return;
+            // Better Auth sets the session it created on this path, not the
+            // user or the account (see oauth-callback-principal.ts).
+            const principal = await oauthCallbackPrincipal(
+              ctx.context as unknown as OAuthCallbackContext,
+              providerIdFromCallbackPath(ctx.path, ctx.params?.id),
+              (userId) => ctx.context.internalAdapter.findAccounts(userId),
+            );
+            if (!principal) return;
+            const { user, account } = principal;
+            const newSession = ctx.context.newSession;
 
             const headers = ctx.request?.headers;
             const userAgent = headers?.get('user-agent') ?? undefined;
@@ -387,26 +394,6 @@ type RegisteredUserLike = {
   email: string;
   name?: string | null;
   emailVerified?: boolean | null;
-};
-
-/**
- * Structural shapes of the user/account objects the OAuth callback hook
- * reads. They arrive untyped (`any`) on the after-hook context, so the
- * handler narrows to exactly the fields it consumes.
- */
-type OAuthCallbackUser = {
-  id: string;
-  email: string;
-  name?: string | null;
-  image?: string | null;
-  emailVerified?: boolean | null;
-  createdAt?: Date | string;
-};
-
-type OAuthCallbackAccount = {
-  id: string;
-  accountId?: string | null;
-  providerId?: string | null;
 };
 
 /**

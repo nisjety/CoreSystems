@@ -1,0 +1,29 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_line_item_codes_populated",
+  description: "Shipment lines and inventory movement lines always carry an item, so a (model, movement type, tenant) whose lines have no item code at all means the extraction reads the wrong JSON field. Returns one row per model, movement type and tenant with lines but no inventory_id. In 2026-10 fact_shipment_line reads $.inventory.id while Visma sends inventoryNumber (77,607 of 77,607 lines empty), and the adjustment, issue and receipt branches of fact_inventory_movement_line read $.inventory.id while Visma sends inventoryItem.number (125,764 of 137,657 lines empty).",
+  tags: ["assertion", "silver", "keys"]
+}
+
+SELECT
+  'fact_shipment_line' AS model,
+  'SHIPMENT' AS movement_type,
+  tenant_id,
+  COUNT(*) AS line_rows,
+  COUNTIF(inventory_id IS NOT NULL) AS lines_with_item
+FROM ${ref("visma_silver", "fact_shipment_line")}
+GROUP BY tenant_id
+HAVING COUNTIF(inventory_id IS NOT NULL) = 0
+
+UNION ALL
+
+SELECT
+  'fact_inventory_movement_line' AS model,
+  movement_type,
+  tenant_id,
+  COUNT(*) AS line_rows,
+  COUNTIF(inventory_id IS NOT NULL) AS lines_with_item
+FROM ${ref("visma_silver", "fact_inventory_movement_line")}
+GROUP BY movement_type, tenant_id
+HAVING COUNTIF(inventory_id IS NOT NULL) = 0

@@ -13,15 +13,15 @@ import (
 )
 
 // SharedPublisher publishes cross-plane domain events to the shared
-// verevon-nats broker on the aqencia.controlplane.* subject namespace.
+// verevon-nats broker on the controlplane.* subject namespace.
 //
-// Subject convention: aqencia.controlplane.<entity>.<verb>
+// Subject convention: controlplane.<entity>.<verb>
 //
-//	aqencia.controlplane.user.registered
-//	aqencia.controlplane.user.updated
-//	aqencia.controlplane.user.deleted
-//	aqencia.controlplane.user.provider_linked
-//	aqencia.controlplane.user.provider_ready_for_integration
+//	controlplane.user.registered
+//	controlplane.user.updated
+//	controlplane.user.deleted
+//	controlplane.user.provider_linked
+//	controlplane.user.provider_ready_for_integration
 type SharedPublisher struct {
 	conn       *nats.Conn
 	js         jetstream.JetStream
@@ -39,7 +39,7 @@ type SharedCredentials struct {
 }
 
 // NewSharedPublisher connects to the shared NATS broker and ensures the
-// AQENCIA_CONTROLPLANE JetStream stream exists. Returns nil without error
+// CONTROLPLANE JetStream stream exists. Returns nil without error
 // when sharedURL is empty (shared publishing disabled).
 func NewSharedPublisher(sharedURL string, credentials SharedCredentials, clientName string) (*SharedPublisher, error) {
 	if sharedURL == "" {
@@ -133,10 +133,10 @@ func (sp *SharedPublisher) Close() {
 
 // ─── Typed helpers ────────────────────────────────────────────────────────────
 
-// PublishUserRegistered publishes aqencia.controlplane.user.registered.
+// PublishUserRegistered publishes controlplane.user.registered.
 // Called by the event handler when a new user is created from auth events.
 func (sp *SharedPublisher) PublishUserRegistered(ctx context.Context, userID, email, name, provider string) {
-	sp.Publish(ctx, "aqencia.controlplane.user.registered", map[string]any{
+	sp.Publish(ctx, "controlplane.user.registered", map[string]any{
 		"user_id":  userID,
 		"email":    email,
 		"name":     name,
@@ -144,27 +144,27 @@ func (sp *SharedPublisher) PublishUserRegistered(ctx context.Context, userID, em
 	})
 }
 
-// PublishUserUpdated publishes aqencia.controlplane.user.updated.
+// PublishUserUpdated publishes controlplane.user.updated.
 func (sp *SharedPublisher) PublishUserUpdated(ctx context.Context, userID, email string, changes map[string]any) {
-	sp.Publish(ctx, "aqencia.controlplane.user.updated", map[string]any{
+	sp.Publish(ctx, "controlplane.user.updated", map[string]any{
 		"user_id": userID,
 		"email":   email,
 		"changes": changes,
 	})
 }
 
-// PublishUserDeleted publishes aqencia.controlplane.user.deleted.
+// PublishUserDeleted publishes controlplane.user.deleted.
 func (sp *SharedPublisher) PublishUserDeleted(ctx context.Context, userID, email string) {
-	sp.Publish(ctx, "aqencia.controlplane.user.deleted", map[string]any{
+	sp.Publish(ctx, "controlplane.user.deleted", map[string]any{
 		"user_id": userID,
 		"email":   email,
 	})
 }
 
-// PublishProviderLinked publishes aqencia.controlplane.user.provider_linked.
+// PublishProviderLinked publishes controlplane.user.provider_linked.
 // Critical event: Ingestion Plane subscribes to this to provision M365 sync.
 func (sp *SharedPublisher) PublishProviderLinked(ctx context.Context, userID, email, provider, tenantID string) {
-	sp.Publish(ctx, "aqencia.controlplane.user.provider_linked", map[string]any{
+	sp.Publish(ctx, "controlplane.user.provider_linked", map[string]any{
 		"user_id":   userID,
 		"email":     email,
 		"provider":  provider,
@@ -172,7 +172,7 @@ func (sp *SharedPublisher) PublishProviderLinked(ctx context.Context, userID, em
 	})
 }
 
-// PublishResourceGrantsChanged publishes aqencia.controlplane.acl.resource_grants.changed.
+// PublishResourceGrantsChanged publishes controlplane.acl.resource_grants.changed.
 //
 // This is the generalized grant-change event. Retrieval (Data Plane) subscribes
 // to it to evict the affected (subject_id, org_id) authorization-cache key on
@@ -182,7 +182,7 @@ func (sp *SharedPublisher) PublishResourceGrantsChanged(
 	ctx context.Context,
 	grantID, orgID, resourceType, resourceID, subjectType, subjectID, role, action string,
 ) {
-	sp.Publish(ctx, "aqencia.controlplane.acl.resource_grants.changed", map[string]any{
+	sp.Publish(ctx, "controlplane.acl.resource_grants.changed", map[string]any{
 		"grant_id":      grantID,
 		"org_id":        orgID,
 		"resource_type": resourceType,
@@ -195,7 +195,7 @@ func (sp *SharedPublisher) PublishResourceGrantsChanged(
 }
 
 // PublishSpaceMembershipChanged publishes
-// aqencia.controlplane.space.membership_changed whenever a roster sync
+// controlplane.space.membership_changed whenever a roster sync
 // activates or deactivates a user's Space membership (ReplaceMemberships's
 // stale-member and reactivation paths). Model Plane's session-core
 // subscribes to this to invalidate (active=false) or clear (active=true)
@@ -206,7 +206,7 @@ func (sp *SharedPublisher) PublishResourceGrantsChanged(
 // apply a stale revoke after a later restore purely from message reordering
 // on a fire-and-forget publish: the payload itself states the current fact.
 func (sp *SharedPublisher) PublishSpaceMembershipChanged(ctx context.Context, spaceRef, orgID, subjectID string, active bool) {
-	sp.Publish(ctx, "aqencia.controlplane.space.membership_changed", map[string]any{
+	sp.Publish(ctx, "controlplane.space.membership_changed", map[string]any{
 		"space_ref":  spaceRef,
 		"org_id":     orgID,
 		"subject_id": subjectID,
@@ -263,13 +263,13 @@ func (sp *SharedPublisher) PublishGDPRErasure(ctx context.Context, eventID strin
 	if err != nil {
 		return fmt.Errorf("publish GDPR fan-out: %w", err)
 	}
-	if ack == nil || ack.Stream != "AQENCIA_CONTROLPLANE" || ack.Sequence == 0 {
+	if ack == nil || ack.Stream != "CONTROLPLANE" || ack.Sequence == 0 {
 		return fmt.Errorf("publish GDPR fan-out: invalid JetStream PubAck")
 	}
 	return nil
 }
 
-// PublishProviderReadyForIntegration publishes aqencia.controlplane.user.provider_ready_for_integration.
+// PublishProviderReadyForIntegration publishes controlplane.user.provider_ready_for_integration.
 // This gives downstream planes enough org-scoped context to attach a provider link without a second lookup.
 func (sp *SharedPublisher) PublishProviderReadyForIntegration(
 	ctx context.Context,
@@ -285,7 +285,7 @@ func (sp *SharedPublisher) PublishProviderReadyForIntegration(
 	role string,
 	onboardingStatus string,
 ) {
-	sp.Publish(ctx, "aqencia.controlplane.user.provider_ready_for_integration", map[string]any{
+	sp.Publish(ctx, "controlplane.user.provider_ready_for_integration", map[string]any{
 		"user_id":             userID,
 		"email":               email,
 		"provider":            provider,

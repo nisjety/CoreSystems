@@ -1,0 +1,31 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Tenant-scoped fiscal-period dimension grouped from the immutable tenant-date fiscal bridge. Xero does not expose ledger closure state, so no closed-period status is fabricated.",
+  assertions: {
+    nonNull: ["tenant_id", "financial_period_id", "financial_period_key", "period_start", "period_end"],
+    uniqueKey: ["financial_period_key"]
+  }
+}
+
+SELECT
+  financial_period_key,
+  tenant_id,
+  fiscal_configuration_state_key,
+  financial_period_id,
+  CONCAT('FY', CAST(fiscal_year AS STRING), ' P', LPAD(CAST(fiscal_month AS STRING), 2, '0')) AS period_description,
+  MIN(period_start) AS period_start,
+  MAX(period_end) AS period_end,
+  fiscal_year,
+  fiscal_month,
+  DIV(fiscal_month - 1, 3) + 1 AS fiscal_quarter,
+  ANY_VALUE(financial_year_end_day) AS financial_year_end_day,
+  ANY_VALUE(financial_year_end_month) AS financial_year_end_month,
+  ANY_VALUE(fiscal_configuration_version_id) AS fiscal_configuration_version_id,
+  ANY_VALUE(fiscal_configuration_observed_at) AS fiscal_configuration_observed_at,
+  ANY_VALUE(financial_period_basis) AS financial_period_basis,
+  CURRENT_DATE() BETWEEN MIN(period_start) AND MAX(period_end) AS is_current,
+  TRUE AS is_derived,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "bridge_company_date_fiscal_period")}
+GROUP BY 1, 2, 3, 4, 5, 8, 9

@@ -76,7 +76,7 @@ func surfaceSet(surfaces []string) map[string]struct{} {
 }
 
 func stableEventID(event MetricEvent) string {
-	hash := sha1.Sum([]byte(fmt.Sprintf("%s|%s|%s|%s|%s|%f|%d", event.OrgID, event.ActorUserID, event.Surface, event.Metric, event.Source, event.Value, event.OccurredAt.UnixNano())))
+	hash := sha1.Sum([]byte(fmt.Sprintf("%s|%s|%s|%s|%s|%f|%d|%s", event.OrgID, event.ActorUserID, event.Surface, event.Metric, event.Source, event.Value, event.OccurredAt.UnixNano(), event.SourceTraceRef)))
 	return "ins_evt_" + hex.EncodeToString(hash[:10])
 }
 
@@ -90,18 +90,38 @@ func fallback(value, defaultValue string) string {
 
 func copyMetricEvent(event MetricEvent) MetricEvent {
 	return MetricEvent{
-		ID:            event.ID,
-		OrgID:         event.OrgID,
-		ActorUserID:   event.ActorUserID,
-		Surface:       event.Surface,
-		Metric:        event.Metric,
-		Value:         event.Value,
-		Unit:          event.Unit,
-		Source:        event.Source,
-		ConnectorType: event.ConnectorType,
-		Dimensions:    copyMap(event.Dimensions),
-		OccurredAt:    event.OccurredAt,
+		ID:             event.ID,
+		OrgID:          event.OrgID,
+		ActorUserID:    event.ActorUserID,
+		Surface:        event.Surface,
+		Metric:         event.Metric,
+		Value:          event.Value,
+		Unit:           event.Unit,
+		Source:         event.Source,
+		ConnectorType:  event.ConnectorType,
+		Dimensions:     copyMap(event.Dimensions),
+		TimeWindow:     copyTimeWindow(event.TimeWindow),
+		ObservedAt:     event.ObservedAt,
+		SourceTraceRef: event.SourceTraceRef,
+		RetentionClass: event.RetentionClass,
+		OccurredAt:     event.OccurredAt,
 	}
+}
+
+func copyTimeWindow(input *TimeWindow) *TimeWindow {
+	if input == nil {
+		return nil
+	}
+	output := &TimeWindow{}
+	if input.From != nil {
+		from := *input.From
+		output.From = &from
+	}
+	if input.To != nil {
+		to := *input.To
+		output.To = &to
+	}
+	return output
 }
 
 func copyMap(input map[string]any) map[string]any {
@@ -119,15 +139,53 @@ func copyConnectorSlots(input []ConnectorSlot) []ConnectorSlot {
 	output := make([]ConnectorSlot, 0, len(input))
 	for _, slot := range input {
 		output = append(output, ConnectorSlot{
-			Type:               slot.Type,
-			DisplayName:        slot.DisplayName,
-			Surface:            slot.Surface,
-			Status:             slot.Status,
-			Authorization:      slot.Authorization,
-			TokenLeaseAudience: slot.TokenLeaseAudience,
-			RequiredEnv:        copyStrings(slot.RequiredEnv),
-			ReferenceURLs:      copyStrings(slot.ReferenceURLs),
-			Contracts:          copyContracts(slot.Contracts),
+			Type:                     slot.Type,
+			DisplayName:              slot.DisplayName,
+			Surface:                  slot.Surface,
+			Status:                   slot.Status,
+			Authorization:            slot.Authorization,
+			TokenLeaseAudience:       slot.TokenLeaseAudience,
+			RequiredCapabilities:     copyStrings(slot.RequiredCapabilities),
+			RequiredEnv:              copyStrings(slot.RequiredEnv),
+			ReferenceURLs:            copyStrings(slot.ReferenceURLs),
+			Contracts:                copyContracts(slot.Contracts),
+			IntegrationSteps:         copyIntegrationSteps(slot.IntegrationSteps),
+			AdvisoryInstructionPacks: copyAdvisoryInstructionPacks(slot.AdvisoryInstructionPacks),
+			ModelGrounding: ModelGroundingContract{
+				Contract:                  slot.ModelGrounding.Contract,
+				RequiredFields:            copyStrings(slot.ModelGrounding.RequiredFields),
+				ExcludesZeroDataRetention: slot.ModelGrounding.ExcludesZeroDataRetention,
+			},
+		})
+	}
+	return output
+}
+
+func copyIntegrationSteps(input []IntegrationStep) []IntegrationStep {
+	output := make([]IntegrationStep, 0, len(input))
+	for _, step := range input {
+		output = append(output, IntegrationStep{
+			ID:                   step.ID,
+			Label:                step.Label,
+			Purpose:              step.Purpose,
+			EndpointTemplate:     step.EndpointTemplate,
+			Method:               step.Method,
+			FixedOperation:       step.FixedOperation,
+			RequiredCapabilities: copyStrings(step.RequiredCapabilities),
+		})
+	}
+	return output
+}
+
+func copyAdvisoryInstructionPacks(input []AdvisoryInstructionPack) []AdvisoryInstructionPack {
+	output := make([]AdvisoryInstructionPack, 0, len(input))
+	for _, pack := range input {
+		output = append(output, AdvisoryInstructionPack{
+			ID:                pack.ID,
+			Mode:              pack.Mode,
+			RequiresReadiness: pack.RequiresReadiness,
+			SkillIDs:          copyStrings(pack.SkillIDs),
+			Instructions:      copyStrings(pack.Instructions),
 		})
 	}
 	return output

@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
         run_admin_job_worker(runner_store, runner_executor).await;
     });
 
-    // The GDPR erasure consumer binds to AQENCIA_CONTROLPLANE on the shared
+    // The GDPR erasure consumer binds to CONTROLPLANE on the shared
     // cross-plane broker (control-shared-nats), not this crate's own
     // Data-Plane-local `cfg.nats_url` (used below by `stream::spawn`/
     // `spawn_unverified_legacy`) — that broker never carries this subject.

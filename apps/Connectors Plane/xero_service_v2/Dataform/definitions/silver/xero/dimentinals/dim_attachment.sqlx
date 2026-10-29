@@ -1,0 +1,45 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  name: "dim_attachment",
+  description: "Currently listed Accounting attachments for observed tenant and parent pairs. Grain: tenant, parent endpoint, parent ID, attachment ID. No binary content.",
+  tags: ["silver", "xero", "dimension"]
+}
+
+WITH latest_parent_lists AS (
+  SELECT tenant_id, parent_endpoint, parent_id, snapshot_id, synced_at, attachment_ids
+  FROM ${ref("dw_staging_xero", "attachment_list_snapshots")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, parent_endpoint, parent_id
+    ORDER BY synced_at DESC, snapshot_id DESC
+  ) = 1
+),
+latest_metadata AS (
+  SELECT *
+  FROM ${ref("dw_staging_xero", "attachment_metadata")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, parent_endpoint, parent_id, attachment_id
+    ORDER BY synced_at DESC
+  ) = 1
+)
+
+SELECT
+  s.tenant_id,
+  s.parent_endpoint,
+  s.parent_id,
+  m.attachment_id,
+  m.filename,
+  m.mime_type,
+  m.content_length,
+  m.include_online,
+  m.url,
+  s.synced_at AS listed_at,
+  m.synced_at AS metadata_synced_at,
+  'xero' AS _source
+FROM latest_parent_lists AS s
+CROSS JOIN UNNEST(s.attachment_ids) AS listed_attachment_id
+JOIN latest_metadata AS m
+  ON m.tenant_id = s.tenant_id
+ AND m.parent_endpoint = s.parent_endpoint
+ AND m.parent_id = s.parent_id
+ AND m.attachment_id = listed_attachment_id

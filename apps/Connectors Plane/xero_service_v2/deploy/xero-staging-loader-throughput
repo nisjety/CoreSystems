@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Deploy a reviewed, isolated source tree with bounded loader concurrency.
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+if [[ $# -ne 3 || ( $1 != --preview && $1 != --apply ) ]]; then
+  printf 'Usage: %s <--preview|--apply> ISOLATED_SOURCE_DIR MAIN_ENV_FILE\n' "$0" >&2
+  exit 2
+fi
+source_dir=$(cd "$2" && pwd)
+env_file=$(cd "$(dirname "$3")" && pwd)/$(basename "$3")
+if [[ "$source_dir" == "$repo_root" || -d "$source_dir/.git" || -e "$source_dir/.env" \
+      || ! -f "$source_dir/main.py" || ! -f "$source_dir/requirements.txt" \
+      || ! -f "$source_dir/etl/common/bq_writer.py" ]]; then
+  printf 'Expected a reviewed, isolated Cloud Function source directory\n' >&2
+  exit 2
+fi
+if [[ ! -f "$env_file" ]]; then
+  printf 'Expected a private main-project environment file\n' >&2
+  exit 2
+fi
+
+set -a
+source "$env_file"
+set +a
+
+: "${GCP_PROJECT:?main project is required}"
+: "${GCS_BUCKET:?raw bucket is required}"
+: "${XERO_STAGING_DATASET:?staging dataset is required}"
+: "${XERO_STAGING_LAYOUT:?staging layout is required}"
+: "${XERO_INGESTION_NAMESPACE:?ingestion namespace is required}"
+: "${XERO_INGESTION_GENERATION:?ingestion generation is required}"
+: "${XERO_FRESH_START_AT:?baseline activation timestamp is required}"
+
+if [[ "$GCP_PROJECT" != "aquatiq-datavarehus" \
+      || "$GCS_BUCKET" != "aquatiq-datavarehus-xero-raw" \
+      || "$XERO_STAGING_DATASET" != "dw_staging_xero" \
+      || "$XERO_STAGING_LAYOUT" != "warehouse" \
+      || "$XERO_INGESTION_NAMESPACE" != "main" ]]; then
+  printf 'Refusing a non-main Xero raw-history deployment\n' >&2
+  exit 2
+fi
+if [[ ! "$XERO_INGESTION_GENERATION" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+  printf 'XERO_INGESTION_GENERATION must be a canonical UUID\n' >&2
+  exit 2
+fi
+
+args=(
+  functions deploy xero-staging-loader
+  --gen2
+  --project=aquatiq-datavarehus
+  --region=europe-north1
+  "--source=$source_dir"
+  --runtime=python312
+  --entry-point=process_fresh_gcs_upload
+  --memory=1Gi
+  --cpu=1
+  # Bound parallel Eventarc delivery so a large Xero run drains promptly. Raw
+  # receipt transactions and typed MERGEs make retried delivery idempotent.
+  --concurrency=80
+  --max-instances=3
+  --retry
+  --set-env-vars="GCP_PROJECT=$GCP_PROJECT,GCS_BUCKET=$GCS_BUCKET,XERO_STAGING_DATASET=$XERO_STAGING_DATASET,XERO_STAGING_LAYOUT=$XERO_STAGING_LAYOUT,XERO_INGESTION_NAMESPACE=$XERO_INGESTION_NAMESPACE,XERO_INGESTION_GENERATION=$XERO_INGESTION_GENERATION,XERO_FRESH_START_AT=$XERO_FRESH_START_AT"
+)
+
+if [[ $1 == --preview ]]; then
+  printf 'gcloud'
+  printf ' %q' "${args[@]}"
+  printf '\n'
+else
+  gcloud "${args[@]}"
+fi

@@ -9,7 +9,7 @@ export default tseslint.config(
     // other sessions) that carry their own eslint.config.* with an unrelated
     // dependency tree — always exclude them regardless of what worktrees exist
     // on disk.
-    ignores: ['dist', 'coverage', 'node_modules', 'apps', '**/.claude/worktrees/**'],
+    ignores: ['dist', 'dist-studio-demo', 'coverage', 'node_modules', 'apps', '**/.claude/worktrees/**'],
   },
   ...tseslint.configs.recommended,
   {

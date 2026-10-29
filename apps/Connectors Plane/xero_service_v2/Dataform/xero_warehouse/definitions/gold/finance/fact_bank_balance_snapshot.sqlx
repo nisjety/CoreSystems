@@ -1,0 +1,41 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Conformed Xero Bank Summary source snapshots. The values are non-additive within report metrics and across snapshots, and are separate from booked bank transactions.",
+  assertions: {
+    nonNull: ["tenant_id", "report_snapshot_key", "bank_balance_snapshot_key", "report_metric", "company_key", "date_key"],
+    uniqueKey: ["bank_balance_snapshot_key"]
+  }
+}
+
+SELECT
+  FARM_FINGERPRINT(s.tenant_id) AS company_key,
+  FARM_FINGERPRINT(CAST(s.snapshot_as_of_date AS STRING)) AS date_key,
+  IF(s.bank_account_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(s.tenant_id, '|', s.bank_account_id))) AS account_key,
+  s.bank_balance_snapshot_key,
+  s.report_snapshot_key,
+  s.tenant_id,
+  s.report_snapshot_id,
+  s.report_name,
+  s.report_from,
+  s.report_to,
+  s.report_date,
+  s.snapshot_as_of_date,
+  s.report_index,
+  s.section_index,
+  s.section_title,
+  s.row_index,
+  s.row_type,
+  s.row_label,
+  s.cell_index,
+  s.report_metric,
+  s.bank_account_id,
+  s.is_summary_row,
+  s.is_orphan_snapshot,
+  s.source_bank_amount,
+  s.is_report_snapshot,
+  s.is_non_additive,
+  s.is_non_additive_within_snapshot,
+  s.report_synced_at,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_bank_balance_snapshot")} AS s

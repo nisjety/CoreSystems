@@ -1,0 +1,975 @@
+{
+ "summary": "Design 3 (ZDR) is buildable without breaking any org that does not use ZDR, but ZDR is not usable today for any org. Live facts: 3 orgs, all on plan pro, none has ZDR on; no inference provider is ZDR-attested (all attestation vars empty), so every ZDR chat would be refused; no ZDR request has ever reached the running gateway. An admin can nevertheless switch ZDR on (only the plan is checked) and break chat org-wide.\n\nRecommended architecture. Control Plane (Auth Core) stays the only authority for retention posture. A new per-connection record (capability supported / not_supported / cannot_verify, basis, checked_at, digest) and an append-only acknowledgement ledger live in integration-corev2 next to the connection, written in the same audit transaction as the connection. At turn start the BFF (service-attested) asks Auth Core for a short signed retention decision. Auth Core re-verifies org ZDR, connection ownership and status, capability digest and the stored acknowledgement, then mints the turn's plane tokens with zdr=false plus a connection-bound zdr_waiver claim. Model-gateway and inference-core honour that claim only when the request routes to exactly that connection; any other route is refused, never silently downgraded. Session-core records an immutable receipt on the run row (retention_class=zdr_waived, ack id, connection id). The client can never send zdr=false: only a signed claim can lower the posture. Org ZDR stays on for everyone else, for other connections and for explicit Temporary chat. The org-wide ZDR flag is never written.\n\nFindings that change scope. (1) A token-ZDR turn that selects the subscription route with body zdr=false is silently re-routed by the gateway instead of refused. (2) Auth Core resolves org ZDR to false on any org-core error and caches that for 45 s (token lifetimes 300-900 s). (3) Three readers compute org ZDR differently. (4) ZDR turns are unmetered and show no processing line. (5) The browser retention purge cannot fire. (6) Org ZDR covers interactive content only; connector ingestion, contextual retrieval, graph extraction and memory processing run under persistent service principals on Azure.\n\nZDR children as metadata-only runs: not the right design. Session-core forces parent_run_id empty on a ZDR start, requires a fresh thread, and refuses ZDR credentials orchestration writes. The HTTP chat path creates no parent run at all. Do and agentic stay refused under ZDR with a typed bilingual reason in v1. A waived run is a normal run, so Do on Terra and its children register normally, which closes the 2026-10-02 finding for the subscription route by construction.\n\nOwn API keys do not exist today. The capability record is generic so they plug in later. cannot_verify is a real state; supported is reachable only for Verevon-attested deployments, or later for an explicit org-admin assertion.\n\nOwner decisions that matter most: the waived-run policy for derived jobs (memory index, dreaming, learning review run on Verevon paid providers; recommended skip), the processor-instruction risk of a member overriding an admin's ZDR (no admin lock now, counsel review, optional future control), and gating the ZDR switch on attestation.\n\nINCIDENT TO ACT ON: one read-only env listing printed the first 40 characters of CODEX_SUBSCRIPTION_INTERNAL_API_KEY from the inference-core container into this session transcript. It is not repeated here. Rotate that key.",
+ "current_state": [
+  {
+   "fact": "[FACT] 3 live orgs, all plan pro (ZDR-entitled), 0 with interactiveRetention.zdr=true; interactive-retention outbox empty. No ZDR-on org exists, so a live proof needs a dedicated test org.",
+   "source": "psql aggregates on controlplane-postgres db org_core (organizations, organization_interactive_retention_outbox), 2026-10-03; apps/Control Plane/org-core/internal/org/types.go:276-284 (pro, enterprise entitled)",
+   "verified_live": true
+  },
+  {
+   "fact": "[FACT] No inference provider is ZDR-attested: every AZURE_OPENAI_ZDR_* and AZURE_ANTHROPIC_ZDR_* attestation var is empty and *_ZDR_CONFIRMED=false, so supports_zdr=false everywhere and every ZDR chat request fails closed (ZdrUnavailable). The compliance pack and release preflight list this as an open release blocker.",
+   "source": "docker exec model-plane-inference-core-1 env (names, values reduced); inference-core/src/provider/zdr.rs; config.rs:267-271; provider/fallback.rs:1283-1290; docs/compliance/evidence/honest-limits.md L8; scripts/coresystem-cross-plane-preflight.sh:258",
+   "verified_live": true
+  },
+  {
+   "fact": "[FACT] No ZDR request has been served by the running stack: 0 ZDR log lines in model-gateway (37 h) and inference-core; session_core has 1921 runs, 0 with managed_run_terminalization_outbox.zdr=true, and 3 child runs (the A6 fan-out). Every ZDR code path below is therefore proven by source and unit tests only, never live.",
+   "source": "docker logs counts; psql on model-plane-postgres-1 db session_core (aggregates)",
+   "verified_live": true
+  },
+  {
+   "fact": "[FACT] Live Auth Core registry equals apps/Control Plane/config/plane-service-principals.json. Retention is per principal and audience, not per org or run. persistent toward inference-core: capability-core, embedding-engine, graph-index, orchestrator-core, session-core, retrieval-engine. persistent toward data-plane: corpus-seeder, finspo-core, imports-core, quarry-edge. model-gateway and execution-core hold zdr toward quarry; model-gateway holds zdr toward session-core. verevon-gateway holds only model-gateway (zdr) and no control-policy audience.",
+   "source": "docker exec auth-service node (non-secret fields only); config/plane-service-principals.json; convex-token.service.ts:155-168",
+   "verified_live": true
+  },
+  {
+   "fact": "[FACT] 5 live non-deleted openai-codex-subscription connections (2 active, 2 pending, 1 needs_refresh) across 2 orgs and 2 users; integration_connection_consents has 0 rows. All live Terra proofs ran in a non-ZDR org: the e2e helper asserts the token claim zdr is not true.",
+   "source": "psql on ingestion-postgres db integration (aggregates); tests/e2e/product-subscription-route.ts:14-15",
+   "verified_live": true
+  },
+  {
+   "fact": "[FACT] Own API-key connections do not exist. The only user-added model connection is the ChatGPT device-code subscription; the panel states it never accepts an API key. Inference providers are deployment-level (live order azure,anthropic,openai,cohere,openai-codex-subscription). Only roadmap text mentions bring-your-own-provider.",
+   "source": "src/features/integrations/components/ChatGptSubscriptionPanel.tsx:40-44; apps/gateway/src/domains/integrations/model_subscriptions.rs; INFERENCE_PROVIDER_ORDER env; apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md:426",
+   "verified_live": true
+  },
+  {
+   "fact": "[FACT] An org turns ZDR on in Workspace settings (org admin). BFF PATCH /api/v1/orgs/:id/settings (require_org_admin) goes to org-core PATCH /organizations/:id/settings, which writes metadata.interactiveRetention.zdr and enqueues an outbox event on false-to-true. The only gate is plan (402 plan_upgrade_required). There is no attested-provider gate, so an admin can enable a mode that fails every chat (ZDR.md step 4 still open). Disabling is always allowed.",
+   "source": "WorkspaceSettingsPage.tsx:1406-1426; apps/gateway/src/domains/orgs/settings.rs:22-73; org-core internal/http/handlers.go:342-375; internal/org/service_enhanced.go:582-608; Model Plane docs/ZDR.md section 3-4",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] Auth Core mints the interactive zdr claim as org-core stored intent AND the org-core feature.zero_data_retention entitlement, with a 45 s process cache. On any org-core error or timeout it resolves to zdr=false and caches that failure for 45 s. Plane tokens live 300 s, the model-gateway token 900 s.",
+   "source": "auth-core/src/auth/interactive-retention-policy.ts:60,147-174; convex-token.service.ts:155-168 and TTL defaults :70-85,291",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] The BFF derives org ZDR itself from org-core intent only (60 s cache) and fails to TRUE on error; it forces body zdr=true for every chat and speech call and adds x-zdr to upstream. Conversation-core, BFF tickets, inbox, quarry and ai read the raw flag a third way. After a plan lapse (intent true, entitlement false) Auth Core says false while the BFF says true.",
+   "source": "apps/gateway/src/zdr.rs:31-110; domains/chat/shared.rs:95-118; conversation-core internal/clients/orgcore_client.go:63-127; domains/tickets.rs:247, inbox.rs:335,416",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] Turning ZDR on is forward-looking: only conversation-core personal drafts and the recurrence corpus are purged. Session-core threads, messages, memory and Data Plane documents stay. The SPA purge of its local copy cannot fire because the threads listing returns no retention field (F8). Turning ZDR off emits no event.",
+   "source": "conversation-core internal/consumers/interactive_retention_consumer.go:17-33; docs/compliance/evidence/retention-and-erasure-evidence.md N5,F8; apps/gateway/src/domains/chat/history.rs:98-101,164-166",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] Planes read the signed zdr claim differently. Session-core, execution-core and retrieval-engine require it. Model-gateway and inference-core declare it with serde default, so an absent claim means not ZDR. Model-gateway checks sub, user and org across delegated bearers but not zdr; session-core and execution-core do check zdr equality.",
+   "source": "session-core/src/auth.rs:523,668; execution-core/src/auth.rs:431-513; retrieval-engine src/api/mod.rs:296; model-gateway/src/auth.rs:57-58,947-967; inference-core/src/auth.rs:75-76,193-195",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] HTTP chat stream under ZDR (effective_zdr = claims.zdr OR body zdr) takes a persistence-free path: no run, thread, message, event, buffer, idempotency, memory, cache or feedback. It sends exactly one user message (plus optional Data Plane grounding) to inference-core. No attested provider gives a typed zdr_unavailable error, non-retryable. It returns before check_budget, and emits no usage frame, so there is no cost row, no budget gate and no processing line.",
+   "source": "model-gateway/src/sse.rs:943-1066, 8091-8223, check_budget at :1079; state.rs:41; docs/ZDR.md section 2",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] The unary invoke ZDR path keeps provider_hint and subscription_connection_id and sets zdr=true, so inference-core refuses it. The gRPC invoke path creates a metadata-only ZDR run (agent zdr-redacted, empty goal, fresh thread). So the three ZDR paths behave three ways: stream no run, unary no run, gRPC metadata-only run.",
+   "source": "http_routes.rs:8812-8860; grpc.rs:690-747; session_flow.rs:446-545; session-core terminalization.rs:52-65",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] Under ZDR the gateway refuses attachments, image generation, deep research and agentic runs with a typed English-only code zdr_feature_not_supported. Execution-core independently refuses any agent run for caller.zdr or req.zdr (failed_precondition, untyped). Browser runs are refused (412). So Do mode is unreachable under ZDR twice over.",
+   "source": "sse.rs:968-986; execution-core grpc.rs:648-660,1237; browser_run.rs:307-314",
+   "verified_live": false
+  },
+  {
+   "fact": "[INFERENCE] Under ZDR web search, browse_web and artifact or file output are silently not performed: the ZDR branch only refuses the four features above and zdr_direct_stream has no tool loop, so a user asking for them gets plain text with no notice.",
+   "source": "sse.rs:968-1065 (only attachments, generate_image, deep_research, agentic checked); zdr_direct_stream :8091-8223",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] Knowledge grounding under ZDR reaches the Data Plane with the user data-plane bearer. Retrieval forces ephemeral mode from the signed claim and no caches. Query embedding must go to an attested route, and both the direct-Azure and Cohere Embed v4 paths hard-refuse ZDR before any call. [INFERENCE] The dense arm is therefore unavailable under ZDR; how the pipeline degrades was not verified.",
+   "source": "retrieval-engine src/api/mod.rs:443; src/embed/mod.rs:475-543; pipeline/orchestrator.rs:26-62; honest-limits L12",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] Speech, translation, vision, document intelligence, language, realtime and video are refused unconditionally under ZDR (failed_precondition, English text claiming no deployment is attested), even if chat were attested.",
+   "source": "inference-core/src/grpc.rs:171-196,511-979",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] Memory reads and writes are suppressed for a ZDR credential with observable degraded codes (DEGRADED_LETTA_ZDR_*), keyed to the caller token via MemoryRetention::of(caller). Dreaming reads messages joined to threads, and a ZDR turn creates neither, so it is unreachable by construction (pinned by a source-scan test). Both are keyed to the run or token, never to the org.",
+   "source": "session-core grpc.rs:3943-4110,7985-8058; dream_extractor.rs:41-46,1115-1141; memory_grpc.rs:110",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] Learning review is gated on the run's own zdr (managed_run_terminalization_outbox.zdr, set at managed start from the user token), so it is run-keyed. For non-ZDR runs capability-core review calls claude-sonnet-4-5 on a paid provider (A0 leak). OD4 (never, or skip subscription-route threads) is still open. Agent memory server processes memory with azure/gpt-4o-mini and text-embedding-3-large with topic extraction.",
+   "source": "session-core learning_events.rs:150-170,263-264; capability-core internal/sessionreview/retention.go,consumer.go:110-114; CHAT_GAP_CLOSURE_PLAN_2026-10-01.md OD4 and STANDING-RULE FLAG 1; docker exec model-plane-agent-memory-server-1 env (names)",
+   "verified_live": true
+  },
+  {
+   "fact": "[FACT] Caches: inference-core response cache neither reads nor writes for ZDR; Data Plane retrieval and embedding caches skip restrictive ZDR; the BFF skips local preview caching and keeps an org-zdr posture key. Quarry derives zdr only from the request body (token claim ignored): paid search providers are off under ZDR, but the free SearXNG chain still forwards the query to external engines (documented L13).",
+   "source": "inference-core/src/cache.rs:99-120; retrieval-engine orchestrator.rs:32-62; domains/knowledge/quarry.rs:232-246; Quarry-v2 crates/quarry-edge/src/search_routes.rs:144,505,628; honest-limits L13",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] Org ZDR covers interactive content only: documents-api refuses durable writes for a zdr=true token, but connector sync, imports and Quarry ingest use persistent service principals. Contextual retrieval (gpt-4o-mini on paid Azure, live CONTEXTUAL_RETRIEVAL_ENABLED=true), graph extraction and embeddings therefore process a ZDR org's synced documents; only per-document zdr_classification=restricted is excluded. The settings tooltip nevertheless says AI content does not leave the service.",
+   "source": "documents-api-go internal/handler/documents.go:68-80,302-304; embedding-engine stream/mod.rs:230-234,305-306; batch/mod.rs:249-288; docker exec data-plane-v2-embedding-engine-1 env; WorkspaceSettingsPage.tsx:1312-1315",
+   "verified_live": true
+  },
+  {
+   "fact": "[FACT] Unattended or durable features refuse ZDR with typed codes: scheduled runs (DeniesZDR), schedule and watch creation, mail-to-task thread decision, support recurrence, inbox draft persistence and AI proposals (zdr_draft_persistence_forbidden, zdr_ai_proposal_forbidden, zdr_recurrence_forbidden), approval delivery, durable gateway mutations (zdr_durable_mutation_forbidden).",
+   "source": "orchestrator-core internal/orchestration/startworkflow.go:399-415; user-core internal/spaces/*_decision.go; domains/inbox.rs:343, tickets.rs:255; http_routes.rs:823-831",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] Delegation children under ZDR register nothing (no run, edge, stop event, stored answer). Session-core forces parent_run_id empty and a fresh thread for any ZDR start, and refuses ZDR credentials orchestration writes, so a ZDR child could not link to a parent even if registered. This is moot today because agentic is refused first.",
+   "source": "execution-core runtime_loop/agent.rs:2581-2618; session-core terminalization.rs:44-47,377-380; auth.rs:199-203; A6_DO_MODE_TERRA_PROOF_2026-10-01.md 'Findings to follow up'",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] The Terra subscription route is refused under ZDR in three places: normalize.rs rejects body req.zdr (and not token ZDR), execution-core validate_run_route rejects req.zdr, inference-core rejects req.zdr with ZdrUnavailable. The provider declares Global residency and supports_zdr=false. The broker (integration-corev2) has no ZDR concept; it checks org and user ownership of the connection.",
+   "source": "normalize.rs:295-306; execution-core agent_route.rs:99,142; codex_subscription.rs:607-626,710-712; integration-corev2 internal/api/codex_subscription.go:303-326; README.md:667-672,779",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] In a ZDR org a user who picks Terra gets the BFF-forced body zdr=true and then an untyped invalid_request 400 ('supports text-only, non-ZDR chat ...'). The main composer has no org-ZDR awareness; only the inbox picker (respectOrgZdr) blocks the subscription, and inbox AI throws subscription_zdr_unsupported.",
+   "source": "shared.rs:95-118; normalize.rs:112-116,297; sse.rs:919-939; AiModelPicker.tsx:72; features/inbox/lib/inbox-ai.ts:324-328",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] J14 processing line is stamped from server values (provider_used, residency, privacy_tier) onto the usage frame of the durable path only. Retention is not carried on the chunk, so ZDR and sovereign tiers appear only when the request demanded them. A Terra answer shows 'global, ingen EU- eller ZDR-garanti'.",
+   "source": "sse_events.rs:20-101; src/shared/api/privacy-tier.ts:247-288; A6 doc 'J14'",
+   "verified_live": true
+  },
+  {
+   "fact": "[FACT] Usage envelopes are built with zdr:false only and the publisher drops any zdr:true envelope; cost-core accepts usage only from producer model-gateway. ZDR turns are therefore unmetered and unbudgeted although the matrix assigns 'ZDR/cost metadata only' to the Data Plane column.",
+   "source": "sse.rs:9755-9811; state.rs:41-42; cost-core cmd/main.go:53; master-ownership-matrix.md:87",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] integration-corev2 already owns connections (store.Connection with provider_context and capabilities), a per-connection consent table (integration_connection_consents: source, purpose, granted, metadata, revoked_at; UNIQUE connection_id,source,purpose), an atomic audit transaction (withAuditTransaction) and NATS publish. The existing consent route stores caller-supplied source and purpose with no server-composed text, version or digest.",
+   "source": "integration-corev2 internal/store/types.go:47-98; internal/db/migrations/0004_platform_primitives.sql:1-19; internal/api/server.go:437-507; codex_subscription.go:62-150",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] Architecture statements: session-core says retention/ZDR posture is owned by Control Plane organization policy and is not restated in its run proof bundle; GDPR_SUMMARY denies model providers for ZDR content unless the provider can satisfy ZDR; a 'zdr_ephemeral' class must never reach a non-ZDR provider. An owner-chosen exception for user-owned connections therefore needs a documented amendment.",
+   "source": "session-core orchestration_grpc.rs:1177-1182; apps/GDPR_SUMMARY.md:57-58,148-168; master-ownership-matrix.md:157",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] No owner ruling exists on an org-admin control over the subscription route: the compliance pack leaves it as owner-to-confirm. No admin lock is designed here.",
+   "source": "docs/compliance/evidence/honest-limits.md:45; searches of the ledger, gap-closure plan and plans/ found no ruling",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] Control Plane pattern for service-attested decisions: a registered principal obtains an aud=control-policy token (retrieval-engine already holds data:authorization:decide) and Auth Core verifies it with verifyPlaneServiceToken. Registry rows are pinned by plane-service-principals-policy.contract.spec.ts, which reads the real JSON. Interactive tokens are cookie-bound and user-callable (the e2e helper mints them straight from :3011), so a user can mint ordinary tokens but not service-attested ones.",
+   "source": "auth-core/src/auth/data-plane-authorization.controller.ts; plane-service-principals-policy.contract.spec.ts:14-34; plane-token.controller.ts:196-265; product-subscription-route.ts:12",
+   "verified_live": false
+  },
+  {
+   "fact": "[FACT] A second, different principal registry is defined in scripts/bootstrap_runtime_environment.sh:882-1021 (for example session-core zdr for execution-core) from the live Control Plane file; the live stack follows the Control Plane file. Drift risk.",
+   "source": "scripts/bootstrap_runtime_environment.sh:882-1021 vs config/plane-service-principals.json",
+   "verified_live": true
+  },
+  {
+   "fact": "[FACT] Auxiliary gateway calls (titles, follow-ups, summaries) on a Terra turn inherit provider, connection, model and the route's zdr flag, so a Terra turn never touches another provider (A6: only subscription provider in inference-core logs). A waiver bound to the connection is therefore compatible with every gateway helper call.",
+   "source": "sse.rs:518-530,559-575; A6 doc 'Result in one paragraph'; honest-limits L11",
+   "verified_live": true
+  },
+  {
+   "fact": "[FACT] Space ZDR is a separate org-keyed flag in user-core (space_effect_policies.zero_data_retention, operator-set, 0 live rows) and is not applied to provider choice in chat today (L14). Org-core metadata.interactiveRetention.zdr is a different flag.",
+   "source": "user-core internal/spaces/repository.go:1225-1300; migrations/018_space_effect_policies.up.sql:16; psql user_service aggregate; honest-limits L14",
+   "verified_live": true
+  },
+  {
+   "fact": "[FACT] Precedents for the new pieces: shared pure posture logic in mp-contracts (agentic_subscription.rs, dataplane_posture.rs); a test double applying session-core's real credential rules (execution-core runtime_loop/session_core_rules_double.rs); repo contract specs that read real policy files; unminted-claim precedent (sovereign).",
+   "source": "apps/Model Plane/rust/crates/mp-contracts/src/*.rs; execution-core runtime_loop/session_core_rules_double.rs:1-30; model-gateway auth.rs:59-73",
+   "verified_live": false
+  }
+ ],
+ "defects_found": [
+  {
+   "defect": "Org ZDR can be switched on with no attested provider, which breaks chat for the whole org. The org-wide switch is gated by plan only; ZDR.md names this the highest-priority follow-up and it is still open.",
+   "evidence": "WorkspaceSettingsPage.tsx:1406-1426 (zdrLocked = not entitled); org-core service_enhanced.go:582-608; live: 3 pro orgs eligible, every attestation var empty",
+   "severity": "high"
+  },
+  {
+   "defect": "A subscription turn whose ZDR comes from the token (body zdr=false) is not refused: normalize.rs checks only req.zdr, then the stream ZDR branch calls direct_infer with empty provider_hint and subscription_connection_id, so the user's Terra choice is dropped and the turn is served or refused on the default ZDR chain. The BFF masks it in steady state by forcing body zdr=true, but not for non-BFF clients or during the 45-60 s cache skew.",
+   "evidence": "model-gateway normalize.rs:295-306; sse.rs:943,968,1054-1065,8104-8116 (direct_infer params provider_hint, subscription_connection_id passed as empty strings). Source-verified, not live (no ZDR token exists)",
+   "severity": "high"
+  },
+  {
+   "defect": "Auth Core's retention resolver fails open for privacy: on org-core error, timeout or malformed body it returns zdr=false and caches that for 45 s. A transient 2 s timeout makes a ZDR org's tokens non-ZDR for up to 45 s plus token lifetime (300 s planes, 900 s model-gateway). Direct token-claim consumers (documents-api, session-core memory) then persist.",
+   "evidence": "interactive-retention-policy.ts:160-173 (catch sets DEFAULT_POSTURE, then postureCache.set); convex-token.service.ts TTL :70-85,291",
+   "severity": "high"
+  },
+  {
+   "defect": "Three readers compute org ZDR three ways: Auth Core (intent AND plan entitlement, fails to false), BFF (intent only, fails to true), conversation-core and BFF tickets/inbox/quarry/ai (raw intent, live read). A plan lapse or outage yields mixed postures within one request.",
+   "evidence": "interactive-retention-policy.ts:108-166; apps/gateway/src/zdr.rs:57-110; conversation-core orgcore_client.go:121-127; tickets.rs:247, inbox.rs:335",
+   "severity": "medium"
+  },
+  {
+   "defect": "Absent zdr claim is treated as not-ZDR by model-gateway and inference-core (serde default) but rejected by session-core, execution-core and retrieval-engine. A token without the claim is non-ZDR at the two planes that choose providers.",
+   "evidence": "model-gateway auth.rs:57-58; inference-core auth.rs:75-76 versus session-core auth.rs:523, retrieval-engine api/mod.rs:296",
+   "severity": "medium"
+  },
+  {
+   "defect": "Model-gateway does not compare zdr across the delegated bearers it accepts (only sub, user, org), so an inconsistent token set is accepted at ingress and each plane then applies its own claim.",
+   "evidence": "model-gateway auth.rs:947-967 versus session-core auth.rs:668 and execution-core auth.rs:431-513",
+   "severity": "medium"
+  },
+  {
+   "defect": "ZDR chat is unmetered and unbudgeted and carries no provenance: the ZDR branch returns before check_budget, direct_infer returns only the answer string, and no usage frame is sent, so the answer line cannot show provider, region or ZDR and no cost row exists for a paid add-on.",
+   "evidence": "sse.rs:1054-1079,8091-8223,7520-7562; state.rs:41; sse_events.rs:20-101",
+   "severity": "medium"
+  },
+  {
+   "defect": "Browser-side retention purge can never fire: the threads listing returns only sessions, so applyServerRetention always receives undefined and the SPA keeps its local copy after an org enables ZDR.",
+   "evidence": "apps/gateway/src/domains/chat/history.rs:98-101,164-166; src/shared/api/chat-client.ts:2111-2117; retention-and-erasure-evidence F8",
+   "severity": "medium"
+  },
+  {
+   "defect": "Silent drops under ZDR: web search, browse_web and file or artifact output are not performed and not reported, unlike attachments and agentic which return a typed refusal.",
+   "evidence": "sse.rs:968-986 refusal list versus zdr_direct_stream :8091-8223 (inferred from source)",
+   "severity": "medium"
+  },
+  {
+   "defect": "Settings tooltip over-promises: it says ZDR means AI content does not leave the service, but connector ingestion, contextual retrieval, graph extraction, embeddings and memory processing run on Azure under persistent service principals, SearXNG forwards ZDR queries, and ZDR chat itself goes to a model provider.",
+   "evidence": "WorkspaceSettingsPage.tsx:1312-1315; plane-service-principals.json; docker-compose of embedding-engine (live CONTEXTUAL_RETRIEVAL_ENABLED=true); honest-limits L12,L13,L24",
+   "severity": "medium"
+  },
+  {
+   "defect": "Quarry takes zdr only from the request body and ignores the token claim, so any caller that omits the flag gets non-ZDR behaviour; the reverse matters for waived runs, where the body flag must carry the run's resolved posture.",
+   "evidence": "Quarry-v2 crates/quarry-edge/src/search_routes.rs:144,628,505",
+   "severity": "medium"
+  },
+  {
+   "defect": "ZDR refusals are untyped or English-only in several planes (execution-core failed_precondition, inference-core modality refusals, normalize.rs generic text), while the product requires typed, human-readable reasons in Norwegian and English.",
+   "evidence": "execution-core grpc.rs:652-660; inference-core grpc.rs:171-196; normalize.rs:112-116",
+   "severity": "low"
+  },
+  {
+   "defect": "Two principal registries with different retention values exist (bootstrap script and the Control Plane config file); only one is live.",
+   "evidence": "scripts/bootstrap_runtime_environment.sh:882-1021 versus apps/Control Plane/config/plane-service-principals.json",
+   "severity": "low"
+  },
+  {
+   "defect": "Stale documentation: ZDR.md section 3 says the org switch is not gated (still true) but its boundary table predates the stream path and the Anthropic attestation work; capability-core retention.go comment says session-core has no zdr column although managed_run_terminalization_outbox.zdr exists.",
+   "evidence": "apps/Model Plane/docs/ZDR.md:40-49,96-100; capability-core internal/sessionreview/retention.go:19-28 versus session-core migrations/0015_managed_run_terminalization.sql:40",
+   "severity": "low"
+  },
+  {
+   "defect": "Delegation under ZDR cannot be registered even as metadata-only: session-core forces parent_run_id empty and a fresh thread for a ZDR start and refuses ZDR orchestration writes, so the owner's 2026-10-02 'ZDR children' question has no valid metadata-only answer in the current model (see design section 2.4).",
+   "evidence": "terminalization.rs:44-47,377-380; session-core auth.rs:199-203; execution-core agent.rs:2583-2618",
+   "severity": "low"
+  }
+ ],
+ "design": "# Design 3: ZDR that is workable per org, with per-connection informed consent\n\nSource key: [FACT] read in source or live, [INFERENCE] reasoned from source, [DECISION] owner to decide. Evidence for every fact is in current_state.\n\n## 0. Binding principles (owner rulings)\n1. ZDR is on only for orgs that switched it on; we respect it. Orgs without ZDR see no behaviour change at all.\n2. A member may use their OWN subscription or API key even if it cannot do ZDR. We check capability when they add it, tell them plainly (stronger warning when their org has ZDR on), let them continue, and turn ZDR off ONLY for runs that use that connection. Never org-wide, never for other members, never for other connections or models.\n3. Control Plane owns the posture. No client can lower it; only a signed claim from Auth Core can.\n4. No admin lock is designed (no owner ruling found). It is listed as an optional future control.\n5. Live proof runs on gpt-5.6-terra via openai-codex-subscription only, never Verevon Balance.\n\n## 1. Vocabulary and the single rule\nO = org ZDR effective (org-core intent AND plan entitlement). R = explicit ZDR on this turn (Temporary chat, x-zdr, body zdr:true). C = the user-owned connection the turn names. K = connection capability: supported | not_supported | cannot_verify, with digest D. A = acknowledgement stored for (org, user, connection, D, text version), not revoked. S = Space ZDR policy (user-core), not applied in chat today.\nRun retention class (server-stamped): zdr | persistent | zdr_waived.\nRule: effective_zdr = O AND NOT( run uses C AND K != supported AND A valid AND NOT R AND NOT S ).\n- O false: nothing changes, no decision call, no waiver.\n- O and no connection named: zdr (org default).\n- O and C with K = supported: stays zdr on that connection (future: attested or admin-asserted API keys).\n- O and C with K != supported and A valid: run is persistent with a waiver (class zdr_waived), bound to C.\n- O and C with K != supported and no valid A: REFUSED with typed code zdr_connection_not_acknowledged. Never silently served, never silently re-routed.\n- R (Temporary chat) with C and K != supported: REFUSED (zdr_explicit_request_not_supported_by_connection). A waiver covers the org default only, never an explicit per-turn request. Space ZDR is never waivable.\n- Any doubt (Auth Core, org-core or integration-corev2 unreachable): ZDR stays on and the turn is refused with zdr_decision_unavailable (retryable).\n\n## 2. (A) ZDR workable for orgs that have it on\n### 2.1 Current matrix, summarised (full evidence in current_state)\nWORKS end to end today: none live, because no provider is attested. Enforcement machinery is real: stream and unary persistence-free paths, cache skips, memory suppression, learning and dreaming run-keyed exclusion, durable-mutation refusals, scheduled and unattended refusals.\nREFUSED typed: attachments, image generation, deep research, agentic (English only), durable mutations, scheduled runs, inbox and ticket features, browser runs. REFUSED untyped: Do in execution-core, speech and other modalities, subscription route (generic 400), org switch absent a provider (not refused at all).\nSILENT or LEAKING: web, browse and artifacts silently dropped; connector ingestion, contextual retrieval, graph extraction, memory processing and SearXNG are outside ZDR; Auth Core fails open on outage; subscription x token-ZDR silently re-routed; ZDR turns unmetered with no processing line.\n### 2.2 Target behaviour per flow (every flow works with no durable content, or is refused with a typed bilingual reason)\n- Plain chat: works when a provider is attested; else zdr_unavailable (typed, non-retryable). Add a usage frame with provider, region, tier floored at zdr_contractual and retention_class zdr (no content), plus org-level metadata-only metering and budget check (OD-Z7).\n- Grounding: works only with a ZDR-capable query embedding path (task Z-41); otherwise lexical-only with an explicit notice in the stream (never silent).\n- Web, browse, artifacts, attachments, image, deep research, agentic/Do: refused with zdr_feature_not_supported plus a feature field and Norwegian and English text. Silent drops are removed.\n- Voice and other modalities: refused with typed code (already unconditional).\n- Memory, dreaming, learning, caches: unchanged (run or token keyed; verified by a source-scan test that every effective_zdr call site goes through one resolver).\n- Scheduled, mail-to-task, watches, support recurrence, inbox AI: refuse typed (already). A waiver never applies to them: the connection owner is not present.\n- Ingestion boundary: org ZDR is scoped to INTERACTIVE content. State this in the tooltip, /trust and the compliance pack (OD-Z9). No change to connector sync in this design.\n### 2.3 Org switch and operations\n- The BFF settings route and org-core refuse to ENABLE ZDR with 409 zdr_no_attested_provider unless the model catalogue advertises at least one zdr chat model (and, for grounding, an attested embedding path). The UI disables the toggle with the reason. If attestation later lapses (REVIEW_BY), the admin sees a banner and chat refuses typed.\n- One org-core read endpoint GET /api/v1/organizations/:id/retention-posture returns {zdr_effective, intent, entitled, as_of}. Auth Core, BFF, conversation-core, tickets, inbox, quarry and ai all use it. Auth Core uses stale-if-error from last known posture (up to 24 h), never caches a failure as persistent, and with no last-known posture alarms (OD-Z10).\n- Attestation itself (contract, AZURE_OPENAI_ZDR_* evidence, launcher wiring) is an operator action (Z-40).\n### 2.4 Delegation children and the live panel: verdict\nRegistering ZDR children as metadata-only runs is NOT the right design [INFERENCE from verified rules]: (1) session-core forces parent_run_id empty and requires a fresh thread for any ZDR start, so a ZDR child cannot link to a parent; (2) a ZDR credential cannot write orchestration events (attach_subagent) so no lineage or stop event can exist; (3) the HTTP product path creates no parent run, so there is nothing to attach to; (4) the loop is unreachable under ZDR anyway (gateway and execution-core refuse agentic). A metadata-only child run would hold no usable information and would give a false sense of lineage.\nDecision for v1 [DECISION OD-Z8]: Do and agentic stay refused under ZDR with a typed bilingual reason; children register nothing. If the owner later wants Do under ZDR, build ephemeral orchestration: execution-core pushes contentless subagent_attached and subagent_stopped frames (role, state, counts; no goal text) through the run response stream to the gateway SSE, with no session-core write.\nA waived run is a NORMAL durable run, so Do on Terra, plan.propose, wide research, durable child runs, lineage edges and the live panel work exactly as in the A6 proof, which closes the 2026-10-02 finding for the subscription route by construction.\n\n## 3. (B) Connection capability model\nOwner of connections and the record: integration-corev2 (Ingestion Plane). Per connection (columns on integration_connections): zdr_capability (supported | not_supported | cannot_verify), zdr_basis, zdr_basis_ref, zdr_checked_at, zdr_digest.\n- zdr_basis: verevon_attested_deployment | provider_terms_known | provider_by_contract | customer_asserted (future, admin only) | not_assessed.\n- zdr_basis_ref: id of a versioned row in the shared contract api/connection-zdr-capabilities.json, which carries catalog_version. A shared file plus a cross-plane test (integration-corev2 table equals inference-core provider capabilities, for example codex_subscription.rs supports_zdr=false) keeps one source of truth.\n- zdr_digest = sha256 of canonical JSON {provider_key, auth_mode, capability, basis, catalog_version}. Any change invalidates acknowledgements automatically.\nToday: openai-codex-subscription = not_supported, basis provider_terms_known (Global residency, no ZDR commitment, consumer account terms). Own API key (future): OpenAI, Anthropic and Azure OpenAI keys = cannot_verify, basis provider_by_contract (ZDR exists only by agreement or approval that Verevon cannot see from a key; wording to be confirmed against current vendor docs before copy ships, OD-Z12); unknown or OpenAI-compatible endpoints = cannot_verify; known consumer-plan sign-ins = not_supported. supported is reachable only for Verevon-attested deployments (not connections) and later for an explicit admin assertion with recorded evidence reference (OD-Z5).\nHonesty: cannot_verify is a first-class state with its own wording ('we cannot see your agreement with the provider'); it is treated like not_supported by the run rule. Capability is assessed at add (connect start and again at connected) and re-assessed on catalog_version change, on provider reconnect and nightly; a change that alters the digest revokes dependent acknowledgements (reason capability_changed) and audits it.\nExisting 5 live connections are backfilled by an idempotent startup job (all in non-ZDR orgs, so no behaviour change).\n\n## 4. (C) Add-connection prompt, server-enforced\nWhere the prompt appears: (1) when the add flow reaches connected; (2) at FIRST USE after an org turns ZDR on (no add event occurs then); (3) any time from Integrations. Same endpoint and text everywhere.\nServer enforcement (not UI-only):\n- The ack endpoint is owner-only (connection.user_id equals the verified user, org match). The server composes the text from a versioned template plus capability plus org state; the client sends only the digest and text version it displayed. Stale digest or version gives 409 and a fresh assessment. Stored: id, org, connection, user, provider, capability, basis, digest, text_version, locale, text_sha256, full text_snapshot, org_zdr_at_ack, acknowledged_via (connect | first_use | settings), request id, revoked_at, revoke_reason. Written in the same transaction as an audit outbox event (same pattern as codex_subscription.go withAuditTransaction).\n- Without a valid acknowledgement in a ZDR org every decision refuses (zdr_connection_not_acknowledged), so a user who dismisses the dialog can connect but cannot run. A connection never reads as 'ready' in a ZDR org until acknowledged.\n- When the org has ZDR off the same record is shown as information only; nothing is required and no decision call is made.\nWording drafts (final copy needs counsel and vendor-doc confirmation, OD-Z12):\nNO, ZDR on, not_supported: Tittel 'ZDR slås av for samtaler med dette abonnementet'. Tekst 'Organisasjonen din har Zero Data Retention (ZDR) på. ChatGPT-abonnementet ditt kan ikke gi ZDR: samtalene du kjører med det sendes til OpenAI under din egen konto og dine egne vilkår, og OpenAI kan beholde dem. Verevon kan ikke endre det. Hvis du fortsetter, slås ZDR av bare for samtaler du kjører med dette abonnementet. De lagres da i arbeidsområdet ditt som vanlige samtaler, og søk i organisasjonens kunnskap fungerer som i samtaler uten ZDR. ZDR er fortsatt på for resten av organisasjonen, for andre medlemmer og for alle andre modeller og tilkoblinger. Du kan trekke valget tilbake når som helst under Integrasjoner.' Knapper 'Fortsett uten ZDR for dette abonnementet' og 'Avbryt'.\nEN: Title 'ZDR will be off for chats that use this subscription'. Text 'Your organisation has Zero Data Retention (ZDR) turned on. Your ChatGPT subscription cannot provide ZDR: chats you run with it are sent to OpenAI under your own account and terms, and OpenAI may keep them. Verevon cannot change that. If you continue, ZDR is turned off only for chats you run with this subscription. They are then saved in your workspace like ordinary chats, and search in your organisation's knowledge works as in chats without ZDR. ZDR stays on for the rest of the organisation, for other members and for every other model and connection. You can withdraw this choice at any time under Integrations.' Buttons 'Continue without ZDR for this subscription' and 'Cancel'.\nNO, cannot_verify (API key): 'Vi kan ikke bekrefte ZDR for denne nøkkelen. Om den gir null datalagring avhenger av avtalen din med leverandøren, og Verevon kan ikke se eller sjekke den avtalen. Fordi vi ikke kan bekrefte det, behandler vi samtaler med nøkkelen som uten ZDR. [samme fortsettelsestekst som over]'. EN: 'We cannot confirm ZDR for this key. Whether it gives zero retention depends on your agreement with the provider, which Verevon cannot see or check. Because we cannot confirm it, we treat chats with this key as not ZDR. [same continuation text]'.\nNO, ZDR off (info): 'Dette abonnementet gir ikke ZDR. Organisasjonen din bruker ikke ZDR nå, så ingenting endres. Slår organisasjonen på ZDR senere, spør vi deg før du kan bruke abonnementet.' EN: 'This subscription does not provide ZDR. Your organisation is not using ZDR now, so nothing changes. If the organisation turns ZDR on later, we will ask you before you can use the subscription.'\nNO first use: 'Organisasjonen har slått på ZDR, og dette abonnementet kan ikke gi ZDR. Bekreft for å fortsette uten ZDR for samtaler med abonnementet, eller velg en annen modell.' EN: 'Your organisation has turned on ZDR and this subscription cannot provide ZDR. Confirm to continue without ZDR for chats with the subscription, or choose another model.'\nTyped refusals (NO / EN): zdr_connection_not_acknowledged 'Organisasjonen din har ZDR på, og dette abonnementet støtter ikke ZDR. Bekreft under Integrasjoner for å bruke det, eller velg en annen modell.' / 'Your organisation has ZDR on and this subscription does not support ZDR. Confirm under Integrations to use it, or choose another model.' zdr_explicit_request_not_supported_by_connection 'Midlertidig samtale krever ZDR, og dette abonnementet kan ikke gi det.' / 'Temporary chat requires ZDR and this subscription cannot provide it.' zdr_decision_unavailable 'Vi kan ikke bekrefte ZDR-innstillingene nå. Ingenting er sendt. Prøv igjen om litt.' / 'We cannot confirm the ZDR settings right now. Nothing was sent. Try again shortly.' zdr_feature_not_supported 'Dette støttes ikke med ZDR ennå: {feature}.' / 'This is not supported with ZDR yet: {feature}.'\n\n## 5. (D) Authority and the run-time rule\n### 5.1 Authority\nAuth Core (Control Plane) decides and mints. Sources it verifies itself: org-core posture (new retention-posture endpoint), and the connection posture from integration-corev2 read AS THE SESSION USER (Auth Core mints a user-bound aud=ingestion token internally from the session; integration-corev2 already enforces owner and org via assertConnectionAccess). No new principal credential, no shared secret, and the BFF cannot assert facts.\nFlow per chat turn (only when the body names subscription_connection_id AND the BFF sees org ZDR on):\n1. BFF calls POST /api/retention/zdr-decision with an aud=control-policy service token (verevon-gateway gains audience control-policy, scope retention:zdr-decide, retention zdr; pinned by plane-service-principals-policy.contract.spec.ts) plus the user's session cookie and {connection_id, provider, explicit_zdr}. Users cannot call it: no service token.\n2. Auth Core resolves O, checks the rule in section 1 and returns {org_zdr, effective_zdr, reason, ack?, decision} where decision is a 60 s RS256 JWT {org, user, connection, ack_id, digest, jti, exp, aud}. Auth Core audits every decision (content-free) with durable PubAck, same pattern as plane_service_token_issued, and refuses to issue if the audit cannot be published.\n3. BFF mints its token set with header x-retention-decision on each GET /api/:audience/token (and /api/model-plane/token). Auth Core verifies signature, exp, user equals session user, org equals session org, then stamps claims zdr=false, org_zdr=true, zdr_waiver={connection_id, ack_id, provider, digest, decision_jti} and caps TTL at 300 s. Without the header the tokens carry the org posture (zdr=true): a user minting tokens directly can never obtain a waiver.\n4. internal-token and token-exchange routes keep rejecting any x-zdr or body zdr and ignore the decision header; the interactive path ignores x-zdr and body zdr (tested).\nThe BFF replaces apply_org_zdr_posture with resolve_turn_retention: it never writes zdr=false itself; a client zdr:false or x-zdr:false is ignored (monotonic raise preserved). It maps refusals to typed 409 or 503 JSON.\n### 5.2 Per-plane enforcement (what each existing refusal does with a waiver)\n- Shared pure resolver in mp-contracts (new retention.rs): inputs claims view (zdr, org_zdr, waiver) plus request route (provider, connection, explicit zdr) gives Zdr | Persistent | Waived{connection, ack} | Refuse(code). Gateway, inference-core, execution-core and session-core call it; Go and TypeScript planes run the same golden matrix.\n- model-gateway: claims gain org_zdr and zdr_waiver; claims.zdr stays required. normalize uses claims-aware ZDR: with a waiver the request must be provider openai-codex-subscription with exactly the bound connection and no explicit zdr, else 403 zdr_waiver_route_mismatch; without a waiver and token ZDR a subscription request is refused typed. All ~20 effective_zdr sites call the resolver (source-scan test). Delegated bearers must carry equal zdr and equal waiver or the request is refused (posture mismatch). Usage frame is stamped retention_class from the VERIFIED claim.\n- inference-core: backstop. A principal with a waiver may only invoke provider_hint openai-codex-subscription with the bound connection id; everything else (other providers, embeddings, speech, vision) gets PermissionDenied zdr_waiver_route_mismatch. Missing zdr claim is rejected.\n- session-core: VerifiedIdentity.zdr_waiver. start_managed_run records an immutable receipt on the run: retention_class zdr_waived, waiver_ack_id, waiver_connection_id (new migration 0043); caller.zdr false, so thread, messages, completion and memory are durable. This is a receipt of what applied at start, not the live org posture, which stays owned by Control Plane (proof-bundle 'retained' section is updated to cite the receipt). Child runs started by execution-core under the run's own bearer inherit the claim.\n- execution-core: enforce_persistence_free_execution and validate_run_route pass because zdr is false; add waiver binding (provider_hint and connection must equal the claim). Children use the same ModelRoute, so they cannot leave the connection.\n- Data Plane, capability-core, letta-bridge, sandbox, cost: tokens have zdr=false, behave as non-ZDR. Retrieval therefore runs in persistent mode for the waived run (dense arm works), which the acknowledgement text states.\n- Quarry: body zdr is set by gateway and execution-core from the RUN's resolved posture (false for a waived run); Z-08 also ORs the token claim in as a floor.\n### 5.3 What the waiver can never do\nNever org-wide (no org-core write), never for other members (decision requires session user equals ack user equals connection owner), never for other connections or routes (route binding at gateway, inference-core, execution-core), never for explicit Temporary chat, Space ZDR, scheduled or unattended runs, inbox or support AI, browser runs, speech, or non-chat endpoints.\n\n## 6. (E) Visibility\n- Composer, before sending: when org ZDR is on and the selected model or connection is not ZDR-capable, a chip 'Uten ZDR i denne samtalen' / 'Not ZDR in this chat' with hover explaining the connection; if no acknowledgement, selecting or sending opens the same dialog inline and retries. Source: new BFF GET /api/v1/model-connections/:id/zdr (assessment, ack state, org ZDR).\n- Per answer (J14, server-stamped): usage frame gains retention_class (zdr | persistent | zdr_waived) and, for waived, reason connection_not_zdr_capable. Line NO: 'Behandlet: global, ingen EU- eller ZDR-garanti · ZDR av for dette svaret (ditt ChatGPT-abonnement)'; EN: 'Processed: global, no EU or ZDR guarantee · ZDR off for this answer (your ChatGPT subscription)'; hover: 'Your organisation has ZDR, but this answer ran on the connection you confirmed on {date}. The chat is saved in your workspace.' ZDR answers finally show 'ZDR' because the ZDR stream now stamps the tier.\n- Audit (content-free ids only): auth-core zdr_waiver_decision (allowed or refused), integration-core subscription_connection.zdr_acknowledged | zdr_acknowledgement_revoked | zdr_acknowledgement_invalidated (reason), session-core run_started_zdr_waived (run, ack, connection).\n- Org-admin visible record (not a lock): GET /api/v1/orgs/:id/zdr-acknowledgements (require_org_admin) lists member, provider, acknowledged_at, text version, status and a per-connection count of waived runs from session-core (aggregate only). Shown in Workspace settings next to the ZDR toggle. The user sees and can revoke their own in the ChatGPT panel.\n- Optional future control, not built: an org setting 'members may use own connections without ZDR' (default on); see OD-Z4.\n\n## 7. (F) Security analysis\n- Spoofing: only Auth Core signs the waiver; the BFF cannot assert it; client zdr:false is ignored; waiver tokens are bound to one connection and checked at gateway, inference-core and execution-core, so a leaked waiver token cannot reach another provider.\n- Replay: decision 60 s with jti, tokens 300 s max, both bound to the cookie session user and org; replay without the session adds nothing. Mint also needs the BFF service token.\n- Member impersonation: acknowledgement requires owner equals actor; decision requires session user equals ack user equals connection.user_id and connection org equals session org; the broker re-checks org and user at call time.\n- Revocation: owner can revoke any time; effect on the next decision; an in-flight turn finishes (token at most 300 s); runs already persisted stay persisted (stated in the text). Connection removal revokes (reason connection_removed). Capability or text change invalidates via digest.\n- Stale acknowledgement: digest and min text version compared at decision time, not at ack time.\n- Confused deputy: Quarry, Data Plane and tools take posture from the run's verified claim; waiver tokens do not exist outside the BFF chat handlers; gateway helper calls already inherit the route; any call outside the route is refused, not rerouted.\n- Org-core or Auth Core outage: ZDR kept, turn refused (zdr_decision_unavailable). Auth Core stale-if-error posture removes the current fail-open.\n- Processor-instruction risk [FACT-based, legal]: a member can override an admin's ZDR for their own runs, which sends org data to the provider under the member's own terms. Mitigations: explicit text, audit, admin visibility, no waiver for unattended work. Counsel review and an optional admin control are tracked (OD-Z4).\n- Ack record is personal data: kept while the connection exists and 365 days after revoke (audit retention), erased with the org purge.\n\n## 8. What a waived run persists (explicit) and what is keyed to the run\nA waived run is a normal persistent run: thread, messages, run, plan, events, approvals, child runs and lineage, response cache, feedback, usage envelope (cost basis subscription). Exclusions are keyed to the RUN or token, never the org: learning events use the run's outbox zdr; dreaming reads persisted messages; memory uses MemoryRetention::of(caller token); caches use the request flag; Quarry uses the body flag the gateway sets from the run. Derived processing that calls Verevon-operated providers is a separate widening: memory indexing (agent memory server on Azure), dreaming, learning review (claude-sonnet-4-5) and Data Plane query embedding would send the waived run's content to providers the user did not accept. Recommended default [DECISION OD-Z2]: persist the conversation, but skip memory indexing, dreaming and learning review for retention_class zdr_waived (matches the open OD4 recommendation for subscription threads); the acknowledgement text lists what stays on (saved chat, knowledge search, Do tools).\n\n## 9. Contract tests that apply the real rules (no permissive doubles)\n- One golden matrix apps/Model Plane/api/contracts/zdr-posture-matrix.json (O x R x connection x K x ack x digest x Space x outage) with expected decision and typed code. Copies under Control Plane config and integration-corev2 testdata are verified identical by a repo script test. Every plane evaluates the same rows with ITS OWN function: Auth Core TS, mp-contracts Rust (used by gateway, inference-core, execution-core, session-core), BFF Rust, integration-corev2 Go.\n- Real-file tests: plane-service-principals-policy.contract.spec.ts reads the real registry JSON and pins verevon-gateway control-policy scope, no other principal gains retention:zdr-decide, token-exchange unchanged; a normalize test table is the real policy table; the shared capability JSON is read by integration-corev2 and inference-core tests.\n- Doubles that apply real rules: extend execution-core session_core_rules_double.rs with the waiver claim (a waived child registers; a ZDR child does not; a waiver for another connection is refused); add an inference-core broker double enforcing org and user scope like integration-corev2 validateCodexSubscriptionInference; BFF tests run against a recorded Auth Core decision fixture signed with a test key and verified with the real JWKS path.\n- Source-scan tests: every effective_zdr call site and every gateway route has an explicit ZDR policy class (route inventory), and zdr_direct_stream may not drop provider_hint.\n- Mutation checks as in A6: reverting any single enforcement point (route binding, digest check, owner check, claim cap, user binding) must fail a named test.\n\n## 10. Documents that must change\nledger.md (new dated entry, state proposed, then implemented), master-ownership-matrix.md (new rows: model connections with ZDR capability and acknowledgement; contract 4 amended: ZDR propagates except a per-run, acknowledged, connection-bound waiver issued by Control Plane; Auth Core to integration-corev2 read edge), CODEBASE_INFORMATION_SYSTEM.md, GDPR_SUMMARY.md (processor exception for user-owned connections), ZDR.md rewrite, auth-core.md and CONTROL_PLANE_OWNERSHIP.md, honest-limits.md L17-L19 plus a new limit for waived runs, ai-data-policy.md and the J13 /trust edits (waiver and per-connection ZDR must be stated; this depends on the trust-edits job).\n\n## 11. Live proof plan on Terra with a ZDR-on test org\nNeeds (writes, so owner approval): a dedicated test org on plan pro with two members; member A completes the ChatGPT device sign-in for that org (owner-interactive); org ZDR switched on for that org only (it only changes forward behaviour and purges that org's conversation-core drafts). Never toggle an existing org: with nothing attested it would break its chat. Services rebuilt through the launcher (model-gateway, inference-core, session-core, execution-core, auth-service, org-core, integration-api, gateway and frontend). Probes: Z0 free refusal without acknowledgement (no run row, no broker audit line, no non-Terra provider in inference-core logs); Z1 free enforcement checks (stale digest 409, other member 403, client zdr:false ignored, direct token mint has no waiver); Z2 one Terra Ask after acknowledgement (run row zdr_waived with ack id, thread persisted, usage frame and answer line, audit events, only openai-codex-subscription in logs); Z3 second member without acknowledgement refused and member A on another model refused (proves never org-wide); Z4 Do with plan_mode under waiver (children and lineage register, panel frames); Z5 revoke then refused, catalog_version bump then refused until re-ack; Z6 Temporary chat plus Terra refused. Terra calls total about 7 to 10 rounds.\n\n## 12. Deliberately not designed here\nOwn-API-key connections (the record is generic so they plug in; build is Z-50), ephemeral orchestration for Do under ZDR, ZDR for connector ingestion, the Cohere or Azure embedding attestation itself (operator, Z-40/Z-41), an admin lock.",
+ "tasks": [
+  {
+   "id": "Z-00",
+   "title": "Stop the silent subscription re-route under token ZDR",
+   "plane": "Model",
+   "files": [
+    "apps/Model Plane/rust/services/model-gateway/src/normalize.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs"
+   ],
+   "approach": "Make normalization claims-aware: when claims.effective_zdr(req.zdr) is true and the request names the subscription provider, return a typed refusal (code zdr_connection_not_acknowledged until Z-15 lands, then resolver output). Pass provider_hint and subscription_connection_id through zdr_direct_stream into direct_infer so inference-core refuses instead of the gateway re-routing. No change for non-ZDR callers.",
+   "tests_first": "Unit test builds Claims{zdr:true} plus InvokeRequest{provider:openai-codex-subscription, subscription_connection_id, zdr:false} and asserts a typed refusal (fails today: it reaches zdr_direct_stream). Real FallbackChain test with an attested Azure double asserts a Terra-pinned request never lands on Azure.",
+   "live_proof": "Not possible without a ZDR token; covered by Z-60 probe Z0.",
+   "depends_on": [],
+   "size": "S"
+  },
+  {
+   "id": "Z-01",
+   "title": "Strict zdr claim and equal posture across delegated bearers",
+   "plane": "Model",
+   "files": [
+    "apps/Model Plane/rust/services/model-gateway/src/auth.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/grpc_auth.rs",
+    "apps/Model Plane/rust/services/inference-core/src/auth.rs"
+   ],
+   "approach": "Remove serde default on zdr in model-gateway Claims and inference-core Claims so an absent claim is rejected (as in session-core, execution-core, retrieval-engine). In verify_delegated_user_bearer and the service inference variant compare zdr (and later zdr_waiver id) with the ingress token; mismatch is a typed 403 posture_mismatch.",
+   "tests_first": "Tests that issue tokens with the claim missing and with a different zdr per bearer; use claim fixtures generated from Auth Core's real issuePlaneToken output (export once into a fixture) so the rule is tested against the real token shape.",
+   "live_proof": "Free: one stack request with a hand-made token lacking zdr gets 401; normal turns unchanged.",
+   "depends_on": [],
+   "size": "S"
+  },
+  {
+   "id": "Z-02",
+   "title": "Auth Core retention resolver: stale-if-error, no failure caching",
+   "plane": "Control",
+   "files": [
+    "apps/Control Plane/auth-core/src/auth/interactive-retention-policy.ts",
+    "apps/Control Plane/auth-core/src/auth/interactive-retention-policy.spec.ts"
+   ],
+   "approach": "Keep last known posture per org (24 h stale-if-error); never cache an error result as persistent; on an error with no last-known posture mint persistent but raise an error-level audit/alert (OD-Z10). Cache successes only; add a posture revision for tests.",
+   "tests_first": "Spec first: org-core 500 or timeout after a known ZDR=true must still mint zdr:true; error with no history mints false and alerts; a failure is not cached for 45 s.",
+   "live_proof": "Free: stop org-core briefly on a test org with ZDR known and mint tokens (no model call).",
+   "depends_on": [],
+   "size": "S"
+  },
+  {
+   "id": "Z-03",
+   "title": "One org retention-posture read model and migrate all readers",
+   "plane": "Control",
+   "files": [
+    "apps/Control Plane/org-core/internal/http/server.go",
+    "apps/Control Plane/org-core/internal/http/handlers.go",
+    "apps/Control Plane/org-core/internal/org/service_enhanced.go",
+    "apps/Control Plane/auth-core/src/auth/interactive-retention-policy.ts",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/zdr.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/tickets.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/inbox.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ai.rs",
+    "apps/Application Plane/conversation-core/conversation-core-go/internal/clients/orgcore_client.go",
+    "apps/Frontend Plane/verevonv3/src/shared/api/organization-client.ts"
+   ],
+   "approach": "Add GET /api/v1/organizations/:id/retention-posture returning {zdr_effective, intent, entitled, as_of, revision} (effective = intent AND entitlement). Every reader uses it; BFF keeps its fail-closed-true behaviour, Auth Core uses stale-if-error. Remove raw metadata.interactiveRetention reads.",
+   "tests_first": "Golden matrix row 'plan lapsed: intent true, entitlement false' evaluated by org-core (Go), Auth Core (TS), BFF (Rust) and conversation-core (Go) must give one answer; today Auth Core is false and BFF is true.",
+   "live_proof": "Free: read the endpoint for the 3 live orgs (all false) and compare every reader.",
+   "depends_on": [
+    "Z-10"
+   ],
+   "size": "M"
+  },
+  {
+   "id": "Z-04",
+   "title": "Gate the org ZDR switch on an attested provider",
+   "plane": "Frontend",
+   "files": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/settings.rs",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/api/organization-client.ts"
+   ],
+   "approach": "settings.rs reads the model catalogue and returns 409 zdr_no_attested_provider when enabling with no zdr-capable chat model (and no grounding path when documents exist); UI disables the toggle with the reason, shows a banner when ZDR is on but attestation lapses, and the tooltip states the interactive-only scope (OD-Z9).",
+   "tests_first": "Rust tests with a catalogue double built from the real /v1/models shape (feature zdr); Playwright check that the toggle is disabled today (live stack has no attestation).",
+   "live_proof": "Free: toggle stays disabled on the live stack; no write.",
+   "depends_on": [],
+   "size": "M"
+  },
+  {
+   "id": "Z-05",
+   "title": "Typed bilingual ZDR refusal catalogue",
+   "plane": "Model",
+   "files": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs",
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/execution-core/src/agent_route.rs",
+    "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts"
+   ],
+   "approach": "New zdr_refusal module: stable codes plus Norwegian and English text and a feature field. Gateway, execution-core, inference-core and the BFF map to it; chat-client shows the localized message and the right action (open Integrations, choose another model).",
+   "tests_first": "Table test enumerating every ZDR refusal site (including all reject_unattested_zdr_modality operations) and asserting code, both texts, and non-empty feature; a source-scan test fails if a new refusal omits a code.",
+   "live_proof": "Free: trigger each refusal on a non-ZDR stack where reachable by flag, otherwise via Z-60.",
+   "depends_on": [],
+   "size": "M"
+  },
+  {
+   "id": "Z-06",
+   "title": "ZDR stream provenance, usage frame and metadata-only metering",
+   "plane": "Model",
+   "files": [
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/state.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/budget.rs",
+    "apps/Model Plane/go/services/cost-core/internal/consumers/consumer.go",
+    "apps/Frontend Plane/verevonv3/src/shared/api/privacy-tier.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts"
+   ],
+   "approach": "direct_infer returns the served provider and residency; zdr_direct_stream sends a usage frame (no content) with tier floored at zdr_contractual and retention_class zdr; add an org-level metadata-only usage envelope class that the publisher allows under ZDR (no user id, no request text; OD-Z7) and an org-level budget check before the ZDR branch. Update answerProcessingNote so ZDR answers show ZDR.",
+   "tests_first": "A ZDR stream test asserts a usage frame with provider and tier and zero content bytes; envelope test asserts content-free JSON and that other ZDR envelopes are still suppressed; cost-core test accepts the class only from model-gateway.",
+   "live_proof": "Z-60 (needs an attested provider or the waiver path for the answer line).",
+   "depends_on": [],
+   "size": "M"
+  },
+  {
+   "id": "Z-07",
+   "title": "Close silent drops under ZDR",
+   "plane": "Model",
+   "files": [
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs"
+   ],
+   "approach": "Extend the ZDR refusal list to browse_web, web scope, artifact or file output requests, with zdr_feature_not_supported and the feature name; zdr_direct_stream stays tool-free.",
+   "tests_first": "Per-feature unit tests: each requested feature under ZDR returns the typed refusal, none is silently dropped.",
+   "live_proof": "Z-60 free probe.",
+   "depends_on": [
+    "Z-05"
+   ],
+   "size": "S"
+  },
+  {
+   "id": "Z-08",
+   "title": "Quarry takes the token zdr claim as a floor",
+   "plane": "Ingestion",
+   "files": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs"
+   ],
+   "approach": "Expose the verified zdr claim from quarry-edge auth (verify the claims struct first) and OR it into effective_zdr(requested) in search, answer, extract, map and agent routes. Body false can no longer lower a ZDR token. Waived runs still pass false from the gateway because their token is zdr=false.",
+   "tests_first": "quarry-edge tests with ZDR-claim tokens and body zdr:false assert paid providers and caches stay off; existing tests/zdr_behavior.rs extended.",
+   "live_proof": "Free: one web search under a non-ZDR token is unchanged.",
+   "depends_on": [],
+   "size": "M"
+  },
+  {
+   "id": "Z-09",
+   "title": "Fix the browser retention purge (F8)",
+   "plane": "Frontend",
+   "files": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-retention.ts"
+   ],
+   "approach": "ThreadsResponse gains retention {zdr} from the single posture read model (Z-03); chat-client already reads it. Result: enabling ZDR clears the SPA copy.",
+   "tests_first": "Gateway handler test asserts the field; chat-retention test asserts localStorage purge on zdr true and no purge when absent.",
+   "live_proof": "Free: with a ZDR test org, listing returns retention.zdr and the local copy clears.",
+   "depends_on": [
+    "Z-03"
+   ],
+   "size": "S"
+  },
+  {
+   "id": "Z-10",
+   "title": "Shared golden fixtures: posture matrix and connection capability contract",
+   "plane": "Model",
+   "files": [
+    "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+    "apps/Model Plane/api/contracts/connection-zdr-capabilities.json",
+    "scripts/tests/zdr-contract-sync.test.sh"
+   ],
+   "approach": "Write the matrix (O, R, connection, K, ack, digest, Space, outage to expected decision and code) and the capability contract (catalog_version, provider keys, state, basis, wording keys). A repo script test asserts the copies used by Control Plane and Ingestion tests are byte-identical.",
+   "tests_first": "The script test itself, plus a loader test per language that rejects unknown fields and requires every row to have a code.",
+   "live_proof": "None (contract).",
+   "depends_on": [],
+   "size": "S"
+  },
+  {
+   "id": "Z-11",
+   "title": "mp-contracts retention resolver",
+   "plane": "Model",
+   "files": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/retention.rs"
+   ],
+   "approach": "Pure resolver and claim view types (zdr, org_zdr, waiver) returning Zdr, Persistent, Waived{connection, ack} or Refuse(code); route constants from agentic_subscription. No I/O.",
+   "tests_first": "Run the whole golden matrix; property tests that no input combination yields Persistent for a ZDR token without a verified waiver.",
+   "live_proof": "None (library).",
+   "depends_on": [
+    "Z-10",
+    "Z-05"
+   ],
+   "size": "M"
+  },
+  {
+   "id": "Z-12",
+   "title": "integration-corev2 schema, capability assessor and backfill",
+   "plane": "Ingestion",
+   "files": [
+    "apps/Ingestion Plane/integration-corev2/internal/db/migrations/0013_model_connection_zdr.sql",
+    "apps/Ingestion Plane/integration-corev2/internal/store/types.go",
+    "apps/Ingestion Plane/integration-corev2/internal/store/postgres.go",
+    "apps/Ingestion Plane/integration-corev2/internal/store/memory.go",
+    "apps/Ingestion Plane/integration-corev2/internal/store/atomic_audit.go",
+    "apps/Ingestion Plane/integration-corev2/internal/zdr/assessor.go",
+    "apps/Ingestion Plane/integration-corev2/internal/api/codex_subscription.go"
+   ],
+   "approach": "Add zdr_capability, zdr_basis, zdr_basis_ref, zdr_checked_at, zdr_digest to integration_connections and table integration_connection_zdr_acknowledgements (FK ON DELETE CASCADE, partial unique on active ack per connection and digest). Assessor loads the shared capability contract; assess at connect start and at connected; idempotent backfill of the 5 live connections; digest change revokes dependent acks and audits.",
+   "tests_first": "Postgres-backed tests (as postgres_audit_outbox_test.go): migration up and down, backfill idempotency, digest invalidation in the same transaction as the audit outbox row; cross-plane test that the contract table equals inference-core provider capabilities (codex supports_zdr=false).",
+   "live_proof": "Free: backfill on the live DB, SELECT aggregates show 5 rows not_supported.",
+   "depends_on": [
+    "Z-10"
+   ],
+   "size": "L"
+  },
+  {
+   "id": "Z-13",
+   "title": "Acknowledgement API with audit, revocation and admin list",
+   "plane": "Ingestion",
+   "files": [
+    "apps/Ingestion Plane/integration-corev2/internal/api/zdr_acknowledgement.go",
+    "apps/Ingestion Plane/integration-corev2/internal/api/server.go",
+    "apps/Ingestion Plane/integration-corev2/internal/api/codex_subscription.go",
+    "apps/Ingestion Plane/integration-corev2/internal/zdr/texts"
+   ],
+   "approach": "Routes under /api/v1/model-connections/:id: GET zdr (assessment, ack state, composed text for the locale), POST zdr-acknowledgement (owner only, digest and text version checked, text_snapshot stored, audit and NATS event in one transaction), DELETE (owner revoke), GET admin list per org, and a user-bound posture read for Auth Core. Disconnect revokes (connection_removed). Texts are versioned immutable files (NO and EN).",
+   "tests_first": "Tests first for: non-owner 403, wrong org 403, stale digest 409, replay idempotent, text snapshot and sha stored, disconnect revokes, org purge removes rows, existing consent endpoints untouched; wording snapshot test pinning both languages.",
+   "live_proof": "Z-60 probes Z1, Z5.",
+   "depends_on": [
+    "Z-12"
+   ],
+   "size": "L"
+  },
+  {
+   "id": "Z-14",
+   "title": "Auth Core decision endpoint, waiver claim and registry row",
+   "plane": "Control",
+   "files": [
+    "apps/Control Plane/auth-core/src/auth/zdr-waiver-decision.controller.ts",
+    "apps/Control Plane/auth-core/src/auth/zdr-waiver-decision.service.ts",
+    "apps/Control Plane/auth-core/src/auth/plane-token.controller.ts",
+    "apps/Control Plane/auth-core/src/auth/model-plane-token.controller.ts",
+    "apps/Control Plane/auth-core/src/auth/convex-token.service.ts",
+    "apps/Control Plane/auth-core/src/auth/plane-service-principals-policy.contract.spec.ts",
+    "apps/Control Plane/config/plane-service-principals.json",
+    "apps/Control Plane/scripts/run-control-plane.sh"
+   ],
+   "approach": "POST /api/retention/zdr-decision verified with verifyPlaneServiceToken on aud=control-policy and scope retention:zdr-decide; resolves O (Z-03), reads connection posture as the session user from integration-corev2, applies the rule, returns a 60 s signed decision and audits with durable PubAck. Token mint accepts x-retention-decision, verifies it against the cookie session and stamps zdr=false, org_zdr, zdr_waiver, TTL capped at 300 s. Flag ZDR_WAIVER_ENABLED default off. Registry: verevon-gateway gains control-policy audience and the scope (retention zdr).",
+   "tests_first": "Policy contract spec reads the REAL plane-service-principals.json and pins who holds retention:zdr-decide; decision spec runs the golden matrix; specs that internal-token and token-exchange still reject x-zdr and body zdr, interactive routes ignore them, a decision for user A cannot mint for user B, expired or wrong-org decisions fail, audit failure refuses issuance. Mutation checks for each guard.",
+   "live_proof": "Z-60 probe Z1 (free).",
+   "depends_on": [
+    "Z-03",
+    "Z-10",
+    "Z-13"
+   ],
+   "size": "L"
+  },
+  {
+   "id": "Z-15",
+   "title": "model-gateway waiver enforcement and stamping",
+   "plane": "Model",
+   "files": [
+    "apps/Model Plane/rust/services/model-gateway/src/auth.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/normalize.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/session_flow.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs"
+   ],
+   "approach": "Claims gain org_zdr and zdr_waiver; every effective_zdr site calls the mp-contracts resolver; waiver requires provider openai-codex-subscription with the bound connection and no explicit zdr, else 403 zdr_waiver_route_mismatch; tool and Quarry calls receive the run's resolved posture; usage frame carries retention_class and reason from the verified claim; bearer posture equality includes the waiver id.",
+   "tests_first": "Source-scan test that no raw claims.zdr or effective_zdr remains outside the resolver; golden matrix through real normalize and the stream entry; mismatch cases refused; usage frame test; auxiliary-call test (title, follow-ups) stays on the connection.",
+   "live_proof": "Z-60 probes Z2, Z6.",
+   "depends_on": [
+    "Z-00",
+    "Z-01",
+    "Z-05",
+    "Z-11"
+   ],
+   "size": "L"
+  },
+  {
+   "id": "Z-16",
+   "title": "inference-core route-binding backstop",
+   "plane": "Model",
+   "files": [
+    "apps/Model Plane/rust/services/inference-core/src/auth.rs",
+    "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs"
+   ],
+   "approach": "AuthenticatedPrincipal carries the waiver; to_internal_request and every modality entry deny any call whose provider and connection differ from the bound ones (PermissionDenied zdr_waiver_route_mismatch); the subscription provider stays supports_zdr=false so explicit ZDR is still refused.",
+   "tests_first": "Tests with a broker double enforcing org and user scope like validateCodexSubscriptionInference: waiver token plus provider azure refused, plus embeddings refused, plus bound connection allowed, other member's connection refused.",
+   "live_proof": "Z-60 free probe: waiver token (test only) against a non-bound route returns the denial.",
+   "depends_on": [
+    "Z-01",
+    "Z-11"
+   ],
+   "size": "M"
+  },
+  {
+   "id": "Z-17",
+   "title": "session-core retention receipt and derived-job exclusions",
+   "plane": "Model",
+   "files": [
+    "apps/Model Plane/rust/services/session-core/src/auth.rs",
+    "apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/learning_events.rs",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+    "apps/Model Plane/rust/services/session-core/migrations/0043_run_retention_receipt.sql"
+   ],
+   "approach": "VerifiedIdentity.zdr_waiver from the claim; start_managed_run records retention_class and waiver ids (immutable receipt); child runs inherit; per OD-Z2 learning events, dreaming and memory mirror skip retention_class zdr_waived; run proof bundle cites the receipt; audit event run_started_zdr_waived; aggregate count RPC for admin view (counts only).",
+   "tests_first": "Real-Postgres tests (gated on DATABASE_URL like refuses_zdr_runs_foreign_threads): waived start persists thread and receipt, a waiver token cannot start a run claiming another connection, learning and memory skipped for zdr_waived, ZDR start still metadata-only; migration reversible.",
+   "live_proof": "Z-60 probe Z2 (SELECT the receipt, aggregates only).",
+   "depends_on": [
+    "Z-11"
+   ],
+   "size": "L"
+  },
+  {
+   "id": "Z-18",
+   "title": "execution-core waiver-aware Do and children",
+   "plane": "Model",
+   "files": [
+    "apps/Model Plane/rust/services/execution-core/src/auth.rs",
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/execution-core/src/agent_route.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/session_core_rules_double.rs"
+   ],
+   "approach": "Read the waiver from the execution bearer; validate_run_route accepts req.zdr=false with a matching waiver and refuses a mismatch; enforce_persistence_free_execution unchanged for real ZDR; children keep the shared ModelRoute and register normally because their session bearer is zdr=false.",
+   "tests_first": "Extend session_core_rules_double.rs with the waiver claim and session-core's real rules: waived parent and child register with lineage, ZDR parent registers none, waiver for another connection refused; revert-each-guard mutation checks.",
+   "live_proof": "Z-60 probe Z4.",
+   "depends_on": [
+    "Z-11",
+    "Z-17"
+   ],
+   "size": "M"
+  },
+  {
+   "id": "Z-19",
+   "title": "BFF turn retention resolution and connection routes",
+   "plane": "Frontend",
+   "files": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/zdr.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/audience_tokens.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/integrations.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/integrations/model_subscriptions.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/integrations/model_connections.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+   ],
+   "approach": "Replace apply_org_zdr_posture with resolve_turn_retention: only when the body names a subscription connection and the org is ZDR, call the Auth Core decision (control-policy token), pass x-retention-decision on every audience mint through one get_audience_token path, never write zdr=false, ignore client zdr:false, map refusals to typed 409 and 503. New proxy routes for assessment, acknowledgement, revoke and admin list; admin list uses require_org_admin.",
+   "tests_first": "wiremock tests against a decision fixture signed with a test key: all tokens in a turn carry the same decision, a client x-zdr:false and body zdr:false change nothing, explicit zdr:true is passed as explicit_zdr, Auth Core down gives 503 and no upstream call, non-ZDR orgs make no decision call (request count asserted).",
+   "live_proof": "Z-60 probes Z0-Z2.",
+   "depends_on": [
+    "Z-14"
+   ],
+   "size": "L"
+  },
+  {
+   "id": "Z-20",
+   "title": "Frontend prompts, composer chip, answer line and admin record",
+   "plane": "Frontend",
+   "files": [
+    "apps/Frontend Plane/verevonv3/src/shared/api/chatgpt-subscription-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/model-connections-client.ts",
+    "apps/Frontend Plane/verevonv3/src/features/integrations/components/ChatGptSubscriptionPanel.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/components/AiModelPicker.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/api/privacy-tier.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx"
+   ],
+   "approach": "Add-flow dialog after connected and an inline dialog on zdr_connection_not_acknowledged (render the server text, send digest and version, retry the turn); composer chip when org ZDR is on and the model or connection is not ZDR-capable; answer line extended with retention_class; ChatGPT panel shows the user's own acknowledgement with revoke; settings list for admins. Fix the inbox picker to use the same assessment.",
+   "tests_first": "Vitest first: privacy-tier.answer-line tests for the three classes and both languages; panel flow with ZDR on and off; composer chip; refusal-to-dialog-to-retry; Playwright with route mocks; accessibility checks on the dialog.",
+   "live_proof": "Z-60 screenshots of the dialog, chip and line.",
+   "depends_on": [
+    "Z-19",
+    "Z-06"
+   ],
+   "size": "L"
+  },
+  {
+   "id": "Z-21",
+   "title": "Org-admin counts of waived runs",
+   "plane": "Model",
+   "files": [
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/settings.rs",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx"
+   ],
+   "approach": "Read-only aggregate RPC returning per-connection and per-user counts and last-used date of zdr_waived runs for an org (no content, scope-gated for the BFF), shown beside the acknowledgement list.",
+   "tests_first": "Real-Postgres aggregate test; BFF test that non-admins get 403 and that no content field exists in the response schema.",
+   "live_proof": "Z-60 probe Z2 count equals 1.",
+   "depends_on": [
+    "Z-17",
+    "Z-19"
+   ],
+   "size": "S"
+  },
+  {
+   "id": "Z-30",
+   "title": "Ownership, ledger, GDPR and compliance document updates",
+   "plane": "Docs",
+   "files": [
+    "apps/master-ownership-matrix.md",
+    "apps/CODEBASE_INFORMATION_SYSTEM.md",
+    "apps/GDPR_SUMMARY.md",
+    "apps/Model Plane/docs/decisions/ledger.md",
+    "apps/Model Plane/docs/ZDR.md",
+    "apps/Control Plane/docs/core-research/auth-core.md",
+    "apps/Control Plane/CONTROL_PLANE_OWNERSHIP.md",
+    "docs/compliance/evidence/honest-limits.md",
+    "docs/compliance/ai-data-policy.md",
+    "docs/CROSS_PLANE_CONTRACT_MATRIX.md"
+   ],
+   "approach": "Add the ownership rows, amend contract 4, record the Auth Core to integration-corev2 edge, add the processor exception for user-owned connections, rewrite ZDR.md to the current state, update L17-L19 and add a waived-run limit; keep claims no stronger than the code. Trust page text is delivered with the trust-edits job.",
+   "tests_first": "The repo citation checker (docs/compliance/evidence/tools/check-citations.mjs) must pass on updated evidence; a doc test that every task code and refusal code named in docs exists in source.",
+   "live_proof": "None.",
+   "depends_on": [],
+   "size": "M"
+  },
+  {
+   "id": "Z-31",
+   "title": "e2e helper and new ZDR specs",
+   "plane": "Frontend",
+   "files": [
+    "apps/Frontend Plane/verevonv3/tests/e2e/product-subscription-route.ts",
+    "apps/Frontend Plane/verevonv3/tests/e2e/zdr-connection-waiver.spec.ts",
+    "apps/Frontend Plane/verevonv3/tests/e2e/browser-workspace-zdr.spec.ts"
+   ],
+   "approach": "Relax the helper's 'zdr must not be true' guard to 'zdr true only with an acknowledged connection', keep the rule that tests never fall back to Balance or Claude; new spec runs probes Z0-Z6 with evidence lines (ids, counts, codes, timings, no content) as in A6.",
+   "tests_first": "The spec is the test; first run must fail at Z0 against a build without Z-19.",
+   "live_proof": "Z-60.",
+   "depends_on": [
+    "Z-19",
+    "Z-20"
+   ],
+   "size": "M"
+  },
+  {
+   "id": "Z-32",
+   "title": "Launcher, compose and flag wiring",
+   "plane": "Infra",
+   "files": [
+    "apps/Control Plane/docker-compose.yml",
+    "apps/Control Plane/scripts/run-control-plane.sh",
+    "apps/Control Plane/config/README.md",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Ingestion Plane/docker-compose.yml",
+    "scripts/bootstrap_runtime_environment.sh"
+   ],
+   "approach": "Add ZDR_WAIVER_ENABLED (Auth Core, default off), integration core URL for Auth Core, BFF decision credential, and reconcile the second registry in the bootstrap script. Rollout order is enforced by a launcher check: Auth Core flag cannot be on unless gateway, inference-core, session-core and execution-core report the waiver contract version.",
+   "tests_first": "Launcher script tests (release-runtime-partition style) failing when the flag is on and a plane lacks the contract version; deployment-contract spec for new env.",
+   "live_proof": "Free: launcher dry run; flag stays off until the proof window.",
+   "depends_on": [
+    "Z-14"
+   ],
+   "size": "S"
+  },
+  {
+   "id": "Z-40",
+   "title": "Attest a ZDR provider route (operator action)",
+   "plane": "Model",
+   "files": [
+    "apps/Model Plane/docs/ZDR.md",
+    "scripts/release-artifact.sh",
+    "apps/Model Plane/deploy/docker-compose.yml"
+   ],
+   "approach": "Owner obtains the signed no-retention approval, records AZURE_OPENAI_ZDR_* (resource, approval ref, effective date, review-by, reviewer, digest) and sets them only through the release path (ZDR_RETENTION_PATH=zdr-provider-route-attested); verify /v1/models shows a zdr feature. Not code.",
+   "tests_first": "Existing zdr.rs validation tests; a readiness test that /readyz reports attested capability honestly.",
+   "live_proof": "Free: catalogue shows zdr on the covered model; first ZDR chat on the test org succeeds.",
+   "depends_on": [],
+   "size": "M"
+  },
+  {
+   "id": "Z-41",
+   "title": "ZDR-capable query embedding path or explicit lexical degrade",
+   "plane": "Data",
+   "files": [
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/embed/mod.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/pipeline/orchestrator.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/config.rs"
+   ],
+   "approach": "Make the Cohere Foundry and direct-Azure egress guards attestation-aware (same evidence-bound ZdrAttestation shape) or, when none, return lexical-only results with an explicit notice field the gateway surfaces. The index and query embedding model must match.",
+   "tests_first": "Orchestrator tests: ZDR with no attestation returns lexical results plus notice; with attestation the dense arm runs; existing egress-guard tests keep failing closed when unattested.",
+   "live_proof": "Z-60 optional with a ZDR token.",
+   "depends_on": [
+    "Z-40"
+   ],
+   "size": "L"
+  },
+  {
+   "id": "Z-42",
+   "title": "Interactive-only ZDR scope wording and /trust text",
+   "plane": "Frontend",
+   "files": [
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx",
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/src/app/trust",
+    "docs/compliance/evidence/trust-page-edits.diff"
+   ],
+   "approach": "Correct the tooltip to say what ZDR covers (interactive chat content) and does not (connector ingestion, search engines, derived processing), and add the per-connection rule. Public text goes through the trust-edits approval.",
+   "tests_first": "Snapshot test of the tooltip in both languages; claims-vs-code row updated.",
+   "live_proof": "None.",
+   "depends_on": [
+    "Z-30"
+   ],
+   "size": "S"
+  },
+  {
+   "id": "Z-50",
+   "title": "Own-API-key connection kind (later)",
+   "plane": "Ingestion",
+   "files": [
+    "apps/Ingestion Plane/integration-corev2/internal/api/model_connections.go",
+    "apps/Ingestion Plane/integration-corev2/internal/zdr/assessor.go",
+    "apps/Model Plane/rust/services/inference-core/src/provider/user_key.rs",
+    "apps/Frontend Plane/verevonv3/src/features/integrations/components/ModelKeyPanel.tsx"
+   ],
+   "approach": "Generic model connection kinds with the key encrypted in integration-corev2 and a broker infer route like the subscription one; inference-core gets a user-key provider that calls the broker; capability from the shared contract (cannot_verify for OpenAI, Anthropic, Azure keys); same acknowledgement and waiver machinery with provider and connection bound.",
+   "tests_first": "Capability table tests per provider key, key never returned to the browser, ownership tests reused from the subscription broker, waiver binding tests with the new provider id.",
+   "live_proof": "Out of scope for the Terra-only rule: must be proven on the owner's own key with an explicit owner decision.",
+   "depends_on": [
+    "Z-13",
+    "Z-14",
+    "Z-16"
+   ],
+   "size": "XL"
+  },
+  {
+   "id": "Z-51",
+   "title": "Customer-asserted ZDR basis for own keys (optional)",
+   "plane": "Control",
+   "files": [
+    "apps/Ingestion Plane/integration-corev2/internal/api/zdr_acknowledgement.go",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx"
+   ],
+   "approach": "Org-admin-only assertion with evidence reference stores basis customer_assertion and state supported (labelled 'asserted by admin, not verified by Verevon'); inference-core then treats that connection as ZDR-capable per connection id. Only if OD-Z5 is accepted.",
+   "tests_first": "Role tests (members cannot assert), audit tests, resolver rows for supported connections in the golden matrix.",
+   "live_proof": "Not required.",
+   "depends_on": [
+    "Z-50"
+   ],
+   "size": "M"
+  },
+  {
+   "id": "Z-60",
+   "title": "Live proof on Terra with a ZDR-on test org",
+   "plane": "Frontend",
+   "files": [
+    "apps/Frontend Plane/verevonv3/tests/e2e/zdr-connection-waiver.spec.ts",
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/ZDR_WAIVER_TERRA_PROOF.md"
+   ],
+   "approach": "After Z-00 to Z-21 and Z-32 are built through the launcher and ZDR_WAIVER_ENABLED is on for the proof window: create the dedicated pro test org, connect Terra for member A, switch ZDR on for that org, run probes Z0 to Z6 from design section 11, write an evidence note with ids, counts, codes and timings only.",
+   "tests_first": "The probe list is fixed before the run; Z0 and Z1 are free and must pass before any Terra call.",
+   "live_proof": "This task is the live proof; about 7 to 10 Terra rounds; evidence lines in the evidence file, no content.",
+   "depends_on": [
+    "Z-15",
+    "Z-16",
+    "Z-17",
+    "Z-18",
+    "Z-19",
+    "Z-20",
+    "Z-21",
+    "Z-31",
+    "Z-32"
+   ],
+   "size": "M"
+  }
+ ],
+ "rollout_and_migration": "Principle: zero impact on any org that does not use ZDR. Today none of the 3 live orgs has ZDR on and no ZDR request has ever been served, so every step below can ship dark.\n\nOrder (planes first, authority last, UI last):\n1. Wave 0 stop-gaps (Z-00 to Z-09) ship independently. They only add refusals or fixes for ZDR paths, and move Auth Core to stale-if-error. Z-04 prevents enabling a ZDR mode that nothing can serve.\n2. Shared fixtures and resolver (Z-10, Z-11), then every plane learns the waiver claim and enforces route binding while it is never minted: inference-core and model-gateway (Z-15, Z-16), session-core receipt (Z-17), execution-core (Z-18). A plane that predates the claim ignores it and would treat a waiver token as an ordinary non-ZDR token, so Auth Core must not mint until all four report the waiver contract version (launcher check, Z-32).\n3. integration-corev2 schema, assessor, backfill and acknowledgement API (Z-12, Z-13). Migration 0013 is additive. Backfill marks the 5 live connections not_supported and writes no acknowledgements. A revert drops only the new table and columns.\n4. Auth Core decision endpoint behind ZDR_WAIVER_ENABLED=false (Z-14). With the flag off the endpoint answers waiver_disabled; acknowledgements can be recorded (consent only) but no waiver is minted, so a ZDR org member gets the typed refusal. Kill switch: flip the flag, tokens revert to org posture on the next mint (at most 300 s for tokens already issued).\n5. BFF (Z-19) and Frontend (Z-20): until the flag is on the UI shows the prompt but chats stay refused with a clear reason. Z-32 wires env, the control-policy scope for verevon-gateway (pinned by the real-file contract spec) and the launcher gate.\n6. Turn the flag on only for the proof window on the dedicated test org (Z-60), then leave on once the evidence note passes.\n\nControl Plane dependencies (explicit): org-core retention-posture endpoint (Z-03), Auth Core stale-if-error (Z-02), the decision endpoint, claim and registry row (Z-14), launcher and compose changes (Z-32), and a new read edge Auth Core to integration-corev2 recorded in the contract matrix. Builds go through the launcher only (hand-built compose misses the Control Plane env chain).\n\nData migration: existing connections get capability columns by backfill; existing tokens, runs and threads are untouched; session-core gets nullable retention receipt columns with default persistent, so old rows read as persistent. No ZDR org exists to migrate. If an org enables ZDR later, existing durable data stays (forward-looking, now stated in the tooltip).\n\nBackward compatibility: waiver claims are additive JWT fields. The only behaviour change for non-ZDR orgs is stricter claim validation (Z-01) and clearer refusals; Z-01 must be preceded by a check that every live token carries zdr (Auth Core always sets it).\n\nNot shipped until the owner acts: provider attestation (Z-40) and own-API-key connections (Z-50); ZDR chat itself stays unusable without Z-40, which is why Z-04 gates the switch.",
+ "risks": [
+  "INCIDENT: during read-only verification one command printed the first 40 characters of CODEX_SUBSCRIPTION_INTERNAL_API_KEY (inference-core container env) into this session's tool output. The value is not repeated anywhere in this result, but the key is effectively disclosed to this transcript. Rotate it (integration-api and Model Plane share it) before relying on it.",
+  "Processor-instruction risk: a member can override an org admin's ZDR choice for their own runs, sending org data to a provider under the member's own terms. GDPR_SUMMARY denies model providers for ZDR content unless they satisfy ZDR, so this is a documented policy exception that needs counsel review; no admin lock is designed (owner not ruled).",
+  "Processor widening inside a waived run: Verevon-operated Azure and Anthropic calls on the run's content (query embedding for grounding, memory indexing on azure/gpt-4o-mini, learning review on claude-sonnet-4-5, dreaming) are outside the waiver the user accepts. Mitigated only if OD-Z2 (skip derived jobs) is adopted; grounding embedding still runs in persistent mode and is named in the acknowledgement text.",
+  "Rollout skew: an old plane that ignores the waiver claim treats a waiver token as ordinary non-ZDR with no route binding. Mitigated by flag-off default, planes-first order and a launcher gate; inference-core is the backstop for every route.",
+  "Waiver-bearing session-core and data-plane tokens are valid for up to 300 s and cannot be route-bound by those planes. Exposure is limited to the BFF (decision needs the BFF service token plus the session cookie) and TTL; a BFF compromise or SSRF would widen it.",
+  "Provider ZDR facts for API-key vendors (OpenAI, Anthropic, Azure OpenAI) are my knowledge of vendor practice, not repo evidence, and may be stale after June 2026; wording must be confirmed against current vendor documents and counsel before shipping (OD-Z12).",
+  "The subscription-route claim 'no ZDR' rests on repo declarations (codex_subscription.rs) and consumer-plan terms, not on a vendor statement; if OpenAI changes ChatGPT-plan terms the shared capability file and catalog_version must change, and every acknowledgement then goes stale by digest (intended).",
+  "Auth Core now depends on integration-corev2 and org-core at decision time; an outage refuses waived turns (typed, retryable) rather than guessing. Latency is paid only by ZDR-org members who name a subscription connection.",
+  "Auth Core stale-if-error (Z-02) changes the outage behaviour for non-ZDR orgs only when a ZDR org was last known; an Auth Core cold start during an org-core outage still mints persistent (availability-first) and must alert (OD-Z10).",
+  "ZDR chat remains unusable until a provider is attested (Z-40) and, for grounding, an embedding path is ZDR-capable or degraded explicitly (Z-41); the L12 mismatch (index built with Cohere, queries must match) limits options.",
+  "Metering ZDR turns (Z-06) adds an org-level metadata-only envelope under ZDR; it must carry no user id, no prompt, no request text, and needs the owner's approval (OD-Z7) before any envelope allowlist is added.",
+  "Sources not proven live: every ZDR path (stream, unary, gRPC, Data Plane ephemeral retrieval, learning skip) was verified by source and tests only because no ZDR token or org exists; findings 2 and the retrieval degrade behaviour are source-verified, not live.",
+  "Space ZDR (user-core effective policy, 0 rows live) is not applied to chat provider choice today (L14); when it is, a waiver must not override it. The golden matrix carries Space rows now so the day it is enforced the test fails first.",
+  "Acknowledgement records are personal data; retention and erasure must be defined (kept while the connection exists plus 365 days after revoke, purged with the org) and added to the org purge path.",
+  "Dual registries (bootstrap script versus Control Plane file) can drift and silently change per-audience retention; reconcile in Z-32.",
+  "A member who revokes mid-run: the turn completes and the persisted run stays persisted; the acknowledgement text says so, and users may expect deletion. Product wording must be exact."
+ ],
+ "owner_decisions": [
+  {
+   "question": "OD-Z1: Scope of the waiver. May it cover only the org-level ZDR default, never an explicit Temporary chat, never a Space ZDR policy, and only interactive owner-present chat turns (not scheduled, support, inbox, browser, speech)?",
+   "options": "A) Org default only, interactive chat only (as designed). B) Also allow Temporary chat to be waived. C) Also allow unattended runs on the owner's connection.",
+   "recommended": "A. A waiver is a downgrade of the org default for one owner-present turn; explicit per-turn ZDR and Space policy are stronger statements and stay respected."
+  },
+  {
+   "question": "OD-Z2: What may a waived (persisted) run feed into? Memory indexing, dreaming and learning review call Verevon-operated paid providers (Azure, claude-sonnet-4-5) the user never accepted.",
+   "options": "A) Normal non-ZDR behaviour (everything on, subject to existing switches). B) Persist the conversation but skip memory indexing, dreaming and learning review for retention_class zdr_waived. C) Do not persist at all (not what the owner asked).",
+   "recommended": "B. It matches the open OD4 recommendation for subscription-route threads and keeps the waiver from widening to providers the user did not choose; the acknowledgement text lists exactly what stays on."
+  },
+  {
+   "question": "OD-Z3: Acknowledgement lifecycle.",
+   "options": "A) No time expiry; invalid on capability digest change, text-version bump, connection removal or owner revoke. B) Re-confirm every 90 or 180 days. C) Re-confirm per session.",
+   "recommended": "A for v1, with a min text version setting so a material wording change forces re-confirmation."
+  },
+  {
+   "question": "OD-Z4: Admin control and legal exposure. A member can override the admin's ZDR for their own runs; as processor, instructions come from the org. Add an org setting 'members may use own connections without ZDR' (default on) now or later?",
+   "options": "A) None now; audit plus admin visibility only. B) Ship the org switch now (default on). C) Default off (admin must allow).",
+   "recommended": "A now, B on the roadmap before the first regulated customer org, and counsel review of the exception (GDPR_SUMMARY amendment). No lock is built without your ruling."
+  },
+  {
+   "question": "OD-Z5: cannot_verify handling and customer assertion for own API keys (future).",
+   "options": "A) cannot_verify is treated as non-ZDR (waiver needed); no customer assertion. B) Same, plus an org-admin-only 'asserted by admin, not verified' state that keeps ZDR on for that connection. C) Trust any user claim.",
+   "recommended": "B, built later (Z-51); never C."
+  },
+  {
+   "question": "OD-Z6: Gate enabling org ZDR on an attested provider (server-enforced 409 zdr_no_attested_provider).",
+   "options": "A) Gate (as designed). B) Allow enabling and let chat fail. C) Allow with a warning only.",
+   "recommended": "A. All 3 live orgs are entitled and nothing is attested, so B or C is a one-click org-wide outage."
+  },
+  {
+   "question": "OD-Z7: Metering ZDR turns.",
+   "options": "A) Org-level metadata-only usage envelope (tokens, latency, model, no user id, no request text) plus an org-level budget check. B) Per-user metadata. C) No metering.",
+   "recommended": "A, because ZDR is a paid add-on and the matrix already assigns 'ZDR/cost metadata only'; C leaves paid inference unbilled and unbudgeted."
+  },
+  {
+   "question": "OD-Z8: Do mode and delegation children under real ZDR.",
+   "options": "A) Refuse with a typed bilingual reason in v1; register no children (as designed); waived runs get normal children. B) Build ephemeral orchestration (contentless subagent frames, no session-core write). C) Register ZDR children as metadata-only runs.",
+   "recommended": "A now, B only if customers need Do under ZDR. C is not valid in the current session-core model: ZDR start forces parent_run_id empty and a fresh thread and ZDR credentials cannot write orchestration events."
+  },
+  {
+   "question": "OD-Z9: Scope of org ZDR relative to ingestion.",
+   "options": "A) Interactive content only, stated plainly in the tooltip, /trust and the pack; no change to connector sync. B) Also treat synced documents as restricted when the org has ZDR (kills contextualization, graph and dense retrieval for that org).",
+   "recommended": "A now, revisit B when an attested embedding resource exists (Z-41)."
+  },
+  {
+   "question": "OD-Z10: Auth Core behaviour when org-core is unreachable and no last-known posture exists.",
+   "options": "A) Mint persistent (availability-first) with an alert, plus 24 h stale-if-error from last known. B) Mint ZDR (privacy-first), which turns every org's chat persistence off during an org-core outage.",
+   "recommended": "A with stale-if-error; escalate to B only for orgs previously known to be ZDR (which stale-if-error already covers)."
+  },
+  {
+   "question": "OD-Z11: Home of the acknowledgement ledger and the new Auth Core read edge.",
+   "options": "A) integration-corev2 next to the connection (atomic invalidation and audit; Auth Core reads it as the session user). B) org-core ledger with NATS-driven invalidation. C) session-core.",
+   "recommended": "A: acknowledgement is a per-connection consent (precedent integration_connection_consents), and capability change, disconnect and audit then share one transaction. Record the new Control to Ingestion read edge in the contract matrix."
+  },
+  {
+   "question": "OD-Z12: Who signs the per-provider ZDR wording and the legal text of the acknowledgement (NO and EN), including vendor claims for OpenAI, Anthropic and Azure API accounts?",
+   "options": "A) Counsel plus engineering confirm against current vendor documents before copy ships. B) Ship engineering wording and review later.",
+   "recommended": "A, for the ChatGPT subscription text as well; drafts in the design are placeholders."
+  },
+  {
+   "question": "OD-Z13: Which deployment to attest first (operator and contract action, Z-40).",
+   "options": "A) Azure OpenAI Sweden Central chat deployment plus a matching embedding path. B) Chat only; knowledge grounding stays lexical-only under ZDR with a notice. C) Wait.",
+   "recommended": "A if the signed no-retention approval covers both; otherwise B, because ZDR chat without any attestation is unusable and Z-04 will keep the switch disabled."
+  }
+ ],
+ "shared_files_touched": [
+  "apps/Control Plane/config/plane-service-principals.json",
+  "apps/Control Plane/auth-core/src/auth/plane-service-principals-policy.contract.spec.ts",
+  "apps/Control Plane/auth-core/src/auth/convex-token.service.ts",
+  "apps/Control Plane/auth-core/src/auth/plane-token.controller.ts",
+  "apps/Control Plane/auth-core/src/auth/model-plane-token.controller.ts",
+  "apps/Control Plane/auth-core/src/auth/interactive-retention-policy.ts",
+  "apps/Control Plane/scripts/run-control-plane.sh",
+  "apps/Control Plane/docker-compose.yml",
+  "apps/Control Plane/org-core/internal/http/server.go",
+  "apps/Control Plane/org-core/internal/org/service_enhanced.go",
+  "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+  "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+  "apps/Model Plane/rust/services/model-gateway/src/auth.rs",
+  "apps/Model Plane/rust/services/model-gateway/src/normalize.rs",
+  "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+  "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+  "apps/Model Plane/rust/services/inference-core/src/auth.rs",
+  "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+  "apps/Model Plane/rust/services/session-core/src/auth.rs",
+  "apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+  "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+  "apps/Model Plane/rust/services/execution-core/src/agent_route.rs",
+  "apps/Model Plane/rust/services/execution-core/src/runtime_loop/session_core_rules_double.rs",
+  "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+  "apps/Model Plane/api/contracts/connection-zdr-capabilities.json",
+  "apps/Model Plane/deploy/docker-compose.yml",
+  "apps/Ingestion Plane/integration-corev2/internal/store/types.go",
+  "apps/Ingestion Plane/integration-corev2/internal/api/codex_subscription.go",
+  "apps/Ingestion Plane/integration-corev2/internal/api/server.go",
+  "apps/Ingestion Plane/docker-compose.yml",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/zdr.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/audience_tokens.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/integrations.rs",
+  "apps/Frontend Plane/verevonv3/src/shared/api/privacy-tier.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+  "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx",
+  "apps/Frontend Plane/verevonv3/tests/e2e/product-subscription-route.ts",
+  "apps/master-ownership-matrix.md",
+  "apps/Model Plane/docs/decisions/ledger.md",
+  "apps/Model Plane/docs/ZDR.md",
+  "apps/GDPR_SUMMARY.md",
+  "docs/compliance/evidence/honest-limits.md",
+  "scripts/bootstrap_runtime_environment.sh"
+ ]
+}

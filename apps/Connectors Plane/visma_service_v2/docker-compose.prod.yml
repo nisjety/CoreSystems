@@ -1,0 +1,51 @@
+# Production overrides for docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d vsv2
+#
+# Against the development file this changes:
+#   * No password defaults. The stack refuses to start unless VSV2_POSTGRES_PASSWORD is set in .env
+#     (letters and digits only: it is part of a connection URL). Postgres reads it only when it
+#     creates an empty data volume; changing it later does not change an existing database.
+#   * Postgres and Redis publish no host port. Only the vsv2 containers can reach them.
+#   * The HTTP API (backfill endpoint) is opt-in: it starts only with `--profile http`, and then
+#     only with a bearer token (VSV2_HTTP_BEARER_TOKEN).
+#   * Logs rotate (5 files of 20 MB per container) so the host disk cannot fill up with them.
+#   * The scheduler gets 120 s to finish what it is writing when the container is stopped. Checkpoints
+#     only advance after a successful write, so a kill is safe, but a graceful stop avoids a replay.
+#     The open-document re-read cannot be interrupted inside a BigQuery query or a stage write, which
+#     is why the time is more than the 10 s Docker allows by default.
+#
+# Everything else (BigQuery project and dataset, request budget, schedule) comes from
+# docker-compose.yml and .env. docs/DEPLOYMENT.md has the full runbook.
+
+x-logging: &rotated-logs
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: "${VSV2_POSTGRES_PASSWORD:?set VSV2_POSTGRES_PASSWORD in .env}"
+    ports: !reset []
+    restart: unless-stopped
+    logging: *rotated-logs
+
+  redis:
+    ports: !reset []
+    restart: unless-stopped
+    logging: *rotated-logs
+
+  vsv2:
+    environment:
+      VSV2_DATABASE_URL: "postgres://visma_v2:${VSV2_POSTGRES_PASSWORD:?set VSV2_POSTGRES_PASSWORD in .env}@postgres:5432/visma_v2"
+    stop_grace_period: 120s
+    logging: *rotated-logs
+
+  vsv2-http:
+    profiles: ["http"]
+    environment:
+      VSV2_DATABASE_URL: "postgres://visma_v2:${VSV2_POSTGRES_PASSWORD:?set VSV2_POSTGRES_PASSWORD in .env}@postgres:5432/visma_v2"
+      VSV2_HTTP_BEARER_TOKEN: "${VSV2_HTTP_BEARER_TOKEN:?set VSV2_HTTP_BEARER_TOKEN in .env}"
+    logging: *rotated-logs

@@ -1,0 +1,42 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Conformed Xero Balance Sheet and Profit and Loss source snapshots. The amounts are non-additive report output and must not be summed within the report hierarchy, across snapshots, or with GL facts.",
+  assertions: {
+    nonNull: ["tenant_id", "report_snapshot_key", "statement_line_snapshot_key", "company_key", "date_key"],
+    uniqueKey: ["statement_line_snapshot_key"]
+  }
+}
+
+SELECT
+  FARM_FINGERPRINT(s.tenant_id) AS company_key,
+  FARM_FINGERPRINT(CAST(s.statement_as_of_date AS STRING)) AS date_key,
+  IF(s.account_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(s.tenant_id, '|', s.account_id))) AS account_key,
+  s.statement_line_snapshot_key,
+  s.report_snapshot_key,
+  s.tenant_id,
+  s.report_snapshot_id,
+  s.report_type,
+  s.report_name,
+  s.report_from,
+  s.report_to,
+  s.report_date,
+  s.statement_as_of_date,
+  s.report_index,
+  s.section_index,
+  s.section_title,
+  s.row_index,
+  s.row_type,
+  s.row_label,
+  s.cell_index,
+  s.column_header,
+  s.account_id,
+  s.is_summary_row,
+  s.is_orphan_snapshot,
+  s.source_statement_amount,
+  s.is_report_snapshot,
+  s.is_non_additive,
+  s.is_non_additive_within_snapshot,
+  s.report_synced_at,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_financial_statement_line_snapshot")} AS s

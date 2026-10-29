@@ -14,8 +14,12 @@ describe('connectBundlesForProvider', () => {
     expect(connectBundlesForProvider(provider)).toEqual(['inbox'])
   })
 
+  it.each(['google', 'microsoft', ' Google '])('shares read-only onboarding consent for %s', (provider) => {
+    expect(connectBundlesForProvider(provider)).toEqual(['workspace_readonly'])
+  })
+
   it('keeps the established full consent bundle for providers without staged consent', () => {
-    expect(connectBundlesForProvider('google')).toEqual(['full'])
+    expect(connectBundlesForProvider('algolia')).toEqual(['full'])
   })
 
   it('uses the separately configured Instagram OAuth provider for Instagram inbox consent', () => {

@@ -112,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::create_pool(&cfg.database_url).await?;
 
     // Cross-plane GDPR organization-erasure consumer. Binds to
-    // AQENCIA_CONTROLPLANE on the shared cross-plane broker
+    // CONTROLPLANE on the shared cross-plane broker
     // (control-shared-nats) under the dedicated `retrieval-engine-gdpr`
     // identity — NEVER this service's own Data-Plane-local NATS connection
     // wired further below (that broker does not host this stream). Left

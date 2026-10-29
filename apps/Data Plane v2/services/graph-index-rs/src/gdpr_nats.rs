@@ -18,7 +18,7 @@
 //! pointed at `control-shared-nats`, under the narrowly-scoped
 //! `graph-index-gdpr` identity — NEVER this service's own Data-Plane-local
 //! NATS connection (`Config::nats_url` / `nats_connection::connect`, used by
-//! `stream.rs`): that broker does not host `AQENCIA_CONTROLPLANE`, and reusing
+//! `stream.rs`): that broker does not host `CONTROLPLANE`, and reusing
 //! that connection/identity (or any other service's shared-broker identity)
 //! would be exactly the "reused an existing connection/identity" mistake the
 //! GDPR rollout's verify pass already caught once elsewhere. Hence a fully
@@ -66,7 +66,7 @@ use futures::StreamExt;
 use crate::gdpr::parse_erasure_event;
 use crate::store::GraphStore;
 
-pub const STREAM_NAME: &str = "AQENCIA_CONTROLPLANE";
+pub const STREAM_NAME: &str = "CONTROLPLANE";
 pub const SUBJECT: &str = "verevon.gdpr.erasure.requested";
 pub const DURABLE_NAME: &str = "graph-index-gdpr-erasure-v1";
 

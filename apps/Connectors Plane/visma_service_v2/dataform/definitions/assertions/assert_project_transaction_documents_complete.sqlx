@@ -1,0 +1,30 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_project_transaction_documents_complete",
+  description: "Silver must hold every project transaction document that bronze holds. fact_project_transaction aggregates the period slices of a document into one row per (module, refNbr). Returns one row per tenant where the number of distinct (module, refNbr) in visma_bronze.visma_project_transactions differs from the rows of visma_silver.fact_project_transaction. The lines are covered by assert_project_transaction_lines_complete.",
+  tags: ["assertion", "silver", "project"]
+}
+
+WITH bronze AS (
+  SELECT
+    tenantId AS tenant_id,
+    COUNT(DISTINCT FORMAT('%t|%t', module, refNbr)) AS bronze_rows
+  FROM ${ref("visma_bronze", "visma_project_transactions")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+),
+
+silver AS (
+  SELECT tenant_id, COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_project_transaction")}
+  GROUP BY tenant_id
+)
+
+SELECT
+  COALESCE(bronze.tenant_id, silver.tenant_id) AS tenant_id,
+  COALESCE(bronze_rows, 0) AS bronze_rows,
+  COALESCE(silver_rows, 0) AS silver_rows
+FROM bronze
+FULL OUTER JOIN silver ON bronze.tenant_id = silver.tenant_id
+WHERE COALESCE(bronze_rows, 0) != COALESCE(silver_rows, 0)

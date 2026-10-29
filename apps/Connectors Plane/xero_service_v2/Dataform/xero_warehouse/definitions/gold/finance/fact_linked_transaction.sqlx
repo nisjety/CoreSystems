@@ -1,0 +1,15 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Xero linked-transaction bridge for billable and related document flows; it contains no invented financial measure.",
+  assertions: { nonNull: ["tenant_id", "linked_transaction_id", "linked_transaction_key"], uniqueKey: ["linked_transaction_key"] }
+}
+
+SELECT FARM_FINGERPRINT(l.tenant_id) AS company_key,
+       IF(l.contact_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.contact_id))) AS contact_key,
+       l.linked_transaction_key, l.tenant_id, l.linked_transaction_id,
+       l.linked_transaction_type, l.status, l.is_voided,
+       l.source_transaction_id, l.source_transaction_type, l.source_line_item_id,
+       l.target_transaction_id, l.target_line_item_id, l.contact_id,
+       l.updated_at, l.first_seen_at, l.synced_at, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_linked_transaction")} AS l

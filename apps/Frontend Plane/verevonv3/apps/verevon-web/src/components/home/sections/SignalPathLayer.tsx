@@ -86,9 +86,12 @@ type ProblemRouteTargets = {
 };
 
 const DEFAULT_PROBLEM_ROUTE_TARGETS: ProblemRouteTargets = {
-	left: 703,
-	middle: 914,
-	right: 1171,
+	// Keep the central handoff on the actual visual centre. The old values
+	// belonged to the retired three-tab layout and made the quiet horizontal
+	// route drift to one side on wider viewports.
+	left: 690,
+	middle: 960,
+	right: 1230,
 };
 
 function createProblemSignalRoutes({
@@ -216,6 +219,10 @@ export function SignalPathLayer({ variant }: SignalPathLayerProps) {
 			return;
 		}
 
+		if (!window.matchMedia("(min-width: 761px)").matches) {
+			return;
+		}
+
 		const root = rootRef.current;
 		const section = root?.closest<HTMLElement>("#problemet");
 		const svg = root?.querySelector<SVGSVGElement>("svg");
@@ -288,9 +295,33 @@ export function SignalPathLayer({ variant }: SignalPathLayerProps) {
 	}, [variant]);
 
 	useEffect(() => {
+		const root = rootRef.current;
+
+		if (
+			!root ||
+			!window.matchMedia(
+				"(min-width: 761px) and (prefers-reduced-motion: no-preference)",
+			).matches
+		) {
+			return;
+		}
+
 		let disposed = false;
+		let isVisible = false;
+		let setupStarted = false;
 		let cleanupContext: { revert: () => void } | undefined;
 		let startSignals: (() => void) | undefined;
+		let pauseSignals: (() => void) | undefined;
+		const problemRevealHasStarted = () => {
+			const activeRoot = rootRef.current;
+
+			if (!activeRoot) {
+				return false;
+			}
+
+			const rect = activeRoot.getBoundingClientRect();
+			return rect.top <= window.innerHeight * 0.78 && rect.bottom >= 0;
+		};
 
 		async function setup() {
 			const root = rootRef.current;
@@ -310,19 +341,19 @@ export function SignalPathLayer({ variant }: SignalPathLayerProps) {
 				import("gsap/ScrollTrigger"),
 			]);
 
-			if (disposed) {
+			if (disposed || !isVisible) {
+				setupStarted = false;
 				return;
 			}
-
-			const reduceMotion = window.matchMedia(
-				"(prefers-reduced-motion: reduce)",
-			).matches;
 
 			gsap.registerPlugin(ScrollTrigger);
 
 			cleanupContext = gsap.context(() => {
-				const signalTweens: Array<{ play: () => void }> = [];
-				const waitForReveal = variant === "problem" && !reduceMotion;
+				const signalTweens: Array<{
+					pause: () => void;
+					play: () => void;
+				}> = [];
+				const waitForReveal = variant === "problem";
 
 				for (const [index, route] of routes.entries()) {
 					const path = pathRefs.current[index];
@@ -350,10 +381,6 @@ export function SignalPathLayer({ variant }: SignalPathLayerProps) {
 							),
 						},
 					});
-
-					if (reduceMotion) {
-						continue;
-					}
 
 					const travel = { progress: initialProgress };
 
@@ -396,14 +423,16 @@ export function SignalPathLayer({ variant }: SignalPathLayerProps) {
 						tween.play();
 					}
 				};
-
-				if (reduceMotion) {
-					gsap.set(root, { autoAlpha: 1, yPercent: 0 });
-					return;
-				}
+				pauseSignals = () => {
+					for (const tween of signalTweens) {
+						tween.pause();
+					}
+				};
 
 				if (variant === "hero") {
-					startSignals();
+					if (isVisible) {
+						startSignals();
+					}
 					return;
 				}
 
@@ -425,13 +454,40 @@ export function SignalPathLayer({ variant }: SignalPathLayerProps) {
 						},
 					},
 				);
+
+				if (isVisible && problemRevealHasStarted()) {
+					startSignals();
+				}
 			});
 		}
 
-		void setup();
+		const visibilityObserver = new IntersectionObserver(
+			([entry]) => {
+				isVisible = entry.isIntersecting;
+
+				if (!isVisible) {
+					pauseSignals?.();
+					return;
+				}
+
+				if (!setupStarted) {
+					setupStarted = true;
+					void setup();
+					return;
+				}
+
+				if (variant === "hero" || problemRevealHasStarted()) {
+					startSignals?.();
+				}
+			},
+			{ rootMargin: "300px 0px" },
+		);
+
+		visibilityObserver.observe(root);
 
 		return () => {
 			disposed = true;
+			visibilityObserver.disconnect();
 			cleanupContext?.revert();
 		};
 	}, [routes, variant]);
@@ -444,7 +500,9 @@ export function SignalPathLayer({ variant }: SignalPathLayerProps) {
 				variant === "hero"
 					? "inset-0 z-[1]"
 					: "inset-0 z-0",
-				variant === "problem" ? "opacity-0" : "opacity-100",
+				variant === "problem"
+					? "opacity-0"
+					: "opacity-100",
 			].join(" ")}
 			ref={rootRef}
 			style={

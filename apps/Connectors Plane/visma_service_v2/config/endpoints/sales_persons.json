@@ -1,0 +1,31 @@
+{
+  "endpoint_name": "sales_persons",
+  "bigquery_table": "visma_sales_persons",
+  "primary_key": "salespersonID",
+  "source": "erp_rest",
+  "api_method": "get_sales_persons",
+  "api_endpoint": "/v2/salesperson",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "salespersonID",
+    "name",
+    "isActive",
+    "lastModifiedDateTime"
+  ],
+  "notes": "DataMart normalizer parity vs ERP (scripts/normalizer_parity.py, 2026-09-29, after correcting wrong-domain values): 6 of 9 fields equal on all 114 sales persons; createdDateTime is null (DataMart's created time is its load time, 2026-05-19, not the ERP's 2023-09-12).",
+  "datamart": {
+    "ready": false,
+    "pilot_override": false,
+    "query_file": "config/queries/sales_person.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_sales_person",
+    "fallback_source": "erp_rest",
+    "root_field": "salesPersons",
+    "type_name": "SalesPerson"
+  }
+}

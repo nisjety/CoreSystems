@@ -21,7 +21,7 @@ const (
 	BillingPlanConsumerName                      = "billing-core-organization-plan-changed"
 	BillingPlanSubject                           = "organization.plan.changed"
 	BillingPlanDeliverySubject                   = "_VEREVON.CONTROL.DELIVER.billing.organization-plan-changed"
-	ControlSharedStreamName                      = "AQENCIA_CONTROLPLANE"
+	ControlSharedStreamName                      = "CONTROLPLANE"
 	LegacyBridgeConsumerName                     = "control-shared-legacy-bridge"
 	LegacyBridgeDelivery                         = "_VEREVON.CONTROL.SHARED.DELIVER.legacy"
 	ConvexControlDLQSubject                      = "verevon.application.dlq.convex.controlplane"
@@ -37,7 +37,7 @@ const (
 	ConversationOrgErasureDelivery               = "_VEREVON.CONTROL.SHARED.DELIVER.application.conversation.gdpr-erasure"
 	ConversationInteractiveRetentionConsumerName = "conversation-core-interactive-retention"
 	ConversationInteractiveRetentionDelivery     = "_VEREVON.CONTROL.SHARED.DELIVER.application.conversation.interactive-retention"
-	InteractiveRetentionEnabledSubject           = "aqencia.controlplane.org.interactive_retention.enabled"
+	InteractiveRetentionEnabledSubject           = "controlplane.org.interactive_retention.enabled"
 	SessionGDPRErasureConsumerName               = "session-core-gdpr-erasure-v1"
 	QuarryControlOrgErasureConsumerName          = "quarry-control-org-erasure"
 	QuarryControlOrgErasureDelivery              = "_VEREVON.CONTROL.SHARED.DELIVER.ingestion.quarry-control.org-erasure"
@@ -435,13 +435,17 @@ func ProvisionControlSharedRuntime(ctx context.Context, js nats.JetStreamContext
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := requireMigratedSharedNamespace(js); err != nil {
+		return err
+	}
+
 	subjects := []string{
-		"aqencia.controlplane.>",
+		"controlplane.>",
 		"notifications.>",
 		"verevon.session.>",
-		"aqencia.reasoning.session.>",
+		"verevon.reasoning.session.>",
 		"verevon.agent.>",
-		"aqencia.reasoning.run.>",
+		"verevon.reasoning.run.>",
 		"app.session.>",
 		ConvexControlDLQSubject,
 		GDPRErasureRequestedSubject,
@@ -627,7 +631,7 @@ func notificationOrgDeletionConsumerConfigs() []*nats.ConsumerConfig {
 // org-erasure PULL consumer. Like sessionGDPRErasureConsumerConfig, a pull
 // consumer has no DeliverSubject/DeliverGroup — index-engine-rs binds via
 // get_consumer_from_stream (never get_stream first), so its identity also
-// does not need $JS.API.STREAM.INFO.AQENCIA_CONTROLPLANE.
+// does not need $JS.API.STREAM.INFO.CONTROLPLANE.
 func indexEngineOrgErasureConsumerConfig() *nats.ConsumerConfig {
 	return &nats.ConsumerConfig{
 		Durable: IndexEngineOrgErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
@@ -719,7 +723,7 @@ func dataOrchestratorOrgErasureConsumerConfig() *nats.ConsumerConfig {
 // quickwit-adapter-rs GDPR org-erasure PULL consumer. Unlike the other pull
 // consumers above, quickwit-adapter-rs's client resolves the consumer via
 // js.get_stream(..) before get_consumer(..), so this identity also needs
-// $JS.API.STREAM.INFO.AQENCIA_CONTROLPLANE granted in control-shared-nats.conf
+// $JS.API.STREAM.INFO.CONTROLPLANE granted in control-shared-nats.conf
 // (see the session-core-gdpr identity for the same requirement).
 func quickwitAdapterOrgErasureConsumerConfig() *nats.ConsumerConfig {
 	return &nats.ConsumerConfig{
@@ -750,7 +754,7 @@ func costCoreOrgErasureConsumerConfig() *nats.ConsumerConfig {
 // as indexEngineOrgErasureConsumerConfig/graphIndexOrgErasureConsumerConfig
 // above — embedding-engine-rs binds via get_consumer_from_stream (never
 // get_stream first), so its identity also does not need
-// $JS.API.STREAM.INFO.AQENCIA_CONTROLPLANE.
+// $JS.API.STREAM.INFO.CONTROLPLANE.
 func embeddingEngineOrgErasureConsumerConfig() *nats.ConsumerConfig {
 	return &nats.ConsumerConfig{
 		Durable: EmbeddingEngineOrgErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
@@ -795,13 +799,13 @@ func convexControlConsumerConfigs() []*nats.ConsumerConfig {
 		delivery string
 		filter   string
 	}{
-		{"convex-org-created-v1", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.org-created", "aqencia.controlplane.org.created"},
-		{"convex-org-updated-v1", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.org-updated", "aqencia.controlplane.org.updated"},
-		{"convex-org-deleted-v1", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.org-deleted", "aqencia.controlplane.org.deleted"},
-		{"convex-org-member-added-v1", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.member-added", "aqencia.controlplane.org.member_added"},
-		{"convex-org-member-removed-v1", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.member-removed", "aqencia.controlplane.org.member_removed"},
-		{"convex-org-changed-v2", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.org-changed", "aqencia.controlplane.org.changed"},
-		{"convex-org-member-changed-v2", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.member-changed", "aqencia.controlplane.org.member_changed"},
+		{"convex-org-created-v1", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.org-created", "controlplane.org.created"},
+		{"convex-org-updated-v1", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.org-updated", "controlplane.org.updated"},
+		{"convex-org-deleted-v1", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.org-deleted", "controlplane.org.deleted"},
+		{"convex-org-member-added-v1", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.member-added", "controlplane.org.member_added"},
+		{"convex-org-member-removed-v1", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.member-removed", "controlplane.org.member_removed"},
+		{"convex-org-changed-v2", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.org-changed", "controlplane.org.changed"},
+		{"convex-org-member-changed-v2", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.member-changed", "controlplane.org.member_changed"},
 	}
 	configs := make([]*nats.ConsumerConfig, 0, len(definitions))
 	for _, definition := range definitions {

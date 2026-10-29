@@ -1,0 +1,75 @@
+config {
+  type: "table",
+  schema: "visma_silver",
+  name: "dim_warehouse_location",
+  description: "Warehouse bin/location dimension — the `locations` array unpacked from visma_warehouses into one row per (tenant, warehouse, location). Child of dim_warehouse (join on tenant_id + warehouse_id).",
+  tags: ["silver", "visma", "dimension"]
+}
+
+-- =============================================================================
+-- Silver dimension: Warehouse bin locations
+-- Source: visma_warehouses.locations[] (nested array on each warehouse)
+-- Why: Each Visma warehouse (Lagersted) holds many storage locations/bins
+--      (e.g. "A1-2-3", "BUR-7", "Standard"). They were trapped as a raw JSON
+--      array on dim_warehouse; this explodes them so they are queryable and
+--      joinable to inventory/stock movements at bin grain.
+-- Grain: one row per (tenant_id, warehouse_id, location_id).
+-- =============================================================================
+
+WITH latest_warehouse AS (
+  -- Bronze carries several sync snapshots per warehouse; keep only the most
+  -- recent so a bin is not exploded once per snapshot.
+  SELECT
+    tenantId                            AS tenant_id,
+    SAFE_CAST(warehouseID AS STRING)    AS warehouse_id,
+    locations,
+    ROW_NUMBER() OVER (
+      PARTITION BY tenantId, warehouseID
+      ORDER BY refreshedAt DESC, syncedAt DESC
+    ) AS snapshot_rank
+  FROM ${ref("visma_warehouses")}
+  WHERE isDeleted = false OR isDeleted IS NULL
+),
+
+exploded AS (
+  SELECT
+    w.tenant_id,
+    w.warehouse_id,
+    JSON_VALUE(loc, '$.locationId')                    AS location_id,
+    JSON_VALUE(loc, '$.description')                   AS location_description,
+    SAFE_CAST(JSON_VALUE(loc, '$.active') AS BOOL)     AS is_active,
+    SAFE_CAST(JSON_VALUE(loc, '$.inclQtyAvail') AS BOOL) AS include_qty_available,
+    SAFE_CAST(JSON_VALUE(loc, '$.isCosted') AS BOOL)   AS is_costed,
+    SAFE_CAST(JSON_VALUE(loc, '$.salesValid') AS BOOL) AS sales_valid,
+    SAFE_CAST(JSON_VALUE(loc, '$.receiptsValid') AS BOOL) AS receipts_valid,
+    SAFE_CAST(JSON_VALUE(loc, '$.transfersValid') AS BOOL) AS transfers_valid,
+    SAFE_CAST(JSON_VALUE(loc, '$.assemblyValid') AS BOOL) AS assembly_valid,
+    JSON_VALUE(loc, '$.primaryItemValid')              AS primary_item_valid
+  FROM latest_warehouse AS w,
+       UNNEST(JSON_QUERY_ARRAY(w.locations)) AS loc
+  WHERE w.snapshot_rank = 1
+)
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(
+    CAST(tenant_id AS STRING), '|',
+    CAST(warehouse_id AS STRING), '|',
+    CAST(location_id AS STRING)
+  ))                                    AS warehouse_location_key,
+  tenant_id,
+  warehouse_id,
+  location_id,
+  location_description,
+  is_active,
+  include_qty_available,
+  is_costed,
+  sales_valid,
+  receipts_valid,
+  transfers_valid,
+  assembly_valid,
+  primary_item_valid
+FROM exploded
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY tenant_id, warehouse_id, location_id
+  ORDER BY is_active DESC
+) = 1

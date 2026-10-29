@@ -10,6 +10,24 @@ which the provider drives, not our JS.
 
 Companion document: `endpoint-map.md` (full upstream catalog + per-surface consumption view).
 
+## Local canonical stack runner — 2026-10-22
+
+Run `node scripts/run-frontend-plane.mjs up -d --build` from the Verevon v3 root.
+It always uses this directory's `docker-compose.yml`: SPA, Rust gateway and the
+Verevon NATS hub. The runner reads existing mode-0600 frontend `.env` credentials,
+the curated gateway credentials in Studio's protected `control_plane_compose`,
+and the three protected `shared_nats_*_leaf_password` files. It neither creates
+provider credentials nor starts Application, Data or Model Plane services.
+Missing owner services remain unavailable; starting the gateway is not proof
+that their business APIs are connected. Auth stays strict and ports bind only
+to localhost. Use `config --quiet` for validation, not a rendered secret dump.
+
+The SPA image receives only the generated Quarry SDK source and manifests via
+the `quarry-sdk` named build context. It compiles the SDK using the SPA's locked
+TypeScript dependency, without copying host dependencies or broadening the
+SPA context to the entire monorepo. Build with the canonical Compose file so
+the named context is available.
+
 ## Ownership hardening update — 2026-08-11
 
 The gateway remains a session-aware browser boundary. It may validate a small

@@ -1,0 +1,58 @@
+config {
+  type: "table",
+  schema: "xero_datamart",
+  description: "Xero sales-pipeline consumption mart at quote grain. Quotes are not sales orders, revenue, or a forecast until a governed forecast model is introduced.",
+  assertions: { nonNull: ["sales_pipeline_key", "tenant_id", "quote_id"], uniqueKey: ["sales_pipeline_key"] }
+}
+
+WITH quote_source AS (
+  SELECT
+    *,
+    COALESCE(expiry_date < DATE(synced_at), FALSE) AS is_expired_at_observation
+  FROM ${ref("xero_gold_sales", "fact_quote")}
+)
+
+SELECT
+  quote_key AS sales_pipeline_key,
+  company_key,
+  date_key,
+  contact_key,
+  customer_key,
+  branding_theme_key,
+  tenant_id,
+  quote_id,
+  quote_number,
+  reference,
+  status,
+  is_deleted,
+  is_open_pipeline AS is_source_open_pipeline,
+  is_open_pipeline AND NOT is_expired_at_observation AS is_effective_open_pipeline,
+  is_line_set_ambiguous,
+  customer_id,
+  customer_name,
+  quote_date,
+  expiry_date,
+  is_expired_at_observation,
+  currency_code,
+  source_exchange_rate,
+  source_subtotal_in_currency,
+  source_vat_in_currency,
+  source_total_in_currency,
+  pipeline_amount_in_currency AS source_pipeline_amount_in_currency,
+  IF(
+    is_open_pipeline AND NOT is_expired_at_observation,
+    pipeline_amount_in_currency,
+    NULL
+  ) AS pipeline_amount_in_currency,
+  IF(
+    is_open_pipeline AND NOT is_expired_at_observation,
+    pipeline_amount_in_currency,
+    NULL
+  ) IS NOT NULL AS is_pipeline_amount_available,
+  CAST(NULL AS NUMERIC) AS amount_nok,
+  FALSE AS is_nok_amount_available,
+  line_item_count,
+  observed_line_count,
+  synced_at,
+  'xero' AS source_system
+FROM quote_source

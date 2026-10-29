@@ -1,0 +1,4094 @@
+{
+  "spec_commit": "fd9d44b04bf4934a7509b8e7ece51a9e0e462e4f",
+  "spec_sha256": "1afca0717bb0d323210c0f88f3802684c068059f6e5161ee24ddde7ee6294a64",
+  "operations": [
+    {
+      "operation_id": "getAccount",
+      "path": "/Accounts/{AccountID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "AccountID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getAccountAttachmentByFileName",
+      "path": "/Accounts/{AccountID}/Attachments/{FileName}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "AccountID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "FileName",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getAccountAttachmentById",
+      "path": "/Accounts/{AccountID}/Attachments/{AttachmentID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "AccountID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "AttachmentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getAccountAttachments",
+      "path": "/Accounts/{AccountID}/Attachments",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "AccountID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getAccounts",
+      "path": "/Accounts",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "If-Modified-Since",
+          "location": "header",
+          "required": false,
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getBankTransaction",
+      "path": "/BankTransactions/{BankTransactionID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "BankTransactionID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "unitdp",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getBankTransactionAttachmentByFileName",
+      "path": "/BankTransactions/{BankTransactionID}/Attachments/{FileName}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "BankTransactionID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "FileName",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getBankTransactionAttachmentById",
+      "path": "/BankTransactions/{BankTransactionID}/Attachments/{AttachmentID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "BankTransactionID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "AttachmentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getBankTransactionAttachments",
+      "path": "/BankTransactions/{BankTransactionID}/Attachments",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "BankTransactionID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getBankTransactions",
+      "path": "/BankTransactions",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "If-Modified-Since",
+          "location": "header",
+          "required": false,
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "page",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "unitdp",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "pageSize",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "References",
+          "location": "query",
+          "required": false,
+          "type": "array",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getBankTransactionsHistory",
+      "path": "/BankTransactions/{BankTransactionID}/History",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "BankTransactionID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+
+      ]
+    },
+    {
+      "operation_id": "getBankTransfer",
+      "path": "/BankTransfers/{BankTransferID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "BankTransferID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getBankTransferAttachmentByFileName",
+      "path": "/BankTransfers/{BankTransferID}/Attachments/{FileName}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "BankTransferID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "FileName",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getBankTransferAttachmentById",
+      "path": "/BankTransfers/{BankTransferID}/Attachments/{AttachmentID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "BankTransferID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "AttachmentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getBankTransferAttachments",
+      "path": "/BankTransfers/{BankTransferID}/Attachments",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "BankTransferID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getBankTransferHistory",
+      "path": "/BankTransfers/{BankTransferID}/History",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "BankTransferID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+
+      ]
+    },
+    {
+      "operation_id": "getBankTransfers",
+      "path": "/BankTransfers",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "If-Modified-Since",
+          "location": "header",
+          "required": false,
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "includeDeleted",
+          "location": "query",
+          "required": false,
+          "type": "boolean",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getBatchPayment",
+      "path": "/BatchPayments/{BatchPaymentID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "BatchPaymentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getBatchPaymentHistory",
+      "path": "/BatchPayments/{BatchPaymentID}/History",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "BatchPaymentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getBatchPayments",
+      "path": "/BatchPayments",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "If-Modified-Since",
+          "location": "header",
+          "required": false,
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getBrandingTheme",
+      "path": "/BrandingThemes/{BrandingThemeID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "BrandingThemeID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getBrandingThemePaymentServices",
+      "path": "/BrandingThemes/{BrandingThemeID}/PaymentServices",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "BrandingThemeID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getBrandingThemes",
+      "path": "/BrandingThemes",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getBudget",
+      "path": "/Budgets/{BudgetID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "BudgetID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "DateTo",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        },
+        {
+          "name": "DateFrom",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getBudgets",
+      "path": "/Budgets",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "IDs",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "DateTo",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        },
+        {
+          "name": "DateFrom",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getContact",
+      "path": "/Contacts/{ContactID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ContactID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getContactAttachmentByFileName",
+      "path": "/Contacts/{ContactID}/Attachments/{FileName}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ContactID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "FileName",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getContactAttachmentById",
+      "path": "/Contacts/{ContactID}/Attachments/{AttachmentID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ContactID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "AttachmentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getContactAttachments",
+      "path": "/Contacts/{ContactID}/Attachments",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ContactID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getContactByContactNumber",
+      "path": "/Contacts/{ContactNumber}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ContactNumber",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getContactCISSettings",
+      "path": "/Contacts/{ContactID}/CISSettings",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ContactID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getContactGroup",
+      "path": "/ContactGroups/{ContactGroupID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ContactGroupID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getContactGroups",
+      "path": "/ContactGroups",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getContactHistory",
+      "path": "/Contacts/{ContactID}/History",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ContactID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+
+      ]
+    },
+    {
+      "operation_id": "getContacts",
+      "path": "/Contacts",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "If-Modified-Since",
+          "location": "header",
+          "required": false,
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "IDs",
+          "location": "query",
+          "required": false,
+          "type": "array",
+          "format": null
+        },
+        {
+          "name": "page",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "includeArchived",
+          "location": "query",
+          "required": false,
+          "type": "boolean",
+          "format": null
+        },
+        {
+          "name": "summaryOnly",
+          "location": "query",
+          "required": false,
+          "type": "boolean",
+          "format": null
+        },
+        {
+          "name": "searchTerm",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "pageSize",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getCreditNote",
+      "path": "/CreditNotes/{CreditNoteID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "CreditNoteID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "unitdp",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getCreditNoteAsPdf",
+      "path": "/CreditNotes/{CreditNoteID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "CreditNoteID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/pdf"
+      ]
+    },
+    {
+      "operation_id": "getCreditNoteAttachmentByFileName",
+      "path": "/CreditNotes/{CreditNoteID}/Attachments/{FileName}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "CreditNoteID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "FileName",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getCreditNoteAttachmentById",
+      "path": "/CreditNotes/{CreditNoteID}/Attachments/{AttachmentID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "CreditNoteID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "AttachmentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getCreditNoteAttachments",
+      "path": "/CreditNotes/{CreditNoteID}/Attachments",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "CreditNoteID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getCreditNoteHistory",
+      "path": "/CreditNotes/{CreditNoteID}/History",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "CreditNoteID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+
+      ]
+    },
+    {
+      "operation_id": "getCreditNotes",
+      "path": "/CreditNotes",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "If-Modified-Since",
+          "location": "header",
+          "required": false,
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "page",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "unitdp",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "pageSize",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getCurrencies",
+      "path": "/Currencies",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getExpenseClaim",
+      "path": "/ExpenseClaims/{ExpenseClaimID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ExpenseClaimID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getExpenseClaimHistory",
+      "path": "/ExpenseClaims/{ExpenseClaimID}/History",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ExpenseClaimID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+
+      ]
+    },
+    {
+      "operation_id": "getExpenseClaims",
+      "path": "/ExpenseClaims",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "If-Modified-Since",
+          "location": "header",
+          "required": false,
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getInvoice",
+      "path": "/Invoices/{InvoiceID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "InvoiceID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "unitdp",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getInvoiceAsPdf",
+      "path": "/Invoices/{InvoiceID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "InvoiceID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/pdf"
+      ]
+    },
+    {
+      "operation_id": "getInvoiceAttachmentByFileName",
+      "path": "/Invoices/{InvoiceID}/Attachments/{FileName}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "InvoiceID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "FileName",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getInvoiceAttachmentById",
+      "path": "/Invoices/{InvoiceID}/Attachments/{AttachmentID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "InvoiceID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "AttachmentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getInvoiceAttachments",
+      "path": "/Invoices/{InvoiceID}/Attachments",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "InvoiceID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getInvoiceHistory",
+      "path": "/Invoices/{InvoiceID}/History",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "InvoiceID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+
+      ]
+    },
+    {
+      "operation_id": "getInvoiceReminders",
+      "path": "/InvoiceReminders/Settings",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getInvoices",
+      "path": "/Invoices",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "If-Modified-Since",
+          "location": "header",
+          "required": false,
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "IDs",
+          "location": "query",
+          "required": false,
+          "type": "array",
+          "format": null
+        },
+        {
+          "name": "InvoiceNumbers",
+          "location": "query",
+          "required": false,
+          "type": "array",
+          "format": null
+        },
+        {
+          "name": "ContactIDs",
+          "location": "query",
+          "required": false,
+          "type": "array",
+          "format": null
+        },
+        {
+          "name": "Statuses",
+          "location": "query",
+          "required": false,
+          "type": "array",
+          "format": null
+        },
+        {
+          "name": "page",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "includeArchived",
+          "location": "query",
+          "required": false,
+          "type": "boolean",
+          "format": null
+        },
+        {
+          "name": "createdByMyApp",
+          "location": "query",
+          "required": false,
+          "type": "boolean",
+          "format": null
+        },
+        {
+          "name": "unitdp",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "summaryOnly",
+          "location": "query",
+          "required": false,
+          "type": "boolean",
+          "format": null
+        },
+        {
+          "name": "pageSize",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "searchTerm",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getItem",
+      "path": "/Items/{ItemID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ItemID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "unitdp",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getItemHistory",
+      "path": "/Items/{ItemID}/History",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ItemID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+
+      ]
+    },
+    {
+      "operation_id": "getItems",
+      "path": "/Items",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "If-Modified-Since",
+          "location": "header",
+          "required": false,
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "unitdp",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getJournal",
+      "path": "/Journals/{JournalID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "JournalID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getJournalByNumber",
+      "path": "/Journals/{JournalNumber}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "JournalNumber",
+          "location": "path",
+          "required": true,
+          "type": "integer",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getJournals",
+      "path": "/Journals",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "If-Modified-Since",
+          "location": "header",
+          "required": false,
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "name": "offset",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "paymentsOnly",
+          "location": "query",
+          "required": false,
+          "type": "boolean",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getLinkedTransaction",
+      "path": "/LinkedTransactions/{LinkedTransactionID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "LinkedTransactionID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getLinkedTransactions",
+      "path": "/LinkedTransactions",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "page",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "LinkedTransactionID",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "SourceTransactionID",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "ContactID",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "Status",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "TargetTransactionID",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getManualJournal",
+      "path": "/ManualJournals/{ManualJournalID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ManualJournalID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getManualJournalAttachmentByFileName",
+      "path": "/ManualJournals/{ManualJournalID}/Attachments/{FileName}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ManualJournalID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "FileName",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getManualJournalAttachmentById",
+      "path": "/ManualJournals/{ManualJournalID}/Attachments/{AttachmentID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ManualJournalID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "AttachmentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getManualJournalAttachments",
+      "path": "/ManualJournals/{ManualJournalID}/Attachments",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ManualJournalID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getManualJournals",
+      "path": "/ManualJournals",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "If-Modified-Since",
+          "location": "header",
+          "required": false,
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "page",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "pageSize",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getManualJournalsHistory",
+      "path": "/ManualJournals/{ManualJournalID}/History",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ManualJournalID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+
+      ]
+    },
+    {
+      "operation_id": "getOnlineInvoice",
+      "path": "/Invoices/{InvoiceID}/OnlineInvoice",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "InvoiceID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getOrganisationActions",
+      "path": "/Organisation/Actions",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getOrganisationCISSettings",
+      "path": "/Organisation/{OrganisationID}/CISSettings",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "OrganisationID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getOrganisations",
+      "path": "/Organisation",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getOverpayment",
+      "path": "/Overpayments/{OverpaymentID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "OverpaymentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getOverpaymentHistory",
+      "path": "/Overpayments/{OverpaymentID}/History",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "OverpaymentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+
+      ]
+    },
+    {
+      "operation_id": "getOverpayments",
+      "path": "/Overpayments",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "If-Modified-Since",
+          "location": "header",
+          "required": false,
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "page",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "unitdp",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "pageSize",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "References",
+          "location": "query",
+          "required": false,
+          "type": "array",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getPayment",
+      "path": "/Payments/{PaymentID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "PaymentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getPaymentHistory",
+      "path": "/Payments/{PaymentID}/History",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "PaymentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+
+      ]
+    },
+    {
+      "operation_id": "getPaymentServices",
+      "path": "/PaymentServices",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getPayments",
+      "path": "/Payments",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "If-Modified-Since",
+          "location": "header",
+          "required": false,
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "page",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "pageSize",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getPrepayment",
+      "path": "/Prepayments/{PrepaymentID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "PrepaymentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getPrepaymentHistory",
+      "path": "/Prepayments/{PrepaymentID}/History",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "PrepaymentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+
+      ]
+    },
+    {
+      "operation_id": "getPrepayments",
+      "path": "/Prepayments",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "If-Modified-Since",
+          "location": "header",
+          "required": false,
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "page",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "unitdp",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "pageSize",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "InvoiceNumbers",
+          "location": "query",
+          "required": false,
+          "type": "array",
+          "format": null
+        },
+        {
+          "name": "References",
+          "location": "query",
+          "required": false,
+          "type": "array",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getPurchaseOrder",
+      "path": "/PurchaseOrders/{PurchaseOrderID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "PurchaseOrderID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getPurchaseOrderAsPdf",
+      "path": "/PurchaseOrders/{PurchaseOrderID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "PurchaseOrderID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/pdf"
+      ]
+    },
+    {
+      "operation_id": "getPurchaseOrderAttachmentByFileName",
+      "path": "/PurchaseOrders/{PurchaseOrderID}/Attachments/{FileName}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "PurchaseOrderID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "FileName",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getPurchaseOrderAttachmentById",
+      "path": "/PurchaseOrders/{PurchaseOrderID}/Attachments/{AttachmentID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "PurchaseOrderID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "AttachmentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getPurchaseOrderAttachments",
+      "path": "/PurchaseOrders/{PurchaseOrderID}/Attachments",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "PurchaseOrderID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getPurchaseOrderByNumber",
+      "path": "/PurchaseOrders/{PurchaseOrderNumber}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "PurchaseOrderNumber",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getPurchaseOrderHistory",
+      "path": "/PurchaseOrders/{PurchaseOrderID}/History",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "PurchaseOrderID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+
+      ]
+    },
+    {
+      "operation_id": "getPurchaseOrders",
+      "path": "/PurchaseOrders",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "If-Modified-Since",
+          "location": "header",
+          "required": false,
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "name": "Status",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "DateFrom",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "DateTo",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "page",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "pageSize",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getQuote",
+      "path": "/Quotes/{QuoteID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "QuoteID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getQuoteAsPdf",
+      "path": "/Quotes/{QuoteID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "QuoteID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/pdf"
+      ]
+    },
+    {
+      "operation_id": "getQuoteAttachmentByFileName",
+      "path": "/Quotes/{QuoteID}/Attachments/{FileName}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "QuoteID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "FileName",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getQuoteAttachmentById",
+      "path": "/Quotes/{QuoteID}/Attachments/{AttachmentID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "QuoteID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "AttachmentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getQuoteAttachments",
+      "path": "/Quotes/{QuoteID}/Attachments",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "QuoteID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getQuoteHistory",
+      "path": "/Quotes/{QuoteID}/History",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "QuoteID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+
+      ]
+    },
+    {
+      "operation_id": "getQuotes",
+      "path": "/Quotes",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "If-Modified-Since",
+          "location": "header",
+          "required": false,
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "name": "DateFrom",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        },
+        {
+          "name": "DateTo",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        },
+        {
+          "name": "ExpiryDateFrom",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        },
+        {
+          "name": "ExpiryDateTo",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        },
+        {
+          "name": "ContactID",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "Status",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "page",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "QuoteNumber",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getReceipt",
+      "path": "/Receipts/{ReceiptID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ReceiptID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "unitdp",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getReceiptAttachmentByFileName",
+      "path": "/Receipts/{ReceiptID}/Attachments/{FileName}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ReceiptID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "FileName",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getReceiptAttachmentById",
+      "path": "/Receipts/{ReceiptID}/Attachments/{AttachmentID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ReceiptID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "AttachmentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getReceiptAttachments",
+      "path": "/Receipts/{ReceiptID}/Attachments",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ReceiptID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getReceiptHistory",
+      "path": "/Receipts/{ReceiptID}/History",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ReceiptID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+
+      ]
+    },
+    {
+      "operation_id": "getReceipts",
+      "path": "/Receipts",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "If-Modified-Since",
+          "location": "header",
+          "required": false,
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "unitdp",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getRepeatingInvoice",
+      "path": "/RepeatingInvoices/{RepeatingInvoiceID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "RepeatingInvoiceID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getRepeatingInvoiceAttachmentByFileName",
+      "path": "/RepeatingInvoices/{RepeatingInvoiceID}/Attachments/{FileName}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "RepeatingInvoiceID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "FileName",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getRepeatingInvoiceAttachmentById",
+      "path": "/RepeatingInvoices/{RepeatingInvoiceID}/Attachments/{AttachmentID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "RepeatingInvoiceID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "AttachmentID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "contentType",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/octet-stream"
+      ]
+    },
+    {
+      "operation_id": "getRepeatingInvoiceAttachments",
+      "path": "/RepeatingInvoices/{RepeatingInvoiceID}/Attachments",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "RepeatingInvoiceID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getRepeatingInvoiceHistory",
+      "path": "/RepeatingInvoices/{RepeatingInvoiceID}/History",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "RepeatingInvoiceID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+
+      ]
+    },
+    {
+      "operation_id": "getRepeatingInvoices",
+      "path": "/RepeatingInvoices",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getReportAgedPayablesByContact",
+      "path": "/Reports/AgedPayablesByContact",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "contactId",
+          "location": "query",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "date",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        },
+        {
+          "name": "fromDate",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        },
+        {
+          "name": "toDate",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getReportAgedReceivablesByContact",
+      "path": "/Reports/AgedReceivablesByContact",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "contactId",
+          "location": "query",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "name": "date",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        },
+        {
+          "name": "fromDate",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        },
+        {
+          "name": "toDate",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getReportBalanceSheet",
+      "path": "/Reports/BalanceSheet",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "date",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        },
+        {
+          "name": "periods",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "timeframe",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "trackingOptionID1",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "trackingOptionID2",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "standardLayout",
+          "location": "query",
+          "required": false,
+          "type": "boolean",
+          "format": null
+        },
+        {
+          "name": "paymentsOnly",
+          "location": "query",
+          "required": false,
+          "type": "boolean",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getReportBankSummary",
+      "path": "/Reports/BankSummary",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "fromDate",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        },
+        {
+          "name": "toDate",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getReportBudgetSummary",
+      "path": "/Reports/BudgetSummary",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "date",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        },
+        {
+          "name": "periods",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "timeframe",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getReportExecutiveSummary",
+      "path": "/Reports/ExecutiveSummary",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "date",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getReportFromId",
+      "path": "/Reports/{ReportID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "ReportID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getReportProfitAndLoss",
+      "path": "/Reports/ProfitAndLoss",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "fromDate",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        },
+        {
+          "name": "toDate",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        },
+        {
+          "name": "periods",
+          "location": "query",
+          "required": false,
+          "type": "integer",
+          "format": null
+        },
+        {
+          "name": "timeframe",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "trackingCategoryID",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "trackingCategoryID2",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "trackingOptionID",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "trackingOptionID2",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "standardLayout",
+          "location": "query",
+          "required": false,
+          "type": "boolean",
+          "format": null
+        },
+        {
+          "name": "paymentsOnly",
+          "location": "query",
+          "required": false,
+          "type": "boolean",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getReportTenNinetyNine",
+      "path": "/Reports/TenNinetyNine",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "reportYear",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getReportTrialBalance",
+      "path": "/Reports/TrialBalance",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "date",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": "date"
+        },
+        {
+          "name": "paymentsOnly",
+          "location": "query",
+          "required": false,
+          "type": "boolean",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getReportsList",
+      "path": "/Reports",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getTaxRateByTaxType",
+      "path": "/TaxRates/{TaxType}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "TaxType",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getTaxRates",
+      "path": "/TaxRates",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getTrackingCategories",
+      "path": "/TrackingCategories",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "includeArchived",
+          "location": "query",
+          "required": false,
+          "type": "boolean",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getTrackingCategory",
+      "path": "/TrackingCategories/{TrackingCategoryID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "TrackingCategoryID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getUser",
+      "path": "/Users/{UserID}",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "UserID",
+          "location": "path",
+          "required": true,
+          "type": "string",
+          "format": "uuid"
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    },
+    {
+      "operation_id": "getUsers",
+      "path": "/Users",
+      "parameters": [
+        {
+          "name": "xero-tenant-id",
+          "location": "header",
+          "required": true,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "If-Modified-Since",
+          "location": "header",
+          "required": false,
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "name": "where",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        },
+        {
+          "name": "order",
+          "location": "query",
+          "required": false,
+          "type": "string",
+          "format": null
+        }
+      ],
+      "response_content_types": [
+        "application/json"
+      ]
+    }
+  ]
+}

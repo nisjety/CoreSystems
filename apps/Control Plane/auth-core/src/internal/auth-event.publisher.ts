@@ -229,9 +229,9 @@ export type AuthEvent =
   | OrganizationMemberAddedEvent
   | OrganizationMemberRemovedEvent;
 
-const ORGANIZATION_PROJECTION_SUBJECT = 'aqencia.controlplane.org.changed';
+const ORGANIZATION_PROJECTION_SUBJECT = 'controlplane.org.changed';
 const ORGANIZATION_MEMBERSHIP_PROJECTION_SUBJECT =
-  'aqencia.controlplane.org.member_changed';
+  'controlplane.org.member_changed';
 
 @Injectable()
 export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
@@ -436,7 +436,7 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
 
     // Cross-plane: publish to shared NATS for Ingestion/Data/Reasoning planes
     await sharedNats.publish(
-      'aqencia.controlplane.user.registered',
+      'controlplane.user.registered',
       {
         user_id: data.userId,
         email: data.email,
@@ -466,7 +466,7 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
     } as UserLoginEvent);
 
     // Cross-plane: notify other planes of sign-in (useful for session-aware services)
-    await this.sharedNats?.publish('aqencia.controlplane.user.signed_in', {
+    await this.sharedNats?.publish('controlplane.user.signed_in', {
       user_id: data.userId,
       email: data.email,
       session_id: data.sessionId,
@@ -507,7 +507,7 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
 
     // Cross-plane: critical event — Ingestion subscribes to provision M365 sync
     await sharedNats.publish(
-      'aqencia.controlplane.user.provider_linked',
+      'controlplane.user.provider_linked',
       {
         user_id: data.userId,
         email: data.email,
@@ -598,7 +598,7 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
 
     // Cross-plane: ALL planes need to provision resources for a new org
     await this.sharedNats?.publish(
-      'aqencia.controlplane.org.created',
+      'controlplane.org.created',
       {
         org_id: data.organizationId,
         org_name: data.name,
@@ -700,7 +700,7 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
       traceId,
     } as OrganizationMemberAddedEvent);
 
-    await this.sharedNats?.publish('aqencia.controlplane.org.member_added', {
+    await this.sharedNats?.publish('controlplane.org.member_added', {
       org_id: data.organizationId,
       org_name: data.organizationName,
       user_id: data.userId,
@@ -739,7 +739,7 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
       traceId,
     } as OrganizationMemberRemovedEvent);
 
-    await this.sharedNats?.publish('aqencia.controlplane.org.member_removed', {
+    await this.sharedNats?.publish('controlplane.org.member_removed', {
       org_id: data.organizationId,
       org_name: data.organizationName,
       user_id: data.userId,

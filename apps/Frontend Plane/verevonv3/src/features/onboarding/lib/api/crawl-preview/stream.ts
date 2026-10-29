@@ -29,6 +29,14 @@ export async function streamCrawlPreview(
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  let terminalReceipt = false
+  const checkedHandlers: SseHandlers = {
+    ...handlers,
+    onDone: (payload) => {
+      terminalReceipt = true
+      handlers.onDone?.(payload)
+    },
+  }
 
   while (true) {
     const { done, value } = await reader.read()
@@ -39,8 +47,9 @@ export async function streamCrawlPreview(
     while (splitIndex >= 0) {
       const packet = buffer.slice(0, splitIndex)
       buffer = buffer.slice(splitIndex + 2)
-      dispatchCrawlPreviewPacket(packet, handlers)
+      dispatchCrawlPreviewPacket(packet, checkedHandlers)
       splitIndex = buffer.indexOf('\n\n')
     }
   }
+  if (!terminalReceipt) throw new Error('Website preview ended without a completion receipt')
 }

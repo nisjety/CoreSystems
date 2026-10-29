@@ -939,7 +939,7 @@ func (s *Service) RemoveMembership(ctx context.Context, userID, orgID string) er
 // EVENT PUBLISHING METHODS
 // ============================================
 
-// publishUserRegistered publishes aqencia.controlplane.user.registered.
+// publishUserRegistered publishes controlplane.user.registered.
 // Ingestion Plane subscribes to setup M365 and other provider integrations.
 func (s *Service) publishUserRegistered(ctx context.Context, userID, email, name, provider string) {
 	if s.sharedPublisher == nil {
@@ -948,7 +948,7 @@ func (s *Service) publishUserRegistered(ctx context.Context, userID, email, name
 	s.sharedPublisher.PublishUserRegistered(ctx, userID, email, name, provider)
 }
 
-// publishUserUpdated publishes aqencia.controlplane.user.updated.
+// publishUserUpdated publishes controlplane.user.updated.
 func (s *Service) publishUserUpdated(ctx context.Context, userID, email string, changes map[string]any) {
 	if s.sharedPublisher == nil {
 		return
@@ -956,7 +956,7 @@ func (s *Service) publishUserUpdated(ctx context.Context, userID, email string, 
 	s.sharedPublisher.PublishUserUpdated(ctx, userID, email, changes)
 }
 
-// publishUserDeleted publishes aqencia.controlplane.user.deleted.
+// publishUserDeleted publishes controlplane.user.deleted.
 func (s *Service) publishUserDeleted(ctx context.Context, userID, email string) {
 	if s.sharedPublisher == nil {
 		return
@@ -964,7 +964,7 @@ func (s *Service) publishUserDeleted(ctx context.Context, userID, email string) 
 	s.sharedPublisher.PublishUserDeleted(ctx, userID, email)
 }
 
-// publishProviderLinked publishes aqencia.controlplane.user.provider_linked.
+// publishProviderLinked publishes controlplane.user.provider_linked.
 // Ingestion Plane subscribes to setup M365, Google, and other cloud integrations.
 func (s *Service) publishProviderLinked(ctx context.Context, userID, email, provider, tenantID string) {
 	if s.sharedPublisher == nil {

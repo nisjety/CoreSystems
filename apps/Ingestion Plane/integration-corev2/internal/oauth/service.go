@@ -74,7 +74,14 @@ type CallbackResult struct {
 	ErrorCode    string
 	Message      string
 	ReturnURL    string
+	ReturnOrigin string
+	// ReturnURLRejected indicates that the session's previously stored browser
+	// destination no longer satisfies the current deployment allowlist. It is
+	// intentionally a boolean so telemetry and UI never need to expose it.
+	ReturnURLRejected bool
 }
+
+var ErrInvalidReturnURL = errors.New("invalid return URL")
 
 type AccessTokenResult struct {
 	ConnectionID string    `json:"connectionId"`
@@ -125,6 +132,10 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 	if strings.TrimSpace(input.UserID) == "" {
 		return CreateSessionResult{}, fmt.Errorf("userId is required")
 	}
+	returnURL, _, err := s.cfg.NormalizeOAuthReturnURL(input.ReturnURL)
+	if err != nil {
+		return CreateSessionResult{}, ErrInvalidReturnURL
+	}
 	workspaceID := strings.TrimSpace(input.WorkspaceID)
 	if workspaceID == "" {
 		workspaceID = strings.TrimSpace(input.OrganizationID)
@@ -132,6 +143,13 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 	providerContext, err := NormalizeProviderContext(provider.Key, input.ProviderContext)
 	if err != nil {
 		return CreateSessionResult{}, err
+	}
+	if provider.Key == "algolia" {
+		r, err := s.cfg.AlgoliaRegistration()
+		if err != nil {
+			return CreateSessionResult{}, err
+		}
+		providerContext = map[string]string{"algolia_client_id": r.ClientID, "algolia_resource": r.Resource}
 	}
 	// Meta bakes permissions into a Facebook Login for Business configuration
 	// rather than a per-request scope param (see MetaOAuthClient), so a
@@ -167,6 +185,15 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 	redirectURI := s.callbackURL(provider.Key)
 	capabilities := providers.ResolveCapabilities(provider, input.Capabilities, input.Bundles)
 	scopes := providers.ResolveScopes(provider, capabilities)
+	if provider.Key == "algolia" {
+		for _, capability := range input.Capabilities {
+			if capability != "search.analytics.read" {
+				return CreateSessionResult{}, errAlgoliaOAuth
+			}
+		}
+		capabilities = []string{"search.analytics.read"}
+		scopes = []string{"public"}
+	}
 	verifierCiphertext, err := s.vault.Encrypt(verifier, []byte(sessionID))
 	if err != nil {
 		return CreateSessionResult{}, err
@@ -182,7 +209,7 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 		StateHash:              HashState(state),
 		CodeVerifierCiphertext: verifierCiphertext,
 		RedirectURI:            redirectURI,
-		ReturnURL:              strings.TrimSpace(input.ReturnURL),
+		ReturnURL:              returnURL,
 		ProviderContext:        providerContext,
 		Capabilities:           capabilities,
 		Scopes:                 scopes,
@@ -218,10 +245,18 @@ func (s *Service) CompleteCallback(ctx context.Context, providerKey, state, code
 	if err != nil {
 		return CallbackResult{Success: false, ErrorCode: "invalid_state", Message: "OAuth state was not recognized."}, err
 	}
+	returnURL, returnOrigin, returnURLErr := s.cfg.NormalizeOAuthReturnURL(session.ReturnURL)
+	returnURLRejected := returnURLErr != nil && strings.TrimSpace(session.ReturnURL) != ""
+	if returnURLErr != nil {
+		returnURL = ""
+		returnOrigin = ""
+	}
 	result := CallbackResult{
-		SessionID:   session.ID,
-		ProviderKey: session.ProviderKey,
-		ReturnURL:   session.ReturnURL,
+		SessionID:         session.ID,
+		ProviderKey:       session.ProviderKey,
+		ReturnURL:         returnURL,
+		ReturnOrigin:      returnOrigin,
+		ReturnURLRejected: returnURLRejected,
 	}
 	if session.ConsumedAt != nil {
 		result.ErrorCode = "session_consumed"
@@ -274,6 +309,12 @@ func (s *Service) CompleteCallback(ctx context.Context, providerKey, state, code
 	result.Success = true
 	result.ConnectionID = connection.ID
 	result.Message = "Connection completed."
+	if result.ReturnURLRejected {
+		// The connection is safe and authoritative in the status endpoint, but
+		// an in-flight browser must remain open because the old destination may
+		// no longer receive a redirect or postMessage.
+		result.Message = "Connection completed. The return destination is no longer approved; return to the application and refresh integrations."
+	}
 	// Meta inbox completion is finalized by the API only after provider asset
 	// subscriptions and their durable sync state succeed. This keeps the
 	// connect-session status endpoint and integration.connected event truthful.
@@ -298,11 +339,12 @@ func (s *Service) FinalizeConnectedCallback(ctx context.Context, result Callback
 		ConnectionID:   connection.ID,
 		ProviderKey:    connection.ProviderKey,
 		Data: map[string]any{
-			"connectorType": connection.ConnectorType,
-			"displayName":   connection.DisplayName,
-			"capabilities":  connection.Capabilities,
-			"scopes":        redactScopes(connection.Scopes),
-			"status":        connection.Status,
+			"connectorType":     connection.ConnectorType,
+			"displayName":       connection.DisplayName,
+			"capabilities":      connection.Capabilities,
+			"scopes":            redactScopes(connection.Scopes),
+			"status":            connection.Status,
+			"returnURLRejected": result.ReturnURLRejected,
 		},
 		CreatedAt: s.now(),
 	})
@@ -318,6 +360,9 @@ func (s *Service) AccessToken(ctx context.Context, organizationID, connectorType
 	if err != nil {
 		return AccessTokenResult{}, err
 	}
+	if connection.ProviderKey == "algolia" {
+		return AccessTokenResult{}, ErrResourceBoundToken
+	}
 	return s.accessTokenForConnection(ctx, connection)
 }
 
@@ -325,6 +370,9 @@ func (s *Service) AccessTokenForConnection(ctx context.Context, connectionID str
 	connection, err := s.repo.GetConnection(ctx, connectionID)
 	if err != nil {
 		return AccessTokenResult{}, err
+	}
+	if connection.ProviderKey == "algolia" {
+		return AccessTokenResult{}, ErrResourceBoundToken
 	}
 	if connection.DeletedAt != nil || connection.Status != "active" {
 		return AccessTokenResult{}, store.ErrNotFound
@@ -483,6 +531,9 @@ func (s *Service) accessTokenForConnection(ctx context.Context, connection store
 	if err != nil {
 		return AccessTokenResult{}, err
 	}
+	if refreshed.Status != "active" || refreshed.DeletedAt != nil || accessToken == "" {
+		return AccessTokenResult{}, store.ErrNotFound
+	}
 	return AccessTokenResult{
 		ConnectionID: refreshed.ID,
 		ProviderKey:  refreshed.ProviderKey,
@@ -495,6 +546,9 @@ func (s *Service) accessTokenForConnection(ctx context.Context, connection store
 
 func (s *Service) callbackURL(providerKey string) string {
 	normalizedProviderKey := providers.NormalizeKey(providerKey)
+	if normalizedProviderKey == "algolia" {
+		return strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/api/v1/providers/algolia/callback"
+	}
 	if normalizedProviderKey == "snapchat" && strings.TrimSpace(s.cfg.SnapchatRedirectBaseURL) != "" {
 		return strings.TrimRight(s.cfg.SnapchatRedirectBaseURL, "/") + "/oauth/callback/snapchat"
 	}
@@ -517,12 +571,21 @@ func (s *Service) persistConnection(ctx context.Context, session store.ConnectSe
 		profile, _ = client.Profile(ctx, token.AccessToken, session.ProviderContext)
 	}
 	providerAccountID := providerAccountIdentity(session.ProviderKey, profile, token)
+	// A failed Google userinfo lookup must never fall back to the most recent
+	// connector and overwrite a different account's existing website grant.
+	if providers.NormalizeKey(session.ProviderKey) == "google" && providerAccountID == "" {
+		return store.Connection{}, fmt.Errorf("Google provider identity could not be verified")
+	}
 	connectionID := "conn_" + uuid.NewString()
 	createdAt := s.now()
 	reconnecting := false
 	existing := store.Connection{}
 	var err error
-	if providerAccountID != "" {
+	if session.ProviderKey == "algolia" {
+		// No provider identity endpoint is advertised for this MCP grant. Every
+		// approved session remains independent; never replace another account.
+		err = store.ErrNotFound
+	} else if providerAccountID != "" {
 		existing, err = s.repo.FindActiveConnectionByProviderAccount(ctx, session.OrganizationID, session.ConnectorType, providerAccountID)
 	} else {
 		existing, err = s.repo.FindActiveConnection(ctx, session.OrganizationID, session.ConnectorType)
@@ -533,6 +596,14 @@ func (s *Service) persistConnection(ctx context.Context, session store.ConnectSe
 		reconnecting = true
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return store.Connection{}, err
+	}
+	googleGrant := providers.NormalizeKey(session.ProviderKey) == "google" && (token.ScopesVerified || len(token.Scope) > 0)
+	if providers.NormalizeKey(session.ProviderKey) == "google" && reconnecting && !googleGrant {
+		for _, capability := range existing.Capabilities {
+			if !slices.Contains(session.Capabilities, capability) {
+				return store.Connection{}, fmt.Errorf("Google reconnect did not confirm existing grants")
+			}
+		}
 	}
 	accessToken, err := s.vault.Encrypt(token.AccessToken, []byte(connectionID))
 	if err != nil {
@@ -546,6 +617,9 @@ func (s *Service) persistConnection(ctx context.Context, session store.ConnectSe
 		}
 	}
 	displayName := profile.DisplayName
+	if session.ProviderKey == "algolia" {
+		displayName = "Algolia MCP grant"
+	}
 	if displayName == "" {
 		displayName = session.UserEmail
 	}
@@ -570,6 +644,16 @@ func (s *Service) persistConnection(ctx context.Context, session store.ConnectSe
 	connectionScopes := append([]string{}, session.Scopes...)
 	connectionCapabilities := append([]string{}, session.Capabilities...)
 	connectionStatus := "active"
+	if googleGrant {
+		connectionScopes = normalizedStrings(token.Scope)
+		// Incremental Google authorization may return existing grants too.
+		// Retain an existing capability only when the new token confirms every
+		// scope it requires; never blindly union permissions from old metadata.
+		candidates := normalizedStrings(append(append([]string{}, session.Capabilities...), existing.Capabilities...))
+		if provider, ok := providers.FindOAuth("google"); ok {
+			connectionCapabilities = capabilitiesAllowedByScopes(provider, candidates, connectionScopes)
+		}
+	}
 	if isMetaFamilyProvider(session.ProviderKey) && token.ScopesVerified {
 		connectionScopes = normalizedStrings(token.Scope)
 		if provider, ok := providers.FindOAuth(session.ProviderKey); ok {
@@ -674,6 +758,12 @@ func (s *Service) refresh(ctx context.Context, connection store.Connection, refr
 	connection.AccessTokenExpiresAt = token.ExpiresAt
 	connection.LastRefreshedAt = s.now()
 	connection.Status = "active"
+	if providers.NormalizeKey(connection.ProviderKey) == "google" && (token.ScopesVerified || len(token.Scope) > 0) {
+		connection.Scopes = normalizedStrings(token.Scope)
+		if provider, ok := providers.FindOAuth("google"); ok {
+			connection.Capabilities = capabilitiesAllowedByScopes(provider, connection.Capabilities, connection.Scopes)
+		}
+	}
 	if isMetaFamilyProvider(connection.ProviderKey) && token.ScopesVerified {
 		connection.Scopes = normalizedStrings(token.Scope)
 		if provider, ok := providers.FindOAuth(connection.ProviderKey); ok {
@@ -770,10 +860,11 @@ func (s *Service) refreshSingleflight(ctx context.Context, connectionID string, 
 	s.refreshMu.Unlock()
 
 	call.connection, call.accessToken, call.err = work(ctx)
-	close(call.done)
-
 	s.refreshMu.Lock()
 	delete(s.refreshes, connectionID)
+	// Remove the completed slot before waking joiners. An invalidation that
+	// joined a refresh must be able to re-evaluate the resulting credential.
+	close(call.done)
 	s.refreshMu.Unlock()
 
 	return call.connection, call.accessToken, call.err
@@ -807,6 +898,14 @@ func capabilitiesAllowedByScopes(provider providers.Provider, requested, granted
 	granted := map[string]struct{}{}
 	for _, scope := range grantedScopes {
 		granted[strings.TrimSpace(scope)] = struct{}{}
+		if provider.Key == "google" {
+			switch strings.TrimSpace(scope) {
+			case "https://www.googleapis.com/auth/userinfo.email":
+				granted["email"] = struct{}{}
+			case "https://www.googleapis.com/auth/userinfo.profile":
+				granted["profile"] = struct{}{}
+			}
+		}
 	}
 	requestedSet := map[string]struct{}{}
 	for _, capability := range requested {

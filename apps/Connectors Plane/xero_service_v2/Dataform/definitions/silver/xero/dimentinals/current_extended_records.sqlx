@@ -1,0 +1,87 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  name: "current_extended_records",
+  disabled: dataform.projectConfig.vars.enable_xero_extended !== "true",
+  description: "Assets/Projects records present in the latest complete family run; staging remains last-observed history.",
+  tags: ["silver", "xero", "current"]
+}
+
+WITH outcomes AS (
+  SELECT
+    tenant_id, run_id,
+    REGEXP_EXTRACT(endpoint, r'^(assets|projects)_') AS api_family,
+    MAX(synced_at) AS completed_at,
+    COUNTIF(error_present OR termination IN ('error', 'hit_max_pages_cap')) AS failures,
+    COUNTIF(endpoint IN (
+      'assets_assets', 'assets_asset_types', 'projects_projects', 'projects_users',
+      'projects_tasks', 'projects_time'
+    )) AS expected_lists,
+    COUNTIF(endpoint = 'assets_assets') AS asset_statuses,
+    COUNTIF(endpoint = 'assets_asset_types') AS asset_types,
+    COUNTIF(endpoint = 'projects_projects') AS projects,
+    COUNTIF(endpoint = 'projects_users') AS project_users
+  FROM ${ref("dw_staging_xero", "sync_run_entities")}
+  WHERE REGEXP_CONTAINS(endpoint, r'^(assets|projects)_')
+  GROUP BY tenant_id, run_id, api_family
+), snapshot_counts AS (
+  SELECT tenant_id, run_id, api_family, COUNT(*) AS observed_lists,
+    COUNT(DISTINCT TO_JSON_STRING(STRUCT(source_endpoint, request_key))) AS distinct_lists
+  FROM ${ref("dw_staging_xero", "extended_list_snapshots")}
+  GROUP BY tenant_id, run_id, api_family
+), project_child_scopes AS (
+  SELECT p.tenant_id, p.run_id,
+    COUNTIF(project_id IS NOT NULL AND t.snapshot_id IS NULL) AS missing_task_lists,
+    COUNTIF(project_id IS NOT NULL AND tm.snapshot_id IS NULL) AS missing_time_lists
+  FROM ${ref("dw_staging_xero", "extended_list_snapshots")} AS p
+  LEFT JOIN UNNEST(p.record_ids) AS project_id
+  LEFT JOIN ${ref("dw_staging_xero", "extended_list_snapshots")} AS t
+    ON t.tenant_id = p.tenant_id AND t.run_id = p.run_id
+    AND t.source_endpoint = 'projects_tasks' AND t.request_key = project_id
+  LEFT JOIN ${ref("dw_staging_xero", "extended_list_snapshots")} AS tm
+    ON tm.tenant_id = p.tenant_id AND tm.run_id = p.run_id
+    AND tm.source_endpoint = 'projects_time' AND tm.request_key = project_id
+  WHERE p.source_endpoint = 'projects_projects'
+  GROUP BY p.tenant_id, p.run_id
+), complete_runs AS (
+  SELECT o.tenant_id, o.run_id, o.api_family
+  FROM outcomes AS o
+  JOIN snapshot_counts AS c USING (tenant_id, run_id, api_family)
+  LEFT JOIN project_child_scopes AS sc ON sc.tenant_id = o.tenant_id AND sc.run_id = o.run_id
+  WHERE o.failures = 0 AND o.expected_lists = c.observed_lists
+    AND c.observed_lists = c.distinct_lists
+    AND ((o.api_family = 'assets' AND o.asset_statuses = 3 AND o.asset_types = 1)
+      OR (o.api_family = 'projects' AND o.projects = 1 AND o.project_users = 1
+        AND sc.missing_task_lists = 0 AND sc.missing_time_lists = 0))
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY o.tenant_id, o.api_family ORDER BY o.completed_at DESC, o.run_id DESC
+  ) = 1
+), listed AS (
+  SELECT s.tenant_id, s.run_id, s.source_endpoint AS endpoint, s.request_key,
+    IF(s.source_endpoint IN ('projects_tasks', 'projects_time'),
+      CONCAT(s.request_key, ':', native_id), native_id) AS record_id,
+    native_id, s.synced_at AS listed_at
+  FROM ${ref("dw_staging_xero", "extended_list_snapshots")} AS s
+  JOIN complete_runs AS r USING (tenant_id, run_id, api_family)
+  CROSS JOIN UNNEST(s.record_ids) AS native_id
+)
+SELECT l.tenant_id, l.run_id, l.endpoint, l.request_key, l.record_id, l.native_id,
+  COALESCE(d.payload_json, h.payload_json) AS payload_json,
+  COALESCE(d.synced_at, h.synced_at) AS synced_at, l.listed_at
+FROM listed AS l
+JOIN ${ref("dw_staging_xero", "extended_records")} AS h
+  ON h.tenant_id = l.tenant_id AND h.endpoint = l.endpoint AND h.record_id = l.record_id
+  AND h.run_id = l.run_id
+LEFT JOIN ${ref("dw_staging_xero", "extended_records")} AS d
+  ON d.tenant_id = l.tenant_id AND d.record_id = l.record_id
+  AND d.endpoint = CASE l.endpoint
+    WHEN 'assets_assets' THEN 'assets_asset_details'
+    WHEN 'projects_projects' THEN 'projects_project_details'
+    WHEN 'projects_tasks' THEN 'projects_task_details'
+    WHEN 'projects_time' THEN 'projects_time_details'
+    ELSE NULL
+  END
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY l.tenant_id, l.endpoint, l.record_id
+  ORDER BY l.listed_at DESC, l.request_key DESC
+) = 1

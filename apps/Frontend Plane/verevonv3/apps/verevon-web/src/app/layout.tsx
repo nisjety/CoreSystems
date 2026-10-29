@@ -1,13 +1,9 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
-import { PageLoader } from "@/components/core/PageLoader";
+import { Geist_Mono } from "next/font/google";
+import Script from "next/script";
 import { RouteTransition } from "@/components/core/RouteTransition";
+import { siteDescription, siteName, siteUrl } from "@/shared/seo/site";
 import "./globals.css";
-
-const geistSans = Geist({
-	variable: "--font-geist-sans",
-	subsets: ["latin"],
-});
 
 const geistMono = Geist_Mono({
 	variable: "--font-geist-mono",
@@ -15,20 +11,94 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
+	metadataBase: siteUrl,
 	title: {
-		default: "Verevon — Fra kundesignal til godkjent handling",
+		default: "Verevon — Én styrt arbeidsflate for mennesker og AI",
 		template: "%s — Verevon",
 	},
-	description:
-		"Verevon er en norsk AI-arbeidsbenk som finner kilder, skriver forslag og stopper for godkjenning før noe sendes, publiseres eller utføres.",
+	description: siteDescription,
 	openGraph: {
-		title: "Verevon — Fra kundesignal til godkjent handling",
-		description:
-			"Norsk AI-arbeidsbenk for kundearbeid: kilder, svarforslag, godkjenning og revisjonsspor i én flate.",
+		title: "Verevon — Én styrt arbeidsflate for mennesker og AI",
+		description: siteDescription,
 		locale: "nb_NO",
 		type: "website",
+		images: [
+			{
+				alt: "Verevon — Én styrt arbeidsflate for mennesker og AI",
+				height: 630,
+				url: "/opengraph-image",
+				width: 1200,
+			},
+		],
+	},
+	twitter: {
+		card: "summary_large_image",
+		description: siteDescription,
+		title: "Verevon — Én styrt arbeidsflate for mennesker og AI",
+		images: ["/opengraph-image"],
 	},
 };
+
+const structuredData = {
+	"@context": "https://schema.org",
+	"@graph": [
+		{
+			"@type": "Organization",
+			name: siteName,
+			url: siteUrl.toString(),
+			email: "hei@verevon.ai",
+			description: siteDescription,
+		},
+		{
+			"@type": "WebSite",
+			name: siteName,
+			url: siteUrl.toString(),
+			inLanguage: "nb-NO",
+		},
+		{
+			"@type": "SoftwareApplication",
+			name: siteName,
+			applicationCategory: "BusinessApplication",
+			operatingSystem: "Web",
+			url: siteUrl.toString(),
+			description: siteDescription,
+			featureList: [
+				"Arbeid på tvers av systemer",
+				"Kildebaserte svar og planer",
+				"Policy-styrt agentarbeid",
+				"Risikobasert godkjenning",
+				"Sporbar utførelse",
+			],
+		},
+	],
+};
+
+const fullMotionPreferenceScript = `
+(() => {
+	const nativeMatchMedia = window.matchMedia.bind(window);
+
+	window.matchMedia = (query) => {
+		const fullMotionQuery = query
+			.replace(/\\(\\s*prefers-reduced-motion\\s*:\\s*no-preference\\s*\\)/gi, "(min-width: 0px)")
+			.replace(/\\(\\s*prefers-reduced-motion(?:\\s*:\\s*reduce)?\\s*\\)/gi, "(max-width: 0px)");
+
+		return nativeMatchMedia(fullMotionQuery);
+	};
+})();
+`;
+
+const homepageIntroSessionScript = `
+(() => {
+	if (window.location.pathname !== "/") return;
+	try {
+		if (window.sessionStorage.getItem("verevon.home-intro-seen-v1") === "1") {
+			document.documentElement.dataset.homeIntroSession = "seen";
+		}
+	} catch {
+		document.documentElement.dataset.homeIntroSession = "unavailable";
+	}
+})();
+`;
 
 export default function RootLayout({
 	children,
@@ -36,9 +106,28 @@ export default function RootLayout({
 	children: React.ReactNode;
 }>) {
 	return (
-		<html data-scroll-behavior="smooth" lang="nb">
-			<body className={`${geistSans.variable} ${geistMono.variable}`}>
-				<PageLoader />
+		<html data-motion="full" data-scroll-behavior="smooth" lang="nb" suppressHydrationWarning>
+			<head>
+				<Script
+					dangerouslySetInnerHTML={{ __html: fullMotionPreferenceScript }}
+					id="verevon-full-motion-preference"
+					strategy="beforeInteractive"
+				/>
+				<Script
+					dangerouslySetInnerHTML={{ __html: homepageIntroSessionScript }}
+					id="verevon-homepage-intro-session"
+					strategy="beforeInteractive"
+				/>
+			</head>
+			<body className={`${geistMono.variable}`} suppressHydrationWarning>
+				<Script
+					dangerouslySetInnerHTML={{
+						__html: JSON.stringify(structuredData).replace(/</g, "\\u003c"),
+					}}
+					id="verevon-structured-data"
+					strategy="beforeInteractive"
+					type="application/ld+json"
+				/>
 				<RouteTransition />
 				<div className="verevon-page-shell" data-verevon-page-shell>
 					{children}

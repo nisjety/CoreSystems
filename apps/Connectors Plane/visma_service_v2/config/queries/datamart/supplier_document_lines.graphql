@@ -1,0 +1,54 @@
+query SupplierDocumentLines(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  supplierDocumentLines(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    refNbr
+    lineNbr
+    tranType
+    poNbr
+    poLineNbr
+    receiptNbr
+    receiptLineNbr
+    inventoryId
+    tranDesc
+    uom
+    quantity
+    unitCost
+    curyUnitCost
+    lineAmt
+    curyLineAmt
+    discPct
+    discAmt
+    curyDiscAmt
+    discountUnitCostInCurrency
+    discountUnitCost
+    accountId
+    subaccountId
+    taxCategoryId
+    deferredCode
+    deferralSchedule
+    deferralScheduleNbr
+    termStartDate
+    termEndDate
+    projectId
+    taskId
+    branchId
+    note
+    deletedDatabaseRecord
+    supplierId
+    createdInDataMartDateTime
+  }
+}

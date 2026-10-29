@@ -1,0 +1,11 @@
+config {
+  type: "assertion",
+  name: "assert_purchase_order_line_quantities",
+  description: "Purchase order lines with an ordered quantity must have received and open quantities.",
+  tags: ["assertion", "silver", "purchase_order"]
+}
+
+SELECT tenant_id, order_type, order_nbr, line_nbr
+FROM ${ref("visma_silver", "fact_purchase_order_line")}
+WHERE order_qty IS NOT NULL
+  AND (received_qty IS NULL OR open_qty IS NULL)

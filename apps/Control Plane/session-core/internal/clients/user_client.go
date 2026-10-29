@@ -12,6 +12,13 @@ import (
 	"time"
 )
 
+type activeOrganizationKey struct{}
+
+// WithActiveOrganization carries an organization verified by signed delegation.
+func WithActiveOrganization(ctx context.Context, organizationID string) context.Context {
+	return context.WithValue(ctx, activeOrganizationKey{}, strings.TrimSpace(organizationID))
+}
+
 func signUserCoreDelegation(req *http.Request, token, userID string, now time.Time) {
 	timestamp := now.UTC().Format(time.RFC3339)
 	bodyDigestBytes := sha256.Sum256(nil)
@@ -24,7 +31,7 @@ func signUserCoreDelegation(req *http.Request, token, userID string, now time.Ti
 		req.Method,
 		req.URL.RequestURI(),
 		strings.TrimSpace(userID),
-		"",
+		strings.TrimSpace(req.Header.Get("X-Org-Id")),
 		"",
 		"",
 		"",
@@ -119,6 +126,9 @@ func (c *UserClient) authedRequest(ctx context.Context, method, path, userID str
 	if c.serviceToken != "" {
 		req.Header.Set("X-Service-Token", c.serviceToken)
 		req.Header.Set("X-Service-Id", "session-core")
+	}
+	if orgID, ok := ctx.Value(activeOrganizationKey{}).(string); ok && orgID != "" {
+		req.Header.Set("X-Org-Id", orgID)
 	}
 	if userID != "" {
 		req.Header.Set("X-User-Id", userID)

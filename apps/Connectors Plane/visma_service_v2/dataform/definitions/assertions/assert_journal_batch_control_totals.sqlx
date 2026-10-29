@@ -1,0 +1,89 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_journal_batch_control_totals",
+  description: "Each posted journal batch must carry the debit and credit control totals that its general ledger lines add up to, within half a cent. Returns each posted batch whose header totals differ from the sum of its lines (a posted batch with no lines fails when its totals are not zero), except the batches recorded in qa_journal_batch_known_mismatch while their differences are exactly the recorded ones: Visma's own header claims more than its journal listing returns for them. A new mismatch, or a recorded batch whose difference changed, fails.",
+  tags: ["assertion", "bronze", "silver", "general_ledger", "integrity"]
+}
+
+-- Header totals (debitTotal, creditTotal) come from visma_bronze.visma_journal_transactions. The
+-- line amounts come from visma_silver.fact_general_ledger, the typed GL lines of the same batch;
+-- the journal's own lines (journalTransactionLines) are JSON and are not used.
+-- Keys: tenant_id, module (the journal feed writes "ModuleAR", the GL model writes "AR"), batch_number.
+-- Only status 'Posted' is checked: Balanced, Scheduled and Voided batches have no GL lines.
+-- Deleted headers are skipped. A NULL header total counts as 0. Threshold: 0.005.
+-- Amounts are cast to NUMERIC before they are summed (see assert_gl_batch_nets_to_zero).
+-- The header CTE keeps one row per key, the most recently synced, so a duplicate header cannot
+-- multiply the output rows. Duplicate headers are reported by assert_journal_batch_header_unique.
+-- Known source differences (qa_journal_batch_known_mismatch, 49 batches on 2026-10-13) are left out only
+-- while header minus lines is still exactly what was recorded, so a batch that changes comes back.
+WITH headers_all AS (
+  SELECT
+    tenantId AS tenant_id,
+    REGEXP_REPLACE(module, '^Module', '') AS module,
+    batchNumber AS batch_number,
+    financialPeriod AS financial_period,
+    syncedAt AS synced_at,
+    CAST(COALESCE(debitTotal, 0) AS NUMERIC) AS header_debit_total,
+    CAST(COALESCE(creditTotal, 0) AS NUMERIC) AS header_credit_total
+  FROM ${ref("visma_bronze", "visma_journal_transactions")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+    AND status = 'Posted'
+),
+
+headers AS (
+  SELECT
+    tenant_id,
+    module,
+    batch_number,
+    financial_period,
+    header_debit_total,
+    header_credit_total
+  FROM headers_all
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, module, batch_number
+    ORDER BY synced_at DESC, financial_period DESC, header_debit_total DESC, header_credit_total DESC
+  ) = 1
+),
+
+gl_batches AS (
+  SELECT
+    tenant_id,
+    module,
+    batch_number,
+    SUM(CAST(COALESCE(debit_amount, 0) AS NUMERIC)) AS gl_debit_total,
+    SUM(CAST(COALESCE(credit_amount, 0) AS NUMERIC)) AS gl_credit_total,
+    COUNT(*) AS gl_line_count
+  FROM ${ref("visma_silver", "fact_general_ledger")}
+  GROUP BY tenant_id, module, batch_number
+)
+
+SELECT
+  h.tenant_id,
+  h.module,
+  h.batch_number,
+  h.financial_period,
+  h.header_debit_total,
+  h.header_credit_total,
+  COALESCE(g.gl_debit_total, 0) AS gl_debit_total,
+  COALESCE(g.gl_credit_total, 0) AS gl_credit_total,
+  COALESCE(g.gl_line_count, 0) AS gl_line_count,
+  h.header_debit_total - COALESCE(g.gl_debit_total, 0) AS debit_difference,
+  h.header_credit_total - COALESCE(g.gl_credit_total, 0) AS credit_difference
+FROM headers AS h
+LEFT JOIN gl_batches AS g
+  ON g.tenant_id = h.tenant_id
+ AND g.module = h.module
+ AND g.batch_number = h.batch_number
+LEFT JOIN ${ref("visma_silver_common", "qa_journal_batch_known_mismatch")} AS k
+  ON k.tenant_id = h.tenant_id
+ AND k.module = h.module
+ AND k.batch_number = h.batch_number
+ AND k.financial_period = h.financial_period
+WHERE (ABS(h.header_debit_total - COALESCE(g.gl_debit_total, 0)) > NUMERIC '0.005'
+       OR ABS(h.header_credit_total - COALESCE(g.gl_credit_total, 0)) > NUMERIC '0.005')
+  AND NOT (
+    k.batch_number IS NOT NULL
+    AND ABS((h.header_debit_total - COALESCE(g.gl_debit_total, 0)) - k.debit_difference) <= NUMERIC '0.005'
+    AND ABS((h.header_credit_total - COALESCE(g.gl_credit_total, 0)) - k.credit_difference) <= NUMERIC '0.005'
+  )

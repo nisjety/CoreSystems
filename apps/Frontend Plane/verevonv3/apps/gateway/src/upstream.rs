@@ -927,6 +927,7 @@ fn session_service_headers(
     actor: &ActionActor,
     timestamp: DateTime<Utc>,
     nonce: &str,
+    org_id: Option<&str>,
 ) -> BTreeMap<String, String> {
     service_delegation_headers(
         service_token,
@@ -936,7 +937,7 @@ fn session_service_headers(
         url,
         body,
         actor,
-        None,
+        org_id,
         "",
         timestamp,
         "v2",
@@ -950,6 +951,7 @@ pub(crate) async fn proxy_session_json(
     url: &str,
     body: Option<Value>,
     actor: Option<&ActionActor>,
+    org_id: Option<&str>,
 ) -> (StatusCode, Json<Value>) {
     let actor = actor_with_defaults(actor);
     let body_bytes = body
@@ -967,6 +969,7 @@ pub(crate) async fn proxy_session_json(
         &actor,
         now,
         &delegation_nonce(now),
+        org_id,
     );
     proxy_json_with_headers(state, method, url, body, headers, None).await
 }
@@ -1048,6 +1051,86 @@ async fn proxy_json_with_client_and_headers(
             )
         }
     }
+}
+
+/// Forwards one call to the anbud core (tender matching) with the gateway's own key for it and the
+/// organisation the session is in. The core judges the call by that key, that organisation and the user who acts.
+/// All three come from the session, never from the browser. Its answer passes through, except in two cases. A 401 or 403 from the core
+/// means the gateway's key is wrong, and the browser reads a 401 as an expired session and signs the user
+/// out, so it is reported as the service being misconfigured. A call that outlasts the client's timeout is
+/// `timeout`, not an unreachable service.
+pub(crate) async fn proxy_anbud_json(
+    client: &reqwest::Client,
+    api_key_header: &str,
+    api_key: &str,
+    url: &str,
+    org_id: &str,
+    user_id: &str,
+    body: &Value,
+) -> (StatusCode, Json<Value>) {
+    let request = client
+        .post(url)
+        .header(api_key_header, api_key)
+        .header("x-org-id", org_id)
+        .header("x-user-id", user_id)
+        .json(body);
+    match send_with_retry(request).await {
+        Ok(response) => {
+            let status =
+                StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let answer = response.json::<Value>().await.unwrap_or(Value::Null);
+            anbud_answer(status, answer)
+        }
+        Err(err) if err.is_timeout() => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(error(
+                "timeout",
+                "The tender search took too long. Try again.",
+            )),
+        ),
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                is_connect = err.is_connect(),
+                url = %url,
+                "tender service call failed before a response"
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error(
+                    "upstream_unavailable",
+                    "The tender service is unavailable.",
+                )),
+            )
+        }
+    }
+}
+
+/// The core's answer as the browser sees it; see [`proxy_anbud_json`].
+fn anbud_answer(status: StatusCode, answer: Value) -> (StatusCode, Json<Value>) {
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "tender_service_misconfigured",
+                "The tender service did not accept the gateway's credentials.",
+            )),
+        );
+    }
+    let empty = answer.is_null() || answer.as_object().is_some_and(|object| object.is_empty());
+    if !status.is_success() && empty {
+        return (
+            status,
+            Json(error(
+                "upstream_error",
+                format!("Upstream returned {}", status.as_u16()),
+            )),
+        );
+    }
+    (
+        status,
+        Json(if answer.is_null() { json!({}) } else { answer }),
+    )
 }
 
 async fn proxy_json_bytes_with_client_and_headers(
@@ -2300,6 +2383,7 @@ mod tests {
             &actor,
             timestamp,
             "nonce-fixed-vector-000000001",
+            None,
         );
 
         assert_eq!(
@@ -2676,7 +2760,10 @@ pub(crate) async fn proxy_artifact_bytes(
             tracing::warn!(error = %err, %url, "artifact relay upstream request failed");
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(error("artifact_unavailable", "Could not load the artifact.")),
+                Json(error(
+                    "artifact_unavailable",
+                    "Could not load the artifact.",
+                )),
             )
                 .into_response();
         }
@@ -2696,7 +2783,10 @@ pub(crate) async fn proxy_artifact_bytes(
         // may name internal paths. The status is the useful part.
         return (
             status,
-            Json(error("artifact_unavailable", "Could not load the artifact.")),
+            Json(error(
+                "artifact_unavailable",
+                "Could not load the artifact.",
+            )),
         )
             .into_response();
     }
@@ -2707,7 +2797,10 @@ pub(crate) async fn proxy_artifact_bytes(
             tracing::warn!(error = %err, %url, "artifact relay body read failed");
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(error("artifact_unavailable", "Could not load the artifact.")),
+                Json(error(
+                    "artifact_unavailable",
+                    "Could not load the artifact.",
+                )),
             )
                 .into_response();
         }
@@ -2720,7 +2813,10 @@ pub(crate) async fn proxy_artifact_bytes(
         );
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(error("artifact_too_large", "That artifact is too large to display.")),
+            Json(error(
+                "artifact_too_large",
+                "That artifact is too large to display.",
+            )),
         )
             .into_response();
     }
@@ -2746,7 +2842,10 @@ pub(crate) async fn proxy_artifact_bytes(
         .unwrap_or_else(|_| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(error("artifact_unavailable", "Could not load the artifact.")),
+                Json(error(
+                    "artifact_unavailable",
+                    "Could not load the artifact.",
+                )),
             )
                 .into_response()
         })
@@ -2754,14 +2853,19 @@ pub(crate) async fn proxy_artifact_bytes(
 
 #[cfg(test)]
 mod artifact_relay_tests {
-    use super::{RENDERABLE_ARTIFACT_TYPES, ARTIFACT_RELAY_MAX_BYTES};
+    use super::{ARTIFACT_RELAY_MAX_BYTES, RENDERABLE_ARTIFACT_TYPES};
 
     /// The guard that matters: a captured HTML page must never be renderable
     /// from the SPA's own origin, because that is stored XSS with the user's
     /// session attached.
     #[test]
     fn html_and_json_are_never_renderable() {
-        for hostile in ["text/html", "application/xhtml+xml", "image/svg+xml", "application/json"] {
+        for hostile in [
+            "text/html",
+            "application/xhtml+xml",
+            "image/svg+xml",
+            "application/json",
+        ] {
             assert!(
                 !RENDERABLE_ARTIFACT_TYPES.contains(&hostile),
                 "{hostile} must not be served inline from this origin"

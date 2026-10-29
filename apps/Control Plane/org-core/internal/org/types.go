@@ -23,6 +23,9 @@ type Organization struct {
 	OrgNumber          *string        `json:"org_number,omitempty"`
 	VerificationStatus string         `json:"verification_status"` // "unverified" | "verified"
 	BrregData          map[string]any `json:"brreg_data,omitempty"`
+	// The organisation's own website, as its administrators gave it. Nil until one is recorded.
+	WebsiteURL       *string    `json:"website_url,omitempty"`
+	WebsiteUpdatedAt *time.Time `json:"website_updated_at,omitempty"`
 }
 
 type Entitlement struct {

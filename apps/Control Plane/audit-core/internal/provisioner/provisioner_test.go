@@ -246,9 +246,9 @@ func TestProvisionControlSharedRuntimeIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(info.Config.Subjects, []string{
-		"aqencia.controlplane.>", "notifications.>", "verevon.session.>",
-		"aqencia.reasoning.session.>", "verevon.agent.>",
-		"aqencia.reasoning.run.>", "app.session.>", ConvexControlDLQSubject,
+		"controlplane.>", "notifications.>", "verevon.session.>",
+		"verevon.reasoning.session.>", "verevon.agent.>",
+		"verevon.reasoning.run.>", "app.session.>", ConvexControlDLQSubject,
 		GDPRErasureRequestedSubject, GDPRErasureDLQSubject, GDPROwnershipTransferredSubject,
 		DocumentsOrgPurgeDLQSubject, OrgDeletionSubjectWildcard,
 		LegacyGDPRErasureRequestedSubject, LegacyGDPRErasureDLQSubject,

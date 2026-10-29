@@ -10,6 +10,7 @@ const gatewayProxyTarget =
   process.env.VITE_VEREVON_GATEWAY_URL ||
   'http://127.0.0.1:3185'
 const isVitest = Boolean(process.env.VITEST)
+const sceneCaptureMode = process.env.VITE_SCENE_MODE === '1'
 // vite-plugin-mcp 0.3.x attaches a single MCP Server instance to the Vite
 // process. A second SSE client tries to connect that same instance again and
 // crashes the dev server, taking the local Support workspace down with it.
@@ -20,6 +21,21 @@ const enableViteMcp = process.env.VEREVON_VITE_MCP_ENABLED === 'true'
 export default defineConfig({
   plugins: [
     solid(),
+    sceneCaptureMode && {
+      name: 'scene-capture-block-gateway',
+      configureServer(server) {
+        server.middlewares.use((request, response, next) => {
+          const pathname = new URL(request.url ?? '/', 'http://scene.local').pathname
+          if (pathname === '/api' || pathname.startsWith('/api/') || pathname === '/health' || pathname.startsWith('/health/')) {
+            response.statusCode = 503
+            response.setHeader('Content-Type', 'text/plain; charset=utf-8')
+            response.end('Gateway access is disabled in scene capture mode.')
+            return
+          }
+          next()
+        })
+      },
+    },
     // Exposes Vite's dev-time MCP endpoint at /__mcp/sse only when an
     // operator deliberately starts a single-client MCP debugging session.
     !isVitest && enableViteMcp && ViteMcp({
@@ -40,7 +56,7 @@ export default defineConfig({
   // it must be the gateway service name; host-run `pnpm dev` falls back to
   // 127.0.0.1:3185 (the host-mapped gateway port).
   server: {
-    proxy: {
+    proxy: sceneCaptureMode ? {} : {
       '/api': {
         target: gatewayProxyTarget,
         changeOrigin: true,

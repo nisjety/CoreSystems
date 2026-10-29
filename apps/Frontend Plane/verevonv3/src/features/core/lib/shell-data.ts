@@ -10,6 +10,9 @@ export type VerevonRoute =
   | '/spaces'
   | '/studio'
   | '/studio/canvas'
+  | '/engagement'
+  | '/engagement/visibility'
+  | '/studio/pulse'
   | '/studio/campaigns'
   | '/studio/templates'
   | '/inbox'
@@ -35,6 +38,8 @@ export type VerevonRoute =
   | '/ingestions'
   | '/knowledge'
   | '/leads'
+  | '/anbud'
+  | '/anbud/radar'
   | '/agents'
   | '/agents/runs'
   | '/agents/cost'
@@ -118,6 +123,10 @@ export function getNavbarLabels(activeRoute: VerevonRoute, locale: Locale = 'no'
       return { moduleLabel: 'Studio', tabLabel: 'Canvas' }
     case '/studio/campaigns':
       return labels('Studio', 'Studio', 'Kampanjer', 'Campaigns')
+    case '/engagement': return labels('Engasjement', 'Engagement', 'Arbeidsområder', 'Workspaces')
+    case '/engagement/visibility':
+    case '/studio/pulse':
+      return labels('Engasjement', 'Engagement', 'Synlighet', 'Visibility')
     case '/studio/templates':
       return labels('Studio', 'Studio', 'Maler', 'Templates')
     case '/inbox':
@@ -164,6 +173,10 @@ export function getNavbarLabels(activeRoute: VerevonRoute, locale: Locale = 'no'
       return labels('Kunnskap', 'Knowledge', 'Kilder', 'Sources')
     case '/leads':
       return labels('Leads', 'Leads', 'Søk', 'Search')
+    case '/anbud':
+      return labels('Engasjement', 'Engagement', 'Anbud', 'Tenders')
+    case '/anbud/radar':
+      return labels('Engasjement', 'Engagement', 'Anbudsradar', 'Tender radar')
     case '/account':
       return labels('Konto', 'Account', 'Profil', 'Profile')
     case '/settings':
@@ -189,6 +202,8 @@ export function routeFromPath(pathname: string): VerevonRoute {
   // Without this the path fell through to the `/dashboard` default and a Space
   // read as "Hjem".
   if (path.startsWith('/spaces')) return '/spaces'
+  if (path === '/engagement') return '/engagement'
+  if (path.startsWith('/engagement/visibility') || path === '/studio/pulse') return '/engagement/visibility'
   if (path.startsWith('/studio/campaigns')) return '/studio/campaigns'
   if (path.startsWith('/studio/templates')) return '/studio/templates'
   if (path.startsWith('/studio')) return '/studio/canvas'
@@ -216,6 +231,9 @@ export function routeFromPath(pathname: string): VerevonRoute {
   // Routed and linked from the sidebar, but missing here — so /leads collapsed
   // onto the /dashboard default and its own sidebar item never highlighted.
   if (path.startsWith('/leads')) return '/leads'
+  // The radar is matched before the bare /anbud prefix, so it keeps its own sidebar highlight.
+  if (path.startsWith('/anbud/radar')) return '/anbud/radar'
+  if (path.startsWith('/anbud')) return '/anbud'
   // The Run Console is a full-bleed surface — keep it out of the /agents config
   // sub-sidebar by routing it to its own value (matched before the /agents catch).
   if (path.startsWith('/agents/runs')) return '/agents/runs'

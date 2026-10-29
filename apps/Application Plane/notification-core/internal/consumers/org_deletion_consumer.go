@@ -51,7 +51,7 @@ const (
 	// explicit stream — so it must Bind to the pre-provisioned consumer,
 	// matching every sibling GDPR consumer in this fix (documents-api-go,
 	// conversation-core-go, quarry-control).
-	controlSharedStream = "AQENCIA_CONTROLPLANE"
+	controlSharedStream = "CONTROLPLANE"
 )
 
 // orgDeletionPendingEvent is the wire shape for verevon.org.deletion.pending.

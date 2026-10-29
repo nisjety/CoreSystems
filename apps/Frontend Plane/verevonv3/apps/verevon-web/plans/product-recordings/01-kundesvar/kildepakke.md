@@ -1,0 +1,29 @@
+# Fjordform — kundehenvendelse og ordregrunnlag
+DEMOGRUNNLAG: Alle opplysninger er fiktive. Situasjon per 14. september 2026 kl. 09.00.
+
+## K1 — Kundehenvendelse, 14. september 2026 kl. 08.40
+Fra: Nora, kontoransvarlig hos Nordvik Studio (fiktiv kunde).
+«Hei! Vi bestilte 12 Lys bordlamper på ordre FF-1042 til det nye kontoret vårt. Vi åpner 21. september. Sporingssiden viser bare at frakten er registrert. Kommer alle lampene frem i tide? Vi kan eventuelt ta imot dem i to omganger hvis det hjelper.»
+
+## K2 — Ordre- og lagerstatus, oppdatert 14. september 2026 kl. 08.55
+- Ordre: FF-1042, bestilt 8. september 2026.
+- Produkt: Lys bordlampe, sand. Antall: 12.
+- 9 lamper er plukket og pakket på Fjordforms lager.
+- 3 lamper venter på påfyll fra leverandøren.
+- Leverandørens foreløpige anslag for ankomst av de 3 lampene til vårt lager er 17. september.
+- Fraktetikett er opprettet. Ingen kolli er bekreftet hentet av transportøren.
+- Ingen bekreftet leveringsdato til kunden finnes.
+- Ordren er ikke delt. Dellevering er ikke booket.
+- Kunden har betalt avtalt frakt. Ekstra frakt ved eventuell dellevering er ikke avklart.
+
+## K3 — Rutine for forsinkede leveranser, versjon 3, gjeldende 1. september 2026
+1. Bruk siste registrerte ordrestatus.
+2. Skill ankomst til eget lager fra levering til kunden. Leverandøranslag er foreløpige.
+3. Etikett opprettet betyr ikke at transportøren har hentet pakken.
+4. Tilby å undersøke dellevering når kunden ønsker det; logistikk må bekrefte tidspunkt og eventuelle tillegg før booking.
+5. Ikke lov leveringstid eller gebyrfritak uten bekreftelse.
+6. Ved en tidskritisk åpning: send avklaringsbehovet til logistikkansvarlig internt og avtal neste statusoppdatering senest neste arbeidsdag.
+7. Svar varmt og konkret. Forklar hva vi gjør videre, uten å legge skylden på kunden.
+
+## K4 — Tidligere rutine, utgått 31. august 2026
+Tidligere ble alle delleveranser omtalt som fraktfrie. Dette er ikke lenger en gjeldende regel; bruk K3.

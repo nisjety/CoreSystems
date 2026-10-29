@@ -1,0 +1,62 @@
+config {
+  type: "table",
+  schema: "visma_silver",
+  name: "fact_project_budget",
+  description: "Silver: Visma projectBudget actuals deduped from bronze visma_project_budgets. Grain: one row per tenant + project + task + account group + inventory number (the staging key; a line without an item has inventoryNumber <N/A> and sits next to the item lines of its group). actualAmount is Visma's own project rollup (the native project P&L), type I=Income, E=Expense, L=Liability/balance. NOTE businessUnitId is intentionally absent: project budgets carry no business-unit dimension (see Bug E / validator required-fields fix in the sync service).",
+  tags: ["silver", "visma", "fact", "project"]
+}
+
+WITH source_base AS (
+  SELECT * EXCEPT (rn)
+  FROM (
+    SELECT
+      src.*,
+      -- inventoryNumber is the fourth part of the staging key: without it the <N/A> line and
+      -- the item lines of one account group collapse into one
+      ROW_NUMBER() OVER (
+        PARTITION BY src.tenantId, src.projectID, src.projectTaskID, src.accountGroupID, src.inventoryNumber
+        ORDER BY
+          COALESCE(src.refreshedAt, src.syncedAt) DESC,
+          COALESCE(src.firstSyncedAt, src.syncedAt) DESC,
+          src.syncedAt DESC
+      ) AS rn
+    FROM ${ref("visma_bronze", "visma_project_budgets")} AS src
+    WHERE src.isDeleted IS DISTINCT FROM TRUE
+  )
+  WHERE rn = 1
+)
+
+SELECT
+  tenantId                                              AS tenant_id,
+  organizationName                                      AS organization_name,
+  syncedAt                                              AS synced_at,
+  projectID                                             AS project_id,
+  projectTaskID                                         AS project_task_id,
+  accountGroupID                                        AS account_group_id,
+  type                                                  AS budget_type_code,
+  CASE type
+    WHEN 'I' THEN 'Income'
+    WHEN 'E' THEN 'Expense'
+    WHEN 'L' THEN 'Liability'
+    ELSE 'Other'
+  END                                                   AS budget_type,
+  description,
+  uom,
+  rate,
+  originalBudgetAmount                                  AS original_budget_amount,
+  revisedBudgetAmount                                   AS revised_budget_amount,
+  actualAmount                                          AS actual_amount,
+  actualQty                                             AS actual_qty,
+  committedAmount                                       AS committed_amount,
+  committedOpenAmount                                   AS committed_open_amount,
+  committedInvoicedAmount                               AS committed_invoiced_amount,
+  inventoryNumber                                       AS inventory_number,
+
+  -- Signed P&L contributions, aligned with BI_ProjectPortfolioPnL (income & expense both positive)
+  CASE WHEN type = 'I' THEN COALESCE(actualAmount, 0) ELSE 0 END  AS actual_income_amount,
+  CASE WHEN type = 'E' THEN COALESCE(actualAmount, 0) ELSE 0 END  AS actual_expense_amount,
+  CASE WHEN type = 'L' THEN COALESCE(actualAmount, 0) ELSE 0 END  AS actual_liability_amount,
+
+  'visma_project_budgets'                               AS source_system
+FROM source_base
+WHERE projectID IS NOT NULL

@@ -1,0 +1,34 @@
+config { type: "assertion", schema: "dw_1_silver_xero_assertions", name: "xero_finance_activity_safety" }
+
+WITH grain AS (
+  SELECT
+    (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_general_ledger")}) AS general_ledger_count,
+    (SELECT COUNT(*) FROM ${ref("xero_datamart", "finance_activity")}) AS activity_count
+), unsafe AS (
+  SELECT 'unresolved_account' AS entity, CAST(finance_activity_key AS STRING) AS record_id
+  FROM ${ref("xero_datamart", "finance_activity")}
+  WHERE is_account_unresolved
+  UNION ALL
+  SELECT 'unresolved_tracking_1', CAST(finance_activity_key AS STRING)
+  FROM ${ref("xero_datamart", "finance_activity")}
+  WHERE is_tracking_1_unresolved
+  UNION ALL
+  SELECT 'unresolved_tracking_2', CAST(finance_activity_key AS STRING)
+  FROM ${ref("xero_datamart", "finance_activity")}
+  WHERE is_tracking_2_unresolved
+  UNION ALL
+  SELECT 'unavailable_nok_amount_mismatch', CAST(finance_activity_key AS STRING)
+  FROM ${ref("xero_datamart", "finance_activity")}
+  WHERE is_nok_amount_available OR amount_nok IS NOT NULL
+  UNION ALL
+  SELECT 'unresolved_fiscal_period', CAST(finance_activity_key AS STRING)
+  FROM ${ref("xero_datamart", "finance_activity")}
+  WHERE date IS NOT NULL
+    AND (financial_period_key IS NULL OR is_fiscal_period_derived IS NOT TRUE)
+)
+SELECT 'general_ledger_row_count' AS entity,
+       CAST(general_ledger_count AS STRING) AS record_id
+FROM grain
+WHERE general_ledger_count != activity_count
+UNION ALL
+SELECT entity, record_id FROM unsafe

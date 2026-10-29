@@ -10,11 +10,11 @@ type RevealProps = {
 };
 
 /**
- * Reveal — the single, calm motion primitive for the V2 homepage.
+ * Reveal — the single, calm motion primitive for the homepage.
  *
  * One ambient reveal (fade + small rise) on first scroll-in, via
  * IntersectionObserver. No GSAP, no pin, no scrub, no parallax — the whole
- * point of V2 is restraint. Honors prefers-reduced-motion (shows instantly).
+ * point is restraint. Honors prefers-reduced-motion (shows instantly).
  * Backed by the token-driven `.verevon-reveal` class in globals.css.
  */
 export function Reveal({ children, className = "", delay = 0 }: RevealProps) {

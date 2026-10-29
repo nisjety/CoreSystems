@@ -11,6 +11,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 url = { workspace = true }
 scraper = { workspace = true }
+roxmltree = "0.20"
 html2md = { workspace = true }
 blake3 = { workspace = true }
 tracing = { workspace = true }

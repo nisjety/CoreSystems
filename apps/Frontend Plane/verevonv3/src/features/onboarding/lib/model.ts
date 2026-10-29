@@ -25,6 +25,7 @@ export type ConnectorOption = {
   hint: string
   provider: string
   sources: string[]
+  bundles?: string[]
   category: ConnectorCategory
 }
 
@@ -105,6 +106,7 @@ export const onboardingConnectorOptions: readonly ConnectorOption[] = [
     hint: 'Teams, Outlook, SharePoint, OneDrive',
     provider: 'microsoft',
     sources: ['teams', 'outlook', 'sharepoint', 'onedrive'],
+    bundles: ['workspace_readonly'],
     category: 'work',
   },
   {
@@ -118,9 +120,10 @@ export const onboardingConnectorOptions: readonly ConnectorOption[] = [
   {
     id: 'gdrive',
     label: 'Google Workspace',
-    hint: 'Drive, dokumenter, Gmail og kalender',
+    hint: 'Drive, Gmail, kalender, Search Console og GA4 · kun lesing',
     provider: 'google',
-    sources: ['google_drive', 'documents', 'gmail', 'calendar'],
+    sources: ['google_drive', 'documents', 'gmail', 'calendar', 'search_console', 'analytics_readonly'],
+    bundles: ['workspace_readonly'],
     category: 'work',
   },
   {
@@ -271,7 +274,7 @@ export const onboardingCrawlPhases = [
   'Oppdager sider',
   'Kartlegger struktur',
   'Trekker ut innhold',
-  'Bygger kunnskapsbase',
+  'Samler forhåndsvisning',
   'Ferdig!',
 ] as const
 

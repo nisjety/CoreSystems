@@ -1,0 +1,44 @@
+{
+ "day": "2026-10-14",
+ "write_source": "the heartbeat table where a row exists, else the last staging write",
+ "heartbeat_table": true,
+ "calls": {
+  "token": 1,
+  "GET": 1
+ },
+ "subset": true,
+ "tenants": [
+  "Aquatiq AS (pilot)"
+ ],
+ "endpoints": [
+  {
+   "endpoint": "general_ledger_transactions",
+   "method": "finance list, one row (ledger=1, fromPeriod=202001, toPeriod=203012)",
+   "cells": [
+    {
+     "endpoint": "general_ledger_transactions",
+     "tenant": "33f319b9-4d57-11ee-960c-025417856183",
+     "name": "Aquatiq AS (pilot)",
+     "visma_total": 589689,
+     "staging_total": 589689,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-14T18:02:29+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "journal_transactions",
+   "method": "-",
+   "cells": [],
+   "not_countable": "period-scanned and line-counted: periodId is required (HTTP 400 without it) and the total counts journal lines, while staging holds one row per batch.",
+   "modified_filter": "-"
+  }
+ ]
+}

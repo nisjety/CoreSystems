@@ -1,5 +1,5 @@
 //! Plain (non-JetStream) cross-plane consumer for Control Plane's
-//! `aqencia.controlplane.space.membership_changed` event, projected into the
+//! `controlplane.space.membership_changed` event, projected into the
 //! durable `space_membership_revocations` table (migration 0032).
 //!
 //! Deliberately mirrors `retrieval-engine-rs`'s `spawn_grant_invalidator`
@@ -27,7 +27,7 @@ use tracing::{info, warn};
 
 use crate::store::Pool;
 
-const SUBJECT: &str = "aqencia.controlplane.space.membership_changed";
+const SUBJECT: &str = "controlplane.space.membership_changed";
 
 /// `active` states the CURRENT fact (member or not), not an increment: a
 /// redundant or reordered delivery of the same fact is a no-op, which two

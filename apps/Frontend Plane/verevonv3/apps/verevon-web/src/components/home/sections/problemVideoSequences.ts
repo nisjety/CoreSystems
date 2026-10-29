@@ -21,7 +21,7 @@ export const waitingProblemShots: ProblemVideoShot[] = [
 	},
 	{
 		duration: 8,
-		src: "/verevon-vibe/problem-waiting/corridor.mp4",
+		src: "/verevon-vibe/problem-waiting/corridor-web.mp4",
 	},
 	{
 		duration: 9,

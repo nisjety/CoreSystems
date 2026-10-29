@@ -1,0 +1,34 @@
+query Addresses(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  addresses(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    addressId
+    bAccountId
+    addressType
+    addressLine1
+    addressLine2
+    addressLine3
+    city
+    state
+    countryId
+    postalCode
+    isValidated
+    lastModifiedDateTime
+    isDefaultContact
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+  }
+}

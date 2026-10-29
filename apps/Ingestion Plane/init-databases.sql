@@ -143,3 +143,16 @@ CREATE DATABASE finspo
 
 SELECT 'CREATE DATABASE shipping_core OWNER ingestion_user'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'shipping_core')\gexec
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 8. anbud_core database  (used by anbud-core / Doffin + TED tender ingestion)
+--    anbud-core owns its schema through embedded migrations applied at startup
+--    (internal/db.ApplyMigrations), so keep the database empty here. Idempotent
+--    create so re-running this script is safe. NOTE: Postgres only runs this
+--    file on a FRESH data volume — on an existing volume create the database by
+--    hand (see anbud-core/docs/REQUIREMENTS.md).
+-- ─────────────────────────────────────────────────────────────────────────────
+\connect ingestion_plane_db
+
+SELECT 'CREATE DATABASE anbud_core OWNER ingestion_user'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'anbud_core')\gexec

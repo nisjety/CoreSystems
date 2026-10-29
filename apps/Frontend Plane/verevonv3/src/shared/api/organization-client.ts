@@ -159,3 +159,19 @@ export async function updateOrganizationInstructions(
   const saved = record(payload)?.instructions
   return typeof saved === 'string' ? saved : instructions
 }
+
+/**
+ * Records the organisation's own website in org-core, the owner of the company's facts. The gateway checks the
+ * address first; org-core keeps it only as a public http or https address. Returns the website as it was kept.
+ */
+export async function recordOrganizationWebsite(organizationId: string, websiteUrl: string): Promise<string> {
+  const payload = await requestJson<unknown>(
+    `/api/v1/orgs/${encodeURIComponent(organizationId)}/website`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ website_url: websiteUrl }),
+    },
+  )
+  const kept = record(payload)?.website_url
+  return typeof kept === 'string' ? kept : websiteUrl
+}

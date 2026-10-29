@@ -3,7 +3,7 @@
 //
 // org-core publishes ErasureRequestedSubject ("verevon.gdpr.erasure.requested")
 // on the shared Control-Plane bus (control-shared-nats, stream
-// AQENCIA_CONTROLPLANE) from two trigger paths that share one payload shape
+// CONTROLPLANE) from two trigger paths that share one payload shape
 // (apps/Control Plane/org-core/internal/org/gdpr_erasure_fanout.go's
 // PublishGDPRErasureFanout):
 //

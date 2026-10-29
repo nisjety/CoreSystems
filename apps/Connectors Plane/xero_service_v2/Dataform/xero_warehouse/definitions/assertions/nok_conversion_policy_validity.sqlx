@@ -1,0 +1,52 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_nok_conversion_policy_validity",
+  description: "Functional-currency NOK conversion policies must be complete, have valid effective intervals, and never overlap for one tenant and scope."
+}
+
+WITH policies AS (
+  SELECT *
+  FROM ${ref("xero_reference", "xero_nok_conversion_policy")}
+), invalid_rows AS (
+  SELECT
+    'invalid_conversion_policy_row' AS violation,
+    CONCAT(tenant_id, '|', conversion_scope, '|', COALESCE(policy_id, '')) AS record_id
+  FROM policies
+  WHERE NULLIF(TRIM(policy_id), '') IS NULL
+     OR tenant_id IS NULL
+     OR conversion_scope != 'FUNCTIONAL_CURRENCY'
+     OR valid_from IS NULL
+     OR NULLIF(TRIM(policy_source), '') IS NULL
+     OR NULLIF(TRIM(policy_version), '') IS NULL
+     OR approved_at IS NULL
+     OR allow_filled_forward_rate IS NULL
+     OR (valid_to IS NOT NULL AND valid_to <= valid_from)
+), duplicate_policy_ids AS (
+  SELECT
+    'duplicate_conversion_policy_id' AS violation,
+    CONCAT(tenant_id, '|', conversion_scope, '|', policy_id) AS record_id
+  FROM policies
+  GROUP BY tenant_id, conversion_scope, policy_id
+  HAVING COUNT(*) > 1
+), overlapping_active_rows AS (
+  SELECT
+    'overlapping_active_conversion_policy_interval' AS violation,
+    CONCAT(left_policy.tenant_id, '|', left_policy.conversion_scope, '|',
+           left_policy.policy_id, '|', right_policy.policy_id) AS record_id
+  FROM policies AS left_policy
+  INNER JOIN policies AS right_policy
+    ON left_policy.tenant_id = right_policy.tenant_id
+   AND left_policy.conversion_scope = right_policy.conversion_scope
+   AND left_policy.is_active IS TRUE
+   AND right_policy.is_active IS TRUE
+   AND left_policy.policy_id < right_policy.policy_id
+   AND left_policy.valid_from < COALESCE(right_policy.valid_to, DATE '9999-12-31')
+   AND right_policy.valid_from < COALESCE(left_policy.valid_to, DATE '9999-12-31')
+)
+
+SELECT violation, record_id FROM invalid_rows
+UNION ALL
+SELECT violation, record_id FROM duplicate_policy_ids
+UNION ALL
+SELECT violation, record_id FROM overlapping_active_rows

@@ -1,0 +1,52 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Latest Xero fixed-asset configuration per tenant. Dates describe Xero settings, not an inferred fiscal calendar.",
+  assertions: { nonNull: ["tenant_id", "asset_settings_key"], uniqueKey: ["asset_settings_key"] }
+}
+
+WITH latest AS (
+  SELECT *
+  FROM ${ref("dw_bronze_xero", "xero_fixed_asset_settings_observations")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id
+    ORDER BY asset_observed_at DESC, source_receipt_id DESC, source_version_id DESC
+  ) = 1
+), accounts AS (
+  SELECT tenant_id, account_id
+  FROM ${ref("dw_1_silver_xero", "dim_account")}
+)
+SELECT
+  CONCAT(latest.tenant_id, '|fixed-asset-settings') AS asset_settings_key,
+  latest.tenant_id,
+  latest.asset_number_prefix,
+  latest.asset_number_sequence,
+  latest.asset_start_date,
+  latest.last_depreciation_date,
+  latest.is_tax_opted_in,
+  latest.tax_start_date,
+  latest.default_gain_on_disposal_account_id,
+  latest.default_loss_on_disposal_account_id,
+  latest.default_capital_gain_on_disposal_account_id,
+  latest.default_gain_on_disposal_account_id IS NOT NULL AND gain.account_id IS NULL
+    AS is_default_gain_on_disposal_account_unresolved,
+  latest.default_loss_on_disposal_account_id IS NOT NULL AND loss.account_id IS NULL
+    AS is_default_loss_on_disposal_account_unresolved,
+  latest.default_capital_gain_on_disposal_account_id IS NOT NULL AND capital_gain.account_id IS NULL
+    AS is_default_capital_gain_on_disposal_account_unresolved,
+  latest.is_source_deleted,
+  latest.asset_observed_at,
+  latest.source_record_id,
+  latest.source_version_id,
+  latest.source_receipt_id,
+  latest.source_run_id
+FROM latest
+LEFT JOIN accounts AS gain
+  ON latest.tenant_id = gain.tenant_id
+ AND latest.default_gain_on_disposal_account_id = gain.account_id
+LEFT JOIN accounts AS loss
+  ON latest.tenant_id = loss.tenant_id
+ AND latest.default_loss_on_disposal_account_id = loss.account_id
+LEFT JOIN accounts AS capital_gain
+  ON latest.tenant_id = capital_gain.tenant_id
+ AND latest.default_capital_gain_on_disposal_account_id = capital_gain.account_id

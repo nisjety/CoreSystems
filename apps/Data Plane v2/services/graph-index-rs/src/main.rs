@@ -192,7 +192,7 @@ async fn main() -> anyhow::Result<()> {
     // `tokio::select!` below) so a shared-broker outage never takes down
     // HTTP/gRPC/graph-extraction: it binds a pre-provisioned pull consumer on
     // the SHARED cross-plane broker (control-shared-nats, stream
-    // AQENCIA_CONTROLPLANE) under its own dedicated `graph-index-gdpr`
+    // CONTROLPLANE) under its own dedicated `graph-index-gdpr`
     // identity (GRAPH_INDEX_GDPR_NATS_URL/_USER/_PASSWORD) — never this
     // service's own Data-Plane-local `cfg.nats_url` connection, which does
     // not host that stream. Left unset, the consumer is intentionally

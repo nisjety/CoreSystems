@@ -17,14 +17,14 @@ export function DetailGallerySection() {
 		>
 			<div className="max-w-[760px]">
 				<span
-					className="mb-7 block font-arbeit text-[0.98rem] font-normal leading-none text-[color-mix(in_srgb,var(--verevon-a-earth)_48%,var(--verevon-text-muted))]"
+					className="mb-7 block font-manrope text-[0.98rem] font-normal leading-none text-[color-mix(in_srgb,var(--verevon-a-earth)_48%,var(--verevon-text-muted))]"
 					data-fade-out-top
 				>
 					02 / 06
 				</span>
 
 				<h1
-					className="m-0 max-w-[820px] font-arbeit text-[clamp(3.35rem,6.4vw,8.6rem)] font-light leading-[0.9] tracking-[-0.078em] text-verevon-j-text"
+					className="m-0 max-w-[820px] font-manrope text-[clamp(2.35rem,3.4vw,3.5rem)] font-light leading-[0.94] tracking-[-0.045em] text-verevon-j-text"
 					data-fade-out-top
 				>
 					Godkjenningen er en del av produktet.
@@ -34,7 +34,7 @@ export function DetailGallerySection() {
 					className="mt-[clamp(28px,3vw,46px)] max-w-[560px]"
 					data-fade-out-top
 				>
-					<p className="m-0 font-protokoll text-[clamp(1.02rem,1.05vw,1.22rem)] font-light leading-[1.5] text-verevon-text-muted">
+					<p className="m-0 font-manrope text-[clamp(1rem,1.05vw,1.125rem)] font-light leading-[1.5] tracking-[-0.015em] text-verevon-text-muted">
 						Verevon kan foreslå arbeid på tvers av kundeservice, kunnskap og drift.
 						Men handlinger med risiko stopper for vurdering, med kilder,
 						kontekst og sporbarhet ved siden av.
@@ -47,7 +47,7 @@ export function DetailGallerySection() {
 				>
 					{detailNotes.map((note, index) => (
 						<span
-							className="border-b border-verevon-j-text/10 py-4 font-arbeit text-[0.82rem] font-normal uppercase leading-none tracking-[0.12em] text-verevon-j-text/55"
+							className="border-b border-verevon-j-text/10 py-4 font-geist text-[0.7rem] font-medium uppercase leading-none tracking-[0.08em] text-verevon-j-text/55"
 							key={note}
 						>
 							{String(index + 1).padStart(2, "0")} / {note}
@@ -98,7 +98,7 @@ export function DetailGallerySection() {
 						key={note}
 						style={{ "--delay": `${index * 3}s` } as CSSProperties}
 					>
-						<span className="absolute left-4 top-4 font-arbeit text-[0.68rem] font-normal uppercase tracking-[0.16em] text-verevon-j-text/36">
+						<span className="absolute left-4 top-4 font-geist text-[0.6875rem] font-medium uppercase tracking-[0.08em] text-verevon-j-text/36">
 							{note}
 						</span>
 						<span className="absolute bottom-4 left-4 right-4 h-px bg-verevon-j-text/12" />

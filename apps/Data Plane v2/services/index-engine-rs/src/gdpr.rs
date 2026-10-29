@@ -3,7 +3,7 @@
 //! `org-core`'s `PublishGDPRErasureFanout` (immediate hard-delete path and
 //! the 30-day retention cron) publishes onto the shared
 //! `verevon.gdpr.erasure.requested` fan-out on the cross-plane broker
-//! (`control-shared-nats`, stream `AQENCIA_CONTROLPLANE`). This module
+//! (`control-shared-nats`, stream `CONTROLPLANE`). This module
 //! decides which of those events this crate must act on, and performs the
 //! actual hard-purge of the two org-scoped tables index-engine-rs — and
 //! only index-engine-rs — owns write/delete access to:

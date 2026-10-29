@@ -1,0 +1,68 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Atomic Xero aged-report measure cells. Currency is identified only when Xero names it in the column header; unnamed report measures are retained without an inferred currency.",
+  assertions: {
+    nonNull: ["tenant_id", "contact_aging_report_amount_key", "contact_aging_report_line_key", "source_report_cell_key", "source_measure_header", "source_measure_name"],
+    uniqueKey: ["contact_aging_report_amount_key"]
+  }
+}
+
+WITH measure_cells AS (
+  SELECT *
+  FROM ${ref("dw_1_silver_xero", "fact_financial_report_cell")}
+  WHERE report IN ('report_aged_receivables_by_contact', 'report_aged_payables_by_contact')
+    AND row_type = 'Row'
+    AND REGEXP_CONTAINS(column_header, r'^(Total|Paid|Credited|Due)( [A-Z]{3})?$')
+)
+SELECT
+  CONCAT(line.contact_aging_report_line_key, '|', CAST(cell.cell_index AS STRING))
+    AS contact_aging_report_amount_key,
+  line.contact_aging_report_line_key,
+  cell.report_cell_key AS source_report_cell_key,
+  line.tenant_id,
+  line.report_snapshot_key,
+  line.report_snapshot_id,
+  line.report,
+  line.aging_ledger,
+  line.report_run_id,
+  line.contact_id,
+  line.requested_report_date,
+  line.source_document_date,
+  line.source_document_due_date,
+  line.source_document_reference,
+  line.source_document_reference_kind,
+  line.is_source_document_key_available,
+  line.contact_request_key,
+  line.is_contact_request_manifested,
+  line.is_report_run_contact_set_complete,
+  cell.column_header AS source_measure_header,
+  REGEXP_EXTRACT(cell.column_header, r'^(Total|Paid|Credited|Due)') AS source_measure_name,
+  REGEXP_EXTRACT(cell.column_header, r' ([A-Z]{3})$') AS currency_code,
+  REGEXP_CONTAINS(cell.column_header, r' [A-Z]{3}$') AS is_currency_identified,
+  cell.source_numeric_value AS source_amount_in_report_currency,
+  cell.source_numeric_value IS NOT NULL AS is_amount_parse_valid,
+  REGEXP_EXTRACT(cell.column_header, r'^(Total|Paid|Credited|Due)') = 'Due'
+    AND cell.source_numeric_value IS NOT NULL
+    AND ABS(cell.source_numeric_value) > 0 AS is_open_due_amount,
+  CASE
+    WHEN line.source_document_due_date IS NULL THEN NULL
+    ELSE GREATEST(DATE_DIFF(line.requested_report_date, line.source_document_due_date, DAY), 0)
+  END AS days_past_due,
+  CASE
+    WHEN line.source_document_due_date IS NULL THEN 'no_due_date'
+    WHEN line.requested_report_date IS NULL THEN 'unknown_requested_date'
+    WHEN line.source_document_due_date >= line.requested_report_date THEN 'not_due'
+    WHEN DATE_DIFF(line.requested_report_date, line.source_document_due_date, DAY) <= 30 THEN '1_30_days'
+    WHEN DATE_DIFF(line.requested_report_date, line.source_document_due_date, DAY) <= 60 THEN '31_60_days'
+    WHEN DATE_DIFF(line.requested_report_date, line.source_document_due_date, DAY) <= 90 THEN '61_90_days'
+    ELSE '91_plus_days'
+  END AS age_bucket,
+  line.report_synced_at
+FROM measure_cells AS cell
+INNER JOIN ${ref("dw_1_silver_xero", "fact_contact_aging_report_line")} AS line
+  ON cell.tenant_id = line.tenant_id
+ AND cell.report_snapshot_key = line.report_snapshot_key
+ AND cell.report_index = line.report_index
+ AND cell.section_index = line.section_index
+ AND cell.row_index = line.row_index

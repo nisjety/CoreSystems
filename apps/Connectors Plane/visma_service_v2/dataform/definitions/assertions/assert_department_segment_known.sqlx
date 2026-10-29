@@ -1,0 +1,15 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_department_segment_known",
+  description: "Every tenant that has subaccounts must name a department segment (Avdeling or Department) in its subaccount segments, because the department is segment 3 in some tenants and segment 2 in others and dim_subaccount.department_code is taken from the segment with that name. Returns the tenants where none is found: their department would be empty in the general ledger, BI_FinanceTable, BI_SalesOrder and the project lines.",
+  tags: ["assertion", "silver", "department"]
+}
+
+SELECT
+  tenant_id,
+  COUNT(*) AS subaccounts,
+  COUNTIF(department_segment IS NOT NULL) AS with_department_segment
+FROM ${ref("visma_silver", "dim_subaccount")}
+GROUP BY tenant_id
+HAVING COUNTIF(department_segment IS NOT NULL) = 0

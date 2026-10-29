@@ -37,6 +37,27 @@ test('Space shell uses server-composed context and never exposes an authority be
   )
 })
 
-function unwrap(payload: any) {
-  return payload?.data ?? payload
+type SpaceContext = Record<string, unknown> & {
+  space?: { space_ref?: string; name?: string }
+  membership?: { space_ref?: string }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function unwrap(payload: unknown): SpaceContext {
+  const data = isRecord(payload) ? payload.data ?? payload : payload
+  if (!isRecord(data)) throw new Error('Expected a Space context object')
+  for (const key of ['space', 'membership'] as const) {
+    const value = data[key]
+    if (value === undefined) continue
+    if (!isRecord(value) || (value.space_ref !== undefined && typeof value.space_ref !== 'string')) {
+      throw new Error(`Invalid ${key} context`)
+    }
+    if (key === 'space' && value.name !== undefined && typeof value.name !== 'string') {
+      throw new Error('Invalid Space name')
+    }
+  }
+  return data as SpaceContext
 }

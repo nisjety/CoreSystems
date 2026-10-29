@@ -1,5 +1,5 @@
 -- 0032_space_membership_revocations.sql
--- Local, durable projection of Control Plane's aqencia.controlplane.space.membership_revoked
+-- Local, durable projection of Control Plane's controlplane.space.membership_revoked
 -- events. resolve_run_owner/owner_matches (run_service_grpc.rs) join against
 -- this to deny resource-scoped run/thread/memory access once a subject's
 -- Space membership has been revoked, closing a gap where org_id+user_id

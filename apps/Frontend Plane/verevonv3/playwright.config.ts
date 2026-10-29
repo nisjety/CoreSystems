@@ -42,6 +42,8 @@ const STORAGE_STATE = 'tests/e2e/.auth/state.json'
 const LOCAL_BASE_URL = process.env.LOCAL_E2E_BASE_URL || 'http://localhost:5173'
 const LOCAL_STORAGE_STATE = 'tests/e2e/.auth/local-state.json'
 const BROWSER_WORKSPACE_SPECS = /browser-workspace-.*\.spec\.ts/
+const STUDIO_DEMO_BASE_URL = process.env.STUDIO_DEMO_BASE_URL || 'http://127.0.0.1:5174'
+const STUDIO_DEMO_SPECS = /studio-demo\.spec\.ts/
 
 export default defineConfig({
   testDir: 'tests/e2e',
@@ -67,7 +69,7 @@ export default defineConfig({
     {
       name: 'e2e',
       testMatch: /.*\.spec\.ts/,
-      testIgnore: BROWSER_WORKSPACE_SPECS,
+      testIgnore: [BROWSER_WORKSPACE_SPECS, STUDIO_DEMO_SPECS],
       dependencies: ['setup'],
       use: { ...devices['Desktop Chrome'], storageState: STORAGE_STATE },
     },
@@ -81,6 +83,11 @@ export default defineConfig({
       testMatch: BROWSER_WORKSPACE_SPECS,
       dependencies: ['local-setup'],
       use: { ...devices['Desktop Chrome'], baseURL: LOCAL_BASE_URL, storageState: LOCAL_STORAGE_STATE },
+    },
+    {
+      name: 'studio-demo',
+      testMatch: STUDIO_DEMO_SPECS,
+      use: { ...devices['Desktop Chrome'], baseURL: STUDIO_DEMO_BASE_URL },
     },
   ],
 })

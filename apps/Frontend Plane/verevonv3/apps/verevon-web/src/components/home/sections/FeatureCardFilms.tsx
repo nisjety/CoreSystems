@@ -501,7 +501,7 @@ export function FeatureFilmGroup({
 								: "Stopp animasjonen"
 						}
 						aria-pressed={userPaused}
-						className={`absolute z-50 inline-flex size-9 items-center justify-center rounded-full border border-verevon-j-text/12 bg-background/82 text-verevon-j-text/64 shadow-[0_8px_24px_rgba(23,23,23,0.06)] backdrop-blur-md transition hover:border-verevon-j-text/24 hover:text-verevon-j-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-verevon-coral motion-reduce:hidden ${controlClassName}`}
+						className={`absolute z-50 inline-flex size-9 items-center justify-center rounded-full border border-verevon-j-text/12 bg-background/82 text-verevon-j-text/64 shadow-[0_8px_24px_rgba(23,23,23,0.06)] backdrop-blur-md transition hover:border-verevon-j-text/24 hover:text-verevon-j-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-verevon-coral ${controlClassName}`}
 						onClick={() =>
 							setUserPaused((isPaused) => !isPaused)
 						}
@@ -552,14 +552,14 @@ export function FeatureCardFilm({
 			<Image
 				alt=""
 				aria-hidden="true"
-				className="hidden object-cover motion-reduce:z-10 motion-reduce:block"
+				className="hidden object-cover"
 				fill
 				sizes="(max-width: 1140px) 92vw, 22vw"
 				src={film.poster}
 			/>
 			<video
 				aria-hidden="true"
-				className="absolute inset-0 size-full object-cover motion-reduce:hidden"
+				className="absolute inset-0 size-full object-cover"
 				disablePictureInPicture
 				loop
 				muted

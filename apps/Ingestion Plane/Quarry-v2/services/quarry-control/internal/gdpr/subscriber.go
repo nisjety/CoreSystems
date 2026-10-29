@@ -23,7 +23,7 @@ const DurableConsumerName = "quarry-control-org-erasure"
 // Control-Plane-originated lifecycle events). Mirrors the
 // controlSharedStream constant documents-api-go's and conversation-core-go's
 // org-purge consumers bind against.
-const controlSharedStream = "AQENCIA_CONTROLPLANE"
+const controlSharedStream = "CONTROLPLANE"
 
 // StartSubscriber binds quarry-control's pre-provisioned durable JetStream
 // push consumer (DurableConsumerName, on controlSharedStream) and purges the

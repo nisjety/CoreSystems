@@ -1,0 +1,36 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Typed Xero credit-note lines with their parent document context.",
+  assertions: { nonNull: ["tenant_id", "line_item_id", "credit_note_line_key"], uniqueKey: ["credit_note_line_key"] }
+}
+
+WITH lines AS (
+  SELECT l.*, h.credit_note_key, h.credit_note_type, h.status, h.is_deleted,
+         h.is_voided, h.credit_note_date_local, h.currency_code,
+         h.line_amount_types, h.line_item_count, h.sub_total AS header_sub_total,
+         COUNT(*) OVER (PARTITION BY l.tenant_id, l.credit_note_id) AS observed_line_count,
+         COUNTIF(l.line_amount IS NULL) OVER (PARTITION BY l.tenant_id, l.credit_note_id) AS missing_amount_count,
+         SUM(IF(h.line_amount_types = 'Inclusive',
+                l.line_amount - COALESCE(l.tax_amount, 0), l.line_amount))
+           OVER (PARTITION BY l.tenant_id, l.credit_note_id) AS observed_net_subtotal
+  FROM ${ref("dw_bronze_xero", "xero_credit_note_lines")} AS l
+  LEFT JOIN ${ref("fact_credit_note")} AS h
+    ON l.tenant_id = h.tenant_id AND l.credit_note_id = h.credit_note_id
+)
+SELECT CONCAT(tenant_id, '|', line_item_id) AS credit_note_line_key,
+       tenant_id, credit_note_id, credit_note_key, line_item_id,
+       credit_note_type, status, is_deleted, is_voided,
+       credit_note_date_local, currency_code, line_amount_types,
+       account_id, account_code, description, quantity, unit_amount,
+       line_amount AS line_amount_raw, tax_amount, tax_type,
+       IF(line_amount_types = 'Inclusive', line_amount - COALESCE(tax_amount, 0), line_amount) AS net_amount_in_currency,
+       tracking_category_1_id, tracking_option_1_id,
+       tracking_category_2_id, tracking_option_2_id,
+       line_item_count, observed_line_count, missing_amount_count,
+       header_sub_total, observed_net_subtotal,
+       (credit_note_key IS NULL OR line_item_count IS DISTINCT FROM observed_line_count
+        OR header_sub_total IS NULL
+        OR ABS(COALESCE(observed_net_subtotal, 0) - header_sub_total) > 0.02) AS is_line_set_ambiguous,
+       synced_at, version_id
+FROM lines

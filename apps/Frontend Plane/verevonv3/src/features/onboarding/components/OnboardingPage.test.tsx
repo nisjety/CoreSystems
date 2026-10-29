@@ -45,6 +45,37 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+describe('Onboarding website preparation', () => {
+  it('invalidates completed evidence when the website URL changes', async () => {
+    const base = createInitialOnboardingState()
+    seedOnboardingState({ step: 'website', website: { ...base.website, url: 'https://triodelab.no/', status: 'completed', pages: 1 } })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({}), { headers: { 'Content-Type': 'application/json' } })))
+    renderWithProviders(() => <OnboardingPage />)
+    fireEvent.input(await screen.findByRole('textbox', { name: /Nettside-URL/ }), { target: { value: 'www.triodelab.no' } })
+    expect((await screen.findByRole('button', { name: 'Analyser nettside' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('registers the site through Marketing and reuses an existing workspace on retry', async () => {
+    const base = createInitialOnboardingState()
+    seedOnboardingState({ step: 'organization', organization: { ...base.organization, id: 'org-existing', name: 'Triodelab' }, website: { ...base.website, url: 'https://triodelab.no/' } })
+    const website = {
+      id: 'web_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', site: 'https://triodelab.no/', revision: 1,
+      createdAt: '2026-10-24T00:00:00Z', updatedAt: '2026-10-24T00:00:00Z', ownership: { status: 'unverified' },
+      integrations: { searchConsole: { status: 'needs_connection' }, ga4: { status: 'requires_consent' }, clarity: { status: 'not_connected' }, pageSpeed: { status: 'available' } },
+    }
+    const fetchMock = vi.fn<typeof fetch>(async (input) => new Response(JSON.stringify(
+      String(input).includes('/marketing/websites') ? { data: website } : String(input).includes('start-website-ingest') ? { id: 'job_test' } : {},
+    ), { headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderWithProviders(() => <OnboardingPage />)
+    fireEvent.click(await screen.findByRole('button', { name: /^Fortsett$/ }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/marketing/websites'))).toBe(true))
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/create-organization'))).toBe(false)
+    const registration = fetchMock.mock.calls.find(([url]) => String(url).includes('/marketing/websites'))
+    expect(JSON.parse(String(registration?.[1]?.body))).toEqual({ site: 'https://triodelab.no/' })
+  })
+})
+
 describe('OnboardingPage paywall commit guard', () => {
   it('asks before the first-step back control deletes onboarding state and signs out', async () => {
     seedOnboardingState({ step: 'website' })

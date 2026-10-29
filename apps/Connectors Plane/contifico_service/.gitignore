@@ -1,0 +1,29 @@
+# Secrets and local environment (examples and templates stay tracked)
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.*.template
+*.env
+*.env.local
+gcp-credentials.json
+*-credentials.json
+credentials.json
+service-account-*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.coverage
+
+# Caches and OS files
+.cache/
+.DS_Store

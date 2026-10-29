@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-stream="AQENCIA_CONTROLPLANE"
+stream="CONTROLPLANE"
 consumer="documents-api-gdpr-erasure-v1"
 delivery="_VEREVON.CONTROL.SHARED.DELIVER.data.documents-api.gdpr-erasure"
 subject="verevon.gdpr.erasure.requested"

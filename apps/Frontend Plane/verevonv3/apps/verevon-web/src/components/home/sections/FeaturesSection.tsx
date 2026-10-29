@@ -337,7 +337,8 @@ export function FeaturesSection() {
 
 					// Keep this as one shared timeline, matching FeatureCardsSection.
 					// The opacity beat leads, then the cards settle with the same
-					// stagger, tilt, scale, and horizontal spread as the original.
+					// stagger, tilt, and scale without letting adjacent cards collide
+					// while the visitor scrolls through the entrance.
 					gsap.set(cards, {
 						autoAlpha: 0,
 						backfaceVisibility: "hidden",
@@ -345,7 +346,7 @@ export function FeaturesSection() {
 						scale: 1.04,
 						transformOrigin: "50% 0%",
 						transformStyle: "preserve-3d",
-						xPercent: (index) => 72 - index * 48,
+						xPercent: 0,
 						y: -8,
 						force3D: true,
 					});
@@ -436,40 +437,34 @@ export function FeaturesSection() {
 		>
 			<div
 				aria-hidden="true"
-				className="absolute inset-0 bg-[linear-gradient(90deg,rgba(23,23,23,0.042)_1px,transparent_1px),linear-gradient(180deg,rgba(23,23,23,0.038)_1px,transparent_1px)] bg-[length:calc(100%/4)_calc(100%/3),calc(100%/4)_calc(100%/3)] max-[899px]:bg-[length:92px_92px]"
-			/>
-			<div
-				aria-hidden="true"
 				className="absolute inset-0 bg-[radial-gradient(circle_at_74%_32%,rgba(238,122,80,0.075),transparent_29%),radial-gradient(circle_at_12%_74%,rgba(41,64,74,0.05),transparent_30%),linear-gradient(180deg,rgba(248,248,247,0),rgba(248,248,247,0.8))]"
 			/>
 
 			<div className="relative z-10 w-full px-[var(--verevon-edge)] max-[760px]:px-[var(--verevon-page-pad)]">
 				<header
-					className="mx-auto mb-[clamp(48px,8vh,104px)] max-w-[760px] text-center md:invisible"
+					className="mx-auto mb-[clamp(48px,8vh,104px)] max-w-[684px] text-center md:invisible"
 					data-features-intro=""
 				>
-					<p className="verevon-eyebrow text-verevon-coral">04 / Modulene</p>
 					<h2
-						className="mt-4 font-arbeit text-[clamp(2.75rem,5vw,6.1rem)] font-light leading-[0.9] tracking-[-0.07em] text-verevon-j-text text-balance"
+						className="verevon-home-heading text-verevon-j-text text-balance"
 						id="features-title"
 					>
-						Finn. Forstå. Få gjort.
+						Virksomheten, i én sammenheng.
 					</h2>
-					<p className="mx-auto mt-5 max-w-[600px] font-protokoll text-[clamp(0.95rem,1vw,1.1rem)] font-light leading-[1.45] text-verevon-text-muted">
-						Seks moduler, én sammenheng. Dere kan starte med én og ta resten
-						når arbeidet krever det.
+					<p className="mx-auto mt-5 max-w-[42ch] font-manrope text-[clamp(1rem,1.05vw,1.125rem)] font-light leading-[1.5] tracking-[-0.015em] text-verevon-text-muted">
+						Se hvordan systemer, kunnskap, AI og kontroll henger sammen i det samme arbeidsmiljøet.
 					</p>
 				</header>
 
-				<div className="mx-auto w-full max-w-[1680px] [perspective:1400px]">
+				<div className="mx-auto w-full max-w-[var(--verevon-content-max)] [perspective:1400px]">
 					<div
 						className="relative w-full cursor-none"
 						ref={viewportRef}
 					>
-						<div className="relative w-full">
+					<div className="relative w-full" data-features-viewport="">
 							<div
 								className="relative flex w-full snap-x snap-mandatory gap-x-[var(--feature-card-gap)] overflow-x-auto overscroll-x-contain pb-4 pt-2 [--feature-card-gap:clamp(20px,2vw,36px)] [--feature-card-width:clamp(250px,22vw,280px)] lg:[--feature-card-width:calc((100%_-_3*var(--feature-card-gap))/4)] [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden touch-pan-x"
-								aria-label="Verevon-modulene"
+								aria-label="Verevons arbeidsområder"
 								data-features-cards-stage=""
 								ref={carouselRef}
 								onClickCapture={handleViewportClick}
@@ -486,7 +481,7 @@ export function FeaturesSection() {
 										card={card}
 										className="w-[var(--feature-card-width)] shrink-0 snap-start"
 										index={index}
-										key={card.module}
+										key={card.area}
 										total={moduleCards.length}
 									/>
 								))}
@@ -494,24 +489,39 @@ export function FeaturesSection() {
 						</div>
 						</div>
 
-							<button
-								aria-label="Forrige plattformkort"
-								className="absolute inset-y-2 left-0 z-40 w-[clamp(36px,4vw,56px)] cursor-none bg-transparent focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-verevon-coral disabled:pointer-events-none"
-								disabled={activeCardIndex === 0}
-								onClick={() => scrollToCard(activeCardIndex - 1)}
-								type="button"
-							>
-								<span className="sr-only">Forrige</span>
-							</button>
-							<button
-								aria-label="Neste plattformkort"
-								className="absolute inset-y-2 right-0 z-40 w-[clamp(36px,4vw,56px)] cursor-none bg-transparent focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-verevon-coral disabled:pointer-events-none"
-								disabled={activeCardIndex === lastStartIndex}
-								onClick={() => scrollToCard(activeCardIndex + 1)}
-								type="button"
-							>
-								<span className="sr-only">Neste</span>
-							</button>
+							{activeCardIndex > 0 ? (
+								<button
+									aria-label="Forrige plattformkort"
+									className="absolute left-0 top-1/2 z-40 grid size-[clamp(48px,4vw,64px)] -translate-y-1/2 cursor-none place-items-center bg-transparent text-verevon-j-text transition-colors hover:text-verevon-coral-deep focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-verevon-coral"
+									onClick={() => scrollToCard(activeCardIndex - 1)}
+									type="button"
+								>
+									<span className="sr-only">Forrige</span>
+									<svg
+										aria-hidden="true"
+										className="h-[58%] w-auto fill-none stroke-current stroke-[4] [stroke-linecap:round] [stroke-linejoin:round]"
+										viewBox="0 0 36 64"
+									>
+										<path d="m30 4-24 28 24 28" />
+									</svg>
+								</button>
+							) : lastStartIndex > 0 ? (
+								<button
+									aria-label="Neste plattformkort"
+									className="absolute right-0 top-1/2 z-40 grid size-[clamp(48px,4vw,64px)] -translate-y-1/2 cursor-none place-items-center bg-transparent text-verevon-j-text transition-colors hover:text-verevon-coral-deep focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-verevon-coral"
+									onClick={() => scrollToCard(activeCardIndex + 1)}
+									type="button"
+								>
+									<span className="sr-only">Neste</span>
+									<svg
+										aria-hidden="true"
+										className="h-[58%] w-auto fill-none stroke-current stroke-[4] [stroke-linecap:round] [stroke-linejoin:round]"
+										viewBox="0 0 36 64"
+									>
+										<path d="m6 4 24 28L6 60" />
+									</svg>
+								</button>
+							) : null}
 
 					</div>
 				</div>

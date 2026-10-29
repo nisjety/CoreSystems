@@ -1,0 +1,44 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Latest action capabilities of the Xero identity used by this integration, by company. It is not an organisation-wide access-control or individual-user entitlement table.",
+  assertions: {
+    nonNull: ["company_organisation_action_key", "tenant_id", "action_name", "source_receipt_id"],
+    uniqueKey: ["company_organisation_action_key"]
+  }
+}
+
+WITH ranked_responses AS (
+  SELECT
+    tenant_id,
+    source_receipt_id,
+    ROW_NUMBER() OVER (
+      PARTITION BY tenant_id
+      ORDER BY action_observed_at DESC, source_receipt_id DESC
+    ) AS receipt_rank
+  FROM ${ref("dw_bronze_xero", "xero_organisation_action_observations")}
+  GROUP BY tenant_id, source_receipt_id, action_observed_at
+), latest_response AS (
+  SELECT tenant_id, source_receipt_id
+  FROM ranked_responses
+  WHERE receipt_rank = 1
+)
+SELECT
+  observation.organisation_action_observation_key AS company_organisation_action_key,
+  observation.tenant_id,
+  observation.action_position,
+  observation.action_name,
+  observation.action_status,
+  observation.action_status = 'ALLOWED' AS is_allowed,
+  'integration_connection' AS capability_scope,
+  observation.action_observed_at,
+  observation.source_record_id,
+  observation.source_version_id,
+  observation.source_receipt_id,
+  observation.source_run_id,
+  observation.source_payload_hash,
+  TRUE AS is_current_capability
+FROM ${ref("dw_bronze_xero", "xero_organisation_action_observations")} AS observation
+INNER JOIN latest_response
+  USING (tenant_id, source_receipt_id)
+WHERE observation.action_name IS NOT NULL

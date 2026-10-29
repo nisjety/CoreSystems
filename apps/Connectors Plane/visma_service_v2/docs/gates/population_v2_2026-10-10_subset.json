@@ -1,0 +1,92 @@
+{
+  "source": "v2",
+  "date": "2026-10-10",
+  "generated_utc": "2026-10-09T22:27:57+00:00",
+  "max_age_hours": 26.0,
+  "subset": true,
+  "heartbeat_table": "aquatiq-datavarehus.dw_staging_visma._sync_heartbeat",
+  "requests": {
+    "token": 1,
+    "GET": 322
+  },
+  "exit_code": 1,
+  "tenants": [
+    {
+      "tenant_id": "33f319b9-4d57-11ee-960c-025417856183",
+      "name": "Aquatiq AS (pilot)",
+      "kind": "active",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 951,
+            "balance": "61387472.26",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/023672"
+          },
+          "warehouse": {
+            "open": 917,
+            "balance": "54625188.84",
+            "last_sync": null,
+            "age_hours": null,
+            "stale": true
+          },
+          "matched": 706,
+          "cent_drift": 0,
+          "pending": {
+            "balance_pending": 5,
+            "closed_at_visma_pending": 211,
+            "open_at_visma_pending": 245
+          },
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 211,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 255,
+            "balance": "23148511.36",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/Invoice/210507"
+          },
+          "warehouse": {
+            "open": 218,
+            "balance": "13806226.44",
+            "last_sync": null,
+            "age_hours": null,
+            "stale": true
+          },
+          "matched": 113,
+          "cent_drift": 0,
+          "pending": {
+            "closed_at_visma_pending": 105,
+            "open_at_visma_pending": 142
+          },
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 105,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "reasons": [
+        "stale"
+      ],
+      "verdict": "FAIL"
+    }
+  ]
+}

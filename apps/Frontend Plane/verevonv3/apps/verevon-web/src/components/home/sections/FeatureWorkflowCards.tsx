@@ -1,4 +1,6 @@
 import Image from "next/image";
+import Link from "next/link";
+import { ArrowButtonLabel } from "@/components/ui/ArrowButton";
 import { FeatureCardFilm } from "./FeatureCardFilms";
 // The card copy itself lives in a framework-free sibling module so it can be
 // unit-tested without React / next/image in the module graph. Re-exported here
@@ -9,8 +11,29 @@ import { moduleCards, workflowCards } from "./feature-workflow-cards";
 export type { ModuleCard, WorkflowCard };
 export { moduleCards, workflowCards };
 
+function ModuleVisual({ card }: { card: ModuleCard }) {
+	// Account for the full image width needed to cover the portrait frame.
+	// A landscape source needs more pixels than the visible card width alone.
+	const coverScale = Math.max(1, (card.imageWidth / card.imageHeight) / (4 / 5));
+	const imageSizes = `(max-width: 767px) ${Math.ceil(78 * coverScale)}vw, (max-width: 1140px) ${Math.ceil(88 * coverScale)}vw, ${Math.ceil(32 * coverScale)}vw`;
 
-/** Photographic module card used by the public platform carousel. */
+	return (
+		<>
+			<Image
+				alt={card.imageAlt}
+				className="object-cover brightness-[0.94] saturate-[0.86] contrast-[1.05] transition-[transform,filter] duration-[900ms] ease-out group-hover:scale-[1.045] group-hover:brightness-100 group-hover:saturate-100 motion-reduce:transition-none motion-reduce:group-hover:scale-100"
+				fill
+				quality={90}
+				sizes={imageSizes}
+				src={card.image}
+				style={{ objectPosition: card.imagePosition ?? "center" }}
+			/>
+			<div aria-hidden="true" className="absolute inset-0 bg-[linear-gradient(180deg,rgba(6,13,17,0.08),transparent_38%,rgba(5,10,13,0.28))]" />
+		</>
+	);
+}
+
+/** Product-area card used by the public platform carousel. */
 export function ModuleWorkflowCard({
 	card,
 	index,
@@ -24,60 +47,38 @@ export function ModuleWorkflowCard({
 	animated?: boolean;
 	className?: string;
 }) {
+	const titleId = `module-card-${index}-title`;
+
 	return (
-		<a
-			aria-label={`${card.module}: ${card.title}`}
-			className={`group flex min-w-0 flex-col gap-3${animated ? " md:invisible" : ""} ${className}`}
+		<Link
+			aria-labelledby={titleId}
+			className={`verevon-cta-card group flex min-w-0 cursor-pointer flex-col gap-3 no-underline outline-none focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-verevon-coral${animated ? " md:invisible" : ""} ${className}`}
 			data-feature-index={index}
+			data-module-card-link=""
 			href={card.href}
 			{...(animated ? { "data-feature-card": "" } : {})}
 		>
-			<div className="flex h-[15px] select-none items-center justify-between font-protokoll text-[10px] leading-none text-verevon-j-text/42">
-				<span className="tracking-[0.18em]">{card.beat}</span>
+			<div className="flex h-[15px] select-none items-center justify-between font-geist text-[0.6875rem] font-medium uppercase leading-none tracking-[0.08em] text-verevon-j-text/42">
+				<span>{card.area}</span>
 				<span>{`0${index + 1} / ${String(total).padStart(2, "0")}`}</span>
 			</div>
 
 			<div className="relative aspect-[4/5] overflow-hidden bg-verevon-j-text/[0.04]">
-				<Image
-					alt={card.imageAlt}
-					className="object-cover transition-transform duration-[900ms] ease-out will-change-transform group-hover:scale-[1.04] motion-reduce:transition-none motion-reduce:group-hover:scale-100"
-					fill
-					sizes="(max-width: 1140px) 92vw, 22vw"
-					src={card.image}
-					style={{ objectPosition: card.imagePosition ?? "center" }}
-				/>
-				{/* Keeps the overlaid module name legible on light photographs. */}
-				<div
-					aria-hidden="true"
-					className="absolute inset-0 bg-[linear-gradient(180deg,rgba(23,23,23,0.34)_0%,rgba(23,23,23,0)_38%)]"
-				/>
-				<p className="absolute left-3 top-3 m-0 font-protokoll text-[10px] font-medium uppercase tracking-[0.17em] text-white/92">
-					{card.module}
-				</p>
+				<ModuleVisual card={card} />
 			</div>
 
-			<h3 className="m-0 max-w-full break-words font-arbeit text-[clamp(1.18rem,1.42vw,1.6rem)] font-light leading-[1.06] tracking-[-0.05em] text-verevon-j-text">
+			<h3 className="m-0 max-w-full break-words font-manrope text-[clamp(1.18rem,1.42vw,1.6rem)] font-light leading-[1.06] tracking-[-0.05em] text-verevon-j-text" id={titleId}>
 				{card.title}
 			</h3>
 
-			<div
-				aria-label={`${card.module}: ${card.features.join(", ")}`}
-				className="flex flex-wrap gap-1.5"
-			>
-				{card.features.map((feature) => (
-					<span
-						className="rounded-full border border-verevon-j-text/10 px-2 py-1 font-protokoll text-[9px] uppercase tracking-[0.12em] text-verevon-j-text/58"
-						key={feature}
-					>
-						{feature}
-					</span>
-				))}
-			</div>
-
-			<p className="m-0 font-protokoll text-[clamp(0.82rem,0.82vw,0.94rem)] font-light leading-[1.45] text-verevon-text-muted/90">
+			<p className="m-0 font-manrope text-[clamp(0.9375rem,0.9vw,1rem)] font-light leading-[1.5] tracking-[-0.015em] text-verevon-text-muted/90">
 				{card.text}
 			</p>
-		</a>
+
+			<span className="verevon-cta mt-auto text-verevon-j-text">
+				<ArrowButtonLabel>{card.linkLabel}</ArrowButtonLabel>
+			</span>
+		</Link>
 	);
 }
 
@@ -105,7 +106,7 @@ export function FeatureWorkflowCard({
 			href={card.href}
 			{...(animated ? { "data-feature-card": "" } : {})}
 		>
-			<div className="flex h-[15px] select-none items-center justify-between font-protokoll text-[10px] leading-none text-verevon-j-text/42">
+			<div className="flex h-[15px] select-none items-center justify-between font-geist text-[0.6875rem] font-medium uppercase leading-none tracking-[0.08em] text-verevon-j-text/42">
 				<span className="size-[5px] rounded-full bg-verevon-coral/70" />
 				<span>{`0${index + 1} / ${String(total).padStart(2, "0")}`}</span>
 			</div>
@@ -114,11 +115,11 @@ export function FeatureWorkflowCard({
 				<FeatureCardFilm kind={card.film} />
 			</div>
 
-			<h3 className="m-0 max-w-full break-words font-arbeit text-[clamp(1.25rem,1.55vw,1.75rem)] font-light leading-[1.04] tracking-[-0.055em] text-verevon-j-text">
+			<h3 className="m-0 max-w-full break-words font-manrope text-[clamp(1.25rem,1.55vw,1.75rem)] font-light leading-[1.04] tracking-[-0.055em] text-verevon-j-text">
 				{card.title}
 			</h3>
 
-			<p className="m-0 font-protokoll text-[9px] font-medium uppercase tracking-[0.17em] text-verevon-coral/80">
+			<p className="m-0 font-geist text-[0.6875rem] font-medium uppercase tracking-[0.08em] text-verevon-coral/80">
 				{card.kicker}
 			</p>
 
@@ -128,7 +129,7 @@ export function FeatureWorkflowCard({
 			>
 				{card.features.map((feature) => (
 					<span
-						className="rounded-full border border-verevon-j-text/10 px-2 py-1 font-protokoll text-[9px] uppercase tracking-[0.12em] text-verevon-j-text/58"
+						className="rounded-full border border-verevon-j-text/10 px-2 py-1 font-geist text-[0.6875rem] font-medium uppercase tracking-[0.08em] text-verevon-j-text/58"
 						key={feature}
 					>
 						{feature}
@@ -136,7 +137,7 @@ export function FeatureWorkflowCard({
 				))}
 			</div>
 
-			<p className="m-0 font-protokoll text-[clamp(0.82rem,0.82vw,0.94rem)] font-light leading-[1.4] text-verevon-text-muted/90">
+			<p className="m-0 font-manrope text-[clamp(0.9375rem,0.9vw,1rem)] font-light leading-[1.5] tracking-[-0.015em] text-verevon-text-muted/90">
 				{card.text}
 			</p>
 		</a>

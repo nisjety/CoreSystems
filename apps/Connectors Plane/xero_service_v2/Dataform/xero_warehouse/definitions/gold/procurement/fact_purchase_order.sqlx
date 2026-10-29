@@ -1,0 +1,41 @@
+config {
+  type: "table",
+  schema: "xero_gold_procurement",
+  description: "Xero purchase order headers; only authorised unbilled orders contribute to open commitments.",
+  assertions: { nonNull: ["tenant_id", "purchase_order_id", "purchase_order_key"], uniqueKey: ["purchase_order_key"] }
+}
+
+WITH line_sets AS (
+  SELECT tenant_id, purchase_order_id, COUNT(*) AS observed_line_count,
+         LOGICAL_OR(is_line_set_ambiguous) AS has_ambiguous_lines
+  FROM ${ref("dw_1_silver_xero", "fact_purchase_order_line")}
+  GROUP BY tenant_id, purchase_order_id
+), orders AS (
+  SELECT p.*, COALESCE(s.observed_line_count, 0) AS observed_line_count,
+         (p.line_item_count IS DISTINCT FROM COALESCE(s.observed_line_count, 0)
+          OR COALESCE(s.has_ambiguous_lines, FALSE)) AS is_line_set_ambiguous
+  FROM ${ref("dw_1_silver_xero", "fact_purchase_order")} AS p
+  LEFT JOIN line_sets AS s
+    ON p.tenant_id = s.tenant_id AND p.purchase_order_id = s.purchase_order_id
+)
+SELECT FARM_FINGERPRINT(p.tenant_id) AS company_key,
+       FARM_FINGERPRINT(CAST(p.order_date_local AS STRING)) AS date_key,
+       c.contact_key,
+       IF(c.is_supplier IS TRUE, c.contact_key, NULL) AS supplier_key,
+       IF(p.branding_theme_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(p.tenant_id, '|', p.branding_theme_id))) AS branding_theme_key,
+       p.purchase_order_key, p.tenant_id, p.purchase_order_id,
+       p.purchase_order_number, p.purchase_order_type, p.reference,
+       p.status, p.is_deleted, p.is_billed, p.is_open_commitment, p.is_line_set_ambiguous,
+       p.contact_id AS supplier_id, p.contact_name AS supplier_name, p.branding_theme_id,
+       p.order_date_local AS order_date, p.currency_code,
+       p.currency_rate AS source_exchange_rate,
+       p.sub_total AS source_subtotal_in_currency,
+       p.total_tax AS source_vat_in_currency,
+       p.total AS source_total_in_currency,
+       IF(p.is_open_commitment AND NOT p.is_billed AND NOT p.is_line_set_ambiguous
+          AND p.currency_code IS NOT NULL,
+          p.total, NULL) AS committed_amount_in_currency,
+       p.line_item_count, p.observed_line_count, p.synced_at, 'xero' AS source_system
+FROM orders AS p
+LEFT JOIN ${ref("xero_gold_common", "dim_contact")} AS c
+  ON p.tenant_id = c.tenant_id AND p.contact_id = c.contact_id

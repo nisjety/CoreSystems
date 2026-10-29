@@ -1,0 +1,49 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_cash_transactions",
+  description: "Bronze: Cash account transaction entries from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.float("amount")} AS `amount`,
+  ${bronze.str("cashAccount")} AS `cashAccount`,
+  ${bronze.float("controlTotal")} AS `controlTotal`,
+  ${bronze.str("currency")} AS `currency`,
+  ${bronze.str("description")} AS `description`,
+  ${bronze.str("disbReceipt")} AS `disbReceipt`,
+  ${bronze.str("entryType")} AS `entryType`,
+  ${bronze.str("finPeriod")} AS `finPeriod`,
+  ${bronze.str("financialPeriod")} AS `financialPeriod`,
+  ${bronze.str("financialsDetail")} AS `financialsDetail`,
+  ${bronze.bool("hold")} AS `hold`,
+  ${bronze.str("lastModifiedDateTime")} AS `lastModifiedDateTime`,
+  ${bronze.str("referenceNbr")} AS `referenceNbr`,
+  ${bronze.str("status")} AS `status`,
+  ${bronze.float("taxAmount")} AS `taxAmount`,
+  ${bronze.str("taxDetails")} AS `taxDetails`,
+  ${bronze.float("taxTotal")} AS `taxTotal`,
+  ${bronze.str("timeStamp")} AS `timeStamp`,
+  ${bronze.str("tranDate")} AS `tranDate`,
+  ${bronze.str("tranType")} AS `tranType`,
+  ${bronze.str("transactionDetails")} AS `transactionDetails`,
+  ${bronze.float("vatExemptTotal")} AS `vatExemptTotal`,
+  ${bronze.float("vatTaxableTotal")} AS `vatTaxableTotal`,
+  ${bronze.str("owner")} AS `owner`,
+  ${bronze.str("documentRef")} AS `documentRef`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`  -- v2 does not fetch this field
+FROM ${ref("dw_staging_visma", "cash_transactions")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

@@ -1,0 +1,24 @@
+config { type: "assertion", schema: "dw_1_silver_xero_assertions", name: "xero_gold_expansion_grain_reconciliation" }
+
+WITH source_counts AS (
+  SELECT 'items' entity, COUNT(*) n FROM ${ref("dw_staging_xero", "items")}
+  UNION ALL SELECT 'quotes', COUNT(*) FROM ${ref("dw_staging_xero", "quotes")}
+  UNION ALL SELECT 'quote_lines', COUNT(*) FROM ${ref("dw_staging_xero", "quote_lines")}
+  UNION ALL SELECT 'purchase_orders', COUNT(*) FROM ${ref("dw_staging_xero", "purchase_orders")}
+  UNION ALL SELECT 'purchase_order_lines', COUNT(*) FROM ${ref("dw_staging_xero", "purchase_order_lines")}
+  UNION ALL SELECT 'bank_transactions', COUNT(*) FROM ${ref("dw_staging_xero", "bank_transactions")}
+  UNION ALL SELECT 'bank_transaction_lines', COUNT(*) FROM ${ref("dw_staging_xero", "bank_transaction_lines")}
+  UNION ALL SELECT 'bank_transfers', COUNT(*) FROM ${ref("dw_staging_xero", "bank_transfers")}
+), gold_counts AS (
+  SELECT 'items' entity, COUNT(*) n FROM ${ref("xero_gold_sales", "dim_item")}
+  UNION ALL SELECT 'quotes', COUNT(*) FROM ${ref("xero_gold_sales", "fact_quote")}
+  UNION ALL SELECT 'quote_lines', COUNT(*) FROM ${ref("xero_gold_sales", "fact_quote_line")}
+  UNION ALL SELECT 'purchase_orders', COUNT(*) FROM ${ref("xero_gold_procurement", "fact_purchase_order")}
+  UNION ALL SELECT 'purchase_order_lines', COUNT(*) FROM ${ref("xero_gold_procurement", "fact_purchase_order_line")}
+  UNION ALL SELECT 'bank_transactions', COUNT(*) FROM ${ref("xero_gold_finance", "fact_bank_transaction")}
+  UNION ALL SELECT 'bank_transaction_lines', COUNT(*) FROM ${ref("xero_gold_finance", "fact_bank_transaction_line")}
+  UNION ALL SELECT 'bank_transfers', COUNT(*) FROM ${ref("xero_gold_finance", "fact_bank_transfer")}
+)
+SELECT source_counts.entity, source_counts.n AS source_rows, gold_counts.n AS gold_rows
+FROM source_counts JOIN gold_counts USING (entity)
+WHERE source_counts.n != gold_counts.n

@@ -1,0 +1,45 @@
+# Hand-kept copy of config/queries/datamart/warehouses.graphql.
+# includeDeleted defaults to true: the paginator never sends the variable, and the
+# generated default (false) would hide deletions from bronze. Deleted rows arrive
+# with deletedDatabaseRecord = true (same convention as general_ledger_balance.graphql).
+# The nested `locations` selection is removed on purpose: the field is typed non-null but is null
+# for warehouses without locations, which fails the entire query. Locations come from the
+# warehouseLocations root instead.
+query Warehouses(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = true
+) {
+  warehouses(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    warehouseId
+    warehouseCd
+    branchId
+    replenishmentClassId
+    active
+    lockSitePICountEntry
+    description
+    locationEntry
+    avgDefaultCost
+    fifoDefaultCost
+    receiptLocationId
+    shipLocationId
+    returnLocationId
+    dropShipLocationId
+    contactId
+    addressId
+    lastModifiedDateTime
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+  }
+}

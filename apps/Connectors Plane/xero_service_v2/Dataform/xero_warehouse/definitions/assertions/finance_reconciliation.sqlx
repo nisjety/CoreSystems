@@ -1,0 +1,11 @@
+config { type: "assertion", schema: "dw_1_silver_xero_assertions", name: "xero_invoice_line_subtotal_reconciliation" }
+
+WITH line_sets AS (
+  SELECT tenant_id, invoice_id,
+         ANY_VALUE(sub_total) AS header_subtotal,
+         ANY_VALUE(observed_line_net) AS line_net
+  FROM ${ref("dw_1_silver_xero", "fact_invoice_line")}
+  WHERE NOT is_line_set_ambiguous
+  GROUP BY 1, 2
+)
+SELECT * FROM line_sets WHERE ABS(header_subtotal - line_net) > 0.02

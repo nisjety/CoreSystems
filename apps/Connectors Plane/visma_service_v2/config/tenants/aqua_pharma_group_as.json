@@ -1,0 +1,7 @@
+{
+  "tenant_id": "ffa4a061-8084-11e9-b307-0aa512338dd6",
+  "tenant_name": "Aqua Pharma Group AS",
+  "datamart_company_id": "2413631",
+  "status": "active",
+  "notes": "Registered in v1 scripts/add_tenants.py; DataMart company discovered with `vsv2 dm-companies` on 2026-10-01."
+}

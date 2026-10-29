@@ -1,0 +1,30 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_fixed_asset_transaction_rows_complete",
+  description: "Silver must hold every fixed asset transaction that bronze holds. Returns one row per tenant where the number of distinct (refNo, lineNo), the staging key of visma_bronze.visma_fixed_asset_transactions, differs from the rows of visma_silver.fact_fixed_asset_transaction.",
+  tags: ["assertion", "silver", "fixed_asset"]
+}
+
+WITH bronze AS (
+  SELECT
+    tenantId AS tenant_id,
+    COUNT(DISTINCT FORMAT('%t|%t', refNo, lineNo)) AS bronze_rows
+  FROM ${ref("visma_bronze", "visma_fixed_asset_transactions")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+),
+
+silver AS (
+  SELECT tenant_id, COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_fixed_asset_transaction")}
+  GROUP BY tenant_id
+)
+
+SELECT
+  COALESCE(bronze.tenant_id, silver.tenant_id) AS tenant_id,
+  COALESCE(bronze_rows, 0) AS bronze_rows,
+  COALESCE(silver_rows, 0) AS silver_rows
+FROM bronze
+FULL OUTER JOIN silver ON bronze.tenant_id = silver.tenant_id
+WHERE COALESCE(bronze_rows, 0) != COALESCE(silver_rows, 0)

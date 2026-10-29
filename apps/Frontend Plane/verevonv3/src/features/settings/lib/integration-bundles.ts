@@ -13,6 +13,9 @@
  */
 export function connectBundlesForProvider(providerKey: string): string[] {
   const normalizedProvider = providerKey.trim().toLowerCase()
+  // Share onboarding's read-only Workspace grant, including GSC and GA4.
+  // Sending mail and other writes require a separate, explicit consent flow.
+  if (normalizedProvider === 'google' || normalizedProvider === 'microsoft') return ['workspace_readonly']
   if (normalizedProvider === 'meta') return ['messenger']
   if (normalizedProvider === 'linkedin') return ['onboarding']
   if (normalizedProvider === 'slack' || normalizedProvider === 'discord' || normalizedProvider === 'x') {

@@ -20,7 +20,7 @@
 //! `embedding-engine-gdpr` identity — NEVER this service's own
 //! Data-Plane-local NATS connection (`Config::nats_url` /
 //! `nats_connection::connect`, used by `stream.rs`/`wiki_consumer.rs`/
-//! `image_consumer.rs`): that broker does not host `AQENCIA_CONTROLPLANE`,
+//! `image_consumer.rs`): that broker does not host `CONTROLPLANE`,
 //! and reusing that connection/identity (or any other service's
 //! shared-broker identity) would be exactly the "reused an existing
 //! connection/identity" mistake this GDPR rollout's verify pass already
@@ -62,7 +62,7 @@ use qdrant_client::Qdrant;
 use crate::cas_store::CasStore;
 use crate::gdpr::{parse_erasure_event, purge_organization_data, PurgeCollections};
 
-pub const STREAM_NAME: &str = "AQENCIA_CONTROLPLANE";
+pub const STREAM_NAME: &str = "CONTROLPLANE";
 pub const SUBJECT: &str = "verevon.gdpr.erasure.requested";
 pub const DURABLE_NAME: &str = "embedding-engine-org-erasure";
 

@@ -1,0 +1,36 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Supplier credit allocations to bills; unresolved links and invalid currencies retain source values only.",
+  assertions: { nonNull: ["tenant_id", "allocation_id", "allocation_key"], uniqueKey: ["allocation_key"] }
+}
+
+SELECT FARM_FINGERPRINT(a.tenant_id) AS company_key,
+       FARM_FINGERPRINT(CAST(DATE(a.allocation_date) AS STRING)) AS date_key,
+       FARM_FINGERPRINT(CONCAT(a.tenant_id, '|', a.credit_note_currency_code)) AS currency_key,
+       a.allocation_key, a.tenant_id, a.allocation_id,
+       a.credit_note_key, a.credit_note_id, a.invoice_key, a.invoice_id,
+       a.invoice_number, a.allocation_date, a.credit_note_currency_code AS currency_code,
+       a.credit_note_status, a.invoice_status, a.is_deleted,
+       a.is_deletion_flag_unknown, a.is_invoice_unresolved, a.is_currency_mismatch,
+       a.is_invoice_type_mismatch, a.is_observed_with_credit_note,
+       a.is_invoice_deleted, a.is_invoice_voided,
+       (h.is_reportable IS TRUE AND a.is_observed_with_credit_note
+        AND NOT a.is_deleted AND NOT a.is_deletion_flag_unknown
+        AND NOT a.is_invoice_unresolved AND NOT a.is_invoice_type_mismatch
+        AND NOT a.is_currency_mismatch
+        AND a.credit_note_currency_code IS NOT NULL
+        AND a.invoice_status IN ('AUTHORISED', 'PAID')) AS is_reportable,
+       a.source_allocated_amount,
+       IF(h.is_reportable IS TRUE AND a.is_observed_with_credit_note
+          AND NOT a.is_deleted AND NOT a.is_deletion_flag_unknown
+          AND NOT a.is_invoice_unresolved AND NOT a.is_invoice_type_mismatch
+          AND NOT a.is_currency_mismatch
+          AND a.credit_note_currency_code IS NOT NULL
+          AND a.invoice_status IN ('AUTHORISED', 'PAID'),
+          a.source_allocated_amount, NULL) AS amount_in_currency,
+       a.synced_at, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_credit_note_allocation")} AS a
+LEFT JOIN ${ref("fact_supplier_credit_note")} AS h
+  ON a.tenant_id = h.tenant_id AND a.credit_note_id = h.credit_note_id
+WHERE a.credit_note_type = 'ACCPAYCREDIT'

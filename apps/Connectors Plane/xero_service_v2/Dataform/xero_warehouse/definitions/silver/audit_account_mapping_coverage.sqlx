@@ -1,0 +1,38 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Tenant-level account-mapping coverage. It distinguishes Xero native account-class classification from a finance-governed reporting or group-chart mapping without inferring either from account codes.",
+  assertions: {
+    nonNull: ["tenant_id", "account_mapping_method"],
+    uniqueKey: ["tenant_id", "account_mapping_method"]
+  }
+}
+
+SELECT
+  tenant_id,
+  account_mapping_method,
+  COUNT(*) AS account_count,
+  COUNTIF(is_active) AS active_account_count,
+  COUNTIF(is_archived) AS archived_account_count,
+  COUNTIF(is_missing_from_staging) AS missing_from_current_staging_account_count,
+  COUNTIF(is_financial_statement_classification_complete)
+    AS financially_classified_account_count,
+  COUNTIF(NOT is_financial_statement_classification_complete)
+    AS financially_unclassified_account_count,
+  COUNTIF(is_active AND is_financial_statement_classification_complete)
+    AS active_financially_classified_account_count,
+  COUNTIF(is_active AND NOT is_financial_statement_classification_complete)
+    AS active_financially_unclassified_account_count,
+  COUNTIF(account_mapping_method = 'finance_governed_account_mapping')
+    AS governed_mapping_account_count,
+  COUNTIF(is_active AND account_mapping_method = 'finance_governed_account_mapping')
+    AS active_governed_mapping_account_count,
+  COUNTIF(account_mapping_method = 'native_account_class_fallback')
+    AS native_account_class_fallback_account_count,
+  COUNTIF(is_active AND account_mapping_method = 'native_account_class_fallback')
+    AS active_native_account_class_fallback_account_count,
+  COUNTIF(account_mapping_method = 'unmapped') AS unmapped_account_count,
+  COUNTIF(is_active AND account_mapping_method = 'unmapped') AS active_unmapped_account_count,
+  MAX(synced_at) AS latest_account_observed_at
+FROM ${ref("dw_1_silver_xero", "dim_account")}
+GROUP BY tenant_id, account_mapping_method

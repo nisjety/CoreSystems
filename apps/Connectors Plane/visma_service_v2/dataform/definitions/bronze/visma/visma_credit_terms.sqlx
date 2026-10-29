@@ -1,0 +1,46 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_credit_terms",
+  description: "Bronze: Credit and payment term definitions from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.str("calculationType")} AS `calculationType`,
+  ${bronze.str("createdDateTime")} AS `createdDateTime`,
+  ${bronze.int("delayDays")} AS `delayDays`,
+  ${bronze.str("description")} AS `description`,
+  ${bronze.int("discountDay")} AS `discountDay`,
+  ${bronze.float("discountPercent")} AS `discountPercent`,
+  ${bronze.str("discountType")} AS `discountType`,
+  ${bronze.str("dueDateType")} AS `dueDateType`,
+  ${bronze.int("dueDay1")} AS `dueDay1`,
+  ${bronze.int("dueDay1DayFrom1")} AS `dueDay1DayFrom1`,
+  ${bronze.int("dueDay1DayTo1")} AS `dueDay1DayTo1`,
+  ${bronze.int("dueDay2")} AS `dueDay2`,
+  ${bronze.int("dueDay2DayFrom1")} AS `dueDay2DayFrom1`,
+  ${bronze.int("dueDay2DayTo1")} AS `dueDay2DayTo1`,
+  ${bronze.str("instalmentFrequency")} AS `instalmentFrequency`,
+  ${bronze.str("instalmentMethod")} AS `instalmentMethod`,
+  ${bronze.str("instalmentType")} AS `instalmentType`,
+  ${bronze.str("lastModifiedDateTime")} AS `lastModifiedDateTime`,
+  ${bronze.str("moveDueDateIfOnTheWeekend")} AS `moveDueDateIfOnTheWeekend`,
+  ${bronze.int("numberOfInstalments")} AS `numberOfInstalments`,
+  ${bronze.str("termsId")} AS `termsId`,
+  ${bronze.str("visibleTo")} AS `visibleTo`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`  -- v2 does not fetch this field
+FROM ${ref("dw_staging_visma", "credit_terms")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

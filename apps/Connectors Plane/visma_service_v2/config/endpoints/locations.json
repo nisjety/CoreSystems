@@ -1,0 +1,34 @@
+{
+  "endpoint_name": "locations",
+  "bigquery_table": "visma_locations",
+  "primary_key": [
+    "baccount.number",
+    "locationId"
+  ],
+  "source": "erp_rest",
+  "api_method": "get_locations",
+  "api_endpoint": "/v1/location",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "baccount.number",
+    "locationId"
+  ],
+  "notes": "DATAMART CANNOT KEY THIS ENDPOINT (measured 2026-09-29): the ERP key is (baccount.number, locationId) = a business-account NUMBER and a location CODE ('HOVED', 'HS', 'MAIN', ... 116 codes). DataMart's Location has only internal integers (locationId, bAccountId; all 20,290 rows are ints and none equals an ERP code), and the location code exists nowhere in DataMart, so no join can recover it. normalize_location therefore leaves locationId null and keeps the internal numbers as locationInternalId / bAccountInternalId. Keep this endpoint ERP-sourced (ready=false). DataMart also lists 20,290 locations against 14,552 from the ERP. Removed 2026-09-30: the duplicate config `customer_locations`, which read the same URL (/v1/location) and returned identical rows (14,552 of 14,552, 0 differing). Supplier locations are the separate `supplier_locations` endpoint. Do not require `locationName`: 2 of 14,552 locations (e.g. locationId FEIL) have none, and one rejected row fails the whole endpoint run.",
+  "datamart": {
+    "ready": false,
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    },
+    "query_file": "config/queries/location.graphql",
+    "type_name": "Location",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": false,
+    "join_normalizer": "normalize_location",
+    "fallback_source": "erp_rest",
+    "root_field": "locations"
+  }
+}
