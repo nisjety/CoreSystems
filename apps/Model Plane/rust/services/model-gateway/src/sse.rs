@@ -35,7 +35,7 @@ pub mod lifecycle_events;
 
 use crate::{
     auth::{
-        Claims, VerifiedCapabilityBearer, VerifiedCostBearer,
+        Claims, VerifiedBrowserBearer, VerifiedCapabilityBearer, VerifiedCostBearer,
         VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer,
         VerifiedInferenceBearer, VerifiedIngestionBearer, VerifiedSandboxBearer,
         VerifiedSessionBearer as VerifiedModelBearer,
@@ -1313,6 +1313,7 @@ pub async fn invoke_stream_sse(
     cost_bearer: Option<Extension<VerifiedCostBearer>>,
     ingestion_bearer: Option<Extension<VerifiedIngestionBearer>>,
     sandbox_bearer: Option<Extension<VerifiedSandboxBearer>>,
+    browser_bearer: Option<Extension<VerifiedBrowserBearer>>,
     axum::Json(mut req): axum::Json<InvokeRequest>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let request_id = new_ulid();
@@ -1348,6 +1349,7 @@ pub async fn invoke_stream_sse(
     let cost_bearer = cost_bearer.map(|Extension(bearer)| bearer);
     let ingestion_bearer = ingestion_bearer.map(|Extension(bearer)| bearer);
     let sandbox_bearer = sandbox_bearer.map(|Extension(bearer)| bearer);
+    let browser_bearer = browser_bearer.map(|Extension(bearer)| bearer);
     let features = req.features.clone();
     let conversation_only = features.iter().any(|f| f == "conversation_only");
     if conversation_only && (req.deep_research || req.generate_image
@@ -2207,6 +2209,8 @@ pub async fn invoke_stream_sse(
             inference_bearer,
             agentic_space_id,
             sandbox_bearer,
+            // The Do turn's browser bearer, forwarded only on a run that keeps no ZDR (WS21-S2).
+            browser_bearer,
             agentic_route,
             idem_guard,
             None,
@@ -10066,7 +10070,9 @@ fn authenticated_run_agent_request(
     session_bearer: &VerifiedModelBearer,
     inference_bearer: &VerifiedInferenceBearer,
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
+    browser_bearer: Option<&VerifiedBrowserBearer>,
 ) -> Result<tonic::Request<RunAgentRequest>, tonic::Status> {
+    let zdr = request.zdr;
     let authorization = format!("Bearer {}", execution_bearer.as_str())
         .parse()
         .map_err(|_| tonic::Status::unauthenticated("malformed verified user credential"))?;
@@ -10106,6 +10112,18 @@ fn authenticated_run_agent_request(
                 .parse()
                 .map_err(|_| {
                     tonic::Status::unauthenticated("malformed verified sandbox-manager credential")
+                })?,
+        );
+    }
+    // Conditional like the sandbox credential, and never on a zero-retention run: no browser
+    // credential is forwarded for one, and execution-core would refuse it there (WS21-S2).
+    if let Some(browser_bearer) = browser_bearer.filter(|_| !zdr) {
+        request.metadata_mut().insert(
+            "x-browser-authorization",
+            format!("Bearer {}", browser_bearer.as_str())
+                .parse()
+                .map_err(|_| {
+                    tonic::Status::unauthenticated("malformed verified browser credential")
                 })?,
         );
     }
@@ -10710,6 +10728,7 @@ fn spawn_run_dispatch(
     inference_bearer: &VerifiedInferenceBearer,
     space_id: &str,
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
+    browser_bearer: Option<&VerifiedBrowserBearer>,
     // plan-gate §2.4: the plan approved together with this thread's grant,
     // pre-formatted, when one is waiting and this run is not itself in plan
     // mode. `None` for every run that predates plan-gate or has no approved
@@ -10826,6 +10845,7 @@ fn spawn_run_dispatch(
         session_bearer,
         inference_bearer,
         sandbox_bearer,
+        browser_bearer,
     )?;
     Ok(tokio::spawn(async move {
         let result = execution_client
@@ -11510,6 +11530,9 @@ fn agentic_run_stream(
     // governed agent loop needs it too, not only the inline ExecuteStep path).
     space_id: String,
     sandbox_bearer: Option<VerifiedSandboxBearer>,
+    // The browser bearer of a Do turn that may be offered the browser tools (WS21-S2). `None` for
+    // every continuation, which never forwards one, and for every turn with the switch off.
+    browser_bearer: Option<VerifiedBrowserBearer>,
     // The inference route this run is pinned to; empty for every turn that is
     // not on the ChatGPT subscription (see `AgentRoute`).
     route: AgentRoute,
@@ -11655,6 +11678,7 @@ fn agentic_run_stream(
             &inference_bearer,
             &space_id,
             sandbox_bearer.as_ref(),
+            browser_bearer.as_ref(),
             plan_context.as_deref(),
             &route,
             resume.clone(),
@@ -15404,6 +15428,7 @@ mod tests {
             &super::VerifiedModelBearer::for_test("session-token"),
             &super::VerifiedInferenceBearer::for_test("inference-token"),
             None,
+            None,
         )
         .expect("build execution request");
 
@@ -15453,6 +15478,7 @@ mod tests {
             &super::VerifiedModelBearer::for_test("session-token"),
             &super::VerifiedInferenceBearer::for_test("inference-token"),
             Some(&super::VerifiedSandboxBearer::for_test("sandbox-token")),
+            None,
         )
         .expect("build execution request");
 
@@ -15462,6 +15488,47 @@ mod tests {
                 .get("x-sandbox-authorization")
                 .and_then(|value| value.to_str().ok()),
             Some("Bearer sandbox-token")
+        );
+    }
+
+    #[test]
+    fn execution_dispatch_forwards_the_browser_bearer_only_when_present_and_not_zdr() {
+        let dispatch = |zdr: bool, browser: Option<&super::VerifiedBrowserBearer>| {
+            super::authenticated_run_agent_request(
+                super::RunAgentRequest {
+                    zdr,
+                    ..super::RunAgentRequest::default()
+                },
+                &super::VerifiedExecutionBearer::for_test("execution-token"),
+                &super::VerifiedBearer::for_test("data-token"),
+                &super::VerifiedModelBearer::for_test("session-token"),
+                &super::VerifiedInferenceBearer::for_test("inference-token"),
+                None,
+                browser,
+            )
+            .expect("build execution request")
+        };
+        let header = |request: &tonic::Request<super::RunAgentRequest>| {
+            request
+                .metadata()
+                .get("x-browser-authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let browser = super::VerifiedBrowserBearer::for_test("browser-token");
+        assert_eq!(
+            header(&dispatch(false, Some(&browser))).as_deref(),
+            Some("Bearer browser-token")
+        );
+        assert_eq!(
+            header(&dispatch(false, None)),
+            None,
+            "an absent browser bearer is no header at all"
+        );
+        assert_eq!(
+            header(&dispatch(true, Some(&browser))),
+            None,
+            "a zero-retention run never carries one"
         );
     }
 
@@ -17234,6 +17301,7 @@ fn run_agent_request_is_buildable(
         session_bearer,
         inference_bearer,
         None,
+        None,
     )
     .map(|_| ())
 }
@@ -17960,6 +18028,8 @@ pub(crate) async fn continue_run(
             model_bearer,
             inference_bearer,
             String::new(),
+            None,
+            // A continuation never forwards a browser bearer (WS21-S2).
             None,
             AgentRoute::default(),
             None,
@@ -19755,6 +19825,7 @@ mod continue_run_tests {
                 &session,
                 &inference,
                 None,
+                None,
             )
             .expect_err(broken);
             assert_eq!(launch.code(), refused.code(), "{broken}: the pre-check is the launch's check");
@@ -19851,6 +19922,7 @@ mod continue_run_tests {
             session,
             inference,
             String::new(),
+            None,
             None,
             AgentRoute::default(),
             None,
@@ -21244,6 +21316,7 @@ mod continue_run_tests {
             session,
             inference,
             String::new(),
+            None,
             None,
             AgentRoute::default(),
             None,

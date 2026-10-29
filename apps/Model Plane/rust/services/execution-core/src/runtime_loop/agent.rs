@@ -48,7 +48,7 @@ use mp_contracts::model_plane::v1::{
 };
 use serde_json::{json, Value as JsonValue};
 use tonic::transport::Channel;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::permission::PermissionMode;
 use crate::runtime_loop::{self, StepOutcome};
@@ -445,6 +445,10 @@ struct LoopContext<'a> {
     /// specific bearer must be user-bound. Read only by the `code_interpreter`
     /// dispatch arm in `run_rounds`, and only when `req.space_id` is set.
     sandbox_bearer: Option<&'a str>,
+    /// The run's verified browser bearer (WS21-S2): present only when the request carried one and
+    /// the browser switch is on. It names the user's broker grants, so no delegated child receives
+    /// it (DEC-19 D10).
+    browser_bearer: Option<&'a str>,
     capability_client: Option<&'a crate::capability_client::CapabilityClient>,
     sandbox_manager_client: &'a crate::sandbox_manager_client::SandboxManagerClient,
     backend_id: &'a str,
@@ -743,6 +747,7 @@ pub(crate) async fn run_agent(
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     terminal_tokens: &dyn ManagedRunTokenProvider,
     sandbox_bearer: Option<String>,
+    browser_bearer: Option<String>,
     capability_client: Option<&crate::capability_client::CapabilityClient>,
     sandbox_manager_client: &crate::sandbox_manager_client::SandboxManagerClient,
     backend_id: &str,
@@ -775,7 +780,8 @@ pub(crate) async fn run_agent(
         .await;
     }
     let waived = offer_is_waived(&req, caller);
-    let tools = offered_tools(&req, waived, capability_policy, governance_from_env()).await;
+    let held = browser_bearer.is_some();
+    let tools = offered_tools(&req, waived, held, capability_policy, governance_from_env()).await;
     run_agent_with_offered(
         state,
         session_channel,
@@ -789,6 +795,7 @@ pub(crate) async fn run_agent(
         capability_policy,
         terminal_tokens,
         sandbox_bearer,
+        browser_bearer,
         capability_client,
         sandbox_manager_client,
         backend_id,
@@ -891,6 +898,8 @@ async fn resume_parked_run(
         capability_policy,
         terminal_tokens,
         sandbox_bearer,
+        // A parked run was never offered a browser tool, so it holds no browser bearer.
+        None,
         capability_client,
         sandbox_manager_client,
         backend_id,
@@ -927,6 +936,9 @@ pub(crate) struct OfferedTools {
 async fn offered_tools(
     req: &pb::RunAgentRequest,
     waived: bool,
+    // Whether the run carries a verified browser bearer (WS21-S2), the one thing that names a
+    // broker grant. Without one no browser tool is offered, whatever the switch says.
+    browser_bearer: bool,
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     governance: Governance<'_>,
 ) -> OfferedTools {
@@ -934,9 +946,6 @@ async fn offered_tools(
     // A waived route keeps nothing and runs no MCP call, exactly like a ZDR run: the same
     // flag, so no listing, no token and no lookup is made for either.
     let retention_bound = req.zdr || waived;
-    // No verified browser bearer reaches this loop yet: the gateway forwards one only from
-    // WS21-S2. Until then no run is offered a browser tool, whatever the switch says.
-    let browser_bearer = false;
     let (defs, derivable) = merged_tool_defs_governed(
         &req.run_id,
         &req.org_id,
@@ -1118,8 +1127,8 @@ async fn merged_tool_defs_governed(
     // (which can itself trigger an observation write), no MCP name resolved or prefetched.
     // The built-in names are still resolved when the gate reads classes (see below).
     zdr: bool,
-    // The run's verified browser bearer, the only thing that names a broker grant. No run
-    // carries one before WS21-S2, so every caller passes false until then.
+    // The run's verified browser bearer, the only thing that names a broker grant. The offer
+    // passes whether the run carries one; the test entries pass false.
     browser_bearer: bool,
     // The connections the run's person selected (WS23-S4). Empty offers no connected-app read.
     connector_scope: &[String],
@@ -1401,6 +1410,7 @@ async fn run_agent_with_tools(
         capability_policy,
         terminal_tokens,
         sandbox_bearer,
+        None,
         capability_client,
         sandbox_manager_client,
         backend_id,
@@ -1453,6 +1463,7 @@ pub(crate) async fn run_agent_with_offered(
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     terminal_tokens: &dyn ManagedRunTokenProvider,
     sandbox_bearer: Option<String>,
+    browser_bearer: Option<String>,
     capability_client: Option<&crate::capability_client::CapabilityClient>,
     sandbox_manager_client: &crate::sandbox_manager_client::SandboxManagerClient,
     backend_id: &str,
@@ -1514,6 +1525,7 @@ pub(crate) async fn run_agent_with_offered(
         capability_policy,
         terminal_tokens,
         sandbox_bearer,
+        browser_bearer,
         capability_client,
         sandbox_manager_client,
         backend_id,
@@ -1568,6 +1580,7 @@ async fn run_agent_with_route(
         capability_policy,
         terminal_tokens,
         sandbox_bearer,
+        None,
         capability_client,
         sandbox_manager_client,
         backend_id,
@@ -1601,6 +1614,7 @@ async fn run_agent_with_route_parkable(
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     terminal_tokens: &dyn ManagedRunTokenProvider,
     sandbox_bearer: Option<String>,
+    browser_bearer: Option<String>,
     capability_client: Option<&crate::capability_client::CapabilityClient>,
     sandbox_manager_client: &crate::sandbox_manager_client::SandboxManagerClient,
     backend_id: &str,
@@ -1748,6 +1762,7 @@ async fn run_agent_with_route_parkable(
         capability_policy,
         terminal_tokens,
         sandbox_bearer: sandbox_bearer.as_deref(),
+        browser_bearer: browser_bearer.as_deref(),
         capability_client,
         sandbox_manager_client,
         backend_id,
@@ -1766,6 +1781,9 @@ async fn run_agent_with_route_parkable(
         result_store: result_store.clone(),
         max_tokens: scheduled.map_or(MAX_TOKENS, |scope| scope.max_tokens_per_round),
     };
+    if context.browser_bearer.is_some() {
+        debug!(run_id = %req.run_id, "browser bearer present");
+    }
 
     // 2. The governed ReAct loop.
     let (loop_goal, seeded_round) = match resumed {
@@ -5491,6 +5509,8 @@ async fn run_delegated_child(
         capability_policy: parent.capability_policy,
         terminal_tokens: parent.terminal_tokens,
         sandbox_bearer: parent.sandbox_bearer,
+        // A delegated child never receives the browser bearer (DEC-19 D10).
+        browser_bearer: None,
         capability_client: parent.capability_client,
         sandbox_manager_client: parent.sandbox_manager_client,
         backend_id: parent.backend_id,
@@ -6760,7 +6780,7 @@ const DO_BROWSER_ENABLED_ENV: &str = "EXECUTION_DO_BROWSER_ENABLED";
 
 /// Whether the deployment has switched the Do loop's browser tools on. Only the value `1`
 /// enables it: an unset, empty or other value leaves every run without them.
-fn do_browser_enabled() -> bool {
+pub(crate) fn do_browser_enabled() -> bool {
     parse_do_browser_enabled(std::env::var(DO_BROWSER_ENABLED_ENV).ok().as_deref())
 }
 
@@ -8975,6 +8995,7 @@ mod tests {
         offered_tools(
             &control,
             false,
+            false,
             &control_policy,
             governance(ToolClassGate::Enforce, McpDoTools::Read, 40, &control_source),
         )
@@ -8994,6 +9015,7 @@ mod tests {
                 let offered = offered_tools(
                     &request,
                     waived,
+                    false,
                     &policy,
                     governance(ToolClassGate::Enforce, mode, 40, &source),
                 )
@@ -9041,6 +9063,7 @@ mod tests {
         offered_tools(
             &request,
             false,
+            false,
             &policy,
             governance(ToolClassGate::Off, McpDoTools::Read, 40, &source),
         )
@@ -9080,6 +9103,7 @@ mod tests {
             let offered = offered_tools(
                 &request,
                 true,
+                false,
                 &policy,
                 governance(ToolClassGate::Enforce, mode, 40, &source),
             )
@@ -9106,6 +9130,7 @@ mod tests {
         let control = offered_tools(
             &request,
             false,
+            false,
             &policy,
             governance(ToolClassGate::Enforce, McpDoTools::Read, 40, &source),
         )
@@ -9128,6 +9153,7 @@ mod tests {
         request.zdr = true;
         let offered = offered_tools(
             &request,
+            false,
             false,
             &policy,
             governance(ToolClassGate::Enforce, McpDoTools::Read, 40, &source),
@@ -11722,6 +11748,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -11811,6 +11838,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -11883,6 +11911,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -13506,6 +13535,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -13578,6 +13608,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -13647,6 +13678,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -14108,6 +14140,7 @@ mod tests {
                 "inference-token".to_owned(),
                 &ALLOW_CAPABILITY_POLICY,
                 &STATIC_TERMINAL_TOKENS,
+                None,
                 None,
                 None,
                 &test_sandbox_manager_client(),
@@ -17049,6 +17082,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -17136,6 +17170,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -17207,6 +17242,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -17287,6 +17323,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -17699,6 +17736,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -17781,6 +17819,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -17965,6 +18004,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -18054,6 +18094,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -18257,6 +18298,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -18338,6 +18380,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -18430,6 +18473,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -18512,6 +18556,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -18614,6 +18659,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -18683,6 +18729,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -18846,6 +18893,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -19013,6 +19061,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -19209,6 +19258,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -19254,6 +19304,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -19481,6 +19532,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -19576,6 +19628,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -19658,6 +19711,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -19723,6 +19777,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -19798,6 +19853,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -19880,6 +19936,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -20027,6 +20084,50 @@ mod tests {
                 "switched_on={switched_on} offered {names:?} without a bearer"
             );
         }
+    }
+
+    /// The run's own bearer reaches the offer it is made with: a run that carries one and has the
+    /// switch on is offered the browser tools, while a zero-retention or waived run is not, and a
+    /// run without one is not either. Read through `offered_tools`, the call `run_agent` makes.
+    #[tokio::test]
+    async fn the_run_bearer_reaches_the_browser_offer() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::mcp_gateway::McpDoTools;
+        let governance = || Governance {
+            gate: ToolClassGate::Off,
+            mode: McpDoTools::Off,
+            cap: 0,
+            source: None,
+            browser_do: true,
+        };
+        let browser_names = |offered: OfferedTools| -> Vec<String> {
+            offered
+                .defs
+                .into_iter()
+                .map(|tool| tool.name)
+                .filter(|name| name.starts_with("browser."))
+                .collect()
+        };
+        let mut req = pb::RunAgentRequest::default();
+        req.run_id = "run-browser-offer".to_owned();
+        req.org_id = "org-browser".to_owned();
+        req.user_id = "user-browser".to_owned();
+
+        let with_bearer =
+            offered_tools(&req, false, true, &ALLOW_CAPABILITY_POLICY, governance()).await;
+        assert_eq!(
+            browser_names(with_bearer),
+            ["browser.observe", "browser.act"]
+        );
+        let without_bearer =
+            offered_tools(&req, false, false, &ALLOW_CAPABILITY_POLICY, governance()).await;
+        assert!(browser_names(without_bearer).is_empty());
+        let waived =
+            offered_tools(&req, true, true, &ALLOW_CAPABILITY_POLICY, governance()).await;
+        assert!(browser_names(waived).is_empty(), "a waived run is not offered them");
+        req.zdr = true;
+        let zdr = offered_tools(&req, false, true, &ALLOW_CAPABILITY_POLICY, governance()).await;
+        assert!(browser_names(zdr).is_empty(), "a zero-retention run is not offered them");
     }
 
     /// Under zero retention no run is offered a browser tool, even with a bearer and the switch on.
@@ -20270,6 +20371,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -20370,6 +20472,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -20415,6 +20518,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -21043,6 +21147,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &crate::runtime_loop::session_core_rules_double::SignedServiceTokens,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -21687,6 +21792,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -21755,6 +21861,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -21838,6 +21945,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -25521,6 +25629,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -25670,7 +25779,7 @@ mod tests {
     #[tokio::test]
     async fn the_offer_is_derivable_only_for_a_fresh_request_with_no_added_tools() {
         let fresh = subscription_request();
-        let offered = offered_tools(&fresh, false, &ALLOW_CAPABILITY_POLICY, governance_from_env()).await;
+        let offered = offered_tools(&fresh, false, false, &ALLOW_CAPABILITY_POLICY, governance_from_env()).await;
         assert!(offered.derivable);
         assert_eq!(offered.defs, base_tool_defs(false));
 
@@ -25682,7 +25791,7 @@ mod tests {
             }],
             ..fresh.clone()
         };
-        assert!(!offered_tools(&with_client_tool, false, &ALLOW_CAPABILITY_POLICY, governance_from_env()).await.derivable);
+        assert!(!offered_tools(&with_client_tool, false, false, &ALLOW_CAPABILITY_POLICY, governance_from_env()).await.derivable);
 
         // An approval continuation (a stage-1 segment or the in-place resume): its offered set
         // is replaced by the snapshot's, so it is never derivable, and its defs are the ones
@@ -25697,7 +25806,7 @@ mod tests {
                 }),
                 ..fresh.clone()
             };
-            let offered = offered_tools(&continuation, false, &ALLOW_CAPABILITY_POLICY, governance_from_env()).await;
+            let offered = offered_tools(&continuation, false, false, &ALLOW_CAPABILITY_POLICY, governance_from_env()).await;
             assert!(!offered.derivable, "{mode}");
             assert_eq!(
                 offered.defs,
@@ -26568,7 +26677,7 @@ mod tests {
             ..subscription_request()
         };
         // What the offer reports for this request is what the loop is driven with.
-        let offered = offered_tools(&with_client_tool, false, &ALLOW_CAPABILITY_POLICY, governance_from_env()).await;
+        let offered = offered_tools(&with_client_tool, false, false, &ALLOW_CAPABILITY_POLICY, governance_from_env()).await;
         assert!(!offered.derivable);
         let run = drive_park_with(
             ParkKnobs::ON,
@@ -26661,6 +26770,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -27002,6 +27112,7 @@ mod tests {
             "inference-token".to_owned(),
             policy,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &test_sandbox_manager_client(),
@@ -27782,6 +27893,7 @@ mod tests {
             &STATIC_TERMINAL_TOKENS,
             None,
             None,
+            None,
             &test_sandbox_manager_client(),
             "test-backend",
             None,
@@ -28444,6 +28556,7 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
             None,
             None,
             &sandbox_manager,

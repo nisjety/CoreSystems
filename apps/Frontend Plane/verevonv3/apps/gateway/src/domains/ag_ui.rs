@@ -121,6 +121,9 @@ async fn stream_agent_ui(
     // After `inject_personal_thread_context`: only minted once Control has
     // actually scoped this turn to a Space (same rule as native chat).
     let sandbox_token = shared::sandbox_token(&state, &user, &headers, &body).await;
+    // The same rule as the sandbox credential, and never on a zero-retention turn (WS21-S2).
+    let zdr = shared::zdr_flag(&headers) || bool_field(&body, "zdr").unwrap_or(false);
+    let browser_token = shared::browser_token(&state, &user, &headers, &body, zdr).await;
 
     let token = shared::model_token(&state, &user, &headers).await;
     let data_plane_token = shared::data_plane_token(&state, &user, &headers).await;
@@ -171,11 +174,14 @@ async fn stream_agent_ui(
     if let Some(token) = sandbox_token {
         req = req.header("x-sandbox-authorization", format!("Bearer {token}"));
     }
+    if let Some(token) = browser_token {
+        req = req.header("x-browser-authorization", format!("Bearer {token}"));
+    }
     if let Some(last_event_id) = headers.get("last-event-id").and_then(|v| v.to_str().ok()) {
         req = req.header("last-event-id", last_event_id);
     }
 
-    if shared::zdr_flag(&headers) || bool_field(&body, "zdr").unwrap_or(false) {
+    if zdr {
         req = req.header("x-zdr", "true");
     }
 

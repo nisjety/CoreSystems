@@ -1720,6 +1720,60 @@ pub(crate) async fn proxy_sse_stream_with_data_plane(
     last_event_id: Option<&str>,
     actor: Option<(&str, &str)>,
     zdr: bool,
+    relayed_errors: &'static [(&'static str, u16, &'static str)],
+) -> Response {
+    proxy_sse_stream_with_browser(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        data_plane_bearer,
+        capability_bearer,
+        inference_bearer,
+        execution_bearer,
+        cost_bearer,
+        session_bearer,
+        ingestion_bearer,
+        sandbox_bearer,
+        None,
+        last_event_id,
+        actor,
+        zdr,
+        relayed_errors,
+    )
+    .await
+}
+
+/// [`proxy_sse_stream_with_data_plane`] for the caller that carries a browser credential: a Do turn
+/// that may be offered the agent browser (WS21-S2). The credential is forwarded only on a turn that
+/// is not zero-retention, whatever the caller passed.
+#[allow(clippy::too_many_arguments)] // cohesive SSE-proxy request context
+pub(crate) async fn proxy_sse_stream_with_browser(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    data_plane_bearer: Option<&str>,
+    // See F-14, apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-09-15.md §3.9: the org's PII and
+    // injection-defense policies live in capability-core and are looked up by
+    // model-gateway keyed off this bearer. Absent it, moderation.rs fails
+    // closed (redacts everything, including PII the user typed themselves)
+    // rather than consult the org's actual policy.
+    capability_bearer: Option<&str>,
+    inference_bearer: Option<&str>,
+    execution_bearer: Option<&str>,
+    cost_bearer: Option<&str>,
+    session_bearer: Option<&str>,
+    ingestion_bearer: Option<&str>,
+    // Present only for a Space-scoped turn (see `chat::shared::sandbox_token`).
+    sandbox_bearer: Option<&str>,
+    // The browser credential of a Do turn (WS21-S2). Never forwarded on a zero-retention turn.
+    browser_bearer: Option<&str>,
+    last_event_id: Option<&str>,
+    actor: Option<(&str, &str)>,
+    zdr: bool,
     // Closed upstream error codes this caller relays, as (code, upstream status,
     // fixed message). Empty for every caller but a continuation: the error body
     // is then not even read. See `upstream_error_response`.
@@ -1777,6 +1831,13 @@ pub(crate) async fn proxy_sse_stream_with_data_plane(
         .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
     {
         req = req.header("x-sandbox-authorization", format!("Bearer {token}"));
+    }
+    if let Some(token) = browser_bearer
+        .filter(|_| !zdr)
+        .map(str::trim)
+        .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
+    {
+        req = req.header("x-browser-authorization", format!("Bearer {token}"));
     }
 
     if let Some((user_id, org_id)) = actor {

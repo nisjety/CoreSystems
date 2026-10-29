@@ -13,7 +13,7 @@ use crate::{
     config::AppState,
     domains::chat::shared,
     middleware::AuthenticatedUser,
-    upstream::{proxy_sse_stream_with_data_plane, proxy_sse_stream_with_session},
+    upstream::{proxy_sse_stream_with_browser, proxy_sse_stream_with_session},
 };
 
 /// Default request body ceiling of the chat stream route, and only that route.
@@ -154,7 +154,11 @@ async fn stream_chat(
     // After `inject_personal_thread_context`, not with the other bearers above:
     // it is only minted once Control has actually scoped this turn to a Space.
     let sandbox_token = shared::sandbox_token(&state, &user, &headers, &outbound_body).await;
-    proxy_sse_stream_with_data_plane(
+    // The browser credential of a Do turn that may use the agent browser: the same rule as the
+    // sandbox credential, and never on a zero-retention turn (WS21-S2).
+    let browser_token =
+        shared::browser_token(&state, &user, &headers, &outbound_body, effective_zdr).await;
+    proxy_sse_stream_with_browser(
         &state,
         Method::POST,
         &url,
@@ -168,6 +172,7 @@ async fn stream_chat(
         Some(&session_token),
         ingestion_token.as_deref(),
         sandbox_token.as_deref(),
+        browser_token.as_deref(),
         None,
         Some((&user.user_id, org_id.as_str())),
         effective_zdr,

@@ -245,6 +245,54 @@ pub(crate) async fn sandbox_token(
     .await
 }
 
+/// Whether the agent browser's Do tools are switched on for this gateway (`BROWSER_DO_ENABLED`,
+/// WS21-S2). Read per turn and exact, like the other switches here: only the word `true` enables it.
+fn browser_do_enabled() -> bool {
+    browser_do_enabled_from(std::env::var("BROWSER_DO_ENABLED").ok().as_deref())
+}
+
+fn browser_do_enabled_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// Whether a turn may be offered the agent browser: the switch is on, the turn asks for the agentic
+/// run, it keeps no content (ZDR), and it is not Space-scoped. A Space's `browser_entitled` (WS21-S8)
+/// defaults to deny and is not read yet, so a Space turn never gets the browser.
+fn browser_do_offered(switched_on: bool, body: &Value, zdr: bool) -> bool {
+    switched_on && !zdr && is_agentic_turn(body) && !is_space_scoped_turn(body)
+}
+
+fn is_agentic_turn(body: &Value) -> bool {
+    body.get("features")
+        .and_then(Value::as_array)
+        .is_some_and(|features| features.iter().any(|feature| feature.as_str() == Some("agentic")))
+}
+
+/// Mint the interactive `aud=browser-broker` token for a Do turn that may use the agent browser
+/// (WS21-S2). Model Plane forwards it to execution-core, which uses it only for a run that is offered
+/// the browser tools, so it is minted for no other turn: not with the switch off, not for a turn
+/// without the agentic run, not under zero retention and not for a Space turn. Best-effort like
+/// `sandbox_token`: a missing credential leaves the run without browser tools, never the turn without
+/// its run.
+pub(crate) async fn browser_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    body: &Value,
+    zdr: bool,
+) -> Option<String> {
+    if !browser_do_offered(browser_do_enabled(), body, zdr) {
+        return None;
+    }
+    get_model_service_token(
+        state,
+        &user.user_id,
+        &cookie_header(headers),
+        ModelServiceAudience::BrowserBroker,
+    )
+    .await
+}
+
 async fn required_token(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -734,11 +782,11 @@ mod tests {
     };
 
     use super::{
-        apply_org_zdr_posture, data_plane_authorization_value, delegated_auth_unavailable,
-        dev_bypass_model_token, is_space_scoped_turn, normalized_model_body,
-        proxy_model_json_with_data_plane, proxy_model_json_with_data_plane_request_timeout,
-        proxy_model_json_with_session, proxy_model_json_with_session_and_capability,
-        sandbox_token,
+        apply_org_zdr_posture, browser_do_enabled_from, browser_do_offered, browser_token,
+        data_plane_authorization_value, delegated_auth_unavailable, dev_bypass_model_token,
+        is_space_scoped_turn, normalized_model_body, proxy_model_json_with_data_plane,
+        proxy_model_json_with_data_plane_request_timeout, proxy_model_json_with_session,
+        proxy_model_json_with_session_and_capability, sandbox_token,
     };
 
     fn test_state(allow_dev_auth_bypass: bool) -> AppState {
@@ -936,6 +984,250 @@ mod tests {
             .as_deref(),
             Some("sandbox-token")
         );
+    }
+
+    /// Sets `BROWSER_DO_ENABLED` for one test and restores it after. Callers hold `TEST_ENV_LOCK`.
+    struct BrowserSwitch(Option<std::ffi::OsString>);
+
+    impl BrowserSwitch {
+        fn set(value: Option<&str>) -> Self {
+            let previous = std::env::var_os("BROWSER_DO_ENABLED");
+            match value {
+                Some(value) => std::env::set_var("BROWSER_DO_ENABLED", value),
+                None => std::env::remove_var("BROWSER_DO_ENABLED"),
+            }
+            Self(previous)
+        }
+    }
+
+    impl Drop for BrowserSwitch {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("BROWSER_DO_ENABLED", value),
+                None => std::env::remove_var("BROWSER_DO_ENABLED"),
+            }
+        }
+    }
+
+    fn browser_test_user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-test".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "User Test".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-test".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-test".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    #[test]
+    fn the_browser_switch_is_on_only_for_the_exact_word_true() {
+        assert!(browser_do_enabled_from(Some("true")));
+        for value in [None, Some(""), Some("1"), Some("TRUE"), Some(" true")] {
+            assert!(!browser_do_enabled_from(value), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn a_browser_token_is_offered_only_for_a_personal_agentic_turn_without_zdr() {
+        let agentic = json!({"features": ["tools", "agentic"]});
+        assert!(browser_do_offered(true, &agentic, false));
+        let plain = json!({"features": ["tools"]});
+        let space = json!({"features": ["agentic"], "space_context": {"space_id": "space-1"}});
+        for (switched_on, body, zdr) in [
+            (false, &agentic, false),
+            (true, &agentic, true),
+            (true, &plain, false),
+            (true, &space, false),
+        ] {
+            assert!(
+                !browser_do_offered(switched_on, body, zdr),
+                "switched_on={switched_on} zdr={zdr}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_token_costs_no_auth_core_call_while_the_switch_is_off() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let _switch = BrowserSwitch::set(None);
+        let auth_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/browser-broker/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "token": "browser-token",
+                "expiresInSeconds": 300,
+            })))
+            .mount(&auth_core)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = auth_core.uri();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            "better-auth.session=verified".parse().expect("cookie"),
+        );
+        assert!(browser_token(
+            &state,
+            &browser_test_user(),
+            &headers,
+            &json!({"features": ["agentic"]}),
+            false,
+        )
+        .await
+        .is_none());
+        assert!(auth_core
+            .received_requests()
+            .await
+            .expect("recording enabled")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn browser_token_is_minted_for_a_personal_agentic_turn_when_the_switch_is_on() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let _switch = BrowserSwitch::set(Some("true"));
+        let auth_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/browser-broker/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "token": "browser-token",
+                "expiresInSeconds": 300,
+            })))
+            .mount(&auth_core)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = auth_core.uri();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            "better-auth.session=verified".parse().expect("cookie"),
+        );
+        let user = browser_test_user();
+        let agentic = json!({"features": ["agentic"]});
+        let space = json!({"features": ["agentic"], "space_context": {"space_id": "space-1"}});
+
+        assert_eq!(
+            browser_token(&state, &user, &headers, &agentic, false)
+                .await
+                .as_deref(),
+            Some("browser-token")
+        );
+        // A zero-retention turn and a Space turn are refused before any mint is asked for.
+        assert!(browser_token(&state, &user, &headers, &agentic, true)
+            .await
+            .is_none());
+        assert!(browser_token(&state, &user, &headers, &space, false)
+            .await
+            .is_none());
+        assert_eq!(
+            auth_core
+                .received_requests()
+                .await
+                .expect("recording enabled")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_proxy_forwards_the_browser_credential_in_its_own_header_and_never_under_zdr() {
+        use reqwest::Method;
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/invoke/stream"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string("data: {}\n\n"),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let state = test_state(false);
+        let url = format!("{}/invoke/stream", server.uri());
+        let sent = crate::upstream::proxy_sse_stream_with_browser(
+            &state,
+            Method::POST,
+            &url,
+            Some(json!({"content": "hello"})),
+            Some("model-token"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("browser-token"),
+            None,
+            None,
+            false,
+            &[],
+        )
+        .await;
+        assert_eq!(sent.status(), StatusCode::OK);
+        let refused = crate::upstream::proxy_sse_stream_with_browser(
+            &state,
+            Method::POST,
+            &url,
+            Some(json!({"content": "hello"})),
+            Some("model-token"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("browser-token"),
+            None,
+            None,
+            true,
+            &[],
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::OK);
+
+        let browser_header = |request: &wiremock::Request| {
+            request
+                .headers
+                .iter()
+                .find(|(name, _)| name.as_str().eq_ignore_ascii_case("x-browser-authorization"))
+                .map(|(_, value)| value.to_str().expect("ascii").to_owned())
+        };
+        let requests = server.received_requests().await.expect("recording enabled");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            browser_header(&requests[0]).as_deref(),
+            Some("Bearer browser-token")
+        );
+        assert_eq!(browser_header(&requests[1]), None, "a zero-retention turn");
     }
 
     #[tokio::test]
