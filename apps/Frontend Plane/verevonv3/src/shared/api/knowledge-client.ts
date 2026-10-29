@@ -103,6 +103,14 @@ export interface ScrapeRequest {
   exclude_tags?: string[]
   /** Upper bound for the whole fetch; quarry-edge applies its own default when absent. */
   timeout_ms?: number
+  /** Content extractor: main content (default), the whole body without scripts, or the raw document. */
+  extractor?: 'readability' | 'clean_full' | 'raw'
+  /** Drop inline base64 images from the markdown. */
+  remove_base64_images?: boolean
+  /** Browser steps before the capture (`wait`, `click`, `write`, `press`, `scroll`, `select`). Needs the edge's scrape-actions switch. */
+  actions?: Array<Record<string, unknown>>
+  /** What a failed step does: stop (`abort`, the edge's default) or go on (`continue`). */
+  actions_on_error?: 'abort' | 'continue'
   /** When true, quarry-edge persists the fetched page into the knowledge base
    * (not just returns it). Omit/false for preview-only scrapes. */
   ingest?: boolean

@@ -20,6 +20,7 @@ import {
   createIngestionSource,
   deleteIngestionSource,
   getIngestionEvidence,
+  getIngestionUsage,
   getScheduleCapabilities,
   listIngestionProfiles,
   listIngestionRuns,
@@ -27,7 +28,9 @@ import {
   listIngestionSources,
   NO_SCHEDULE_CAPABILITIES,
   runIngestionScheduleAction,
+  type CreditUsage,
   type EvidenceTimeline,
+  type ExtractItem,
   type ProfilePayload,
   type RunItem,
   type ScheduleCapabilities,
@@ -39,23 +42,30 @@ import { getSessionContext } from '@/shared/api/auth-client'
 import { discoverCrawlPages, scrapeUrl, startCrawl } from '@/shared/api/knowledge-client'
 import { listMonitors, type ChangeMonitor } from '@/shared/api/monitoring-client'
 import { runWebSearch } from '@/shared/api/search-client'
+import { executeAction } from '@/shared/actions/action-client'
+import type { ActionActor } from '@/shared/actions/types'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 import { Button } from '@/shared/ui/Button'
 import { VerevonSegmented, VerevonSegmentedButton } from '@/shared/ui/verevon/VerevonSegmented'
 import {
+  agentInput,
   boundedInt,
+  buildActions,
   crawlRequestFromState,
   defaultPlaygroundState,
   isAsyncEndpoint,
   missingInput,
+  parseSchema,
   scrapeRequestFromState,
+  searchFiltersFromState,
   splitList,
   type PlaygroundState,
 } from '@/features/ingestions/lib/playground'
 import { countRunsByGroup, defaultRunFilter, runProgressPercent, type RunFilter, type RunStatusFilter } from '@/features/ingestions/lib/runs'
 import { toScrapeView } from '@/features/ingestions/lib/scrape-view'
-import { IngestionsPlayground, playgroundErrorMessage } from '@/features/ingestions/components/IngestionsPlayground'
+import { jobControlMessage, playgroundErrorMessage } from '@/features/ingestions/lib/errors'
+import { IngestionsPlayground } from '@/features/ingestions/components/IngestionsPlayground'
 import {
   IngestionsPlaygroundResult,
   type IngestState,
@@ -108,9 +118,11 @@ export default function VerevonIngestionsPage() {
   const [sources, setSources] = createSignal<SourcePayload | null>(null)
   const [profiles, setProfiles] = createSignal<ProfilePayload | null>(null)
   const [monitors, setMonitors] = createSignal<ChangeMonitor[] | null>([])
+  const [usage, setUsage] = createSignal<CreditUsage | null>(null)
   const [selectedRunId, setSelectedRunId] = createSignal<string | null>(null)
   const [runEvidence, setRunEvidence] = createSignal<EvidenceTimeline | null>(null)
   const [evidenceLoading, setEvidenceLoading] = createSignal(false)
+  const [controlError, setControlError] = createSignal<string | null>(null)
   const [runFilter, setRunFilter] = createSignal<RunFilter>(defaultRunFilter)
   const [playground, setPlayground] = createSignal<PlaygroundState>(defaultPlaygroundState)
   const [playgroundResult, setPlaygroundResult] = createSignal<PlaygroundResult | null>(null)
@@ -118,6 +130,7 @@ export default function VerevonIngestionsPage() {
   const [playgroundRunning, setPlaygroundRunning] = createSignal(false)
   const [ingestState, setIngestState] = createSignal<IngestState>('idle')
   const [orgId, setOrgId] = createSignal('')
+  const [userId, setUserId] = createSignal('')
   const [scheduleForm, setScheduleForm] = createSignal<ScheduleFormState>({
     name: '',
     kind: 'crawl',
@@ -133,6 +146,7 @@ export default function VerevonIngestionsPage() {
   const [sourcePending, setSourcePending] = createSignal(false)
   const [deletingSourceId, setDeletingSourceId] = createSignal<string | null>(null)
 
+  const actor = (): ActionActor => ({ orgId: orgId(), type: 'human', userId: userId() })
   const selectedRun = createMemo(() => runs().find((run) => run.id === selectedRunId()) ?? null)
   const runCounts = createMemo(() => countRunsByGroup(runs()))
   const successRate = createMemo(() => {
@@ -140,17 +154,30 @@ export default function VerevonIngestionsPage() {
     return finished === 0 ? null : Math.round((runCounts().succeeded / finished) * 100)
   })
   const sourceCount = createMemo(() => (sources()?.quarrySources?.length ?? 0) + (sources()?.integrations?.length ?? 0))
+  const usageLabel = createMemo(() => {
+    const current = usage()
+    if (!current) return '—'
+    const used = Math.round(current.creditsUsed * 10) / 10
+    return current.creditsLimit ? `${used} / ${Math.round(current.creditsLimit)}` : `${used}`
+  })
 
   async function loadWorkspace(signal?: AbortSignal) {
     setLoading(true)
     setError(null)
-    // Monitors are their own read: a failure there must not blank the run list.
+    // Monitors and usage are their own reads: a failure there must not blank the run list.
     void listMonitors(signal)
       .then((next) => {
         if (!signal?.aborted) setMonitors(next)
       })
       .catch(() => {
         if (!signal?.aborted) setMonitors(null)
+      })
+    void getIngestionUsage('7d', signal)
+      .then((next) => {
+        if (!signal?.aborted) setUsage(next)
+      })
+      .catch(() => {
+        if (!signal?.aborted) setUsage(null)
       })
     try {
       const [runData, scheduleData, sourceData, profileData] = await Promise.all([
@@ -165,10 +192,12 @@ export default function VerevonIngestionsPage() {
       setProfiles(profileData)
     } catch (caught) {
       if (signal?.aborted) return
-      setError(translateApiError(caught, tr, {
-        no: 'Kunne ikke laste inn arbeidsområdet for innhenting.',
-        en: 'Could not load ingestion workspace.',
-      }))
+      setError(
+        translateApiError(caught, tr, {
+          no: 'Kunne ikke laste inn arbeidsområdet for innhenting.',
+          en: 'Could not load ingestion workspace.',
+        }),
+      )
     } finally {
       if (!signal?.aborted) setLoading(false)
     }
@@ -187,11 +216,13 @@ export default function VerevonIngestionsPage() {
     () => {
       const controller = new AbortController()
       void loadWorkspace(controller.signal)
-      // The knowledge routes (scrape, crawl, map) are org-scoped by header; the
-      // gateway checks the membership, so the session's own org is the right one.
+      // The knowledge routes (scrape, crawl, map) and the actions are scoped to the
+      // session's own org; the gateway checks membership, so this is the right org.
       void getSessionContext()
         .then((ctx) => {
-          if (!controller.signal.aborted) setOrgId(ctx.orgId ?? ctx.orgs[0]?.id ?? '')
+          if (controller.signal.aborted) return
+          setOrgId(ctx.orgId ?? ctx.orgs[0]?.id ?? '')
+          setUserId(ctx.userId)
         })
         .catch(() => undefined)
       return () => controller.abort()
@@ -265,8 +296,8 @@ export default function VerevonIngestionsPage() {
         return tr('Skriv inn noe å søke etter.', 'Enter something to search for.')
       case 'urls':
         return tr('Legg inn minst én URL.', 'Add at least one URL.')
-      case 'prompt':
-        return tr('Beskriv hva som skal trekkes ut.', 'Describe what should be extracted.')
+      case 'goal':
+        return tr('Beskriv hva agenten skal oppnå.', 'Describe what the agent should achieve.')
       case 'url':
         return tr('Angi en mål-URL.', 'Enter a target URL.')
     }
@@ -279,7 +310,31 @@ export default function VerevonIngestionsPage() {
       setPlaygroundError(missingMessage(missing))
       return
     }
-    const needsOrg = state.endpoint === 'scrape' || state.endpoint === 'crawl' || state.endpoint === 'map'
+    if (state.endpoint === 'scrape') {
+      const steps = buildActions(state.actions)
+      if (!steps.ok) {
+        setPlaygroundError(
+          tr(
+            `Steg ${steps.index + 1} mangler ${actionFieldLabel(steps.field, 'no')}.`,
+            `Step ${steps.index + 1} is missing ${actionFieldLabel(steps.field, 'en')}.`,
+          ),
+        )
+        return
+      }
+    }
+    let schema: ReturnType<typeof parseSchema> | null = null
+    if (state.endpoint === 'extract') {
+      schema = parseSchema(state.schema)
+      if (!schema.ok) {
+        setPlaygroundError(
+          schema.reason === 'not_object'
+            ? tr('Skjemaet må være et JSON-objekt.', 'The schema must be a JSON object.')
+            : tr('Skjemaet er ikke gyldig JSON.', 'The schema is not valid JSON.'),
+        )
+        return
+      }
+    }
+    const needsOrg = state.endpoint === 'scrape' || state.endpoint === 'crawl' || state.endpoint === 'map' || state.endpoint === 'agent'
     if (needsOrg && !orgId()) {
       setPlaygroundError(tr('Fant ingen organisasjon for økten. Last siden på nytt.', 'No organization found for this session. Reload the page.'))
       return
@@ -298,9 +353,14 @@ export default function VerevonIngestionsPage() {
           break
         }
         case 'extract': {
-          const created = await createIngestionRun({ kind: 'extract', url: state.url.trim(), prompt: state.prompt.trim() })
-          const evidence = created.evidence?.kind === 'extract' ? created.evidence : null
-          setPlaygroundResult({ kind: 'extract', url: state.url.trim(), result: evidence?.result ?? null, raw: created })
+          const schemaObject = schema?.ok ? schema.schema : null
+          const created = await createIngestionRun({
+            kind: 'extract',
+            url: state.url.trim(),
+            ...(schemaObject ? { schema: schemaObject } : {}),
+          })
+          const items = created.evidence?.kind === 'extract' ? (created.evidence.results as ExtractItem[]) : []
+          setPlaygroundResult({ kind: 'extract', url: state.url.trim(), items, schemaUsed: schemaObject !== null, raw: created })
           break
         }
         case 'map': {
@@ -314,28 +374,66 @@ export default function VerevonIngestionsPage() {
           break
         }
         case 'search': {
-          const payload = await runWebSearch({ query: state.query.trim(), limit: boundedInt(state.searchLimit, 1, 20) ?? 5, includeAnswer: false })
-          setPlaygroundResult({ kind: 'search', query: state.query.trim(), results: payload.results ?? [] })
+          const payload = await runWebSearch({
+            query: state.query.trim(),
+            limit: boundedInt(state.searchLimit, 1, 20) ?? 5,
+            includeAnswer: state.searchIncludeAnswer,
+            filters: searchFiltersFromState(state),
+          })
+          setPlaygroundResult({
+            kind: 'search',
+            query: state.query.trim(),
+            results: payload.results ?? [],
+            answer: payload.answer ?? null,
+            citations: payload.citations ?? [],
+            answerRequested: state.searchIncludeAnswer,
+          })
+          break
+        }
+        case 'agent': {
+          const execution = await executeAction('ingestions.start_agent_run', actor(), agentInput(state))
+          const result = (execution.result ?? {}) as Record<string, unknown>
+          setPlaygroundResult({
+            kind: 'agent',
+            url: state.url.trim(),
+            goal: state.goal.trim(),
+            runId: String(result.run_id ?? ''),
+            threadId: String(result.thread_id ?? ''),
+            sessionId: String(result.session_id ?? ''),
+          })
           break
         }
         case 'crawl': {
           const job = await startCrawl(orgId(), crawlRequestFromState(state))
-          setPlaygroundResult({ kind: 'job', endpoint: 'crawl', id: job.id, target: state.url.trim(), acceptedAt: job.acceptedAt ?? job.createdAt ?? '' })
+          setPlaygroundResult({
+            kind: 'job',
+            endpoint: 'crawl',
+            id: job.id,
+            target: state.url.trim(),
+            acceptedAt: job.acceptedAt ?? job.createdAt ?? '',
+          })
           void loadWorkspace()
           break
         }
         case 'batch': {
           const urls = splitList(state.urls)
           const created = await createIngestionRun({ kind: 'batch', urls })
-          setPlaygroundResult({ kind: 'job', endpoint: 'batch', id: created.run.id, target: created.run.target || `${urls.length} URLs`, acceptedAt: created.run.createdAt })
+          setPlaygroundResult({
+            kind: 'job',
+            endpoint: 'batch',
+            id: created.run.id,
+            target: created.run.target || `${urls.length} URLs`,
+            acceptedAt: created.run.createdAt,
+          })
           void loadWorkspace()
           break
         }
       }
     } catch (caught) {
+      const fallback = { no: 'Kjøringen kunne ikke fullføres.', en: 'The run could not be completed.' }
       if (!isAsyncEndpoint(state.endpoint)) {
         setPlaygroundResult(null)
-        setPlaygroundError(playgroundErrorMessage(caught, state.endpoint, tr))
+        setPlaygroundError(playgroundErrorMessage(caught, tr, fallback, state.endpoint))
         return
       }
       // A durable hand-off can fail (e.g. a transient 502) after the job was
@@ -362,20 +460,40 @@ export default function VerevonIngestionsPage() {
           })
         : undefined
       if (landed) {
-        setPlaygroundResult({ kind: 'job', endpoint: state.endpoint === 'crawl' ? 'crawl' : 'batch', id: landed.id, target: landed.target, acceptedAt: landed.createdAt })
+        setPlaygroundResult({
+          kind: 'job',
+          endpoint: state.endpoint === 'crawl' ? 'crawl' : 'batch',
+          id: landed.id,
+          target: landed.target,
+          acceptedAt: landed.createdAt,
+        })
       } else if (reconciled) {
         setPlaygroundResult(null)
-        setPlaygroundError(playgroundErrorMessage(caught, state.endpoint, tr))
+        setPlaygroundError(playgroundErrorMessage(caught, tr, fallback))
       } else {
         setPlaygroundResult(null)
-        setPlaygroundError(tr(
-          'Vi fikk ikke bekreftet om kjøringen ble startet. Vent litt før du prøver på nytt.',
-          "We couldn't confirm whether the run was started. Please wait a moment before trying again.",
-        ))
+        setPlaygroundError(
+          tr(
+            'Vi fikk ikke bekreftet om kjøringen ble startet. Vent litt før du prøver på nytt.',
+            "We couldn't confirm whether the run was started. Please wait a moment before trying again.",
+          ),
+        )
       }
     } finally {
       setPlaygroundRunning(false)
     }
+  }
+
+  function actionFieldLabel(field: 'value' | 'selector' | 'text' | 'key' | 'ms' | 'pixels', locale: 'no' | 'en') {
+    const labels = {
+      value: { no: 'verdi', en: 'a value' },
+      selector: { no: 'CSS-selektor', en: 'a CSS selector' },
+      text: { no: 'tekst', en: 'text' },
+      key: { no: 'tast', en: 'a key' },
+      ms: { no: 'millisekunder', en: 'milliseconds' },
+      pixels: { no: 'piksler', en: 'pixels' },
+    }
+    return labels[field][locale]
   }
 
   /** `knowledge.scrape_url`: the same scrape again with `ingest: true`, so the page lands in Kunnskap. */
@@ -384,9 +502,9 @@ export default function VerevonIngestionsPage() {
     if (result?.kind !== 'scrape' || !orgId()) return
     setIngestState('sending')
     try {
-      // Ingest the page itself; a screenshot capture adds nothing to Kunnskap.
+      // Ingest the page itself; a screenshot or PDF capture adds nothing to Kunnskap.
       const current = playground()
-      const formats = current.formats.filter((format) => format !== 'screenshot')
+      const formats = current.formats.filter((format) => format !== 'screenshot' && format !== 'pdf')
       await scrapeUrl(orgId(), scrapeRequestFromState({ ...current, formats, url: result.view.requestedUrl }, true))
       setIngestState('sent')
     } catch {
@@ -420,6 +538,17 @@ export default function VerevonIngestionsPage() {
     setActiveView('playground')
   }
 
+  /** Pause, resume or cancel a crawl or batch job through the `ingestions.job_control` action. */
+  async function controlJob(jobId: string, action: 'pause' | 'resume' | 'cancel') {
+    setControlError(null)
+    try {
+      await executeAction('ingestions.job_control', actor(), { jobId, action })
+      await loadWorkspace()
+    } catch (caught) {
+      setControlError(jobControlMessage(caught, tr))
+    }
+  }
+
   function showRuns(status: RunStatusFilter) {
     setRunFilter({ ...defaultRunFilter, status })
     setActiveView('runs')
@@ -428,10 +557,7 @@ export default function VerevonIngestionsPage() {
   async function createSchedule() {
     setError(null)
     if (!scheduleCapabilities().kinds.includes(scheduleForm().kind)) {
-      setError(tr(
-        'Denne tidsplantypen er ikke aktivert på denne installasjonen.',
-        'This schedule type is not enabled on this installation.',
-      ))
+      setError(tr('Denne tidsplantypen er ikke aktivert på denne installasjonen.', 'This schedule type is not enabled on this installation.'))
       return
     }
     try {
@@ -507,10 +633,12 @@ export default function VerevonIngestionsPage() {
       if (reconciled && stillPresent) {
         setError(translateApiError(caught, tr, { no: 'Kilden kunne ikke fjernes.', en: 'Source could not be removed.' }))
       } else if (!reconciled) {
-        setError(tr(
-          'Vi fikk ikke bekreftet om kilden ble fjernet. Vent litt før du prøver på nytt.',
-          "We couldn't confirm whether the source was removed. Please wait a moment before trying again.",
-        ))
+        setError(
+          tr(
+            'Vi fikk ikke bekreftet om kilden ble fjernet. Vent litt før du prøver på nytt.',
+            "We couldn't confirm whether the source was removed. Please wait a moment before trying again.",
+          ),
+        )
       }
       // Else: confirmed removed — the re-fetch already synced the list.
     } finally {
@@ -547,25 +675,45 @@ export default function VerevonIngestionsPage() {
 
         <section class="ingestions-overview" aria-label={tr('Oversikt', 'Overview')}>
           <button type="button" class="ingestions-stat" aria-label={tr('Vis aktive', 'Show active')} onClick={() => showRuns('active')}>
-            <span class="ingestions-stat__label"><Zap class="size-3.5" strokeWidth={2} />{tr('Aktive', 'Active')}</span>
+            <span class="ingestions-stat__label">
+              <Zap class="size-3.5" strokeWidth={2} />
+              {tr('Aktive', 'Active')}
+            </span>
             <strong>{runCounts().active}</strong>
             <small>{tr(`av ${runs().length} totalt`, `of ${runs().length} total`)}</small>
           </button>
           <button type="button" class="ingestions-stat ingestions-stat--good" aria-label={tr('Vis fullførte', 'Show succeeded')} onClick={() => showRuns('succeeded')}>
-            <span class="ingestions-stat__label"><CheckCircle2 class="size-3.5" strokeWidth={2} />{tr('Fullført', 'Succeeded')}</span>
+            <span class="ingestions-stat__label">
+              <CheckCircle2 class="size-3.5" strokeWidth={2} />
+              {tr('Fullført', 'Succeeded')}
+            </span>
             <strong>{runCounts().succeeded}</strong>
             <small>{successRate() === null ? tr('ingen ferdige ennå', 'none finished yet') : tr(`${successRate()} % suksess`, `${successRate()}% success`)}</small>
           </button>
           <button type="button" class="ingestions-stat ingestions-stat--bad" aria-label={tr('Vis feilede', 'Show failed')} onClick={() => showRuns('failed')}>
-            <span class="ingestions-stat__label"><AlertTriangle class="size-3.5" strokeWidth={2} />{tr('Feilet', 'Failed')}</span>
+            <span class="ingestions-stat__label">
+              <AlertTriangle class="size-3.5" strokeWidth={2} />
+              {tr('Feilet', 'Failed')}
+            </span>
             <strong>{runCounts().failed}</strong>
             <small>{runCounts().failed > 0 ? tr('krever oppmerksomhet', 'needs attention') : tr('alt i orden', 'all clear')}</small>
           </button>
           <button type="button" class="ingestions-stat" aria-label={tr('Vis planlagte jobber', 'Show scheduled jobs')} onClick={() => setActiveView('monitoring')}>
-            <span class="ingestions-stat__label"><Activity class="size-3.5" strokeWidth={2} />{tr('Planlagt', 'Scheduled')}</span>
+            <span class="ingestions-stat__label">
+              <Activity class="size-3.5" strokeWidth={2} />
+              {tr('Planlagt', 'Scheduled')}
+            </span>
             <strong>{schedules().length + (monitors()?.length ?? 0)}</strong>
             <small>{tr(`${monitors()?.length ?? 0} overvåkere · ${sourceCount()} kilder`, `${monitors()?.length ?? 0} monitors · ${sourceCount()} sources`)}</small>
           </button>
+          <div class="ingestions-stat" aria-label={tr('Kreditter siste 7 dager', 'Credits, last 7 days')}>
+            <span class="ingestions-stat__label">
+              <Activity class="size-3.5" strokeWidth={2} />
+              {tr('Kreditter · 7 d', 'Credits · 7 d')}
+            </span>
+            <strong>{usageLabel()}</strong>
+            <small>{usage()?.creditsLimit ? tr(`${Math.round(usage()?.utilizationPercent ?? 0)} % brukt`, `${Math.round(usage()?.utilizationPercent ?? 0)}% used`) : tr('ingen tak satt', 'no ceiling set')}</small>
+          </div>
         </section>
 
         <VerevonSegmented class="ingestions-tabs" aria-label={tr('Innhentingsvisninger', 'Ingestion views')}>
@@ -573,11 +721,7 @@ export default function VerevonIngestionsPage() {
             {(view) => {
               const Icon = view.icon
               return (
-                <VerevonSegmentedButton
-                  class="ingestions-tab"
-                  selected={activeView() === view.id}
-                  onClick={() => setActiveView(view.id)}
-                >
+                <VerevonSegmentedButton class="ingestions-tab" selected={activeView() === view.id} onClick={() => setActiveView(view.id)}>
                   <Icon class="size-4" strokeWidth={1.9} />
                   {viewLabel(view.id, tr)}
                   <Show when={view.id === 'runs' && runCounts().active > 0}>
@@ -599,12 +743,7 @@ export default function VerevonIngestionsPage() {
 
         <Show when={activeView() === 'playground'}>
           <section class="ingestions-playground">
-            <IngestionsPlayground
-              state={playground()}
-              onChange={patchPlayground}
-              onSubmit={() => void submitPlayground()}
-              submitting={playgroundRunning()}
-            />
+            <IngestionsPlayground state={playground()} onChange={patchPlayground} onSubmit={() => void submitPlayground()} submitting={playgroundRunning()} />
             <IngestionsPlaygroundResult
               result={playgroundResult()}
               running={playgroundRunning()}
@@ -629,6 +768,8 @@ export default function VerevonIngestionsPage() {
             evidence={runEvidence()}
             evidenceLoading={evidenceLoading()}
             onRerun={rerun}
+            onControl={controlJob}
+            controlError={controlError()}
           />
         </Show>
 

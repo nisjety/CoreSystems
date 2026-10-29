@@ -2,12 +2,17 @@ import { describe, expect, it } from 'vitest'
 import { cronPresets, describeCron } from '@/features/ingestions/lib/cron'
 import { changeCount, changeTimeline, shortFingerprint } from '@/features/ingestions/lib/monitoring'
 import {
+  agentInput,
+  buildActions,
   codeSnippet,
   crawlRequestFromState,
   defaultPlaygroundState,
   missingInput,
+  newAction,
+  parseSchema,
   quarryRequestFor,
   scrapeRequestFromState,
+  searchFiltersFromState,
   type PlaygroundState,
 } from '@/features/ingestions/lib/playground'
 import { countRunsByGroup, filterRuns, formatDuration, runDurationMs, runStatusGroup } from '@/features/ingestions/lib/runs'
@@ -71,7 +76,8 @@ describe('playground requests', () => {
   it('names what is missing per endpoint', () => {
     expect(missingInput(state({ endpoint: 'search' }))).toBe('query')
     expect(missingInput(state({ endpoint: 'batch', urls: ' , ' }))).toBe('urls')
-    expect(missingInput(state({ endpoint: 'extract', url: 'https://a.no' }))).toBe('prompt')
+    expect(missingInput(state({ endpoint: 'extract', url: 'https://a.no' }))).toBeNull()
+    expect(missingInput(state({ endpoint: 'agent', url: 'https://a.no' }))).toBe('goal')
     expect(missingInput(state({ endpoint: 'map', url: 'https://a.no' }))).toBeNull()
   })
 
@@ -141,5 +147,80 @@ describe('change timeline', () => {
     expect(timeline.map((entry) => entry.change)).toEqual(['changed', 'unchanged', 'first'])
     expect(changeCount(timeline)).toBe(1)
     expect(shortFingerprint('blake3:deadbeefcafe0123456789')).toBe('blake3:deadbeefcafe…')
+  })
+})
+
+describe('browser steps, schemas and search filters', () => {
+  it('builds the Quarry steps from the form and names the first incomplete one', () => {
+    const built = buildActions([
+      newAction('wait'),
+      { ...newAction('click'), selector: '#go' },
+      { ...newAction('scroll'), scroll: 'bottom' },
+      { ...newAction('write'), selector: '#q', text: 'rust' },
+      { ...newAction('press'), key: 'Enter' },
+    ])
+    expect(built).toEqual({
+      ok: true,
+      actions: [
+        { type: 'wait', milliseconds: 1000 },
+        { type: 'click', selector: '#go' },
+        { type: 'scroll', to: 'bottom' },
+        { type: 'write', selector: '#q', text: 'rust' },
+        { type: 'press', key: 'Enter' },
+      ],
+    })
+    expect(buildActions([newAction('click')])).toEqual({ ok: false, index: 0, field: 'selector' })
+    expect(buildActions([{ ...newAction('write'), selector: '#q', text: '' }])).toEqual({ ok: false, index: 0, field: 'text' })
+  })
+
+  it('sends the steps and their error policy with a scrape, and nothing when there are none', () => {
+    const body = scrapeRequestFromState(state({
+      url: 'https://a.no',
+      actions: [{ ...newAction('click'), selector: '#more' }],
+      actionsOnError: 'continue',
+    }))
+    expect(body).toMatchObject({ actions: [{ type: 'click', selector: '#more' }], actions_on_error: 'continue' })
+    expect(scrapeRequestFromState(state({ url: 'https://a.no' }))).not.toHaveProperty('actions')
+  })
+
+  it('reads the extraction schema as a JSON object or nothing', () => {
+    expect(parseSchema('')).toEqual({ ok: true, schema: null })
+    expect(parseSchema('{"type":"object"}')).toEqual({ ok: true, schema: { type: 'object' } })
+    expect(parseSchema('[1]')).toEqual({ ok: false, reason: 'not_object' })
+    expect(parseSchema('{bad')).toEqual({ ok: false, reason: 'invalid_json' })
+  })
+
+  it('forwards the schema on extract and leaves it out when there is none', () => {
+    expect(quarryRequestFor(state({ endpoint: 'extract', url: 'https://a.no', schema: '{"type":"object"}' })).body).toEqual({
+      urls: ['https://a.no'],
+      schema: { type: 'object' },
+    })
+    expect(quarryRequestFor(state({ endpoint: 'extract', url: 'https://a.no' })).body).toEqual({ urls: ['https://a.no'] })
+  })
+
+  it('turns the search filters into the gateway filters, blanks dropped', () => {
+    expect(searchFiltersFromState(state({
+      searchCountry: 'no',
+      searchLanguage: 'NO',
+      searchTimeRange: 'week',
+      searchIncludeDomains: 'a.no, b.no',
+    }))).toEqual({
+      timeRange: 'week',
+      topic: null,
+      exactMatch: false,
+      includeDomains: ['a.no', 'b.no'],
+      excludeDomains: [],
+      country: 'NO',
+      language: 'no',
+    })
+  })
+
+  it('builds the agent input from the goal, limits and domains, and says it is a Verevon call', () => {
+    const input = agentInput(state({ url: 'https://a.no', goal: ' Find it ', maxSteps: '12', allowedDomains: 'a.no' }))
+    expect(input).toEqual({ url: 'https://a.no', goal: 'Find it', maxSteps: 12, allowedDomains: ['a.no'] })
+    const request = quarryRequestFor(state({ endpoint: 'agent', url: 'https://a.no', goal: 'Find it' }))
+    expect(request.path).toBe('/api/v1/actions/execute')
+    expect(request.body).toMatchObject({ actionId: 'ingestions.start_agent_run' })
+    expect(request.note).toContain('Verevon')
   })
 })

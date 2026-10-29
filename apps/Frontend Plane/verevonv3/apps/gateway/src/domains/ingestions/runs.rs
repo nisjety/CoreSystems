@@ -148,6 +148,11 @@ fn to_run_item(job: &Value) -> Value {
         "completedAt": str_or_null(job, "completed_at"),
         "target": target,
         "progress": Value::Object(progress),
+        // Who started the job (`{type, actor, ref}`) and which schedule fired it,
+        // so a run can say "manual" or "schedule X" instead of guessing.
+        "origin": job.get("origin").cloned().unwrap_or(Value::Null),
+        "scheduleId": str_or_null(job, "schedule_id"),
+        "phase": str_or_null(job, "phase"),
         "stats": stats,
     })
 }
@@ -279,9 +284,14 @@ async fn create_extract(
         Err(message) => return validation(&message),
     };
 
+    // Structured extraction is schema-driven on quarry-edge (`/v1/extract` reads
+    // `schema`; its `prompt` is accepted but not used yet), so only the schema
+    // is forwarded.
     let mut request = json!({ "urls": [url.clone()] });
-    if let Some(prompt) = first_str(body, &["prompt"]) {
-        request["prompt"] = Value::String(prompt);
+    match extract_schema(body) {
+        Ok(Some(schema)) => request["schema"] = schema,
+        Ok(None) => {}
+        Err(message) => return validation(&message),
     }
     let (status, resp) = quarry_call(
         state,
@@ -307,13 +317,12 @@ async fn create_extract(
         .filter(|s| !s.is_empty())
         .unwrap_or(&url)
         .to_owned();
-    let run_status = first
-        .get("status")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("completed")
-        .to_owned();
+    // quarry-edge reports per source: "ok" (structured), "fetched" (markdown only)
+    // or "error". A failed source is a failed run; the other two are completed.
+    let run_status = match first.get("status").and_then(Value::as_str).map(str::trim) {
+        Some("error") => "failed",
+        _ => "completed",
+    };
 
     okay(json!({
         "run": {
@@ -405,6 +414,22 @@ async fn create_scrape(
 }
 
 // ── Small helpers ───────────────────────────────────────────────────────────
+
+/// The extraction schema of a run body: a JSON object, or the same document sent
+/// as text. `Ok(None)` when none was sent; an unreadable schema is a validation error.
+fn extract_schema(body: &Value) -> Result<Option<Value>, String> {
+    match body.get("schema") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if text.trim().is_empty() => Ok(None),
+        Some(Value::String(text)) => serde_json::from_str::<Value>(text)
+            .ok()
+            .filter(Value::is_object)
+            .map(Some)
+            .ok_or_else(|| "The extraction schema must be a JSON object.".to_owned()),
+        Some(value) if value.is_object() => Ok(Some(value.clone())),
+        Some(_) => Err("The extraction schema must be a JSON object.".to_owned()),
+    }
+}
 
 fn handoff_id(data: &Value) -> String {
     first_str(data, &["job_id", "jobId", "id", "run_id", "runId"]).unwrap_or_default()

@@ -1,35 +1,45 @@
-import { createMemo, createSignal, For, Show } from 'solid-js'
-import { ArrowUpRight, Loader, RotateCcw, Search, Square, X } from '@/shared/icons'
+import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
+import { AlertTriangle, ArrowUpRight, Loader, Pause, Play, RotateCcw, Search, Square, X } from '@/shared/icons'
 import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 import { Button } from '@/shared/ui/Button'
 import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
 import { VerevonSegmented, VerevonSegmentedButton } from '@/shared/ui/verevon/VerevonSegmented'
 import { VerevonSelect } from '@/shared/ui/verevon/VerevonSelect'
-import type { EvidenceTimeline, RunItem } from '@/shared/api/ingestions-client'
+import {
+  getIngestionJob,
+  getIngestionJobErrors,
+  type EvidenceTimeline,
+  type JobDetail,
+  type JobErrors,
+  type RunItem,
+} from '@/shared/api/ingestions-client'
 import {
   countRunsByGroup,
   filterRuns,
   formatDuration,
   runDurationMs,
   runProgressPercent,
+  runStatusGroup,
   type RunFilter,
   type RunStatusFilter,
 } from '@/features/ingestions/lib/runs'
 import {
   DownloadButton,
   EmptyState,
-  NeedsBackend,
   StatusBadge,
   absoluteTime,
   kindLabel,
   relativeTime,
+  type Tr,
 } from '@/features/ingestions/components/ingestions-ui'
 
 /**
  * Apify-style run history: status chips with counts, kind and text filters, a
- * table with duration and progress, and a run detail with overview, log (the
- * Quarry event timeline) and output.
+ * table with duration and progress, and a run detail with overview, the Quarry
+ * event log, and output (stats plus the failed and blocked URLs of the job).
+ * Pause, resume and cancel are the real job-control action; they show only for
+ * the kinds Quarry can control.
  */
 export function IngestionsRunsView(props: {
   runs: RunItem[]
@@ -40,6 +50,8 @@ export function IngestionsRunsView(props: {
   evidence: EvidenceTimeline | null
   evidenceLoading: boolean
   onRerun: (run: RunItem) => void
+  onControl: (jobId: string, action: 'pause' | 'resume' | 'cancel') => Promise<void>
+  controlError: string | null
 }) {
   const i18n = useI18n()
   const tr = i18n.tr
@@ -60,7 +72,12 @@ export function IngestionsRunsView(props: {
         <div class="ingestions-card__header">
           <div>
             <h2>{tr('Kjøringshistorikk', 'Run history')}</h2>
-            <p>{tr('Varige crawl-, uttrekk-, batch-, søk- og agentjobber fra Quarry. Velg en rad for logg og utdata.', 'Durable crawl, extract, batch, search and agent jobs from Quarry. Pick a row for log and output.')}</p>
+            <p>
+              {tr(
+                'Varige crawl-, uttrekk-, batch-, søk- og agentjobber fra Quarry. Velg en rad for logg, feil og utdata.',
+                'Durable crawl, extract, batch, search and agent jobs from Quarry. Pick a row for log, errors and output.',
+              )}
+            </p>
           </div>
           <a href="/knowledge" link class="ingestions-inline-link">
             {tr('Åpne Kunnskap', 'Open Knowledge')}
@@ -94,11 +111,7 @@ export function IngestionsRunsView(props: {
                 placeholder={tr('Mål eller ID', 'Target or ID')}
               />
             </label>
-            <VerevonSelect
-              aria-label={tr('Type', 'Kind')}
-              value={props.filter.kind}
-              onChange={(event) => props.onFilterChange({ kind: event.currentTarget.value })}
-            >
+            <VerevonSelect aria-label={tr('Type', 'Kind')} value={props.filter.kind} onChange={(event) => props.onFilterChange({ kind: event.currentTarget.value })}>
               <option value="all">{tr('Alle typer', 'All kinds')}</option>
               <For each={kinds()}>{(kind) => <option value={kind}>{kindLabel(kind, tr)}</option>}</For>
             </VerevonSelect>
@@ -123,9 +136,7 @@ export function IngestionsRunsView(props: {
                 fallback={
                   <tr>
                     <td colspan="6" class="ingestions-empty-cell">
-                      {props.runs.length === 0
-                        ? tr('Ingen varige kjøringer ennå.', 'No durable runs yet.')
-                        : tr('Ingen kjøringer passer filteret.', 'No runs match the filter.')}
+                      {props.runs.length === 0 ? tr('Ingen varige kjøringer ennå.', 'No durable runs yet.') : tr('Ingen kjøringer passer filteret.', 'No runs match the filter.')}
                     </td>
                   </tr>
                 }
@@ -145,9 +156,13 @@ export function IngestionsRunsView(props: {
                         }
                       }}
                     >
-                      <td><StatusBadge status={run.status} /></td>
+                      <td>
+                        <StatusBadge status={run.status} />
+                      </td>
                       <td>{kindLabel(run.kind, tr)}</td>
-                      <td class="ingestions-truncate" title={run.target}>{run.target}</td>
+                      <td class="ingestions-truncate" title={run.target}>
+                        {run.target}
+                      </td>
                       <td class="ingestions-muted-cell" title={absoluteTime(run.startedAt ?? run.createdAt, i18n)}>
                         {relativeTime(run.startedAt ?? run.createdAt, i18n)}
                       </td>
@@ -180,8 +195,10 @@ export function IngestionsRunsView(props: {
             run={run()}
             evidence={props.evidence}
             evidenceLoading={props.evidenceLoading}
+            controlError={props.controlError}
             onClose={() => props.onSelectRun(null)}
             onRerun={() => props.onRerun(run())}
+            onControl={props.onControl}
           />
         )}
       </Show>
@@ -193,21 +210,87 @@ function canRerun(run: RunItem) {
   return ['crawl', 'scrape', 'extract'].includes(run.kind) && /^https?:\/\//i.test(run.target)
 }
 
+/** A job's origin as Quarry records it: a schedule that fired it, or a person or API call. */
+export function originLabel(job: Pick<JobDetail, 'origin' | 'scheduleId'> | null, tr: Tr): string {
+  if (job?.scheduleId) return tr(`Tidsplan ${job.scheduleId}`, `Schedule ${job.scheduleId}`)
+  const type = job?.origin?.type
+  if (!type) return tr('Ukjent', 'Unknown')
+  switch (type) {
+    case 'schedule':
+      return tr('Tidsplan', 'Schedule')
+    case 'api':
+      return 'API'
+    case 'manual':
+    case 'web':
+    case 'unknown':
+      return tr('Manuell', 'Manual')
+    default:
+      return type
+  }
+}
+
 function RunDetail(props: {
   run: RunItem
   evidence: EvidenceTimeline | null
   evidenceLoading: boolean
+  controlError: string | null
   onClose: () => void
   onRerun: () => void
+  onControl: (jobId: string, action: 'pause' | 'resume' | 'cancel') => Promise<void>
 }) {
   const i18n = useI18n()
   const tr = i18n.tr
   const [tab, setTab] = createSignal<'overview' | 'log' | 'output'>('overview')
+  const [job, setJob] = createSignal<JobDetail | null>(null)
+  const [errors, setErrors] = createSignal<JobErrors | null>(null)
+  const [errorsLoading, setErrorsLoading] = createSignal(false)
+  const [busy, setBusy] = createSignal(false)
   const percent = () => runProgressPercent(props.run)
-  const exportJson = () => JSON.stringify({ run: props.run, evidence: props.evidence }, null, 2)
-  const statLines = createMemo(() =>
-    Object.entries(props.run.stats).filter(([, value]) => typeof value === 'number' || typeof value === 'string'),
+  const exportJson = () => JSON.stringify({ run: props.run, job: job(), errors: errors(), evidence: props.evidence }, null, 2)
+  const statLines = createMemo(() => Object.entries(props.run.stats).filter(([, value]) => typeof value === 'number' || typeof value === 'string'))
+  const isPaused = () => job()?.status === 'paused' || job()?.phase === 'paused'
+  const isActive = () => runStatusGroup(props.run.status) === 'active'
+
+  // Re-read the job whenever the row in the list moves on, so the detail follows the run.
+  createEffect(
+    () => `${props.run.id}|${props.run.status}|${props.run.progress.completed ?? 0}`,
+    () => {
+      const controller = new AbortController()
+      getIngestionJob(props.run.id, controller.signal)
+        .then(setJob)
+        .catch(() => {
+          if (!controller.signal.aborted) setJob(null)
+        })
+      return () => controller.abort()
+    },
   )
+
+  createEffect(
+    () => `${tab()}|${props.run.id}|${props.run.status}`,
+    () => {
+      if (tab() !== 'output') return
+      const controller = new AbortController()
+      setErrorsLoading(true)
+      getIngestionJobErrors(props.run.id, { limit: 100 }, controller.signal)
+        .then(setErrors)
+        .catch(() => {
+          if (!controller.signal.aborted) setErrors(null)
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setErrorsLoading(false)
+        })
+      return () => controller.abort()
+    },
+  )
+
+  async function control(action: 'pause' | 'resume' | 'cancel') {
+    setBusy(true)
+    try {
+      await props.onControl(props.run.id, action)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
     <aside class="verevon-panel ingestions-card ingestions-run-detail" aria-label={tr('Kjøringsdetaljer', 'Run details')}>
@@ -217,7 +300,9 @@ function RunDetail(props: {
             <StatusBadge status={props.run.status} />
             <h2>{kindLabel(props.run.kind, tr)}</h2>
           </div>
-          <p class="ingestions-truncate" title={props.run.target}>{props.run.target}</p>
+          <p class="ingestions-truncate" title={props.run.target}>
+            {props.run.target}
+          </p>
         </div>
         <button type="button" class="ingestions-icon-button" aria-label={tr('Lukk detaljer', 'Close details')} onClick={() => props.onClose()}>
           <X class="size-4" strokeWidth={1.9} />
@@ -231,20 +316,48 @@ function RunDetail(props: {
             {tr('Kjør på nytt', 'Run again')}
           </Button>
         </Show>
-        <Button size="xs" disabled title={tr('Avbryt krever jobbkontroll i Quarry (QUARRY_EDGE__JOB_CONTROL) og en gateway-rute.', 'Abort needs job control in Quarry (QUARRY_EDGE__JOB_CONTROL) and a gateway route.')}>
-          <Square class="size-4" strokeWidth={1.9} />
-          {tr('Avbryt', 'Abort')}
-        </Button>
+        <Show when={job()?.controllable}>
+          <Show when={isActive() && !isPaused()}>
+            <Button size="xs" disabled={busy()} onClick={() => void control('pause')}>
+              <Pause class="size-4" strokeWidth={1.9} />
+              {tr('Pause', 'Pause')}
+            </Button>
+          </Show>
+          <Show when={isPaused()}>
+            <Button size="xs" disabled={busy()} onClick={() => void control('resume')}>
+              <Play class="size-4" strokeWidth={1.9} />
+              {tr('Gjenoppta', 'Resume')}
+            </Button>
+          </Show>
+          <Show when={isActive()}>
+            <Button size="xs" disabled={busy()} onClick={() => void control('cancel')}>
+              <Square class="size-4" strokeWidth={1.9} />
+              {tr('Avbryt', 'Cancel')}
+            </Button>
+          </Show>
+        </Show>
         <DownloadButton filename={`${props.run.id || 'run'}.json`} content={exportJson} label={tr('Eksporter JSON', 'Export JSON')} />
       </div>
+      <Show when={props.controlError}>
+        {(message) => (
+          <div class="ingestions-alert" role="alert">
+            <AlertTriangle class="size-4" strokeWidth={1.9} />
+            {message()}
+          </div>
+        )}
+      </Show>
 
       <VerevonSegmented aria-label={tr('Detaljvisning', 'Detail view')}>
-        <VerevonSegmentedButton selected={tab() === 'overview'} onClick={() => setTab('overview')}>{tr('Oversikt', 'Overview')}</VerevonSegmentedButton>
+        <VerevonSegmentedButton selected={tab() === 'overview'} onClick={() => setTab('overview')}>
+          {tr('Oversikt', 'Overview')}
+        </VerevonSegmentedButton>
         <VerevonSegmentedButton selected={tab() === 'log'} onClick={() => setTab('log')}>
           {tr('Logg', 'Log')}
           <Show when={props.evidence?.timeline.length}>{(count) => <span class="ingestions-count-pill">{count()}</span>}</Show>
         </VerevonSegmentedButton>
-        <VerevonSegmentedButton selected={tab() === 'output'} onClick={() => setTab('output')}>{tr('Utdata', 'Output')}</VerevonSegmentedButton>
+        <VerevonSegmentedButton selected={tab() === 'output'} onClick={() => setTab('output')}>
+          {tr('Utdata', 'Output')}
+        </VerevonSegmentedButton>
       </VerevonSegmented>
 
       <Show when={tab() === 'overview'}>
@@ -258,24 +371,41 @@ function RunDetail(props: {
           <dd class="ingestions-mono">{props.run.id || '—'}</dd>
           <dt>{tr('Kjørings-ID', 'Run ID')}</dt>
           <dd class="ingestions-mono">{props.run.runId || '—'}</dd>
+          <dt>{tr('Opprinnelse', 'Origin')}</dt>
+          <dd>{originLabel(job(), tr)}</dd>
           <dt>{tr('Opprettet', 'Created')}</dt>
-          <dd>{absoluteTime(props.run.createdAt, i18n)}</dd>
+          <dd>{absoluteTime(job()?.createdAt ?? props.run.createdAt, i18n)}</dd>
           <dt>{tr('Startet', 'Started')}</dt>
           <dd>{absoluteTime(props.run.startedAt, i18n)}</dd>
           <dt>{tr('Fullført', 'Finished')}</dt>
-          <dd>{absoluteTime(props.run.completedAt, i18n)}</dd>
+          <dd>{absoluteTime(job()?.finishedAt ?? props.run.completedAt, i18n)}</dd>
           <dt>{tr('Varighet', 'Duration')}</dt>
           <dd>{formatDuration(runDurationMs(props.run), tr)}</dd>
+          <dt>{tr('Fase', 'Phase')}</dt>
+          <dd>{job()?.phase ?? props.run.phase ?? '—'}</dd>
           <dt>{tr('Fremdrift', 'Progress')}</dt>
           <dd>
             {props.run.progress.completed ?? 0}
             {props.run.progress.total ? ` / ${props.run.progress.total}` : ''}
+            <Show when={job()}>
+              {(current) => (
+                <span class="ingestions-muted">
+                  {' '}
+                  · {current().counts.failed} {tr('feilet', 'failed')} · {current().counts.blocked} {tr('blokkert', 'blocked')} · {current().counts.retried}{' '}
+                  {tr('nye forsøk', 'retries')}
+                </span>
+              )}
+            </Show>
           </dd>
-          <dt>{tr('Opprinnelse', 'Origin')}</dt>
-          <dd><NeedsBackend label={tr('Ukjent', 'Unknown')} reason={tr('Gatewayen videresender ikke schedule_id, så manuell og planlagt kjøring kan ikke skilles ennå.', 'The gateway does not forward schedule_id, so manual and scheduled runs cannot be told apart yet.')} /></dd>
-          <dt>{tr('Kostnad', 'Cost')}</dt>
-          <dd><NeedsBackend label="—" reason={tr('Quarry-jobber har ingen kostnadsfelt, og forbruks-API-et er ikke eksponert.', 'Quarry jobs carry no cost field, and the usage API is not exposed.')} /></dd>
         </dl>
+        <Show when={job()?.warnings.length}>
+          <div class="ingestions-warning-box">
+            <h3>{tr('Advarsler', 'Warnings')}</h3>
+            <ul>
+              <For each={job()?.warnings ?? []}>{(warning) => <li>{warning.message}</li>}</For>
+            </ul>
+          </div>
+        </Show>
       </Show>
 
       <Show when={tab() === 'log'}>
@@ -344,10 +474,74 @@ function RunDetail(props: {
             </For>
           </dl>
         </Show>
-        <pre class="ingestions-json-pre">{JSON.stringify(props.run.stats, null, 2)}</pre>
-        <div class="ingestions-pill-row">
-          <NeedsBackend label={tr('Sider per URL', 'Per-page results')} reason={tr('Quarry har ikke et endepunkt for resultater per side; feil per URL (/errors) er ikke eksponert i gatewayen.', 'Quarry has no per-page results endpoint; per-URL errors (/errors) are not exposed by the gateway.')} />
-        </div>
+        <Show
+          when={!errorsLoading()}
+          fallback={
+            <div class="ingestions-result__loading">
+              <Loader class="size-4 ingestions-spin" strokeWidth={1.9} />
+              {tr('Laster feil …', 'Loading errors…')}
+            </div>
+          }
+        >
+          <Show
+            when={errors()}
+            fallback={<EmptyState title={tr('Ingen feilliste', 'No error list')}>{tr('Quarry har ingen feilliste for denne jobben.', 'Quarry has no error list for this job.')}</EmptyState>}
+          >
+            {(list) => (
+              <>
+                <h3 class="ingestions-section-title">
+                  {tr(`Feil per URL (${list().errors.length})`, `Errors per URL (${list().errors.length})`)}
+                </h3>
+                <Show when={list().errors.length > 0} fallback={<p class="ingestions-muted">{tr('Ingen URL-er feilet.', 'No URLs failed.')}</p>}>
+                  <ul class="ingestions-error-list">
+                    <For each={list().errors}>
+                      {(item) => (
+                        <li>
+                          <a href={item.url ?? undefined} target="_blank" rel="noreferrer" class="ingestions-truncate">
+                            {item.url ?? '—'}
+                          </a>
+                          <span class="ingestions-mono">
+                            {[item.code, item.status, item.category].filter(Boolean).join(' · ')}
+                          </span>
+                          <Show when={item.retryable}>
+                            <span class="ingestions-status ingestions-status--info">{tr('kan prøves igjen', 'retryable')}</span>
+                          </Show>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+                </Show>
+                <Show when={list().blocked.length > 0}>
+                  <h3 class="ingestions-section-title">{tr(`Blokkerte sider (${list().blocked.length})`, `Blocked pages (${list().blocked.length})`)}</h3>
+                  <ul class="ingestions-error-list">
+                    <For each={list().blocked}>
+                      {(item) => (
+                        <li>
+                          <span class="ingestions-truncate">{item.url ?? '—'}</span>
+                          <span class="ingestions-mono">{item.reason ?? ''}</span>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+                </Show>
+                <Show when={list().robotsBlocked.length > 0}>
+                  <h3 class="ingestions-section-title">
+                    {tr(`Holdt utenfor av robots.txt (${list().robotsBlocked.length})`, `Kept out by robots.txt (${list().robotsBlocked.length})`)}
+                  </h3>
+                  <ul class="ingestions-error-list">
+                    <For each={list().robotsBlocked}>{(item) => <li class="ingestions-truncate">{item.url ?? '—'}</li>}</For>
+                  </ul>
+                </Show>
+                <Show when={list().nextSeq !== null}>
+                  <p class="ingestions-muted">{tr('Flere feil finnes. Vises de første 100.', 'More errors exist. The first 100 are shown.')}</p>
+                </Show>
+              </>
+            )}
+          </Show>
+        </Show>
+        <Show when={statLines().length === 0 && !errorsLoading() && !errors()}>
+          <pre class="ingestions-json-pre">{JSON.stringify(props.run.stats, null, 2)}</pre>
+        </Show>
       </Show>
     </aside>
   )

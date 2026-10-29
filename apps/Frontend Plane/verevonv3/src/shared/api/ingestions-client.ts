@@ -20,6 +20,11 @@ export type RunItem = {
     query?: string | null
   }
   stats: Record<string, unknown>
+  /** Who started the job: `{ type, actor?, ref? }` as Quarry records it (`manual`, `schedule`, `api`, …). */
+  origin?: { type: string; actor?: string | null; ref?: string | null } | null
+  /** The schedule that fired this job, when it was not started by hand. */
+  scheduleId?: string | null
+  phase?: string | null
 }
 
 export type ScheduleItem = {
@@ -144,12 +149,72 @@ export type RunCreateRequest =
        urls: string[]
      }
   | {
+       kind: 'extract'
+       url: string
+       /** JSON Schema for structured extraction; quarry-edge reads nothing else. */
+       schema?: Record<string, unknown> | string
+     }
+  | {
        kind: string
        url: string
-       prompt?: string
-       schema?: Record<string, unknown> | string
-       extractMode?: 'product' | 'article' | 'general'
      }
+
+/** One job's status as Quarry reports it (`GET /api/ingestions/jobs/{id}`). */
+export type JobDetail = {
+  id: string
+  kind: string
+  status: string
+  phase: string
+  terminal: boolean
+  origin: RunItem['origin']
+  createdAt: string
+  finishedAt: string | null
+  deadlineAt: string | null
+  counts: { completed: number; failed: number; blocked: number; retried: number }
+  total: number | null
+  /** `exact` for a batch, `budget` for a crawl whose total is a page ceiling. */
+  totalKind: string | null
+  warnings: Array<{ code: string; message: string }>
+  control: { desired: string | null; pending: boolean }
+  scheduleId: string | null
+  runId: string | null
+  /** Crawl and batch jobs can be paused, resumed and cancelled. */
+  controllable: boolean
+}
+
+/** Failed and blocked pages of a job (`GET /api/ingestions/jobs/{id}/errors`). */
+export type JobErrors = {
+  errors: Array<{
+    id: string
+    ts: string
+    url: string | null
+    code: string | null
+    category: string | null
+    retryable: boolean
+    status: number | null
+  }>
+  blocked: Array<{ url: string | null; ts: string; reason: string | null }>
+  robotsBlocked: Array<{ url: string | null; ts: string; reason: string | null }>
+  nextSeq: number | null
+}
+
+/** Team credit use for a period (`GET /api/ingestions/usage`). */
+export type CreditUsage = {
+  period: string | null
+  creditsUsed: number
+  creditsLimit: number | null
+  utilizationPercent: number
+}
+
+/** One structured or markdown result of `/v1/extract`, as the gateway hands it over. */
+export type ExtractItem = {
+  url: string
+  status: 'ok' | 'fetched' | 'error' | string
+  data?: unknown
+  markdown?: string | null
+  structured?: unknown
+  error?: string | null
+}
 
 export type ScheduleCreateRequest = {
   name: string
@@ -251,4 +316,24 @@ export function deleteIngestionSource(id: string, signal?: AbortSignal) {
     `/api/ingestions/sources/${encodeURIComponent(id)}`,
     { method: 'DELETE', signal },
   )
+}
+
+export function getIngestionJob(id: string, signal?: AbortSignal) {
+  return requestJson<JobDetail>(`/api/ingestions/jobs/${encodeURIComponent(id)}`, { signal })
+}
+
+export function getIngestionJobErrors(
+  id: string,
+  options: { afterSeq?: number; limit?: number } = {},
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams()
+  if (options.afterSeq !== undefined) query.set('afterSeq', String(options.afterSeq))
+  if (options.limit !== undefined) query.set('limit', String(options.limit))
+  const suffix = query.size > 0 ? `?${query.toString()}` : ''
+  return requestJson<JobErrors>(`/api/ingestions/jobs/${encodeURIComponent(id)}/errors${suffix}`, { signal })
+}
+
+export function getIngestionUsage(period: string, signal?: AbortSignal) {
+  return requestJson<CreditUsage>(`/api/ingestions/usage?period=${encodeURIComponent(period)}`, { signal })
 }

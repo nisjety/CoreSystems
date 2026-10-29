@@ -1,5 +1,5 @@
 import { createMemo, createSignal, For, Show } from 'solid-js'
-import { Bell, Eye, Loader, Plus, ScanSearch, Telescope, Trash2 } from '@/shared/icons'
+import { Bell, Eye, Loader, Plus, RefreshCw, ScanSearch, Telescope, Trash2 } from '@/shared/icons'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
@@ -17,7 +17,11 @@ import {
 } from '@/shared/api/monitoring-client'
 import { changeCount, changeTimeline, shortFingerprint } from '@/features/ingestions/lib/monitoring'
 import { describeCron } from '@/features/ingestions/lib/cron'
-import { EmptyState, NeedsBackend, relativeTime } from '@/features/ingestions/components/ingestions-ui'
+import { EmptyState, relativeTime } from '@/features/ingestions/components/ingestions-ui'
+import { listNotifications, type Notification as AppNotification } from '@/shared/api/notifications-client'
+
+/** The in-product notifications Quarry sends when a monitored page changes. */
+const CHANGE_NOTIFICATION = 'change_detected'
 
 const presets: MonitorPreset[] = ['hourly', 'daily', 'weekly']
 
@@ -57,6 +61,15 @@ export function IngestionsMonitoringView(props: {
   // every row traces to a real edge baseline; nothing is synthesized.
   const [history, { refetch: refetchHistory }] = createResource(watchedUrl, (url) => getChangeHistory(url))
   const timeline = createMemo(() => changeTimeline(history() ?? []))
+
+  // In-product alerts Quarry sends when a monitored page changes (the `change_detected` notification).
+  const [notifications, { refetch: refetchNotifications }] = createResource(
+    () => 'change-notifications',
+    () => listNotifications().catch(() => []),
+  )
+  const changeNotes = createMemo(() =>
+    ((notifications() ?? []) as AppNotification[]).filter((note) => note.type === CHANGE_NOTIFICATION),
+  )
 
   async function check() {
     const candidate = urlInput().trim()
@@ -269,6 +282,39 @@ export function IngestionsMonitoringView(props: {
           </Show>
         </section>
 
+        <section class="verevon-panel ingestions-card">
+          <div class="ingestions-card__header">
+            <div>
+              <h2>{tr('Varsler om endringer', 'Change alerts')}</h2>
+              <p>{tr('Varsler i appen når en overvåket side endrer seg.', 'In-app alerts when a monitored page changes.')}</p>
+            </div>
+            <Button size="xs" variant="ghost" onClick={() => void refetchNotifications()}>
+              <RefreshCw class="size-4" strokeWidth={1.9} />
+              {tr('Oppdater', 'Refresh')}
+            </Button>
+          </div>
+          <div class="ingestions-card-list">
+            <For
+              each={changeNotes()}
+              fallback={
+                <EmptyState icon={<Bell class="size-5" strokeWidth={1.8} />} title={tr('Ingen endringsvarsler ennå.', 'No change alerts yet.')}>
+                  {tr('Et varsel kommer når en overvåket side har fått nytt innhold.', 'An alert arrives when a monitored page has new content.')}
+                </EmptyState>
+              }
+            >
+              {(note) => (
+                <article class={cn('ingestions-list-card', !note.read && 'ingestions-list-card--unread')}>
+                  <div class="ingestions-title-row ingestions-title-row--spread">
+                    <h3 class="ingestions-truncate">{note.title}</h3>
+                    <span class="ingestions-muted-cell">{relativeTime(note.createdAt, i18n)}</span>
+                  </div>
+                  <Show when={note.body}>{(body) => <p>{body()}</p>}</Show>
+                </article>
+              )}
+            </For>
+          </div>
+        </section>
+
         <section class="verevon-panel ingestions-card ingestions-runs-panel">
           <div class="ingestions-card__header">
             <div>
@@ -321,16 +367,12 @@ export function IngestionsMonitoringView(props: {
                   )}
                 </For>
               </ol>
-              <div class="ingestions-pill-row">
-                <NeedsBackend
-                  label={tr('Tekstdiff', 'Text diff')}
-                  reason={tr('Quarry lagrer bare fingeravtrykk per basislinje, så det finnes ingen tekst å sammenligne ennå.', 'Quarry stores only a fingerprint per baseline, so there is no text to compare yet.')}
-                />
-                <NeedsBackend
-                  label={tr('E-post/webhook', 'Email/webhook')}
-                  reason={tr('Endringsvarsler går bare i appen i dag.', 'Change alerts go in-app only today.')}
-                />
-              </div>
+              <p class="ingestions-pg__note">
+                {tr(
+                  'Quarry lagrer ett fingeravtrykk per basislinje, ikke teksten. Tidslinjen viser derfor når innholdet endret seg, ikke hva som endret seg.',
+                  'Quarry keeps one fingerprint per baseline, not the text. The timeline therefore shows when the content changed, not what changed.',
+                )}
+              </p>
             </Show>
           </Show>
         </section>

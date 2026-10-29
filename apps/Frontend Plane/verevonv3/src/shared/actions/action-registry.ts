@@ -906,11 +906,24 @@ const ingestionsCreateRunInput = z
     kind: z.string().min(1),
     urls: z.array(z.string().url()).optional(),
     url: z.string().url().optional(),
-    prompt: z.string().trim().optional(),
+    // Extract only: a JSON Schema object (or the same document as text).
+    schema: z.union([z.record(z.string(), z.unknown()), z.string()]).optional(),
   })
   .refine((value) => (value.kind === 'batch' ? (value.urls?.length ?? 0) > 0 : !!value.url), {
     message: "kind 'batch' requires a non-empty 'urls' array; any other kind requires 'url'",
   })
+
+const ingestionsJobControlInput = z.object({
+  jobId: z.string().min(1),
+  action: z.enum(['pause', 'resume', 'cancel']),
+})
+
+const ingestionsStartAgentRunInput = z.object({
+  url: z.string().url(),
+  goal: z.string().trim().min(1).max(2000),
+  maxSteps: z.number().int().min(1).max(100).optional(),
+  allowedDomains: z.array(z.string().min(1)).max(50).optional(),
+})
 
 const ingestionsCreateScheduleInput = z
   .object({
@@ -2658,6 +2671,28 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: ingestionsCreateRunInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.job_control',
+    label: 'Pause, resume or cancel job',
+    description: 'Pause, resume or cancel a running crawl or batch job. Scrape, search, extract and agent runs finish in one request and cannot be controlled.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: ingestionsJobControlInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.start_agent_run',
+    label: 'Start browser agent run',
+    description: 'Open a browser session on a URL and start a durable browser-agent run that works toward a goal within a step budget.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: ingestionsStartAgentRunInput,
     outputSchema: envelopeStatusOutput,
   },
   {

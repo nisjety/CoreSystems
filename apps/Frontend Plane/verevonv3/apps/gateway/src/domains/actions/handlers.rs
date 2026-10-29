@@ -32,6 +32,7 @@ use super::dispatchers::{
     dispatch_inbox_save_draft, dispatch_inbox_send_reply, dispatch_inbox_set_assignment,
     dispatch_inbox_set_status, dispatch_inbox_submit_feedback, dispatch_inbox_workspace_set_pinned,
     dispatch_inbox_workspace_set_read, dispatch_ingestions_create_run,
+    dispatch_ingestions_job_control, dispatch_ingestions_start_agent_run,
     dispatch_ingestions_create_schedule, dispatch_ingestions_create_source,
     dispatch_ingestions_delete_source, dispatch_ingestions_run_schedule_action,
     dispatch_integrations_disconnect, dispatch_integrations_disconnect_chatgpt_subscription,
@@ -241,6 +242,12 @@ pub(super) async fn execute_action(
             dispatch_mcp_delete_server(&state, &user, &headers, &body.input).await
         }
         "mcp.share_server" => dispatch_mcp_share_server(&state, &user, &headers, &body.input).await,
+        "ingestions.job_control" => {
+            dispatch_ingestions_job_control(&state, &user, &headers, &body.input).await
+        }
+        "ingestions.start_agent_run" => {
+            dispatch_ingestions_start_agent_run(&state, &user, &headers, &body.input).await
+        }
         "monitoring.check_now" => {
             dispatch_monitoring_check_now(&state, &user, &headers, &body.input).await
         }

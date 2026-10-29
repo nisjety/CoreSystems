@@ -1,7 +1,6 @@
 import { createMemo, createSignal, For, Show, type Component } from 'solid-js'
 import {
   Bot,
-  ChevronDown,
   Code2,
   FileText,
   Globe,
@@ -12,37 +11,43 @@ import {
   Map as MapIcon,
   Network,
   Play,
+  Plus,
   ScanSearch,
   Search,
   SlidersHorizontal,
   Sparkles,
+  Trash2,
   type LucideProps,
 } from '@/shared/icons'
-import { useI18n, translateApiError } from '@/shared/i18n'
+import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 import { Button } from '@/shared/ui/Button'
 import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
 import { VerevonSegmented, VerevonSegmentedButton } from '@/shared/ui/verevon/VerevonSegmented'
+import { VerevonSelect } from '@/shared/ui/verevon/VerevonSelect'
 import { VerevonTextarea } from '@/shared/ui/verevon/VerevonTextarea'
-import { ApiError } from '@/shared/api/http'
 import {
   codeSnippet,
   endpointGroups,
-  extractTemplatePrompt,
+  extractTemplateSchema,
+  newAction,
   quarryRequestFor,
+  type ActionType,
   type ExtractTemplate,
+  type PlaygroundAction,
   type PlaygroundEndpoint,
   type PlaygroundState,
   type ScrapeFormat,
+  type ScrollMode,
   type SnippetLanguage,
 } from '@/features/ingestions/lib/playground'
-import { CopyButton, NeedsBackend, kindLabel } from '@/features/ingestions/components/ingestions-ui'
+import { CopyButton, kindLabel } from '@/features/ingestions/components/ingestions-ui'
 
 /**
- * The Firecrawl-style playground: grouped endpoint picker, one input card with an
- * options panel, a format gallery and a "get code" panel. Submitting is the page's
- * job (it owns the run list the async kinds reconcile against); this component only
- * edits the state and renders it.
+ * The Firecrawl-style playground: a grouped endpoint picker, one input card whose
+ * fields follow the endpoint, an options panel, a format gallery, a browser-step
+ * builder for scrape, and a "get code" panel built from the request the page sends.
+ * Submitting is the page's job; this component only edits and renders the state.
  */
 
 const endpointIcons: Record<PlaygroundEndpoint, Component<LucideProps>> = {
@@ -52,7 +57,10 @@ const endpointIcons: Record<PlaygroundEndpoint, Component<LucideProps>> = {
   extract: Sparkles,
   crawl: Network,
   batch: Layers,
+  agent: Bot,
 }
+
+type Panel = 'options' | 'formats' | 'actions' | 'code'
 
 const formatOptions: Array<{ id: ScrapeFormat; icon: Component<LucideProps> }> = [
   { id: 'markdown', icon: FileText },
@@ -60,9 +68,14 @@ const formatOptions: Array<{ id: ScrapeFormat; icon: Component<LucideProps> }> =
   { id: 'rawHtml', icon: Code2 },
   { id: 'links', icon: Link },
   { id: 'screenshot', icon: Image },
+  { id: 'pdf', icon: FileText },
 ]
 
-function groupLabel(id: 'discover' | 'extract' | 'crawl', tr: (no: string, en: string) => string) {
+const actionTypes: ActionType[] = ['wait', 'click', 'write', 'press', 'scroll', 'select']
+
+type Tr = (no: string, en: string) => string
+
+function groupLabel(id: 'discover' | 'extract' | 'crawl' | 'autonomous', tr: Tr) {
   switch (id) {
     case 'discover':
       return tr('Oppdag', 'Discover')
@@ -70,10 +83,12 @@ function groupLabel(id: 'discover' | 'extract' | 'crawl', tr: (no: string, en: s
       return tr('Hent ut', 'Extract')
     case 'crawl':
       return 'Crawl'
+    case 'autonomous':
+      return tr('Autonom', 'Autonomous')
   }
 }
 
-function formatLabel(id: ScrapeFormat, tr: (no: string, en: string) => string) {
+function formatLabel(id: ScrapeFormat, tr: Tr) {
   switch (id) {
     case 'markdown':
       return 'Markdown'
@@ -85,10 +100,29 @@ function formatLabel(id: ScrapeFormat, tr: (no: string, en: string) => string) {
       return tr('Lenker', 'Links')
     case 'screenshot':
       return tr('Skjermbilde', 'Screenshot')
+    case 'pdf':
+      return 'PDF'
   }
 }
 
-export function submitLabel(endpoint: PlaygroundEndpoint, tr: (no: string, en: string) => string) {
+function actionLabel(id: ActionType, tr: Tr) {
+  switch (id) {
+    case 'wait':
+      return tr('Vent', 'Wait')
+    case 'click':
+      return tr('Klikk', 'Click')
+    case 'write':
+      return tr('Skriv', 'Write')
+    case 'press':
+      return tr('Trykk tast', 'Press key')
+    case 'scroll':
+      return tr('Rull', 'Scroll')
+    case 'select':
+      return tr('Velg', 'Select')
+  }
+}
+
+export function submitLabel(endpoint: PlaygroundEndpoint, tr: Tr) {
   switch (endpoint) {
     case 'search':
       return tr('Søk på nettet', 'Search the web')
@@ -102,23 +136,33 @@ export function submitLabel(endpoint: PlaygroundEndpoint, tr: (no: string, en: s
       return tr('Start crawl', 'Start crawl')
     case 'batch':
       return tr('Start batch', 'Start batch')
+    case 'agent':
+      return tr('Start agent', 'Start agent')
   }
 }
 
-function endpointHint(endpoint: PlaygroundEndpoint, tr: (no: string, en: string) => string) {
+function endpointHint(endpoint: PlaygroundEndpoint, tr: Tr) {
   switch (endpoint) {
     case 'search':
-      return tr('Søk på nettet og scrape treffene du vil ha.', 'Search the web, then scrape the hits you want.')
+      return tr('Søk på nettet, og scrape treffene du vil ha.', 'Search the web, then scrape the hits you want.')
     case 'map':
       return tr('Finn alle URL-er på et nettsted uten å hente innholdet.', 'List every URL on a site without fetching content.')
     case 'scrape':
-      return tr('Hent én side som Markdown, HTML, lenker eller skjermbilde.', 'Fetch one page as Markdown, HTML, links or a screenshot.')
+      return tr(
+        'Hent én side som Markdown, HTML, lenker, skjermbilde eller PDF, etter egne nettleserhandlinger om du vil.',
+        'Fetch one page as Markdown, HTML, links, a screenshot or a PDF, after browser steps if you add them.',
+      )
     case 'extract':
-      return tr('Beskriv hva du vil ha, og få strukturert data tilbake.', 'Describe what you want and get structured data back.')
+      return tr('Gi et JSON-skjema, og få strukturert data tilbake per side.', 'Give a JSON schema and get structured data back per page.')
     case 'crawl':
-      return tr('Følg lenker fra én URL og hent hele nettstedet som en varig jobb.', 'Follow links from one URL and fetch the site as a durable job.')
+      return tr('Følg lenker fra én URL og hent nettstedet som en varig jobb du kan sette på pause.', 'Follow links from one URL and fetch the site as a durable job you can pause.')
     case 'batch':
       return tr('Hent en liste med URL-er som én varig jobb.', 'Fetch a list of URLs as one durable job.')
+    case 'agent':
+      return tr(
+        'En nettleseragent jobber mot målet i inntil valgt antall steg, og logger hvert steg.',
+        'A browser agent works toward the goal for up to the chosen number of steps and logs each step.',
+      )
   }
 }
 
@@ -130,7 +174,7 @@ export function IngestionsPlayground(props: {
 }) {
   const i18n = useI18n()
   const tr = i18n.tr
-  const [panel, setPanel] = createSignal<'options' | 'formats' | 'code' | null>(null)
+  const [panel, setPanel] = createSignal<Panel | null>(null)
   const [language, setLanguage] = createSignal<SnippetLanguage>('curl')
   const endpoint = () => props.state.endpoint
   const request = createMemo(() => quarryRequestFor(props.state))
@@ -139,23 +183,49 @@ export function IngestionsPlayground(props: {
     const s = props.state
     switch (s.endpoint) {
       case 'scrape':
-        return [!s.onlyMainContent, s.includeTags.trim(), s.excludeTags.trim(), s.waitMs.trim(), s.timeoutMs.trim()].filter(Boolean).length
+        return [
+          !s.onlyMainContent,
+          s.extractor !== 'readability',
+          s.removeBase64Images,
+          s.includeTags.trim(),
+          s.excludeTags.trim(),
+          s.waitMs.trim(),
+          s.timeoutMs.trim(),
+        ].filter(Boolean).length
       case 'crawl':
         return [s.maxDepth.trim(), s.includePaths.trim(), s.excludePaths.trim(), s.allowSubdomains, s.ingest].filter(Boolean).length
       case 'map':
         return [s.mapSearch.trim(), s.allowSubdomains].filter(Boolean).length
+      case 'search':
+        return [
+          s.searchTimeRange,
+          s.searchTopic,
+          s.searchIncludeDomains.trim(),
+          s.searchExcludeDomains.trim(),
+          s.searchExact,
+          s.searchCountry.trim(),
+          s.searchLanguage.trim(),
+        ].filter(Boolean).length
       default:
         return 0
     }
   })
-  function togglePanel(next: 'options' | 'formats' | 'code') {
-    setPanel((current) => (current === next ? null : next))
-  }
+  const togglePanel = (next: Panel) => setPanel((current) => (current === next ? null : next))
 
   function toggleFormat(format: ScrapeFormat) {
     const current = props.state.formats
     const next = current.includes(format) ? current.filter((entry) => entry !== format) : [...current, format]
     props.onChange({ formats: next.length ? next : ['markdown'] })
+  }
+
+  function patchAction(id: string, patch: Partial<PlaygroundAction>) {
+    props.onChange({
+      actions: props.state.actions.map((action) => (action.id === id ? { ...action, ...patch } : action)),
+    })
+  }
+
+  function removeAction(id: string) {
+    props.onChange({ actions: props.state.actions.filter((action) => action.id !== id) })
   }
 
   return (
@@ -175,7 +245,7 @@ export function IngestionsPlayground(props: {
                         selected={endpoint() === id}
                         onClick={() => {
                           props.onChange({ endpoint: id })
-                          if (id !== 'scrape' && panel() === 'formats') setPanel(null)
+                          setPanel(null)
                         }}
                       >
                         <Icon class="size-4" strokeWidth={1.9} />
@@ -188,19 +258,6 @@ export function IngestionsPlayground(props: {
             </div>
           )}
         </For>
-        <div class="ingestions-pg__group">
-          <span class="ingestions-pg__group-label">{tr('Autonom', 'Autonomous')}</span>
-          <span class="ingestions-pg__endpoint ingestions-pg__endpoint--stub" aria-disabled="true">
-            <Bot class="size-4" strokeWidth={1.9} />
-            Agent
-            <NeedsBackend
-              reason={tr(
-                'Innhentingsruten sender ukjente typer til scrape i dag; agentkjøringer går via nettleser-API-et.',
-                'The ingestion route sends unknown kinds to scrape today; agent runs go through the browser API.',
-              )}
-            />
-          </span>
-        </div>
       </div>
 
       <form
@@ -246,17 +303,54 @@ export function IngestionsPlayground(props: {
             </div>
           </label>
         </Show>
+
+        <Show when={endpoint() === 'agent'}>
+          <label class="ingestions-field">
+            {tr('Mål for agenten', 'Goal for the agent')}
+            <VerevonTextarea
+              rows={3}
+              value={props.state.goal}
+              onInput={(event) => props.onChange({ goal: event.currentTarget.value })}
+              placeholder={tr(
+                'Finn prisen på den billigste sykkelen og noter lagerstatus.',
+                'Find the price of the cheapest bike and note the stock status.',
+              )}
+            />
+          </label>
+          <div class="ingestions-pg__panel ingestions-options-grid" role="group" aria-label={tr('Agentgrenser', 'Agent limits')}>
+            <label class="ingestions-field">
+              {tr('Maks steg', 'Max steps')}
+              <VerevonInput
+                type="number"
+                min="1"
+                max="100"
+                value={props.state.maxSteps}
+                onInput={(event) => props.onChange({ maxSteps: event.currentTarget.value })}
+                placeholder="25"
+              />
+            </label>
+            <label class="ingestions-field">
+              {tr('Tillatte domener', 'Allowed domains')}
+              <VerevonInput
+                value={props.state.allowedDomains}
+                onInput={(event) => props.onChange({ allowedDomains: event.currentTarget.value })}
+                placeholder="example.com, docs.example.com"
+              />
+            </label>
+          </div>
+        </Show>
+
         <Show when={endpoint() === 'extract'}>
           <div class="ingestions-field">
             <span class="ingestions-field__row">
-              <label for="ingestions-extract-prompt">{tr('Hva skal trekkes ut?', 'What should be extracted?')}</label>
+              <label for="ingestions-extract-schema">{tr('JSON-skjema', 'JSON schema')}</label>
               <span class="ingestions-pill-row ingestions-pill-row--inline">
                 <For each={['general', 'product', 'article'] as ExtractTemplate[]}>
                   {(template) => (
                     <button
                       type="button"
                       class="ingestions-chip-button"
-                      onClick={() => props.onChange({ prompt: extractTemplatePrompt(template, tr) })}
+                      onClick={() => props.onChange({ schema: extractTemplateSchema(template) })}
                     >
                       {template === 'general' ? tr('Generell', 'General') : template === 'product' ? tr('Produkt', 'Product') : tr('Artikkel', 'Article')}
                     </button>
@@ -265,17 +359,27 @@ export function IngestionsPlayground(props: {
               </span>
             </span>
             <VerevonTextarea
-              id="ingestions-extract-prompt"
-              rows={3}
-              value={props.state.prompt}
-              onInput={(event) => props.onChange({ prompt: event.currentTarget.value })}
-              placeholder={extractTemplatePrompt('general', tr)}
+              id="ingestions-extract-schema"
+              class="ingestions-mono"
+              rows={6}
+              value={props.state.schema}
+              onInput={(event) => props.onChange({ schema: event.currentTarget.value })}
+              placeholder={tr(
+                'Tomt: siden returneres som Markdown. Et JSON-objekt gir strukturert data.',
+                'Empty: the page comes back as Markdown. A JSON object gives structured data.',
+              )}
             />
+            <small class="ingestions-field__help">
+              {tr(
+                'Skjemaet er en JSON Schema-beskrivelse av feltene du vil ha ut. Quarry fyller dem fra siden.',
+                'The schema is a JSON Schema describing the fields you want. Quarry fills them from the page.',
+              )}
+            </small>
           </div>
         </Show>
 
         <div class="ingestions-pg__toolbar">
-          <Show when={['scrape', 'crawl', 'map', 'search', 'extract'].includes(endpoint())}>
+          <Show when={['scrape', 'crawl', 'map', 'search'].includes(endpoint())}>
             <button
               type="button"
               class={cn('ingestions-tool-button', panel() === 'options' && 'ingestions-tool-button--active')}
@@ -298,7 +402,18 @@ export function IngestionsPlayground(props: {
             >
               <FileText class="size-4" strokeWidth={1.9} />
               {tr('Format', 'Format')}: {props.state.formats.map((format) => formatLabel(format, tr)).join(', ')}
-              <ChevronDown class="size-3.5" strokeWidth={1.9} />
+            </button>
+            <button
+              type="button"
+              class={cn('ingestions-tool-button', panel() === 'actions' && 'ingestions-tool-button--active')}
+              aria-expanded={panel() === 'actions' ? 'true' : 'false'}
+              onClick={() => togglePanel('actions')}
+            >
+              <Play class="size-4" strokeWidth={1.9} />
+              {tr('Nettleserhandlinger', 'Browser steps')}
+              <Show when={props.state.actions.length > 0}>
+                <span class="ingestions-count-pill">{props.state.actions.length}</span>
+              </Show>
             </button>
           </Show>
           <span class="ingestions-pg__spacer" />
@@ -342,16 +457,130 @@ export function IngestionsPlayground(props: {
             </div>
             <p class="ingestions-pg__note">
               {tr(
-                'Markdown følger alltid med for forhåndsvisningen. Skjermbilde kan være slått av på installasjonen; da sier resultatet fra.',
-                'Markdown always comes along for the preview. Screenshots may be switched off on this installation; the result says so.',
+                'Markdown følger alltid med, så forhåndsvisningen har tekst. Skjermbilde og PDF må være slått på på Quarry-edge; er de av, sier resultatet fra hvilken bryter som mangler.',
+                'Markdown always comes along, so the preview has text. Screenshot and PDF must be switched on in Quarry-edge; when they are off, the result names the switch that is missing.',
               )}
             </p>
+          </div>
+        </Show>
+
+        <Show when={panel() === 'actions' && endpoint() === 'scrape'}>
+          <div class="ingestions-pg__panel ingestions-actions-builder" role="group" aria-label={tr('Nettleserhandlinger', 'Browser steps')}>
+            <p class="ingestions-pg__note">
+              {tr(
+                'Handlingene kjøres i rekkefølge i nettleseren før siden hentes. Krever at nettleserhandlinger er slått på på Quarry-edge.',
+                'Steps run in order in the browser before the page is captured. They need browser steps switched on in Quarry-edge.',
+              )}
+            </p>
+            <For
+              each={props.state.actions}
+              fallback={<div class="ingestions-empty-box">{tr('Ingen handlinger ennå. Legg til et steg under.', 'No steps yet. Add one below.')}</div>}
+            >
+              {(action, index) => (
+                <div class="ingestions-action-row">
+                  <span class="ingestions-action-row__index">{index() + 1}</span>
+                  <VerevonSelect
+                    aria-label={tr('Type handling', 'Step type')}
+                    value={action.type}
+                    onChange={(event) => patchAction(action.id, { type: event.currentTarget.value as ActionType })}
+                  >
+                    <For each={actionTypes}>{(type) => <option value={type}>{actionLabel(type, tr)}</option>}</For>
+                  </VerevonSelect>
+                  <Show when={action.type === 'wait'}>
+                    <VerevonInput
+                      type="number"
+                      min="1"
+                      max="30000"
+                      aria-label={tr('Millisekunder', 'Milliseconds')}
+                      value={action.ms}
+                      onInput={(event) => patchAction(action.id, { ms: event.currentTarget.value })}
+                    />
+                  </Show>
+                  <Show when={action.type === 'click' || action.type === 'write' || action.type === 'select'}>
+                    <VerevonInput
+                      class="ingestions-mono"
+                      aria-label={tr('CSS-selektor', 'CSS selector')}
+                      value={action.selector}
+                      onInput={(event) => patchAction(action.id, { selector: event.currentTarget.value })}
+                      placeholder="#search, button[type=submit]"
+                    />
+                  </Show>
+                  <Show when={action.type === 'write'}>
+                    <VerevonInput
+                      aria-label={tr('Tekst', 'Text')}
+                      value={action.text}
+                      onInput={(event) => patchAction(action.id, { text: event.currentTarget.value })}
+                      placeholder={tr('Teksten som skal skrives', 'The text to type')}
+                    />
+                  </Show>
+                  <Show when={action.type === 'select'}>
+                    <VerevonInput
+                      aria-label={tr('Verdi', 'Value')}
+                      value={action.value}
+                      onInput={(event) => patchAction(action.id, { value: event.currentTarget.value })}
+                      placeholder={tr('Verdien som skal velges', 'The option value to pick')}
+                    />
+                  </Show>
+                  <Show when={action.type === 'press'}>
+                    <VerevonInput
+                      aria-label={tr('Tast', 'Key')}
+                      value={action.key}
+                      onInput={(event) => patchAction(action.id, { key: event.currentTarget.value })}
+                      placeholder="Enter, Tab, ArrowDown"
+                    />
+                  </Show>
+                  <Show when={action.type === 'scroll'}>
+                    <VerevonSelect
+                      aria-label={tr('Rullretning', 'Scroll direction')}
+                      value={action.scroll}
+                      onChange={(event) => patchAction(action.id, { scroll: event.currentTarget.value as ScrollMode })}
+                    >
+                      <option value="bottom">{tr('Til bunnen', 'To bottom')}</option>
+                      <option value="top">{tr('Til toppen', 'To top')}</option>
+                      <option value="down">{tr('Ned med piksler', 'Down by pixels')}</option>
+                      <option value="up">{tr('Opp med piksler', 'Up by pixels')}</option>
+                    </VerevonSelect>
+                    <Show when={action.scroll === 'down' || action.scroll === 'up'}>
+                      <VerevonInput
+                        type="number"
+                        min="1"
+                        max="10000"
+                        aria-label={tr('Piksler', 'Pixels')}
+                        value={action.pixels}
+                        onInput={(event) => patchAction(action.id, { pixels: event.currentTarget.value })}
+                      />
+                    </Show>
+                  </Show>
+                  <button type="button" class="ingestions-icon-button" aria-label={tr('Fjern handling', 'Remove step')} onClick={() => removeAction(action.id)}>
+                    <Trash2 class="size-3.5" strokeWidth={1.9} />
+                  </button>
+                </div>
+              )}
+            </For>
             <div class="ingestions-pill-row">
-              <span class="ingestions-muted-label">{tr('Ikke tilgjengelig ennå:', 'Not available yet:')}</span>
-              <NeedsBackend label={tr('Sammendrag', 'Summary')} reason={tr('AI-formater er slått av i Quarry på denne installasjonen.', 'AI formats are switched off in Quarry on this installation.')} />
-              <NeedsBackend label="JSON" reason={tr('Strukturert JSON per side krever at gatewayen videresender schema.', 'Per-page structured JSON needs the gateway to forward a schema.')} />
-              <NeedsBackend label={tr('Handlinger', 'Actions')} reason={tr('Nettleserhandlinger (klikk, skriv, rull) er slått av (QUARRY_EDGE__SCRAPE_ACTIONS).', 'Browser actions (click, type, scroll) are switched off (QUARRY_EDGE__SCRAPE_ACTIONS).')} />
+              <For each={actionTypes}>
+                {(type) => (
+                  <button
+                    type="button"
+                    class="ingestions-chip-button"
+                    onClick={() => props.onChange({ actions: [...props.state.actions, newAction(type)] })}
+                  >
+                    <Plus class="size-3" strokeWidth={2.2} />
+                    {actionLabel(type, tr)}
+                  </button>
+                )}
+              </For>
             </div>
+            <label class="ingestions-field">
+              {tr('Ved feil i et steg', 'When a step fails')}
+              <VerevonSelect
+                value={props.state.actionsOnError}
+                onChange={(event) => props.onChange({ actionsOnError: event.currentTarget.value as 'abort' | 'continue' })}
+              >
+                <option value="abort">{tr('Stopp og rapporter', 'Stop and report')}</option>
+                <option value="continue">{tr('Gå videre til neste steg', 'Go on to the next step')}</option>
+              </VerevonSelect>
+            </label>
           </div>
         </Show>
 
@@ -370,12 +599,34 @@ export function IngestionsPlayground(props: {
                 </span>
               </label>
               <label class="ingestions-field">
+                {tr('Utdrag', 'Extraction')}
+                <VerevonSelect
+                  value={props.state.extractor}
+                  onChange={(event) => props.onChange({ extractor: event.currentTarget.value as PlaygroundState['extractor'] })}
+                >
+                  <option value="readability">{tr('Hovedinnhold (Readability)', 'Main content (Readability)')}</option>
+                  <option value="clean_full">{tr('Hele siden, uten skript og kulisser', 'Whole page, without scripts and chrome')}</option>
+                  <option value="raw">{tr('Råt dokument', 'Raw document')}</option>
+                </VerevonSelect>
+              </label>
+              <label class="ingestions-toggle">
+                <input
+                  type="checkbox"
+                  checked={props.state.removeBase64Images}
+                  onChange={(event) => props.onChange({ removeBase64Images: event.currentTarget.checked })}
+                />
+                <span>
+                  <strong>{tr('Fjern base64-bilder', 'Remove base64 images')}</strong>
+                  <small>{tr('Fjerner innebygde bilder fra Markdown.', 'Drops inline images from the Markdown.')}</small>
+                </span>
+              </label>
+              <label class="ingestions-field">
                 {tr('Inkluder tagger', 'Include tags')}
                 <VerevonInput value={props.state.includeTags} onInput={(event) => props.onChange({ includeTags: event.currentTarget.value })} placeholder="main, article" />
               </label>
               <label class="ingestions-field">
                 {tr('Ekskluder tagger', 'Exclude tags')}
-                <VerevonInput value={props.state.excludeTags} onInput={(event) => props.onChange({ excludeTags: event.currentTarget.value })} placeholder="nav, footer, .cookie" />
+                <VerevonInput value={props.state.excludeTags} onInput={(event) => props.onChange({ excludeTags: event.currentTarget.value })} placeholder="nav, footer" />
               </label>
               <label class="ingestions-field">
                 {tr('Vent før henting (ms)', 'Wait before fetch (ms)')}
@@ -401,7 +652,7 @@ export function IngestionsPlayground(props: {
               </label>
               <label class="ingestions-field">
                 {tr('Ekskluder stier', 'Exclude paths')}
-                <VerevonInput value={props.state.excludePaths} onInput={(event) => props.onChange({ excludePaths: event.currentTarget.value })} placeholder="/blog/*, re:\\?page=" />
+                <VerevonInput value={props.state.excludePaths} onInput={(event) => props.onChange({ excludePaths: event.currentTarget.value })} placeholder="/blog/*" />
               </label>
               <label class="ingestions-toggle">
                 <input type="checkbox" checked={props.state.allowSubdomains} onChange={(event) => props.onChange({ allowSubdomains: event.currentTarget.checked })} />
@@ -439,17 +690,70 @@ export function IngestionsPlayground(props: {
                 {tr('Antall treff', 'Results')}
                 <VerevonInput type="number" min="1" max="20" value={props.state.searchLimit} onInput={(event) => props.onChange({ searchLimit: event.currentTarget.value })} />
               </label>
-              <div class="ingestions-pill-row">
-                <NeedsBackend label={tr('KI-svar', 'AI answer')} reason={tr('Svarsyntese er ikke konfigurert i Quarry på denne installasjonen.', 'Answer synthesis is not configured in Quarry on this installation.')} />
-              </div>
-            </Show>
-            <Show when={endpoint() === 'extract'}>
-              <div class="ingestions-field">
-                {tr('JSON-schema', 'JSON schema')}
-                <div class="ingestions-pill-row">
-                  <NeedsBackend reason={tr('Quarry tar imot schema, men gatewayen videresender bare prompten for uttrekk i dag.', 'Quarry accepts a schema, but the gateway forwards only the prompt for extract today.')} />
-                </div>
-              </div>
+              <label class="ingestions-field">
+                {tr('Tidsrom', 'Time range')}
+                <VerevonSelect
+                  value={props.state.searchTimeRange}
+                  onChange={(event) => props.onChange({ searchTimeRange: event.currentTarget.value as PlaygroundState['searchTimeRange'] })}
+                >
+                  <option value="">{tr('Når som helst', 'Any time')}</option>
+                  <option value="day">{tr('Siste døgn', 'Past day')}</option>
+                  <option value="week">{tr('Siste uke', 'Past week')}</option>
+                  <option value="month">{tr('Siste måned', 'Past month')}</option>
+                  <option value="year">{tr('Siste år', 'Past year')}</option>
+                </VerevonSelect>
+              </label>
+              <label class="ingestions-field">
+                {tr('Emne', 'Topic')}
+                <VerevonSelect
+                  value={props.state.searchTopic}
+                  onChange={(event) => props.onChange({ searchTopic: event.currentTarget.value as PlaygroundState['searchTopic'] })}
+                >
+                  <option value="">{tr('Alle emner', 'All topics')}</option>
+                  <option value="general">{tr('Generelt', 'General')}</option>
+                  <option value="news">{tr('Nyheter', 'News')}</option>
+                  <option value="finance">{tr('Finans', 'Finance')}</option>
+                </VerevonSelect>
+              </label>
+              <label class="ingestions-field">
+                {tr('Kun disse domenene', 'Only these domains')}
+                <VerevonInput value={props.state.searchIncludeDomains} onInput={(event) => props.onChange({ searchIncludeDomains: event.currentTarget.value })} placeholder="docs.example.com" />
+              </label>
+              <label class="ingestions-field">
+                {tr('Ikke disse domenene', 'Exclude domains')}
+                <VerevonInput value={props.state.searchExcludeDomains} onInput={(event) => props.onChange({ searchExcludeDomains: event.currentTarget.value })} placeholder="pinterest.com" />
+              </label>
+              <label class="ingestions-field">
+                {tr('Marked (land)', 'Market (country)')}
+                <VerevonInput value={props.state.searchCountry} onInput={(event) => props.onChange({ searchCountry: event.currentTarget.value.slice(0, 2) })} placeholder="NO" />
+              </label>
+              <label class="ingestions-field">
+                {tr('Språk', 'Language')}
+                <VerevonInput value={props.state.searchLanguage} onInput={(event) => props.onChange({ searchLanguage: event.currentTarget.value.slice(0, 3) })} placeholder="no" />
+              </label>
+              <label class="ingestions-toggle">
+                <input type="checkbox" checked={props.state.searchExact} onChange={(event) => props.onChange({ searchExact: event.currentTarget.checked })} />
+                <span>
+                  <strong>{tr('Eksakt treff', 'Exact match')}</strong>
+                  <small>{tr('Søk etter nøyaktig ordlyd.', 'Search for the exact wording.')}</small>
+                </span>
+              </label>
+              <label class="ingestions-toggle">
+                <input
+                  type="checkbox"
+                  checked={props.state.searchIncludeAnswer}
+                  onChange={(event) => props.onChange({ searchIncludeAnswer: event.currentTarget.checked })}
+                />
+                <span>
+                  <strong>{tr('Be om svar', 'Ask for an answer')}</strong>
+                  <small>
+                    {tr(
+                      'Quarry skriver et kort svar fra treffene når en svarleverandør er satt opp.',
+                      'Quarry writes a short answer from the hits when an answer provider is set up.',
+                    )}
+                  </small>
+                </span>
+              </label>
             </Show>
           </div>
         </Show>
@@ -468,36 +772,19 @@ export function IngestionsPlayground(props: {
               </VerevonSegmented>
               <CopyButton text={snippet} label={tr('Kopier kode', 'Copy code')} />
             </div>
-            <pre class="ingestions-code-panel__code"><code>{snippet()}</code></pre>
+            <pre class="ingestions-code-panel__code">
+              <code>{snippet()}</code>
+            </pre>
             <p class="ingestions-pg__note">
-              {tr(
-                `Samme felt som siden sender, mot Quarry v2 sitt ${request().path}. Sett QUARRY_URL og QUARRY_TOKEN selv.`,
-                `The same fields this page sends, against Quarry v2's ${request().path}. Set QUARRY_URL and QUARRY_TOKEN yourself.`,
-              )}
+              {request().note ??
+                tr(
+                  `Samme felt som siden sender, mot Quarry v2 sitt ${request().path}. Sett QUARRY_URL og QUARRY_TOKEN selv.`,
+                  `The same fields this page sends, against Quarry v2's ${request().path}. Set QUARRY_URL and QUARRY_TOKEN yourself.`,
+                )}
             </p>
           </div>
         </Show>
       </form>
     </div>
   )
-}
-
-/** A failed scrape that asked for a capture the installation switched off. */
-export function isCaptureDisabled(error: unknown): boolean {
-  if (!(error instanceof ApiError)) return false
-  const fields = error.details?.fields
-  return Array.isArray(fields) && fields.some((field) => typeof field === 'object' && field !== null && (field as Record<string, unknown>).code === 'feature_disabled')
-}
-
-export function playgroundErrorMessage(error: unknown, endpoint: PlaygroundEndpoint, tr: (no: string, en: string) => string): string {
-  if (isCaptureDisabled(error)) {
-    return tr(
-      'Skjermbilde er slått av på denne installasjonen (QUARRY_EDGE__SCRAPE_CAPTURE). Fjern Skjermbilde-formatet og kjør igjen.',
-      'Screenshots are switched off on this installation (QUARRY_EDGE__SCRAPE_CAPTURE). Remove the Screenshot format and run again.',
-    )
-  }
-  return translateApiError(error, tr, {
-    no: `${kindLabel(endpoint, tr)} kunne ikke fullføres.`,
-    en: `${kindLabel(endpoint, tr)} could not be completed.`,
-  })
 }

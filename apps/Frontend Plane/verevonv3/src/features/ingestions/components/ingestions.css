@@ -126,7 +126,7 @@
 
 .ingestions-overview {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: 12px;
 }
 
@@ -1256,4 +1256,135 @@
   .ingestions-page .ingestions-pg__submit {
     width: 100%;
   }
+}
+
+/* ── Results and job detail (added with the real-backend wiring) ─────────── */
+
+.ingestions-section-title {
+  margin: 16px 0 8px;
+  color: var(--ing-text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.ingestions-error-list,
+.ingestions-extract-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ingestions-error-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--ing-border);
+  border-radius: 10px;
+  background: var(--ing-surface);
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.ingestions-error-list a {
+  color: var(--ing-info);
+}
+
+.ingestions-extract-item {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--ing-border);
+  border-radius: 12px;
+  background: var(--ing-surface);
+  padding: 12px;
+}
+
+.ingestions-extract-item > a {
+  color: var(--ing-info);
+  font-size: 12.5px;
+}
+
+.ingestions-extract-item .ingestions-json-pre,
+.ingestions-extract-item .ingestions-prose-pre {
+  max-height: 320px;
+  overflow: auto;
+  border-radius: 10px;
+  background: var(--ing-surface-sunken);
+}
+
+.ingestions-answer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--ing-border);
+  border-radius: 12px;
+  background: var(--ing-surface);
+  padding: 14px 16px;
+}
+
+.ingestions-answer p {
+  color: var(--ing-text);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.ingestions-citations {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+}
+
+.ingestions-citations a {
+  color: var(--ing-info);
+}
+
+.ingestions-actions-builder {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ingestions-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.ingestions-action-row > * {
+  min-width: 0;
+}
+
+.ingestions-action-row .verevon-field-compact {
+  flex: 1 1 180px;
+  min-height: 36px;
+}
+
+.ingestions-action-row__index {
+  display: inline-grid;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--ing-surface-sunken);
+  color: var(--ing-text-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.ingestions-pdf-link {
+  padding: 16px;
+}
+
+.ingestions-list-card--unread {
+  border-left: 3px solid var(--ing-accent);
 }

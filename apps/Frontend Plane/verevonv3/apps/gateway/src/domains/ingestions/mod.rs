@@ -11,6 +11,7 @@
 //! cross-plane source aggregation.
 
 mod evidence;
+pub(crate) mod jobs;
 mod profiles;
 pub(crate) mod runs;
 pub(crate) mod schedules;
@@ -47,6 +48,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/ingestions/sources/{id}",
             delete(sources::delete_source),
         )
+        .route("/api/ingestions/jobs/{id}", get(jobs::get_job))
+        .route("/api/ingestions/jobs/{id}/errors", get(jobs::get_job_errors))
+        .route("/api/ingestions/jobs/{id}/control", post(jobs::job_control))
+        .route("/api/ingestions/usage", get(jobs::get_usage))
         .route("/api/ingestions/profiles", get(profiles::list_profiles))
         .route("/api/ingestions/evidence", get(evidence::get_evidence))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))

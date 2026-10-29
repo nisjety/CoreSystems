@@ -1,7 +1,7 @@
 import { createMemo, createSignal, For, Show } from 'solid-js'
 import {
   AlertTriangle,
-  ArrowUpRight,
+  Bot,
   CheckCircle2,
   Clock,
   Database,
@@ -17,19 +17,34 @@ import { cn } from '@/shared/lib/cn'
 import { Button } from '@/shared/ui/Button'
 import { VerevonSegmented, VerevonSegmentedButton } from '@/shared/ui/verevon/VerevonSegmented'
 import type { DiscoveredPage } from '@/shared/api/knowledge-client'
-import type { WebSearchResult } from '@/shared/api/search-client'
+import type { WebSearchCitation, WebSearchResult } from '@/shared/api/search-client'
+import type { ExtractItem } from '@/shared/api/ingestions-client'
 import type { ScrapeView } from '@/features/ingestions/lib/scrape-view'
 import { shortFingerprint } from '@/features/ingestions/lib/monitoring'
 import { formatDuration } from '@/features/ingestions/lib/runs'
-import { CopyButton, DownloadButton, EmptyState, NeedsBackend, absoluteTime, kindLabel } from '@/features/ingestions/components/ingestions-ui'
+import {
+  CopyButton,
+  DownloadButton,
+  EmptyState,
+  absoluteTime,
+  kindLabel,
+} from '@/features/ingestions/components/ingestions-ui'
 
 /** What the last playground submission produced. */
 export type PlaygroundResult =
   | { kind: 'scrape'; view: ScrapeView; raw: unknown }
-  | { kind: 'extract'; url: string; result: unknown; raw: unknown }
+  | { kind: 'extract'; url: string; items: ExtractItem[]; schemaUsed: boolean; raw: unknown }
   | { kind: 'map'; url: string; pages: DiscoveredPage[] }
-  | { kind: 'search'; query: string; results: WebSearchResult[] }
+  | {
+      kind: 'search'
+      query: string
+      results: WebSearchResult[]
+      answer: string | null
+      citations: WebSearchCitation[]
+      answerRequested: boolean
+    }
   | { kind: 'job'; endpoint: 'crawl' | 'batch'; id: string; target: string; acceptedAt: string }
+  | { kind: 'agent'; url: string; goal: string; runId: string; threadId: string; sessionId: string }
 
 export type IngestState = 'idle' | 'sending' | 'sent' | 'failed'
 
@@ -52,7 +67,7 @@ export function IngestionsPlaygroundResult(props: {
         fallback={
           <div class="ingestions-result__loading">
             <Loader class="size-5 ingestions-spin" strokeWidth={1.9} />
-            <span>{tr('Henter …', 'Fetching…')}</span>
+            <span>{tr('Kjører …', 'Running…')}</span>
             <div class="ingestions-skeleton" />
             <div class="ingestions-skeleton ingestions-skeleton--short" />
             <div class="ingestions-skeleton" />
@@ -73,8 +88,8 @@ export function IngestionsPlaygroundResult(props: {
             <Show when={!props.error}>
               <EmptyState icon={<ScanSearch class="size-5" strokeWidth={1.8} />} title={tr('Resultatet vises her', 'The result shows here')}>
                 {tr(
-                  'Velg et endepunkt, lim inn en URL og kjør. Markdown, JSON, lenker og metadata dukker opp her, klare til å kopieres.',
-                  'Pick an endpoint, paste a URL and run. Markdown, JSON, links and metadata show up here, ready to copy.',
+                  'Velg et endepunkt, fyll inn og kjør. Markdown, JSON, lenker og metadata dukker opp her, klare til å kopieres.',
+                  'Pick an endpoint, fill in and run. Markdown, JSON, links and metadata show up here, ready to copy.',
                 )}
               </EmptyState>
             </Show>
@@ -83,25 +98,19 @@ export function IngestionsPlaygroundResult(props: {
           {(result) => (
             <>
               <Show when={result().kind === 'scrape' ? (result() as Extract<PlaygroundResult, { kind: 'scrape' }>) : null}>
-                {(scrape) => (
-                  <ScrapeResultView
-                    view={scrape().view}
-                    raw={scrape().raw}
-                    ingestState={props.ingestState}
-                    onIngest={props.onIngest}
-                  />
-                )}
+                {(scrape) => <ScrapeResultView view={scrape().view} raw={scrape().raw} ingestState={props.ingestState} onIngest={props.onIngest} onBatchUrls={props.onBatchUrls} />}
               </Show>
               <Show when={result().kind === 'extract' ? (result() as Extract<PlaygroundResult, { kind: 'extract' }>) : null}>
-                {(extract) => <ExtractResultView url={extract().url} result={extract().result} raw={extract().raw} />}
+                {(extract) => <ExtractResultView url={extract().url} items={extract().items} schemaUsed={extract().schemaUsed} raw={extract().raw} />}
               </Show>
               <Show when={result().kind === 'map' ? (result() as Extract<PlaygroundResult, { kind: 'map' }>) : null}>
-                {(map) => (
-                  <MapResultView url={map().url} pages={map().pages} onScrapeUrl={props.onScrapeUrl} onBatchUrls={props.onBatchUrls} />
-                )}
+                {(map) => <MapResultView url={map().url} pages={map().pages} onScrapeUrl={props.onScrapeUrl} onBatchUrls={props.onBatchUrls} />}
               </Show>
               <Show when={result().kind === 'search' ? (result() as Extract<PlaygroundResult, { kind: 'search' }>) : null}>
-                {(search) => <SearchResultView query={search().query} results={search().results} onScrapeUrl={props.onScrapeUrl} />}
+                {(search) => <SearchResultView search={search()} onScrapeUrl={props.onScrapeUrl} onBatchUrls={props.onBatchUrls} />}
+              </Show>
+              <Show when={result().kind === 'agent' ? (result() as Extract<PlaygroundResult, { kind: 'agent' }>) : null}>
+                {(agent) => <AgentReceipt run={agent()} />}
               </Show>
               <Show when={result().kind === 'job' ? (result() as Extract<PlaygroundResult, { kind: 'job' }>) : null}>
                 {(job) => (
@@ -113,8 +122,8 @@ export function IngestionsPlaygroundResult(props: {
                       <h3>{job().endpoint === 'crawl' ? tr('Crawl startet', 'Crawl started') : tr('Batch startet', 'Batch started')}</h3>
                       <p>
                         {tr(
-                          'Jobben kjører varig i Quarry. Fremdrift, logg og utdata finner du under Kjøringer.',
-                          'The job runs durably in Quarry. Progress, log and output are under Runs.',
+                          'Jobben kjører varig i Quarry. Fremdrift, feil og logg finner du under Kjøringer, der du også kan sette jobben på pause.',
+                          'The job runs durably in Quarry. Progress, errors and log are under Runs, where you can also pause the job.',
                         )}
                       </p>
                       <dl class="ingestions-kv">
@@ -132,7 +141,7 @@ export function IngestionsPlaygroundResult(props: {
                     </div>
                     <Button variant="secondary" size="sm" onClick={() => props.onOpenRun(job().id)}>
                       {tr('Følg kjøringen', 'Follow the run')}
-                      <ArrowUpRight class="size-4" strokeWidth={1.9} />
+                      <ExternalLink class="size-4" strokeWidth={1.9} />
                     </Button>
                   </div>
                 )}
@@ -145,9 +154,63 @@ export function IngestionsPlaygroundResult(props: {
   )
 }
 
-type ScrapeTab = 'markdown' | 'json' | 'links' | 'metadata' | 'html' | 'screenshot'
+function AgentReceipt(props: { run: Extract<PlaygroundResult, { kind: 'agent' }> }) {
+  const i18n = useI18n()
+  const tr = i18n.tr
+  return (
+    <div class="ingestions-job-receipt">
+      <div class="ingestions-job-receipt__icon">
+        <Bot class="size-5" strokeWidth={1.8} />
+      </div>
+      <div class="ingestions-job-receipt__copy">
+        <h3>{tr('Agenten jobber', 'The agent is working')}</h3>
+        <p>
+          {tr(
+            'Agenten kjører i en nettleserøkt og logger hvert steg i kjøringen. Følg fremdriften i kjøringskonsollen.',
+            'The agent runs in a browser session and logs each step to the run. Follow its progress in the run console.',
+          )}
+        </p>
+        <dl class="ingestions-kv">
+          <dt>{tr('Mål', 'Target')}</dt>
+          <dd class="ingestions-truncate">{props.run.url}</dd>
+          <dt>{tr('Oppdrag', 'Goal')}</dt>
+          <dd>{props.run.goal}</dd>
+          <dt>{tr('Kjørings-ID', 'Run ID')}</dt>
+          <dd class="ingestions-mono">{props.run.runId}</dd>
+          <dt>{tr('Økt-ID', 'Session ID')}</dt>
+          <dd class="ingestions-mono">{props.run.sessionId}</dd>
+        </dl>
+      </div>
+      <a class="button button--secondary button--sm" href="/agents/runs" link>
+        {tr('Åpne kjøringskonsollen', 'Open the run console')}
+        <ExternalLink class="size-4" strokeWidth={1.9} />
+      </a>
+    </div>
+  )
+}
 
-function ScrapeResultView(props: { view: ScrapeView; raw: unknown; ingestState: IngestState; onIngest: () => void }) {
+function extractStatusLabel(status: string, tr: (no: string, en: string) => string) {
+  switch (status) {
+    case 'ok':
+      return tr('Strukturert', 'Structured')
+    case 'fetched':
+      return tr('Hentet som Markdown', 'Fetched as Markdown')
+    case 'error':
+      return tr('Feilet', 'Failed')
+    default:
+      return status
+  }
+}
+
+type ScrapeTab = 'markdown' | 'json' | 'links' | 'metadata' | 'html' | 'screenshot' | 'pdf'
+
+function ScrapeResultView(props: {
+  view: ScrapeView
+  raw: unknown
+  ingestState: IngestState
+  onIngest: () => void
+  onBatchUrls: (urls: string[]) => void
+}) {
   const i18n = useI18n()
   const tr = i18n.tr
   const [tab, setTab] = createSignal<ScrapeTab>('markdown')
@@ -161,7 +224,8 @@ function ScrapeResultView(props: { view: ScrapeView; raw: unknown; ingestState: 
       { id: 'metadata', label: tr('Metadata', 'Metadata') },
     ]
     if (html()) list.push({ id: 'html', label: 'HTML' })
-    if (props.view.captures) list.push({ id: 'screenshot', label: tr('Skjermbilde', 'Screenshot') })
+    if (props.view.captures?.screenshotInline || props.view.captures?.screenshotUrl) list.push({ id: 'screenshot', label: tr('Skjermbilde', 'Screenshot') })
+    if (props.view.captures?.pdfUrl) list.push({ id: 'pdf', label: 'PDF' })
     return list
   })
   const tabText = () => {
@@ -213,22 +277,32 @@ function ScrapeResultView(props: { view: ScrapeView; raw: unknown; ingestState: 
 
       <div class="ingestions-result__facts">
         <Show when={props.view.driver}>
-          <span>{tr('Driver', 'Driver')}: <strong>{props.view.driver}</strong></span>
+          <span>
+            {tr('Driver', 'Driver')}: <strong>{props.view.driver}</strong>
+          </span>
         </Show>
         <Show when={props.view.durationMs !== null}>
-          <span><Clock class="size-3" strokeWidth={2} /> {formatDuration(props.view.durationMs, tr)}</span>
+          <span>
+            <Clock class="size-3" strokeWidth={2} /> {formatDuration(props.view.durationMs, tr)}
+          </span>
         </Show>
         <Show when={props.view.wordCount !== null}>
-          <span>{props.view.wordCount} {tr('ord', 'words')}</span>
+          <span>
+            {props.view.wordCount} {tr('ord', 'words')}
+          </span>
         </Show>
         <Show when={props.view.language}>
           <span>{props.view.language}</span>
         </Show>
         <Show when={props.view.change}>
-          <span>{tr('Endring', 'Change')}: <strong>{props.view.change}</strong></span>
+          <span>
+            {tr('Endring', 'Change')}: <strong>{props.view.change}</strong>
+          </span>
         </Show>
         <Show when={props.view.fingerprint}>
-          <span class="ingestions-mono" title={props.view.fingerprint}>{shortFingerprint(props.view.fingerprint)}</span>
+          <span class="ingestions-mono" title={props.view.fingerprint}>
+            {shortFingerprint(props.view.fingerprint)}
+          </span>
         </Show>
       </div>
 
@@ -256,13 +330,19 @@ function ScrapeResultView(props: { view: ScrapeView; raw: unknown; ingestState: 
           </For>
         </VerevonSegmented>
         <span class="ingestions-pg__spacer" />
-        <Show when={tab() !== 'screenshot'}>
+        <Show when={tab() !== 'screenshot' && tab() !== 'pdf'}>
           <CopyButton text={tabText} />
           <DownloadButton
             filename={tab() === 'markdown' ? 'scrape.md' : tab() === 'html' ? 'scrape.html' : tab() === 'links' ? 'links.txt' : 'scrape.json'}
             content={tabText}
             type={tab() === 'markdown' ? 'text/markdown' : tab() === 'html' ? 'text/html' : tab() === 'links' ? 'text/plain' : 'application/json'}
           />
+        </Show>
+        <Show when={tab() === 'links' && props.view.links.length > 0}>
+          <Button size="sm" variant="secondary" onClick={() => props.onBatchUrls(props.view.links.map((link) => link.href))}>
+            <Layers class="size-4" strokeWidth={1.9} />
+            {tr('Batch alle lenker', 'Batch all links')}
+          </Button>
         </Show>
       </div>
 
@@ -279,8 +359,11 @@ function ScrapeResultView(props: { view: ScrapeView; raw: unknown; ingestState: 
             {(markdown) => <pre class="ingestions-prose-pre">{markdown()}</pre>}
           </Show>
         </Show>
-        <Show when={tab() === 'json' || tab() === 'metadata'}>
-          <pre class="ingestions-json-pre">{tab() === 'json' ? json() : JSON.stringify(props.view.metadata, null, 2)}</pre>
+        <Show when={tab() === 'json'}>
+          <pre class="ingestions-json-pre">{json()}</pre>
+        </Show>
+        <Show when={tab() === 'metadata'}>
+          <pre class="ingestions-json-pre">{JSON.stringify(props.view.metadata, null, 2)}</pre>
         </Show>
         <Show when={tab() === 'html'}>
           <pre class="ingestions-json-pre">{html()}</pre>
@@ -290,7 +373,9 @@ function ScrapeResultView(props: { view: ScrapeView; raw: unknown; ingestState: 
             <For each={props.view.links} fallback={<li class="ingestions-muted">{tr('Ingen lenker funnet.', 'No links found.')}</li>}>
               {(link) => (
                 <li>
-                  <a href={link.href} target="_blank" rel="noreferrer" class="ingestions-truncate">{link.href}</a>
+                  <a href={link.href} target="_blank" rel="noreferrer" class="ingestions-truncate">
+                    {link.href}
+                  </a>
                   <Show when={link.text}>{(label) => <small>{label()}</small>}</Show>
                 </li>
               )}
@@ -300,11 +385,25 @@ function ScrapeResultView(props: { view: ScrapeView; raw: unknown; ingestState: 
         <Show when={tab() === 'screenshot' && props.view.captures}>
           {(captures) => (
             <Show
-              when={captures().screenshotInline ? `data:${captures().screenshotInline!.contentType};base64,${captures().screenshotInline!.dataBase64}` : captures().screenshotUrl}
+              when={
+                captures().screenshotInline
+                  ? `data:${captures().screenshotInline?.contentType};base64,${captures().screenshotInline?.dataBase64}`
+                  : captures().screenshotUrl
+              }
               fallback={<EmptyState title={tr('Ingen skjermbilde i svaret', 'No screenshot in the response')} />}
             >
               {(src) => <img class="ingestions-screenshot" src={src()} alt={tr('Skjermbilde av siden', 'Screenshot of the page')} />}
             </Show>
+          )}
+        </Show>
+        <Show when={tab() === 'pdf' && props.view.captures?.pdfUrl}>
+          {(pdf) => (
+            <div class="ingestions-pdf-link">
+              <a href={pdf()} target="_blank" rel="noreferrer" class="button button--secondary button--sm">
+                <ExternalLink class="size-4" strokeWidth={1.9} />
+                {tr('Åpne PDF', 'Open PDF')}
+              </a>
+            </div>
           )}
         </Show>
       </div>
@@ -327,14 +426,19 @@ function ScrapeResultView(props: { view: ScrapeView; raw: unknown; ingestState: 
   )
 }
 
-function ExtractResultView(props: { url: string; result: unknown; raw: unknown }) {
+function ExtractResultView(props: { url: string; items: ExtractItem[]; schemaUsed: boolean; raw: unknown }) {
   const i18n = useI18n()
   const tr = i18n.tr
   const [tab, setTab] = createSignal<'data' | 'raw'>('data')
-  const data = createMemo(() => {
-    const record = typeof props.result === 'object' && props.result !== null ? (props.result as Record<string, unknown>) : {}
-    return record.structured ?? record.data ?? props.result
-  })
+  const data = createMemo(() =>
+    props.items.map((item) => ({
+      url: item.url,
+      status: item.status,
+      data: item.data ?? item.structured ?? null,
+      markdown: item.markdown ?? null,
+      error: item.error ?? null,
+    })),
+  )
   const text = () => JSON.stringify(tab() === 'data' ? data() : props.raw, null, 2)
   return (
     <div class="ingestions-result__body">
@@ -342,22 +446,50 @@ function ExtractResultView(props: { url: string; result: unknown; raw: unknown }
         <div class="ingestions-min-width">
           <div class="ingestions-title-row">
             <Sparkles class="size-4" strokeWidth={1.9} />
-            <h3>{tr('Uttrekk', 'Extract')}</h3>
+            <h3>{props.schemaUsed ? tr('Strukturert uttrekk', 'Structured extraction') : tr('Uttrekk som Markdown', 'Extraction as Markdown')}</h3>
           </div>
           <span class="ingestions-result__url">{props.url}</span>
         </div>
       </header>
       <div class="ingestions-result__tabs">
         <VerevonSegmented aria-label={tr('Visning', 'View')}>
-          <VerevonSegmentedButton selected={tab() === 'data'} onClick={() => setTab('data')}>{tr('Data', 'Data')}</VerevonSegmentedButton>
-          <VerevonSegmentedButton selected={tab() === 'raw'} onClick={() => setTab('raw')}>{tr('Rått svar', 'Raw response')}</VerevonSegmentedButton>
+          <VerevonSegmentedButton selected={tab() === 'data'} onClick={() => setTab('data')}>
+            {tr('Data', 'Data')}
+          </VerevonSegmentedButton>
+          <VerevonSegmentedButton selected={tab() === 'raw'} onClick={() => setTab('raw')}>
+            {tr('Rått svar', 'Raw response')}
+          </VerevonSegmentedButton>
         </VerevonSegmented>
         <span class="ingestions-pg__spacer" />
         <CopyButton text={text} />
         <DownloadButton filename="extract.json" content={text} />
       </div>
       <div class="ingestions-result__viewport">
-        <pre class="ingestions-json-pre">{text()}</pre>
+        <Show when={tab() === 'data'} fallback={<pre class="ingestions-json-pre">{text()}</pre>}>
+          <ul class="ingestions-extract-list">
+            <For each={data()} fallback={<li class="ingestions-muted">{tr('Quarry ga ingen resultater.', 'Quarry returned no results.')}</li>}>
+              {(item) => (
+                <li class="ingestions-extract-item">
+                  <div class="ingestions-title-row ingestions-title-row--spread">
+                    <a href={item.url} target="_blank" rel="noreferrer" class="ingestions-truncate">
+                      {item.url}
+                    </a>
+                    <span class={cn('ingestions-status', item.status === 'error' ? 'ingestions-status--warning' : 'ingestions-status--success')}>
+                      {extractStatusLabel(item.status, tr)}
+                    </span>
+                  </div>
+                  <Show when={item.error}>{(message) => <div class="ingestions-alert">{message()}</div>}</Show>
+                  <Show when={item.data !== null}>
+                    <pre class="ingestions-json-pre">{JSON.stringify(item.data, null, 2)}</pre>
+                  </Show>
+                  <Show when={item.data === null && item.markdown}>
+                    <pre class="ingestions-prose-pre">{item.markdown}</pre>
+                  </Show>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Show>
       </div>
     </div>
   )
@@ -406,7 +538,7 @@ function MapResultView(props: {
                 </label>
                 <button type="button" class="ingestions-icon-button" onClick={() => props.onScrapeUrl(page.url)}>
                   <ScanSearch class="size-3.5" strokeWidth={1.9} />
-                  Scrape
+                  {kindLabel('scrape', tr)}
                 </button>
               </li>
             )}
@@ -417,27 +549,69 @@ function MapResultView(props: {
   )
 }
 
-function SearchResultView(props: { query: string; results: WebSearchResult[]; onScrapeUrl: (url: string) => void }) {
+function SearchResultView(props: {
+  search: Extract<PlaygroundResult, { kind: 'search' }>
+  onScrapeUrl: (url: string) => void
+  onBatchUrls: (urls: string[]) => void
+}) {
   const i18n = useI18n()
   const tr = i18n.tr
+  const urls = () => props.search.results.map((hit) => hit.url)
   return (
     <div class="ingestions-result__body">
       <header class="ingestions-result__head">
         <div class="ingestions-min-width">
           <div class="ingestions-title-row">
-            <h3>{tr(`${props.results.length} treff`, `${props.results.length} results`)}</h3>
+            <h3>{tr(`${props.search.results.length} treff`, `${props.search.results.length} results`)}</h3>
           </div>
-          <span class="ingestions-result__url">“{props.query}”</span>
+          <span class="ingestions-result__url">“{props.search.query}”</span>
         </div>
-        <NeedsBackend label={tr('KI-svar av', 'AI answer off')} reason={tr('Svarsyntese er ikke konfigurert på denne installasjonen.', 'Answer synthesis is not configured on this installation.')} />
+        <Button size="sm" variant="primary" disabled={urls().length === 0} onClick={() => props.onBatchUrls(urls())}>
+          <Layers class="size-4" strokeWidth={1.9} />
+          {tr('Batch alle treff', 'Batch all hits')}
+        </Button>
       </header>
+      <Show when={props.search.answerRequested}>
+        <Show
+          when={props.search.answer}
+          fallback={
+            <div class="ingestions-warning-box">
+              {tr(
+                'Quarry ga ikke noe svar. Svar krever en svarleverandør på Quarry-edge; treffene under er likevel gyldige.',
+                'Quarry returned no answer. An answer needs an answer provider on Quarry-edge; the hits below are still valid.',
+              )}
+            </div>
+          }
+        >
+          {(answer) => (
+            <div class="ingestions-answer">
+              <p>{answer()}</p>
+              <Show when={props.search.citations.length > 0}>
+                <ol class="ingestions-citations">
+                  <For each={props.search.citations}>
+                    {(citation) => (
+                      <li>
+                        <a href={citation.url} target="_blank" rel="noreferrer">
+                          {citation.title || citation.url}
+                        </a>
+                      </li>
+                    )}
+                  </For>
+                </ol>
+              </Show>
+            </div>
+          )}
+        </Show>
+      </Show>
       <div class="ingestions-result__viewport">
         <ol class="ingestions-search-list">
-          <For each={props.results} fallback={<li class="ingestions-muted">{tr('Ingen treff.', 'No results.')}</li>}>
+          <For each={props.search.results} fallback={<li class="ingestions-muted">{tr('Ingen treff.', 'No results.')}</li>}>
             {(hit) => (
               <li>
                 <div class="ingestions-min-width">
-                  <a href={hit.url} target="_blank" rel="noreferrer"><strong>{hit.title || hit.url}</strong></a>
+                  <a href={hit.url} target="_blank" rel="noreferrer">
+                    <strong>{hit.title || hit.url}</strong>
+                  </a>
                   <small class="ingestions-truncate">{hit.url}</small>
                   <Show when={hit.snippet}>{(snippet) => <p>{snippet()}</p>}</Show>
                 </div>

@@ -27,9 +27,13 @@ export type SearchTimeRange = 'day' | 'month' | 'week' | 'year'
  * and `timeRange: null` mean "no filter" (the default broad search).
  */
 export type WebSearchFilters = {
+  /** Two-letter market hint, e.g. `NO`. */
+  country?: string | null
   exactMatch?: boolean
   excludeDomains?: string[]
   includeDomains?: string[]
+  /** Two- or three-letter language hint, e.g. `no`. */
+  language?: string | null
   timeRange?: SearchTimeRange | null
   topic?: SearchTopic | null
 }
@@ -104,6 +108,8 @@ export function runWebSearch(
   if (filters.exactMatch) body.exactMatch = true
   if (filters.includeDomains?.length) body.includeDomains = filters.includeDomains
   if (filters.excludeDomains?.length) body.excludeDomains = filters.excludeDomains
+  if (filters.country) body.country = filters.country
+  if (filters.language) body.language = filters.language
   return requestJson<WebSearchPayload>('/api/v1/search/web', {
     method: 'POST',
     body: JSON.stringify(body),
