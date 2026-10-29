@@ -1,0 +1,1 @@
+{"decision_list":[{"decision":"allow","policy":"url_dns_public","url":"http://slow.crawl.test/redir"},{"decision":"block","policy":"domain_grant_blocked","url":"http://fixture-b.crawl.test/ext"},{"decision":"allow","policy":"dns_pinned_proxy","url":"http://slow.crawl.test/redir"},{"decision":"block","policy":"domain_grant_blocked","url":"https://www.google.com/"}]}

@@ -69,3 +69,6 @@ One line per change: time UTC | leg | KEY old -> new. One line per revert.
 2026-10-28T23:27:37Z | R-X12 | QUARRY_EDGE__METRICS_ENABLED 1 -> (unset, 0) (revert; live-flags.env empty, edge recreated)
 2026-10-29T01:10:33Z | R2-SC4 | QUARRY_BROWSER_DEADLINE_SCALE (unset, 1) -> 0.5 (T2 incl. a first-step case; navigate deadline 12.5 s; sessions_open was 0)
 2026-10-29T01:12:13Z | R2-SC4 | QUARRY_BROWSER_DEADLINE_SCALE 0.5 -> (unset, 1) (revert; live-flags.env empty, edge recreated)
+2026-10-29T02:44:10Z | R3-SC4 | QUARRY_EDGE__RUN_SWEEPER_DRY_RUN 1 -> 0 (RS: an idle agent run is really released; sessions_open was 0 before the change)
+2026-10-29T02:44:10Z | R3-SC4 | QUARRY_EDGE__RUN_SWEEP_INTERVAL_S (unset, 15) -> 5; QUARRY_EDGE__AGENT_RUN_IDLE_TTL_S (unset, 300) -> 30 (RS idle-expiry resume)
+2026-10-29T02:46:37Z | R3-SC4 | QUARRY_EDGE__RUN_SWEEPER_DRY_RUN 0 -> (unset, compose default 1) (revert); RUN_SWEEP_INTERVAL_S 5 -> (unset, 15) (revert); AGENT_RUN_IDLE_TTL_S 30 -> (unset, 300) (revert; live-flags.env empty, edge recreated)

@@ -1,0 +1,30 @@
+=== RS start 2026-10-29T02:44:42Z ready={"generation":0,"sessions_open":0}
+--- RS run=run_01M62RQ7Z9YNQ065Z1EK3DQ19A allowed_domains=[fixture-a.crawl.test, slow.crawl.test]
+checkpoint at start (step|status|[current_url]): 0|active|[]
+first navigate slow.html: http=504 time=25.157690
+  {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":25000,"effect":"unknown","op":"navigate"}}
+wait (blank tab): http=200 time=0.211729
+  {"url":"about:blank","title":null,"step":1,"ax_nodes":3,"ax_names":[]}
+browser-session: {"currentUrl":"about:blank","title":null,"status":"active","live":true}
+checkpoint after the blank wait (step|status|[current_url]): 1|active|[]
+receipts: [{"step":0,"a":"navigate","s":"failed","code":"TIMEOUT"},{"step":1,"a":"wait","s":"completed","code":null}]
+idle from 2026-10-29T02:45:11Z; polling /ready sessions_open
+sessions_open 0 after 37s
+step on the expired run: http=404 time=0.031520
+  {"code":"NOT_FOUND","message":"agent run is not live","retryable":false,"details":{"reason":"run_not_live","resumable":true,"resume_run_id":"run_01M62RQ7Z9YNQ065Z1EK3DQ19A"}}
+checkpoint after expiry (step|status|[current_url]): 1|active|[]
+resume: http=200 time=0.019011
+  {"run_id":"run_01M62RQ7Z9YNQ065Z1EK3DQ19A","error":null}
+  'durable checkpoint URL is outside' in body: 0
+browser-session after resume: {"currentUrl":"","title":null,"status":"active","live":true}
+wait after resume (info): http=502 time=0.116718
+  {"code":"DRIVER_FAILED","message":"chromiumoxide: no current page; call goto() first","retryable":false,"details":{"reason":"no_current_page"}}
+navigate fixture-a after resume: http=200 time=0.414203
+  {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+wait after it: http=200 time=0.171160 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","do
+receipts: [{"step":0,"a":"navigate","s":"failed","code":"TIMEOUT"},{"step":1,"a":"wait","s":"completed","code":null},{"step":1,"a":"wait","s":"failed","code":"DRIVER_FAILED"},{"step":2,"a":"navigate","s":"completed","code":null},{"step":3,"a":"wait","s":"completed","code":null}]
+checkpoint before close (step|status|[current_url]): 3|active|[http://fixture-a.crawl.test/]
+close: HTTP=200
+checkpoint after close (step|status|[current_url]): 3|closed|[http://fixture-a.crawl.test/]
+ready: {"generation":1,"sessions_open":0}
+=== RS end 2026-10-29T02:45:54Z ready={"generation":1,"sessions_open":0}

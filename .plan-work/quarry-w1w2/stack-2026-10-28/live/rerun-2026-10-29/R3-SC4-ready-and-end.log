@@ -1,0 +1,5 @@
+# R3-SC4 /ready per container (end of each) and end-state checks
+shipped container end: {"status":"ready","slot":{"status":"ready","generation":1,"probe_failures":0},"so":0}
+rs container end: {"status":"ready","slot":{"status":"ready","generation":1,"probe_failures":0},"so":0}
+final container end: {"status":"ready","slot":{"status":"ready","generation":1,"probe_failures":0},"so":0}
+edge RestartCount 0 in all three (docker inspect)

@@ -1,0 +1,28 @@
+=== S1b start 2026-10-29T02:39:22Z ready={"generation":1,"sessions_open":0}
+--- S1b try 1 run=run_01M62RDF7APDGZ025S71C7KGP4 allowed_domains=[fixture-a.crawl.test, slow.crawl.test]
+warm navigate fixture-a: http=200 time=0.303892 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":0,"ax_nodes":37,"ax_names":["Fixture A","Fixt
+checkpoint (step|status|current_url): 1|active|http://fixture-a.crawl.test/
+navigate slow.crawl.test/toblank.html: http=200 time=0.210882
+  {"url":"http://slow.crawl.test/toblank.html","title":"R3-SC4 to blank","step":1,"ax_nodes":6,"ax_names":["R3-SC4 to blank","moving","moving"]}
+wait 1500 ms (tab moved to about:blank#off): http=403 time=1.573553
+  {"code":"SECURITY_BLOCKED","message":"browser action reached a domain outside the run's allowed domains","retryable":false,"details":null}
+browser-session: {"currentUrl":"http://slow.crawl.test/toblank.html","title":null,"status":"active","live":true}
+checkpoint after the refusal (step|status|current_url): 2|active|http://slow.crawl.test/toblank.html
+navigate fixture-a: http=200 time=0.176400 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+receipts: [{"step":0,"a":"navigate","s":"completed","code":null},{"step":1,"a":"navigate","s":"completed","code":null},{"step":2,"a":"wait","s":"failed","code":"SECURITY_BLOCKED"},{"step":3,"a":"navigate","s":"completed","code":null}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+--- S1b try 2 run=run_01M62RDNQXNY9YFB1KN37XTGJQ allowed_domains=[fixture-a.crawl.test, slow.crawl.test]
+warm navigate fixture-a: http=200 time=0.347370 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":0,"ax_nodes":37,"ax_names":["Fixture A","Fixt
+checkpoint (step|status|current_url): 1|active|http://fixture-a.crawl.test/
+navigate slow.crawl.test/toblank.html: http=200 time=0.123315
+  {"url":"http://slow.crawl.test/toblank.html","title":"R3-SC4 to blank","step":1,"ax_nodes":6,"ax_names":["R3-SC4 to blank","moving","moving"]}
+wait 1500 ms (tab moved to about:blank#off): http=403 time=1.565251
+  {"code":"SECURITY_BLOCKED","message":"browser action reached a domain outside the run's allowed domains","retryable":false,"details":null}
+browser-session: {"currentUrl":"http://slow.crawl.test/toblank.html","title":null,"status":"active","live":true}
+checkpoint after the refusal (step|status|current_url): 2|active|http://slow.crawl.test/toblank.html
+navigate fixture-a: http=200 time=0.153472 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+receipts: [{"step":0,"a":"navigate","s":"completed","code":null},{"step":1,"a":"navigate","s":"completed","code":null},{"step":2,"a":"wait","s":"failed","code":"SECURITY_BLOCKED"},{"step":3,"a":"navigate","s":"completed","code":null}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+=== S1b end 2026-10-29T02:39:35Z ready={"generation":1,"sessions_open":0}
