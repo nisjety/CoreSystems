@@ -46,6 +46,15 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/chat/threads/{thread_id}/flags",
             put(history::update_thread_flags),
         )
+        // Move a thread's active branch: a version switch, or a rewind the client confirms first (WS17 S9).
+        .route(
+            "/api/v1/chat/threads/{thread_id}/branch",
+            post(json_handlers::branch_thread),
+        )
+        .route(
+            "/api/v1/chat/threads/{thread_id}/rewind",
+            post(json_handlers::rewind_thread),
+        )
         .route(
             "/api/v1/chat/stream/resume/{request_id}",
             get(streams::resume_stream),

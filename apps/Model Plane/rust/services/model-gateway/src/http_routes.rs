@@ -7942,6 +7942,17 @@ pub struct InvokeRequest {
     /// composer and never reached the server as a distinct action.
     #[serde(default, alias = "editResubmit")]
     pub edited_resubmit: bool,
+    /// The turn regenerates the answer with this message id (WS17 S9): the thread's active branch moves to
+    /// that answer's question, and the answer is produced again beside the old one, with no user turn
+    /// appended. Honoured only while `MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED` is on, and refused under zero
+    /// retention and for an agentic turn. A blank id is absent.
+    #[serde(default, alias = "regenerateOfMessageId")]
+    pub regenerate_of_message_id: Option<String>,
+    /// The turn is an edit of the user turn with this message id (WS17 S9): the active branch moves to that
+    /// turn's parent, and the edited text is appended beside the original. The rules of
+    /// `regenerate_of_message_id` apply.
+    #[serde(default, alias = "editOfMessageId")]
+    pub edit_of_message_id: Option<String>,
     #[serde(default)]
     pub max_cost_usd: Option<f64>,
     #[serde(default)]
@@ -9508,6 +9519,10 @@ struct ThreadMessageVersion {
     /// Whether this turn is on the active path. Only a read with `include_inactive`
     /// (or a versioned thread) ever says false.
     on_active_path: bool,
+    /// The ids of the turns that share this turn's parent, in order: the versions a switch can move to (WS17
+    /// S9). Present only on a versioned transcript read with versions on.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    siblings: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -10317,7 +10332,7 @@ struct ThreadMessagesQuery {
 /// wire. The deploy sets the two together. Read by the strict parser the other switches share.
 const MESSAGE_VERSIONS_ENV: &str = "MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED";
 
-fn message_versions_enabled() -> bool {
+pub(crate) fn message_versions_enabled() -> bool {
     mp_contracts::loop_fold::switch_from(std::env::var(MESSAGE_VERSIONS_ENV).ok().as_deref())
 }
 
@@ -10394,6 +10409,37 @@ async fn list_thread_messages(
         .map_err(|e| session_thread_error("session-core list_conversation failed", &e))?
         .into_inner();
 
+    // A version switch moves the branch to a sibling, and the siblings sit on branches the transcript does not
+    // show. A versioned transcript therefore takes one more unpaged read, and each versioned turn lists the
+    // turns sharing its parent, in order (WS17 S9).
+    let sibling_ids = if message_versions_enabled()
+        && response.messages.iter().any(|m| m.sibling_count > 1)
+    {
+        let all = state
+            .session_client
+            .clone()
+            .list_conversation(authenticated_session_request(
+                ListConversationRequest {
+                    org_id: claims.org_id.clone(),
+                    thread_id: trimmed.to_owned(),
+                    // A versioned thread is a personal one: a Space keeps no message tree.
+                    space_id: String::new(),
+                    space_read_decision_ref: String::new(),
+                    space_read_decision_token: String::new(),
+                    include_inactive: true,
+                    limit: 0,
+                    before_message_id: String::new(),
+                },
+                &bearer,
+            )?)
+            .await
+            .map_err(|e| session_thread_error("session-core list_conversation failed", &e))?
+            .into_inner();
+        sibling_ids_by_parent(&all.messages)
+    } else {
+        std::collections::HashMap::new()
+    };
+
     // Only a paged read says whether more exists, so an unpaged body keeps the
     // exact shape every caller already parses.
     let has_more = (limit > 0).then_some(response.has_more);
@@ -10414,6 +10460,10 @@ async fn list_thread_messages(
                     },
                 ),
                 version: (m.sibling_count > 0).then(|| ThreadMessageVersion {
+                    siblings: sibling_ids
+                        .get(&m.parent_message_id)
+                        .cloned()
+                        .unwrap_or_default(),
                     parent_message_id: m.parent_message_id,
                     sibling_ordinal: m.sibling_ordinal,
                     sibling_count: m.sibling_count,
@@ -10428,6 +10478,28 @@ async fn list_thread_messages(
         has_more,
         versions_enabled: message_versions_enabled().then_some(true),
     }))
+}
+
+/// The ids of the turns that share each parent, in sibling order: what a versioned turn lists as the
+/// versions a switch can move to (WS17 S9).
+fn sibling_ids_by_parent(
+    turns: &[mp_contracts::model_plane::v1::SessionMessage],
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut by_parent: std::collections::HashMap<String, Vec<(u32, String)>> =
+        std::collections::HashMap::new();
+    for turn in turns {
+        by_parent
+            .entry(turn.parent_message_id.clone())
+            .or_default()
+            .push((turn.sibling_ordinal, turn.message_id.clone()));
+    }
+    by_parent
+        .into_iter()
+        .map(|(parent, mut versions)| {
+            versions.sort();
+            (parent, versions.into_iter().map(|(_, id)| id).collect())
+        })
+        .collect()
 }
 
 /// The body of a branch move: the turn the user picked and the leaf they last saw.
@@ -10497,7 +10569,7 @@ async fn branch_thread(
 
 /// Session Core's refusals of a branch move, as the typed codes the client acts on. A stale
 /// leaf is a conflict to reload from; any other refusal keeps the session error mapping.
-fn branch_thread_error(error: &tonic::Status) -> HttpJsonError {
+pub(crate) fn branch_thread_error(error: &tonic::Status) -> HttpJsonError {
     match error.code() {
         tonic::Code::Aborted => (
             StatusCode::CONFLICT,
@@ -10520,7 +10592,7 @@ fn branch_thread_error(error: &tonic::Status) -> HttpJsonError {
     }
 }
 
-fn history_versions_disabled() -> HttpJsonError {
+pub(crate) fn history_versions_disabled() -> HttpJsonError {
     (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(json!({"error": {
@@ -11255,6 +11327,12 @@ async fn invoke(
 
     // Normalize and validate the request
     let mut normalized = normalize::normalize(&req)?;
+    // A regenerate or an edit needs the message tree. With its switch off it is refused before any thread,
+    // run or branch is touched (WS17 S9).
+    let version_turn = normalize::version_turn(&req)?;
+    if version_turn.is_some() && !message_versions_enabled() {
+        return Err(history_versions_disabled().into());
+    }
     // The organisation's model policy, asked of inference-core before anything
     // durable exists: a refused turn leaves no thread, message or run behind, and
     // the ZDR branch below is under the same policy as the durable one.
@@ -11453,34 +11531,72 @@ async fn invoke(
         &request_id,
         "gateway-direct",
     );
-    let session_run = session_flow::prepare_managed_run_authenticated_with_receipt(
-        &state,
-        normalized.thread_id.as_deref(),
-        normalized.session_key.as_deref(),
-        &claims.org_id,
-        &claims.user_id,
-        &normalized.content,
-        "model-gateway",
-        "execute",
-        &managed_start_key,
-        mp_contracts::model_plane::v1::ManagedRunSource::GatewayDirect,
-        effective_zdr,
-        &model_bearer,
-        normalized.space_context.as_ref(),
-        normalized.space_append_context.as_ref(),
-        false,
-        None,
-        // The prompt is stored under the send's own id, so a retry of it lands as one row.
-        session_flow::send_receipt_id(
-            crate::queued_input::send_receipts_enabled(),
-            effective_zdr,
-            req.regenerated,
-            req.edited_resubmit,
-            req.idempotency_key.as_deref(),
-        ),
-    )
-    .await
-    .map_err(|error| {
+    // A regenerate or an edit moves the thread's branch before the run that answers it starts (WS17 S9). A
+    // refused move starts nothing, so the thread keeps the branch it had.
+    let version_thread = match version_turn {
+        Some(turn) => {
+            let thread_id = normalized.thread_id.clone().unwrap_or_default();
+            let version_move = session_flow::move_active_leaf(
+                &state,
+                &claims.org_id,
+                &thread_id,
+                &turn,
+                &model_bearer,
+            )
+            .await
+            .map_err(|error| branch_thread_error(&error))?;
+            if let Some(goal) = version_move.goal {
+                normalized.content = goal;
+            }
+            Some((thread_id, turn))
+        }
+        None => None,
+    };
+    let started = match version_thread.as_ref() {
+        Some((thread_id, turn)) => {
+            session_flow::prepare_version_run_authenticated(
+                &state,
+                thread_id,
+                &claims.org_id,
+                &claims.user_id,
+                &normalized.content,
+                turn,
+                &managed_start_key,
+                &model_bearer,
+            )
+            .await
+        }
+        None => {
+            session_flow::prepare_managed_run_authenticated_with_receipt(
+                &state,
+                normalized.thread_id.as_deref(),
+                normalized.session_key.as_deref(),
+                &claims.org_id,
+                &claims.user_id,
+                &normalized.content,
+                "model-gateway",
+                "execute",
+                &managed_start_key,
+                mp_contracts::model_plane::v1::ManagedRunSource::GatewayDirect,
+                effective_zdr,
+                &model_bearer,
+                normalized.space_context.as_ref(),
+                normalized.space_append_context.as_ref(),
+                false,
+                None,
+                // The prompt is stored under the send's own id, so a retry of it lands as one row.
+                session_flow::send_receipt_id(
+                    crate::queued_input::send_receipts_enabled(),
+                    effective_zdr,
+                    req.regenerated,
+                    req.edited_resubmit,
+                    req.idempotency_key.as_deref(),
+                ),
+            )
+            .await
+        }
+    };
+    let session_run = started.map_err(|error| {
         (
             StatusCode::BAD_GATEWAY,
             Json(
@@ -15743,6 +15859,7 @@ mod thread_messages_page_tests {
             author_subject_id: String::new(),
             metadata: None,
             version: Some(ThreadMessageVersion {
+                siblings: Vec::new(),
                 parent_message_id: "m1".to_owned(),
                 sibling_ordinal: 2,
                 sibling_count: 3,
@@ -15789,5 +15906,23 @@ mod thread_messages_page_tests {
         })
         .expect("the response serialises");
         assert_eq!(body["versions_enabled"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn a_versioned_turn_lists_the_turns_sharing_its_parent_in_order() {
+        let turn = |id: &str, parent: &str, ordinal: u32| mp_contracts::model_plane::v1::SessionMessage {
+            message_id: id.to_owned(),
+            parent_message_id: parent.to_owned(),
+            sibling_ordinal: ordinal,
+            ..Default::default()
+        };
+        let by_parent = sibling_ids_by_parent(&[
+            turn("a2", "u1", 2),
+            turn("a1", "u1", 1),
+            turn("a3", "u1", 3),
+            turn("u2", "a1", 1),
+        ]);
+        assert_eq!(by_parent["u1"], vec!["a1", "a2", "a3"]);
+        assert_eq!(by_parent["a1"], vec!["u2"]);
     }
 }

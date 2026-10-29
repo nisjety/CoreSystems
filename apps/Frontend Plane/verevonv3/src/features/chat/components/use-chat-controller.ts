@@ -91,6 +91,7 @@ import {
   type ChatConnectedEvent,
   type ChatErrorEvent,
   type ChatFeedbackRating,
+  type ChatInvokeRequest,
   type ChatStreamHandlers,
   type ChatThreadEvent,
   type ChatThreadMessagesPage,
@@ -261,6 +262,9 @@ export function frameSequence(id: string | undefined): number | undefined {
   return id && /^\d+$/.test(id) ? Number(id) : undefined
 }
 
+/** The server id of the turn a regenerate or an edit replaces, sent only on a versioned thread (WS17 S9). */
+type ServerVersionTarget = Pick<ChatInvokeRequest, 'regenerateOfMessageId' | 'editOfMessageId'>
+
 export function useChatController() {
   // Resolved once, like any hook: the controller runs inside the chat page,
   // which is inside the app's locale provider.
@@ -388,6 +392,17 @@ export function useChatController() {
   // memory makes a newly-created scoped thread continue to send the selected
   // Space on later turns during this chat session without persisting a bearer.
   const scopedThreadRefs = new Map<string, string>()
+  /**
+   * Whether the server keeps a message tree for conversations (WS17 S9). The switch is server-wide, so it is
+   * learnt from a `connected` frame or a transcript whose turns carry a version, and never unlearnt. While it
+   * is set, a regenerate or an edit names its turn by the server's id instead of appending the question again.
+   */
+  let serverVersionsOn = false
+  /**
+   * The server's id for each turn a send minted here, once a versioned send's transcript confirms it
+   * (`reconcileSentTurns`). A turn loaded from the server is not in this map: its id already is the server's.
+   */
+  const serverMessageIds = new Map<string, string | undefined>()
   const [input, setInput] = createSignal('')
   /**
    * Quiet, non-blocking notice for a rating that did NOT persist.
@@ -1290,6 +1305,8 @@ export function useChatController() {
       const page = await (messagesRequest ?? readThreadMessages(threadId))
       if (seq !== threadLoadSequence) return
       const history = page.messages
+      // A turn carries its version only where the server keeps a message tree, so one versioned turn shows the switch is on.
+      if (history.some((message) => message.version)) serverVersionsOn = true
       // A skipped transcript would have stamped the session's updatedAt, and it
       // exists only for a thread that has messages to return.
       const cachedUpdatedAt = serverCached?.updatedAt
@@ -2629,7 +2646,7 @@ export function useChatController() {
     noteQueuedInput(id, 'refused', result.message)
   }
 
-  const sendContent = async (rawContent: string, modelOverride?: string, options: SendOptions = {}) => {
+  const sendContent = async (rawContent: string, modelOverride?: string, options: SendOptions & ServerVersionTarget = {}) => {
     const content = rawContent.trim()
     if (!content) return
     // A deep-linked transcript from Spaces, Support, or another agent surface
@@ -2787,6 +2804,9 @@ export function useChatController() {
       attachments: [],
     }
     if (executeGrant) executePlanTurnIds.set(assistantId, executeGrant.turnId)
+    // A versioned send's turns get the server's ids from `reconcileSentTurns`; until then they have none to name.
+    if (userTurn) serverMessageIds.set(userTurn.id, undefined)
+    serverMessageIds.set(assistantId, undefined)
     const nextTurns = [
       ...state.turns,
       ...(userTurn ? [userTurn] : []),
@@ -2997,6 +3017,8 @@ export function useChatController() {
           zdr: options.zdr,
           regenerated: options.regenerated,
           editResubmit: options.editResubmit,
+          regenerateOfMessageId: options.regenerateOfMessageId,
+          editOfMessageId: options.editOfMessageId,
           // The send's receipt. Absent for a zero-retention turn, a regenerate and an edited
           // resubmit; a queued message sent again carries its original id.
           clientMessageId: sendClientMessageId(options, () => createId('msg')),
@@ -3023,7 +3045,8 @@ export function useChatController() {
             // refusal can still follow (the rung is resolved after `connected`);
             // it is explained on the plan card through `executePlanTurnIds`.
             if (executeGrant) spendThreadGrant(executeGrant)
-            const { requestId, threadId: serverThreadId, model: connectedModel, runId } = connected
+            const { requestId, threadId: serverThreadId, model: connectedModel, runId, versionsEnabled } = connected
+            if (versionsEnabled) serverVersionsOn = true
             captureRequestId(requestId)
             // An agentic / plan-mode turn learns its durable orchestration run
             // id here — this is what lets the live agent panel attach to
@@ -3183,6 +3206,8 @@ export function useChatController() {
                 setState((s) => { s.status = 'idle' })
               writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
             }
+            // A versioned send's turns need the server's ids before a later regenerate or edit can name them.
+            if (usesServerVersions(activeThreadId)) void reconcileSentTurns(activeThreadId, assistantId, userTurn?.id)
           },
           onError: (failure) => {
             const { code } = failure
@@ -3946,6 +3971,41 @@ export function useChatController() {
     return resolved instanceof Promise ? resolved.then(next) : next(resolved)
   }
 
+  /**
+   * Whether a send on this thread goes through the server's version tree. A temporary chat keeps client-only
+   * versions, and a Space thread keeps no tree, so neither does.
+   */
+  const usesServerVersions = (threadId: string | null | undefined): boolean => (
+    serverVersionsOn && !!threadId && !isTemporaryThread(threadId) && !scopedThreadRefs.has(threadId)
+  )
+
+  /** The server's id for a turn, or `undefined` for a turn this controller minted that the server has not confirmed. */
+  const serverIdOf = (turn: ChatTurn): string | undefined => (
+    serverMessageIds.has(turn.id) ? serverMessageIds.get(turn.id) : turn.id
+  )
+
+  /**
+   * After a versioned send, read the newest turns back and record the server's ids for the ones the send
+   * minted. A failed read leaves them unknown, so the next regenerate or edit is refused rather than naming a
+   * turn the server may not have.
+   */
+  const reconcileSentTurns = async (threadId: string, answerId: string, questionId: string | undefined) => {
+    const page = await readThreadMessages(threadId).catch(() => undefined)
+    const answer = page?.messages.at(-1)
+    if (answer?.role !== 'assistant') return
+    serverMessageIds.set(answerId, answer.id)
+    const question = page?.messages.at(-2)
+    if (questionId && question?.role === 'user') serverMessageIds.set(questionId, question.id)
+  }
+
+  /** A versioned regenerate or edit names a turn the server has saved; a stopped or unsaved turn has no id to name. */
+  const refuseUnsavedVersionTarget = () => {
+    showFeedbackNotice(i18n.tr(
+      'Denne meldingen er ikke lagret ennå, så den kan ikke erstattes her. Last inn samtalen på nytt og prøv igjen.',
+      'This message is not saved yet, so it cannot be replaced here. Reload the conversation and try again.',
+    ))
+  }
+
   /** The final exchange, when it may be sent again: the last user turn and what follows it. */
   const latestExchange = () => {
     if (isForeignOriginThread(state.threadId) || isStreaming()) return undefined
@@ -3986,13 +4046,22 @@ export function useChatController() {
   }
 
   const regenerateExchange = (anchorIndex: number, lastUser: ChatTurn, subscriptionConnectionId: string | undefined) => {
+    // On a versioned thread the server keeps the outgoing answer as a version, so the regenerate names it and no
+    // client-only version is taken; a temporary chat keeps client-only versions.
+    const versioned = usesServerVersions(state.threadId)
+    const answer = state.turns[anchorIndex + 1]
+    const regenerateOfMessageId = versioned && answer ? serverIdOf(answer) : undefined
+    if (versioned && !regenerateOfMessageId) {
+      refuseUnsavedVersionTarget()
+      return
+    }
     // Snapshot the outgoing exchange as a version BEFORE truncating it away —
     // see chat-versions.ts. Must run before the slice below, which is itself
     // the fix for a real bug this uncovered: `sendContent` with
     // `appendUser: false` only ever APPENDS the new assistant turn, so
     // without this truncation the old answer stayed visible forever and a
     // second, separate answer piled up underneath it.
-    setVersionState((prev) => beginNewVersion(prev, snapshot(state.turns), state.threadId))
+    if (!versioned) setVersionState((prev) => beginNewVersion(prev, snapshot(state.turns), state.threadId))
     // F-12 (CHAT_PARITY_AUDIT_2026-09-15.md §3.5): `sendContent` (below) reads
     // `state.turns` again, synchronously, to build its own next-turns array —
     // and that read is a plain untracked read, not inside an effect/JSX. A
@@ -4027,6 +4096,9 @@ export function useChatController() {
       // only way model-gateway can know: the text is identical. This is what
       // activates SignalKind::Regenerate in the implicit-feedback loop.
       regenerated: true,
+      // Named to the server on a versioned thread, which moves the branch to the answer's parent and appends the
+      // new answer there: the question is not appended a second time.
+      regenerateOfMessageId,
     })
   }
 
@@ -4065,6 +4137,12 @@ export function useChatController() {
     // changed underneath it.
     if (!outgoingAssistant || outgoingAssistant.id !== turnId) return
     if (outgoingAssistant.status !== 'stopped') return
+    // A continuation resends the question with the partial answer folded in. On a versioned thread the server
+    // would append that as a second question, and there is no server contract for continuing a version yet.
+    if (usesServerVersions(state.threadId)) {
+      showFeedbackNotice(i18n.tr('Fortsett er ikke tilgjengelig i denne samtalen ennå.', 'Continue is not available in this conversation yet.'))
+      return
+    }
     const partial = outgoingAssistant.content
     // Nothing to continue FROM. "Generer på nytt" already covers this turn
     // correctly; inventing a continuation for empty text would just be a
@@ -4169,6 +4247,14 @@ export function useChatController() {
       showFeedbackNotice('Denne turen har dokumentert effekt og kan ikke redigeres på stedet. Start en ny tur eller bruk kvitteringen i Trace.')
       return
     }
+    // A versioned edit names the question it replaces: the server moves the branch to that question's parent and
+    // appends the edited question as its sibling.
+    const versioned = usesServerVersions(state.threadId)
+    const editOfMessageId = versioned ? serverIdOf(original) : undefined
+    if (versioned && !editOfMessageId) {
+      refuseUnsavedVersionTarget()
+      return
+    }
     const isFinalExchange = index === lastUserIndex(state.turns)
     // Editing an earlier turn discards every exchange after it, and unlike the
     // final-turn path there is no version to switch back to. That used to
@@ -4195,7 +4281,8 @@ export function useChatController() {
       // truncates everything after it (below) and replaces it wholesale —
       // that path is deliberately NOT versioned (chat-versions.ts: nesting
       // would be possible past this point, which the design rules out).
-      setVersionState((prev) => beginNewVersion(prev, snapshot(state.turns), state.threadId))
+      // A versioned thread keeps the replaced question as a server version, so no client-only one is taken.
+      if (!versioned) setVersionState((prev) => beginNewVersion(prev, snapshot(state.turns), state.threadId))
     } else {
       setVersionState(null)
     }
@@ -4221,6 +4308,9 @@ export function useChatController() {
       // distinct action, so it has to be declared. Activates
       // SignalKind::EditResubmit.
       editResubmit: true,
+      // Named to the server on a versioned thread, which moves the branch to the question's parent and appends the
+      // edited question as its sibling.
+      editOfMessageId,
     })
   }
 

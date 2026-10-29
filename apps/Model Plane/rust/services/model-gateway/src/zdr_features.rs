@@ -111,6 +111,9 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
         "edited_resubmit",
         Treatment::Inert("a learning signal, and learning does not run on a ZDR turn"),
     ),
+    // A version move names a durable message of the thread, and a ZDR turn writes none (WS17 S9).
+    ("regenerate_of_message_id", refused_feature("message_versions")),
+    ("edit_of_message_id", refused_feature("message_versions")),
     ("max_cost_usd", refused_feature("spend_cap")),
     // The answer is capped at the caller's `max_tokens` (the lower of the two).
     ("max_tokens", Treatment::Honored),
@@ -226,6 +229,8 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         regenerated: _,
         pinned_message_ids: _,
         edited_resubmit: _,
+        regenerate_of_message_id: _,
+        edit_of_message_id: _,
         max_cost_usd: _,
         max_tokens: _,
         profile: _,
@@ -266,6 +271,8 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "regenerated",
         "pinned_message_ids",
         "edited_resubmit",
+        "regenerate_of_message_id",
+        "edit_of_message_id",
         "max_cost_usd",
         "max_tokens",
         "profile",
@@ -316,6 +323,11 @@ pub fn refusal(request: &InvokeRequest) -> Option<Refusal> {
     }
     if request.execute_granted {
         return feature("agentic");
+    }
+    if request.regenerate_of_message_id.as_deref().is_some_and(|id| !id.trim().is_empty())
+        || request.edit_of_message_id.as_deref().is_some_and(|id| !id.trim().is_empty())
+    {
+        return feature("message_versions");
     }
     if request.plan_mode {
         return feature("plan_mode");

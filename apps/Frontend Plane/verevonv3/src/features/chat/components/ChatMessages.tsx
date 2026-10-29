@@ -14,6 +14,7 @@ import {
   ChevronDown,
   ChevronLeft,
   Pin,
+  RotateCcw,
   ChevronRight,
   ChevronUp,
   Copy,
@@ -132,6 +133,7 @@ import {
   TOOL_LABELS,
 } from './chat-types'
 import type { VersionBadge } from '@/features/chat/lib/chat-versions'
+import type { ServerVersionBadge } from '@/features/chat/lib/chat-versions-server'
 import { streamActivityLabel, type StreamActivity } from '@/features/chat/lib/stream-activity'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { translateApiError, useI18n } from '@/shared/i18n'
@@ -472,6 +474,16 @@ export function AssistantMessage(props: {
   onViewAttachments?: (attachmentId: string) => void
   version?: VersionBadge | null
   onSelectVersion?: (target: number) => void
+  /**
+   * The server's version switcher for this turn (WS17 S9). Set only on a versioned thread, where a switch
+   * moves the thread's branch to the sibling the badge names. It replaces the client-only badge.
+   */
+  serverVersion?: ServerVersionBadge | null
+  onSwitchServerVersion?: (messageId: string) => void
+  /** How many turns a rewind to this turn would hide, when a rewind is offered (WS17 S9). */
+  rewindHiddenTurns?: number | null
+  /** Rewinds the thread to this turn, once the user has confirmed it. Nothing is deleted. */
+  onRewind?: () => void
   /** See `MessageBlock`'s doc — marks the article `data-latest`. */
   isLatest?: boolean
   /** Forwarded into `ConversationNodeContext` — see its own doc for why. */
@@ -483,6 +495,7 @@ export function AssistantMessage(props: {
 }) {
   const i18n = useI18n()
   const [reaction, setReaction] = createSignal<'up' | 'down' | null>(null)
+  const [confirmingRewind, setConfirmingRewind] = createSignal(false)
   // Where the answer was processed, from the gateway's own stamp on `usage`.
   // Undefined (nothing rendered) unless the server asserted a residency or a
   // retention claim; never worked out from the model name.
@@ -826,6 +839,78 @@ export function AssistantMessage(props: {
             >
               <ThumbsDown size={14} />
             </MessageAction>
+            <Show when={props.serverVersion}>
+              {(badge) => (
+                <div class="verevon-chat-version-switcher" role="group" aria-label={i18n.tr('Svarversjon', 'Answer version')}>
+                  <button
+                    type="button"
+                    class="verevon-chat-version-switcher__arrow"
+                    disabled={badge().previousId === null}
+                    aria-label={i18n.tr('Forrige versjon', 'Previous version')}
+                    onClick={() => {
+                      const previous = badge().previousId
+                      if (previous) props.onSwitchServerVersion?.(previous)
+                    }}
+                  >
+                    <ChevronLeft size={14} />
+                  </button>
+                  <span class="verevon-chat-version-switcher__label">
+                    {badge().current}/{badge().total}
+                  </span>
+                  <button
+                    type="button"
+                    class="verevon-chat-version-switcher__arrow"
+                    disabled={badge().nextId === null}
+                    aria-label={i18n.tr('Neste versjon', 'Next version')}
+                    onClick={() => {
+                      const next = badge().nextId
+                      if (next) props.onSwitchServerVersion?.(next)
+                    }}
+                  >
+                    <ChevronRight size={14} />
+                  </button>
+                </div>
+              )}
+            </Show>
+            <Show when={props.rewindHiddenTurns && props.rewindHiddenTurns > 0 ? props.rewindHiddenTurns : undefined}>
+              {(hidden) => (
+                <>
+                  <MessageAction
+                    label={i18n.tr('Gå tilbake hit', 'Rewind to here')}
+                    onClick={() => setConfirmingRewind(true)}
+                  >
+                    <RotateCcw size={14} />
+                  </MessageAction>
+                  <Show when={confirmingRewind()}>
+                    <div
+                      class="verevon-chat-rewind-confirm"
+                      role="dialog"
+                      aria-modal="true"
+                      aria-label={i18n.tr('Gå tilbake hit', 'Rewind to here')}
+                    >
+                      <p>
+                        {i18n.tr(
+                          `${hidden()} svar og meldinger etter dette punktet skjules. Ingenting slettes: de ligger fortsatt i en egen gren.`,
+                          `${hidden()} later turns will be hidden. Nothing is deleted: they stay on their own branch.`,
+                        )}
+                      </p>
+                      <button type="button" onClick={() => setConfirmingRewind(false)}>
+                        {i18n.tr('Avbryt', 'Cancel')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setConfirmingRewind(false)
+                          props.onRewind?.()
+                        }}
+                      >
+                        {i18n.tr('Gå tilbake hit', 'Rewind to here')}
+                      </button>
+                    </div>
+                  </Show>
+                </>
+              )}
+            </Show>
             <Show when={props.version}>
               {(version) => (
                 <div class="verevon-chat-version-switcher" role="group" aria-label={i18n.tr('Svarversjon', 'Answer version')}>

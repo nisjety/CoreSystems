@@ -498,6 +498,7 @@ pub async fn prepare_managed_run_authenticated_with_receipt(
         conversation_only,
         retrieval_scope,
         client_message_id,
+        true,
     )
     .await
 }
@@ -538,6 +539,7 @@ pub(crate) async fn prepare_managed_run_with_token(
         false,
         None,
         None,
+        true,
     )
     .await
 }
@@ -645,6 +647,145 @@ pub(crate) async fn prepare_idempotent_browser_run(
     })
 }
 
+/// What a regenerate or an edit leaves the run to answer (WS17 S9). For a regenerate, the question the
+/// answer continues, read from the thread so the model is asked what the thread shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VersionMove {
+    pub goal: Option<String>,
+}
+
+/// The typed refusal of a branch move the thread cannot make: a turn that is not on the active path, is of
+/// the wrong role, or has no turn to move to. The gateway maps it to the `history_branch_refused` conflict.
+const VERSION_TURN_REFUSED: &str = "history_branch_refused";
+
+/// Moves the active branch of `thread_id` for a regenerate or an edit (WS17 S9), before the run that answers
+/// it starts. The thread is read once: its turns, with the inactive branches, give the turn's parent (where
+/// the leaf moves), the leaf the move must still find (the compare-and-set) and, for a regenerate, the
+/// question. A turn written before the tree has no parent yet, so the turn before it in sequence is its
+/// parent, as Session Core links a legacy chain.
+///
+/// # Errors
+/// `FailedPrecondition` with `history_branch_refused` for a refused turn; Session Core's own refusals of the
+/// move (a stale leaf, an active run, a Space or waived thread) come back unchanged.
+pub async fn move_active_leaf(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    turn: &crate::normalize::VersionTurn,
+    bearer: &VerifiedSessionBearer,
+) -> Result<VersionMove, tonic::Status> {
+    use crate::normalize::VersionTurn;
+    use mp_contracts::model_plane::v1::{ListConversationRequest, SetActiveLeafRequest};
+
+    let mut session_client = state.session_client.clone();
+    let turns = session_client
+        .list_conversation(crate::sse::authenticated_session_request(
+            ListConversationRequest {
+                org_id: org_id.to_owned(),
+                thread_id: thread_id.to_owned(),
+                space_id: String::new(),
+                space_read_decision_ref: String::new(),
+                space_read_decision_token: String::new(),
+                // Unpaged, with the branches the leaf is not on: the leaf is the newest active turn.
+                limit: 0,
+                before_message_id: String::new(),
+                include_inactive: true,
+            },
+            bearer,
+        )?)
+        .await?
+        .into_inner()
+        .messages;
+
+    let refused = || tonic::Status::failed_precondition(VERSION_TURN_REFUSED);
+    let (message_id, role) = match turn {
+        VersionTurn::Regenerate { message_id } => (message_id, "assistant"),
+        VersionTurn::Edit { message_id } => (message_id, "user"),
+    };
+    let index = turns
+        .iter()
+        .position(|message| &message.message_id == message_id)
+        .ok_or_else(refused)?;
+    let message = &turns[index];
+    if message.role != role || !message.on_active_path {
+        return Err(refused());
+    }
+    let parent_index = if message.parent_message_id.is_empty() {
+        index.checked_sub(1)
+    } else {
+        turns
+            .iter()
+            .position(|candidate| candidate.message_id == message.parent_message_id)
+    }
+    .ok_or_else(refused)?;
+    let parent = &turns[parent_index];
+    let goal = match turn {
+        VersionTurn::Regenerate { .. } if parent.role == "user" => Some(parent.content.clone()),
+        VersionTurn::Regenerate { .. } => return Err(refused()),
+        VersionTurn::Edit { .. } => None,
+    };
+    let expected_leaf_message_id = turns
+        .iter()
+        .rev()
+        .find(|candidate| candidate.on_active_path)
+        .map(|candidate| candidate.message_id.clone())
+        .unwrap_or_default();
+
+    state
+        .message_tree_client
+        .clone()
+        .set_active_leaf(crate::sse::authenticated_session_request(
+            SetActiveLeafRequest {
+                org_id: org_id.to_owned(),
+                thread_id: thread_id.to_owned(),
+                target_message_id: parent.message_id.clone(),
+                expected_leaf_message_id,
+            },
+            bearer,
+        )?)
+        .await?;
+    Ok(VersionMove { goal })
+}
+
+/// The managed run of a regenerate or an edit whose branch has moved (see [`move_active_leaf`]). A regenerate
+/// appends no user turn, since its question is already the leaf. An edit appends its text beside the edited
+/// turn, as an ordinary send does. The rest is the ordinary managed start.
+///
+/// # Errors
+/// As [`prepare_managed_run_authenticated`].
+pub async fn prepare_version_run_authenticated(
+    state: &AppState,
+    thread_id: &str,
+    org_id: &str,
+    user_id: &str,
+    goal: &str,
+    turn: &crate::normalize::VersionTurn,
+    start_key: &str,
+    bearer: &VerifiedSessionBearer,
+) -> Result<SessionRun> {
+    prepare_managed_run_with_bearer(
+        state,
+        Some(thread_id),
+        None,
+        org_id,
+        user_id,
+        goal,
+        "model-gateway",
+        "execute",
+        start_key,
+        ManagedRunSource::GatewayDirect,
+        false,
+        Some(bearer.as_str()),
+        None,
+        None,
+        false,
+        None,
+        None,
+        matches!(turn, crate::normalize::VersionTurn::Edit { .. }),
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn prepare_managed_run_with_bearer(
     state: &AppState,
@@ -664,6 +805,7 @@ async fn prepare_managed_run_with_bearer(
     conversation_only: bool,
     retrieval_scope: Option<&str>,
     client_message_id: Option<&str>,
+    append_goal: bool,
 ) -> Result<SessionRun> {
     let thread_id = if zdr {
         // Do not persist a caller-provided thread id or prompt before Session
@@ -685,9 +827,12 @@ async fn prepare_managed_run_with_bearer(
             )
             .await?
         };
-        if let Err(error) =
+        let appended = if append_goal {
             append_user_message(&mut session_client, &thread_id, goal, bearer, append_space, conversation_only, retrieval_scope, client_message_id).await
-        {
+        } else {
+            Ok(AppendReceipt::default())
+        };
+        if let Err(error) = appended {
             if non_empty(requested_thread_id).is_some() && missing_thread_append_error(&error) {
                 tracing::info!(
                     requested_thread_id = %thread_id,

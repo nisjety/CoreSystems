@@ -161,6 +161,21 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             None,
         ),
         (
+            "regenerate_of_message_id",
+            with("regenerate_of_message_id", json!("m-1")),
+            refused("message_versions"),
+        ),
+        (
+            "regenerate_of_message_id",
+            with("regenerate_of_message_id", json!("  ")),
+            None,
+        ),
+        (
+            "edit_of_message_id",
+            with("edit_of_message_id", json!("m-2")),
+            refused("message_versions"),
+        ),
+        (
             "max_cost_usd",
             with("max_cost_usd", json!(0.5)),
             refused("spend_cap"),

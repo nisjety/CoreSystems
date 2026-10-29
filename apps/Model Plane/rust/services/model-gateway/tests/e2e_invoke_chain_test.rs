@@ -23,9 +23,12 @@ use mp_contracts::model_plane::v1::{
     inference_core_server::{InferenceCore, InferenceCoreServer},
     managed_run_lifecycle_client::ManagedRunLifecycleClient,
     managed_run_lifecycle_server::{ManagedRunLifecycle, ManagedRunLifecycleServer},
+    message_tree_service_client::MessageTreeServiceClient,
+    message_tree_service_server::{MessageTreeService, MessageTreeServiceServer},
     session_core_client::SessionCoreClient,
     session_core_server::{SessionCore, SessionCoreServer},
     AnalyzeDocumentRequest, AnalyzeDocumentResponse, AnalyzeImageRequest, AnalyzeImageResponse,
+    SetActiveLeafRequest, SetActiveLeafResponse,
     AnalyzeLanguageRequest, AnalyzeLanguageResponse, AppendMessageRequest, AppendMessageResponse,
     BatchTranslateTextRequest, BatchTranslateTextResponse, CompactNowRequest, CompactNowResponse,
     CompleteStepRequest, CompleteStepResponse, ContextSegment, CreateEmbeddingRequest,
@@ -1182,6 +1185,8 @@ struct MockSessionHandles {
     context_assembly_hangs: Arc<AtomicBool>,
     /// Every `ListConversation` call: the thread-history read a `full` run context makes.
     list_conversation_count: Arc<AtomicUsize>,
+    /// Every `SetActiveLeaf` call, as the gateway sent it (WS17 S9).
+    set_active_leaf_captures: Arc<Mutex<Vec<SetActiveLeafRequest>>>,
 }
 
 struct MockSessionCore {
@@ -1223,6 +1228,7 @@ impl MockSessionCore {
             run_context_captures: Arc::new(Mutex::new(Vec::new())),
             context_assembly_hangs: Arc::new(AtomicBool::new(false)),
             list_conversation_count: Arc::new(AtomicUsize::new(0)),
+            set_active_leaf_captures: Arc::new(Mutex::new(Vec::new())),
         };
         (
             Self {
@@ -1439,6 +1445,30 @@ impl SessionCore for MockSessionCore {
             .list_conversation_count
             .fetch_add(1, Ordering::SeqCst);
         let req = request.into_inner();
+        if req.include_inactive {
+            // A version read (WS17 S9): every turn, each continuing the one before it, all on the
+            // active path, so the newest turn is the leaf.
+            let turns = mock_turns(&self.handles, &req.thread_id);
+            let messages = turns
+                .iter()
+                .enumerate()
+                .map(|(index, (id, role, content))| SessionMessage {
+                    message_id: id.clone(),
+                    role: role.clone(),
+                    content: content.clone(),
+                    agent_name: String::new(),
+                    parent_message_id: index
+                        .checked_sub(1)
+                        .map(|previous| turns[previous].0.clone())
+                        .unwrap_or_default(),
+                    sibling_ordinal: 1,
+                    sibling_count: 1,
+                    on_active_path: true,
+                    ..Default::default()
+                })
+                .collect();
+            return Ok(Response::new(ListConversationResponse { messages, has_more: false }));
+        }
         let messages = self
             .handles
             .conversation
@@ -2852,10 +2882,14 @@ fn clear_model_auth_env() {
 struct SessionMockClients {
     session: SessionCoreClient<tonic::transport::Channel>,
     lifecycle: ManagedRunLifecycleClient<tonic::transport::Channel>,
+    message_tree: MessageTreeServiceClient<tonic::transport::Channel>,
 }
 
 async fn spawn_session_mock(svc: MockSessionCore) -> SessionMockClients {
     let lifecycle = MockManagedRunLifecycle {
+        handles: svc.handles.clone(),
+    };
+    let message_tree = MockMessageTree {
         handles: svc.handles.clone(),
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2864,6 +2898,7 @@ async fn spawn_session_mock(svc: MockSessionCore) -> SessionMockClients {
         Server::builder()
             .add_service(SessionCoreServer::new(svc))
             .add_service(ManagedRunLifecycleServer::new(lifecycle))
+            .add_service(MessageTreeServiceServer::new(message_tree))
             .serve_with_incoming(TcpListenerStream::new(listener))
             .await
             .ok();
@@ -2875,8 +2910,242 @@ async fn spawn_session_mock(svc: MockSessionCore) -> SessionMockClients {
         .unwrap();
     SessionMockClients {
         session: SessionCoreClient::new(ch.clone()),
+        message_tree: MessageTreeServiceClient::new(ch.clone()),
         lifecycle: ManagedRunLifecycleClient::new(ch),
     }
+}
+
+/// The turns of one mock thread as (message id, role, content), oldest first. A turn's id is its thread
+/// and its place, so a test names a turn without a real Session Core.
+fn mock_turns(handles: &MockSessionHandles, thread_id: &str) -> Vec<(String, String, String)> {
+    handles
+        .conversation
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, thread, _)| thread == thread_id)
+        .enumerate()
+        .map(|(index, (role, _, content))| {
+            (format!("{thread_id}-m{index}"), role.clone(), content.clone())
+        })
+        .collect()
+}
+
+/// Session Core's MessageTreeService for the version tests (WS17 S9). The move is checked against the
+/// thread's last turn, as Session Core checks its leaf, and every call is recorded.
+struct MockMessageTree {
+    handles: MockSessionHandles,
+}
+
+#[tonic::async_trait]
+impl MessageTreeService for MockMessageTree {
+    async fn set_active_leaf(
+        &self,
+        request: TReq<SetActiveLeafRequest>,
+    ) -> Result<Response<SetActiveLeafResponse>, Status> {
+        let req = request.into_inner();
+        self.handles
+            .set_active_leaf_captures
+            .lock()
+            .unwrap()
+            .push(req.clone());
+        let turns = mock_turns(&self.handles, &req.thread_id);
+        let leaf = turns.last().map(|(id, _, _)| id.clone()).unwrap_or_default();
+        if req.expected_leaf_message_id != leaf {
+            return Err(Status::aborted("active_leaf_stale"));
+        }
+        let Some(target) = turns.iter().position(|(id, _, _)| *id == req.target_message_id) else {
+            return Err(Status::invalid_argument(
+                "target_message_id does not name a message in this thread",
+            ));
+        };
+        Ok(Response::new(SetActiveLeafResponse {
+            active_leaf_message_id: req.target_message_id.clone(),
+            active_path: turns[..=target].iter().map(|(id, _, _)| id.clone()).collect(),
+        }))
+    }
+}
+
+/// Seeds one thread's turns in order, for the version tests.
+fn seed_thread(handles: &MockSessionHandles, thread_id: &str, turns: &[(&str, &str)]) {
+    let mut conversation = handles.conversation.lock().unwrap();
+    for (role, content) in turns {
+        conversation.push(((*role).to_owned(), thread_id.to_owned(), (*content).to_owned()));
+    }
+}
+
+/// One unary invoke carrying `body`, as the authenticated user, with the version switch set as `switch`.
+async fn invoke_with_versions(
+    body: &str,
+    switch: Option<&str>,
+    session_client: SessionMockClients,
+) -> axum::response::Response {
+    match switch {
+        Some(value) => std::env::set_var("MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED", value),
+        None => std::env::remove_var("MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED"),
+    }
+    let client = spawn_mock(MockOk::default()).await;
+    let (state, _publisher) = make_state(client, session_client).await;
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_owned()))
+        .unwrap();
+    app.oneshot(req).await.unwrap()
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn regenerate_sets_leaf_to_parent_and_skips_user_append() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let (mock_session, session_handles) = MockSessionCore::new();
+    seed_thread(
+        &session_handles,
+        "thread-1",
+        &[("user", "question"), ("assistant", "first answer")],
+    );
+    let session_client = spawn_session_mock(mock_session).await;
+    let resp = invoke_with_versions(
+        r#"{"content":"question","model":"m","thread_id":"thread-1","regenerate_of_message_id":"thread-1-m1"}"#,
+        Some("true"),
+        session_client,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let moves = session_handles.set_active_leaf_captures.lock().unwrap().clone();
+    assert_eq!(moves.len(), 1, "one branch move");
+    assert_eq!(moves[0].thread_id, "thread-1");
+    assert_eq!(moves[0].target_message_id, "thread-1-m0", "the leaf moves to the question");
+    assert_eq!(
+        moves[0].expected_leaf_message_id, "thread-1-m1",
+        "the move expects the answer it regenerates as the leaf"
+    );
+    assert!(
+        !session_handles
+            .append_rpc_captures
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(role, _)| role == "user"),
+        "a regenerate appends no user turn"
+    );
+    std::env::remove_var("MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED");
+    clear_model_auth_env();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn edit_creates_sibling_user_turn() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let (mock_session, session_handles) = MockSessionCore::new();
+    seed_thread(
+        &session_handles,
+        "thread-1",
+        &[
+            ("user", "first question"),
+            ("assistant", "first answer"),
+            ("user", "second question"),
+            ("assistant", "second answer"),
+        ],
+    );
+    let session_client = spawn_session_mock(mock_session).await;
+    let resp = invoke_with_versions(
+        r#"{"content":"second question, edited","model":"m","thread_id":"thread-1","edit_of_message_id":"thread-1-m2"}"#,
+        Some("true"),
+        session_client,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let moves = session_handles.set_active_leaf_captures.lock().unwrap().clone();
+    assert_eq!(moves.len(), 1, "one branch move");
+    assert_eq!(
+        moves[0].target_message_id, "thread-1-m1",
+        "the leaf moves to the edited turn's parent"
+    );
+    assert_eq!(moves[0].expected_leaf_message_id, "thread-1-m3");
+    let user_appends = session_handles
+        .append_rpc_captures
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(role, _)| role == "user")
+        .count();
+    assert_eq!(user_appends, 1, "the edited text is appended once, beside the original");
+    assert!(session_handles
+        .conversation
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(role, _, content)| role == "user" && content == "second question, edited"));
+    std::env::remove_var("MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED");
+    clear_model_auth_env();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn do_turn_with_regenerate_is_refused() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let (mock_session, session_handles) = MockSessionCore::new();
+    seed_thread(
+        &session_handles,
+        "thread-1",
+        &[("user", "question"), ("assistant", "first answer")],
+    );
+    let session_client = spawn_session_mock(mock_session).await;
+    let resp = invoke_with_versions(
+        r#"{"content":"question","model":"m","thread_id":"thread-1","regenerate_of_message_id":"thread-1-m1","features":["agentic"]}"#,
+        Some("true"),
+        session_client,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["code"], "feature_not_supported", "{body}");
+    assert!(session_handles.set_active_leaf_captures.lock().unwrap().is_empty());
+    assert!(session_handles.append_rpc_captures.lock().unwrap().is_empty());
+    std::env::remove_var("MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED");
+    clear_model_auth_env();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn version_turn_is_refused_while_the_switch_is_off() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let (mock_session, session_handles) = MockSessionCore::new();
+    seed_thread(
+        &session_handles,
+        "thread-1",
+        &[("user", "question"), ("assistant", "first answer")],
+    );
+    let session_client = spawn_session_mock(mock_session).await;
+    let resp = invoke_with_versions(
+        r#"{"content":"question","model":"m","thread_id":"thread-1","regenerate_of_message_id":"thread-1-m1"}"#,
+        None,
+        session_client,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "history_versions_disabled", "{body}");
+    assert!(session_handles.set_active_leaf_captures.lock().unwrap().is_empty());
+    assert!(session_handles.append_rpc_captures.lock().unwrap().is_empty());
+    clear_model_auth_env();
 }
 
 async fn terminal_auth_core_url() -> String {
@@ -2909,6 +3178,7 @@ async fn make_state(
     state.inference_client = client;
     state.managed_run_client = session_clients.lifecycle;
     state.session_client = session_clients.session;
+    state.message_tree_client = session_clients.message_tree;
     state
         .configure_managed_terminalization(
             &terminal_auth_core_url().await,

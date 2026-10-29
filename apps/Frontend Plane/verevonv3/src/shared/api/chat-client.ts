@@ -178,6 +178,13 @@ export type ChatInvokeRequest = {
   /** This turn is an EDITED resubmit of the previous question. Same reasoning. */
   editResubmit?: boolean
   /**
+   * The answer this turn regenerates, by its server message id (WS17 S9). Sent only on a versioned
+   * thread, where the regenerate moves the branch instead of appending the question again.
+   */
+  regenerateOfMessageId?: string
+  /** The user turn this turn edits, by its server message id (WS17 S9). Sent only on a versioned thread. */
+  editOfMessageId?: string
+  /**
    * Minimum Venice-style privacy tier this turn may be served by
    * (`min_privacy_tier` on the wire). Enforcement is server-side: ineligible
    * providers are skipped and an empty remainder fails closed — never a silent
@@ -196,6 +203,11 @@ export type ChatConnectedEvent = {
   model?: string
   /** Durable run id. Work surfaces only use it when the turn is plan/research. */
   runId?: string
+  /**
+   * The server keeps a message tree for conversations (WS17 S9), so a regenerate or an edit may name its
+   * turn. Absent while the server's switch is off.
+   */
+  versionsEnabled?: boolean
 }
 export type ChatMessageEvent = { content: string; requestId?: string }
 export type ChatDoneEvent = {
@@ -836,6 +848,25 @@ export type ChatMessage = {
   confidence?: number
   /** What the backend's verification pass found, when it ran on this turn. */
   verification?: ChatVerificationEvent
+  /**
+   * Where this turn sits among the turns that share its parent, as the server reports it on a versioned
+   * thread (WS17 S9). Absent when the server keeps no version tree for the thread.
+   */
+  version?: ChatMessageVersion
+}
+
+/** A turn's place in the server's message tree (WS17 S9): its parent, its place among the turns sharing it, and those turns. */
+export type ChatMessageVersion = {
+  /** The turn this one continues. Empty for the first turn of a thread. */
+  parentMessageId: string
+  /** 1-based place among the turns that share the parent. */
+  siblingOrdinal: number
+  /** How many turns share the parent, this one included. */
+  siblingCount: number
+  /** Whether the turn is on the active path, the conversation the thread shows. */
+  onActivePath: boolean
+  /** The ids of the turns that share the parent, in order: the versions a switch can move to. */
+  siblings: string[]
 }
 
 export type ChatThreadSession = {
@@ -1345,6 +1376,9 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // matching the rest of this body keeps one convention.
     regenerated: request.regenerated ?? false,
     edited_resubmit: request.editResubmit ?? false,
+    // Only on a versioned thread (WS17 S9), so every other body is byte-identical to before.
+    ...(request.regenerateOfMessageId ? { regenerate_of_message_id: request.regenerateOfMessageId } : {}),
+    ...(request.editOfMessageId ? { edit_of_message_id: request.editOfMessageId } : {}),
     // The send's receipt id, omitted unless set so every other body is byte-identical to what it
     // was before this field existed. Never on a zero-retention turn.
     ...(request.clientMessageId && !request.zdr ? { idempotency_key: request.clientMessageId } : {}),
@@ -1691,6 +1725,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         threadId: str(payload.thread_id),
         model: str(payload.model_used) ?? str(payload.model),
         runId: str(payload.run_id),
+        versionsEnabled: payload.versions_enabled === true ? true : undefined,
       })
       break
     case 'chunk': {
@@ -2720,6 +2755,57 @@ async function postChatThreadArchiveState(
   return normalizeChatThreadSession(objectValue(raw)?.session)
 }
 
+/** Where a branch move landed: the new active leaf, and the path up to it (WS17 S9). */
+export type ChatBranchMove = {
+  activeLeafMessageId: string
+  activePath: string[]
+}
+
+/**
+ * Make another version of a message the active one (WS17 S9). `messageId` is a sibling of the turn the user
+ * saw, `index` its 0-based place among them, and `expectedLeafMessageId` the leaf the client last displayed.
+ * A conflict (`active_leaf_stale`) means the thread moved on: reload it before moving again.
+ */
+export async function switchChatVersion(
+  threadId: string,
+  messageId: string,
+  index: number,
+  expectedLeafMessageId: string,
+): Promise<ChatBranchMove> {
+  parseChatHistoryAction({ type: 'message.switch_version', threadId, messageId, index })
+  return postChatBranchMove(threadId, 'branch', { targetMessageId: messageId, expectedLeafMessageId })
+}
+
+/**
+ * Rewind a thread to an earlier turn of its active path (WS17 S9). The user confirms it first. Nothing is
+ * deleted: the turns after the rewind stay on their branch, reachable through the version switcher.
+ */
+export async function rewindChatThread(
+  threadId: string,
+  messageId: string,
+  expectedLeafMessageId: string,
+): Promise<ChatBranchMove> {
+  parseChatHistoryAction({ type: 'thread.rewind', threadId, messageId, confirm: true })
+  return postChatBranchMove(threadId, 'rewind', { targetMessageId: messageId, expectedLeafMessageId, confirm: true })
+}
+
+async function postChatBranchMove(
+  threadId: string,
+  verb: 'branch' | 'rewind',
+  body: Record<string, unknown>,
+): Promise<ChatBranchMove> {
+  const raw = await requestJson<unknown>(
+    `/api/v1/chat/threads/${encodeURIComponent(threadId)}/${verb}`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+  const record = objectValue(raw)
+  const path = Array.isArray(record?.active_path) ? record.active_path : []
+  return {
+    activeLeafMessageId: str(record?.active_leaf_message_id) ?? '',
+    activePath: path.filter((id): id is string => typeof id === 'string'),
+  }
+}
+
 /**
  * Star or unstar a thread, or mark it read or unread. Each call writes only the
  * flag it names, so the server leaves the title, preview and pin alone. Null when
@@ -2937,7 +3023,34 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
       // field means "not recorded" — never a score of zero.
       confidence: num(item.confidence),
       verification: normalizeVerification(item.verification),
+      ...messageVersionField(item.version),
     }))
+}
+
+/** A turn's place in a versioned thread, read by name. A malformed place is dropped, never guessed. */
+function normalizeMessageVersion(value: unknown): ChatMessageVersion | undefined {
+  const record = objectValue(value)
+  if (!record) return undefined
+  const siblingOrdinal = num(record.sibling_ordinal)
+  const siblingCount = num(record.sibling_count)
+  if (siblingOrdinal === undefined || siblingCount === undefined || typeof record.on_active_path !== 'boolean') {
+    return undefined
+  }
+  return {
+    parentMessageId: str(record.parent_message_id) ?? '',
+    siblingOrdinal,
+    siblingCount,
+    onActivePath: record.on_active_path,
+    siblings: Array.isArray(record.siblings)
+      ? record.siblings.filter((id): id is string => typeof id === 'string')
+      : [],
+  }
+}
+
+/** The `version` key for a turn that has one, and no key at all for a turn that does not. */
+function messageVersionField(value: unknown): { version?: ChatMessageVersion } {
+  const version = normalizeMessageVersion(value)
+  return version ? { version } : {}
 }
 
 /**
