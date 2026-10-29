@@ -1,0 +1,4 @@
+# Compatibility entry point for local CoreSystem Infra commands.
+# docker-compose.yml is the authoritative local-only stack.
+include:
+  - path: ./docker-compose.yml

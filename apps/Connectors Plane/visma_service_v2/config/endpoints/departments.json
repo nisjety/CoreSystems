@@ -1,0 +1,31 @@
+{
+  "endpoint_name": "departments",
+  "bigquery_table": "visma_departments",
+  "primary_key": "departmentId",
+  "source": "erp_rest",
+  "api_method": "get_departments",
+  "api_endpoint": "/v1/department",
+  "pagination_profile": "numbertoread_skip",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "departmentId",
+    "description",
+    "publicId",
+    "lastModifiedDateTime"
+  ],
+  "datamart": {
+    "ready": false,
+    "type_name": "Department",
+    "query_file": "config/queries/department.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_department",
+    "fallback_source": "erp_rest",
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    }
+  }
+}

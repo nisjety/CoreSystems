@@ -1,0 +1,32 @@
+query SalesPrices(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  salesPrices(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    recordId
+    inventoryId
+    uom
+    promotion
+    breakQty
+    price
+    currencyId
+    vatId
+    effectiveDate
+    expirationDate
+    lastModifiedDateTime
+    priceCode
+    description
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+  }
+}

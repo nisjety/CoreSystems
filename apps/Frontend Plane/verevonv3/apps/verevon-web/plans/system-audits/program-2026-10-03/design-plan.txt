@@ -1,0 +1,164 @@
+PLAN (integrator output; read-only; repo C:/dev/CoresSystem)
+
+Coverage caveat: all three design texts and critiques were cut off. Reviewed in full: contextual T0-T3, Quarry T01-T05, ZDR Z-00..Z-03. Later task ids (Quarry T06-T16, ZDR Z-04+, contextual T4+) are cited only where a critique names them. Each needs a review pass before it is built.
+
+Checked in code myself (all confirmed):
+- Auth Core's org-core fetch (`interactive-retention-policy.ts` fetchOrgCoreJson) sends no service headers.
+- org-core applies service auth to every route (`server.go:39`).
+- The auth-core org-core credential holds only `org:projection:*` scopes (CP `docker-compose.yml:532`).
+- `plane-service-principal.ts` returns `zdr: retentionPosture === 'zdr'` and accepts only `zdr|persistent`.
+- The Azure adapter returns the raw `finish_reason` (`stop`, `length`).
+- Qdrant payload holds only knowledge_id, document_id, org_id, chunk_index, text and document_date, with no `source`.
+- `rrf_fuse` rebuilds results with `..Default::default()`, which drops `engines`.
+- `bootstrap_runtime_environment.sh` writes a third inline registry.
+- Matrix rules 1-14 are taken.
+
+Not re-verified, taken from the critics: the live 401 from org-core, the Quickwit counts, the sparse arm ignoring `filters.sources`, and the graph `AzureExtractor` bypass.
+
+1. CORRECTED DESIGNS
+
+Contextual retrieval (CR)
+- CR stays ON with no off-switch. The env flag becomes an incident-only kill switch. The default flips to ON in code, compose and `.env.example`, with a default model and a boot-time check.
+- Each knowledge unit gets a `context_status` state machine plus provenance. Legacy rows backfill with a NULL hash and status `legacy`, not an asserted-coherent hash. `embedding_model` is backfilled too.
+- Inline generation is time-boxed. A DB-truth reconciler does backfill, repair and prompt-version refresh. Unchanged inputs make zero provider calls.
+- Accepted `stop_reason` values are `{stop, end_turn}`. `{length, max_tokens}` counts as truncated. Test with a captured real Azure response.
+- Lexical sync uses a DB-truth marker or a JetStream subject, because the core-NATS `units.contextualized` event is non-durable. Repair the Quickwit gap (52 of 207) via `documents.indexed` or rebuild with `--no-clear`.
+- Metering goes through Data Plane usage v2 on a durable stream, then a data-orchestrator forwarder to cost-core `/api/v1/cost/record`, with a `feature` dimension. Pricing rows are needed for embed-v-4-0 and Cohere-rerank-v4.0-pro, or they price at the 3.00/15.00 default.
+- Graph extraction: delete the `azure_openai` extractor and the Azure key in graph-index. Add the same state machine, DLQ and retry cap.
+- No special case for single-chunk documents. The reconciler fills the one raw unit.
+- Reranker sees context: once QB-A lands, add a flagged change so rerank text includes `chunk_context`, gated by the eval. This is why CR currently adds only +0.005 nDCG with rerank on.
+- ZDR posture: a `tenant` retention posture. Auth Core resolves org-ZDR at mint. On resolution failure it returns 503 `retention_posture_unavailable` and issues no token, and the Data Plane maps that to `pending`. Tenant-principal token TTL is capped at 60s. The staleness window is disclosed.
+
+Quarry option B (QB)
+- `POST /v1/rerank` is a service-only sub-router in retrieval-engine-rs. It uses the existing paid Azure Cohere client, with no Model Plane and no subscription route.
+- Auth is principal-aware, with a default-deny route table. Allowed: `/v1/retrieve*` and `/v1/knowledge/search` with `data:read`, and `/v1/rerank` with new scope `data:rerank`. Quarry's `zdr` and `sovereign_required` must be passed explicitly (wire values mapped from Quarry's `ZdrMode`, never "off").
+- Vector-leg corpus scope is server-enforced as a SQL predicate on `documents.source='quarry'` in the post-fusion gate, covering all arms. The client filter cannot work because Qdrant has no `source`. That also makes rerank input public web text.
+- ZDR on rerank:
+  - `zdr_mode` is required on `/v1/rerank` (400 if absent).
+  - It is the run-level flag after any BYO downgrade.
+  - ZDR, sovereign and unapproved-processor cases return HTTP 200 with `status=skipped`, input order and a reason.
+  - Quarry `/v1/search` requires `zdr` from service callers.
+- Also fix:
+  - `rrf_fuse` must keep `engines` and `fusion_score`.
+  - Quarry must emit score and `score_kind` only after model-gateway calibration (T12) ships.
+  - Vector leg gets an HTTP timeout, a kill switch, a budget, and viewer-grant skipping for service principals.
+  - Redact the `retrieval.start` query when the mode is restrictive.
+  - Highlights are deferred, because SERP snippets are 70-274 chars. They apply only to vector chunks or fetched text.
+  - Idempotency key is `rerank:{org}:{request_id}:{contenthash}`. The "startup refuses" guard is a route-only 503.
+- Delete Quarry's LLM reranker and `SEMANTIC_RERANK_MODEL`.
+
+ZDR (ZR)
+- Auth Core stays the only posture authority. A per-connection capability record (`supported/not_supported/cannot_verify`) lives in a side table in integration-corev2. An append-only ack ledger has no cascade FK, and the digest is computed only by integration-corev2.
+- Ack and posture routes are bearer-only with `UserID == connection.UserID` and no internal-key bypass. This fits the earlier ruling that personal connections are owner-only.
+- At turn start the BFF asks Auth Core for a signed decision. Auth Core mints `zdr=false` plus a connection-bound, versioned `zdr_waiver` claim. Model-gateway and inference-core honour it only for that exact connection and refuse any other route.
+- Enforcers ship before minters. A kill switch sits on the decision route. The token set must be homogeneous, and every mint site carries the decision.
+- Session-core records a `zdr_waived` receipt. Waived retrieval defaults to a filtering mode so restricted documents never go to the personal account. The ack text says retrieved org knowledge goes to OpenAI.
+- The org flag is never written.
+- Do mode on Terra still needs `AGENTIC_SUBSCRIPTION_ENABLED` and is not claimed closed.
+- Space ZDR is not applied in v1.
+
+Critic claims I rejected or changed:
+- Quarry critic's "mint the rerank token with org posture" is rejected for v1. It would force ZDR onto waived runs, and `plane-token.controller.ts` is dirty. Required body flag instead.
+- ZDR design's Z-08 and the Quarry critic's fix to read the token claim are narrowed. The claim is used only for `principal_type=user`. Service tokens to the quarry audience are always `zdr:true`.
+- Contextual critic's "posture-version bearer cache" is replaced by the 60s TTL cap (simpler, same bound).
+- Contextual critic #7 (ZDR usage events) is resolved without the owner. Matrix row 87 already allows "ZDR/cost metadata only". Emit content-free count rows with `zdr=true` and record it in the ledger.
+
+2. COLLISIONS AND OWNER CHAINS
+
+All of these are dirty from other sessions except where noted. Edit hunks in place and never git checkout or stash.
+
+- `plane-service-principals.json` (dirty), `plane-service-principals-policy.contract.spec.ts` (untracked), `run-control-plane.sh` (dirty) and `validate-release-credentials.sh`: one principal bundle, P1, owned by Control Plane. It carries:
+  - quarry-edge `data:rerank`
+  - data-orchestrator to cost-core `cost:write`
+  - a separate BFF retention-decision principal (not verevon-gateway)
+  - `tenant` retention for embedding-engine and graph-index
+  - the production-valid tenancy model
+  - the launcher env wiring
+  Chain: P0 then P1. Everyone else adds assertions only after P1. Specs must fail, not skip, when `REQUIRE_CONTRACT` is set. Goldens are vendored and sha256-pinned in each consuming tree.
+- `plane-service-principal.ts` (clean): P0 only. `tenant` maps to zdr:true unless resolved, and both controllers resolve explicitly.
+  - `plane-token.controller.ts` and `convex-token.service.ts` (dirty): P0 first, then ZR waiver.
+  - `bootstrap_runtime_environment.sh`: P0 retires the inline registry and reads the committed JSON, with a parity spec.
+- CP `docker-compose.yml` (dirty, org-core credentials): P0 only. Grant auth-core a narrow `org:retention:read:any`, add an org-core internal route returning `{zdrIntent, entitled}`, and map it in `serviceScopesForRequest`. Test with the real middleware.
+- Data Plane compose (clean): CR config and Azure-key removal, then QB `WEB_RERANK_*`, serialized in one commit with one block per service. Ingestion compose is dirty in the integration-api section, so QB edits only the quarry-edge block.
+- `master-ownership-matrix.md` (clean):
+  - rule 15: Data Plane owns rerank of caller-supplied candidates, including public web results (QB).
+  - rule 16: tenant posture for background LLM work and metering (CR).
+  - rule 17: per-connection waiver, which amends rule 4 (ZR).
+  - rule 18: service-principal route allowlist, an exception to rule 9 (QB).
+  Written in that order, one docs commit per wave.
+- Metering foundation, owned by CR: the Data Plane cost verifier, consumer, `event-envelope-rs` subject table, `cost_events` migration, graph-events signing key, and the forwarder. QB's T16 and ZR add producers after CR lands.
+  - Verifier changes first: per-producer event types, strict decode, and a deterministic idempotency key (the shared embed key drops a second user's usage).
+- cost-core (dirty, uncommitted migrations 0006/0007 and the Azure cost sync): CR owns the ingest v2 change. Wait for the other session to commit. QB and ZR add only pricing rows and dimension values. The budget aggregate must exclude non-chat features, or Data Plane spend degrades chat models.
+- retrieval-engine: QB first (auth, route table, `rerank_api`, log redaction), then CR (rerank text with context).
+- model-gateway `relevance.rs` and `quarry.rs` (clean): QB only. `sse.rs` (+2136) and inference-core `fallback.rs` (+107): ZR only. CR does not edit `fallback.rs`; inference-core counters go in a new file. `tool_loop.rs` (+628): avoided until the other session commits.
+- Trust files in Frontend are dirty and shared with the ZR work: see section 3, trust edits.
+
+3. BUILD ORDER
+
+Sequential spine (Control Plane stage; use the launcher, never a hand-built compose):
+1. P0a: org-core read path plus the real-middleware test, then the Auth Core resolver fix and the 503 semantics.
+2. P0b: `tenant` posture, with the auth-core image deployed before any registry change.
+3. P0c: registry unification and the production principal model.
+4. P1: the principal bundle (Auth Core and org-core recreate).
+
+Parallel wave A (Data Plane; after P1):
+- CR-A: metering foundation. Consumer and verifier deploy before producers. cost-core ingest v2 (Model Plane stage) deploys before the forwarder is enabled, and the forwarder ships dark.
+- CR-B: migration, state machine, reconciler, default ON, stop_reason, graph hardening, and removal of the Azure extractor.
+- QB-A: T03 auth and route table, the `source=quarry` predicate, `/v1/rerank`, and redaction.
+- QB metering (T16) waits for CR-A.
+
+Parallel wave B (Model Plane):
+- QB T12: `relevance.rs` calibration for `score_kind`. Must ship before Quarry emits scores.
+- ZR enforcers: normalize, sse, inference-core, session-core, execution-core.
+- CR inference-core counters.
+
+Wave C (Ingestion):
+- integration-corev2 ack ledger and posture routes.
+- Quarry:
+  - T09 calls the Data Plane for rerank.
+  - T10 vector-leg fixes.
+  - Delete the Model Plane rerank dependency.
+  - D16 decision applied (see section 5).
+  - Docker build target `deploy/compose/Dockerfile.edge --target build`.
+
+Wave D (Frontend):
+- BFF decision call and the org-switch gate.
+- SPA ack prompt, including a drafted `supported` text.
+- Trust edits, split into two parts:
+  - (a) Sentences that do not depend on shipped behavior can start now in parallel. The pending-reverification list has 26 sentences, rows 14, 23, 24 and 25 among them.
+  - (b) ZR-dependent sentences (the `mustSay` pins for the ChatGPT route and the privacy tooltips) land with ZR and state only what the live proof shows.
+  - The Frontend container needs a restart.
+
+Cross-plane deploy order: Control Plane, then Data Plane (verifier and consumer first, then producers), Model Plane (enforcers first, then minters), Ingestion, Frontend (gateway, then SPA). Roll back in reverse. The ZR Auth Core kill switch comes before any ZR enablement.
+
+4. LIVE PROOFS (cheapest first)
+
+1. Free probes. Auth-service reaches org-core with service headers and gets 200. A dedicated ZDR test org mints `zdr:true`, a non-ZDR org `false`, and an org-core outage returns 503 with no token. Fresh bootstrap and launcher produce the same registry.
+2. Principals. quarry-edge mints `data:rerank`. Interactive tokens cannot reach `/v1/rerank`. No `allowAnyOrg` remains in production file mode.
+3. CR coverage by SQL. 207 of 207 units have a non-NULL `context_status`. Quickwit versus Postgres drift is 0 after the reconcile. A forced re-embed with unchanged inputs makes 0 provider calls (counter check).
+4. Metering. One CR call gives exactly one cost-core row with feature, org and exact tokens. Replaying it gives still one row. The chat budget aggregate is unchanged.
+5. Rerank, one paid call. status `ok` with Cohere scores. The same `request_id` retried makes no second provider call. A ZDR request returns `skipped` in input order with zero provider calls.
+6. Quarry search end to end. No 403s in logs, vector hits carry real URLs and only `source=quarry`, `engines` survive fusion, and scores appear only after T12.
+7. Eval gate on the re-seeded corpus. CR and rerank cells do not drop below the committed baseline (nDCG@10 0.7732 for contextual).
+8. ZR, on gpt-5.6-terra via openai-codex-subscription only, never Verevon Balance. On the ZDR test org, standard chat is refused with a typed reason. With the ack, the Terra turn runs and records `zdr_waived`. Other connections and models stay refused. The org flag is unchanged. A non-ZDR org sees no change.
+9. Trust-claims tests pass against the proven behavior.
+
+5. REALLY OPEN OWNER DECISIONS
+
+Already answered and dropped: CR stays on; no subscription rerank; Quarry B; ZDR per-connection waiver with no org-wide off; no admin lock; personal connections owner-only; live tests on the GPT subscription; trust edits to be completed.
+- ZDR attestation: no provider is attested today. Who obtains the Azure attestation, and do we block the org ZDR switch until a provider is advertised? Recommend gating in the BFF, with an operator-only seed for the test org.
+- ZR derived jobs on waived runs (memory index, dreaming, learning review): skip, or process on paid providers? Recommend skip.
+- Quarry D16: autoprompt, answer synthesis, ai-formats and page-title use a Model Plane audience that quarry-edge cannot mint. Either flip the defaults off now or grant `models:invoke` with a narrow scope. Recommend off now, decide the grant later.
+- QB capacity: a shared Foundry deployment with limiter, or dedicated for web traffic before general availability. Recommend shared now, dedicated before GA.
+- Data Plane background budget: the monthly figure, and whether exceeding it stops generation (`skipped_budget`) or only alerts.
+
+6. RISKS
+
+- Fail-open ordering: a waiver `zdr=false` token reaching a Model Plane that is not waiver-aware, or a registry flipped to `tenant` before the new Auth Core image. Enforce the ordering above.
+- Auth Core stalls generation, and chat for a ZDR org, if org-core is down. The 503 contract avoids silent persistence but costs availability.
+- ZDR orgs lose rerank precision. There is no ZDR contract evidence for Cohere on Azure. The skip with marker is the interim behavior.
+- Foundry S0 429s: there is no live evidence of reranker health since 2026-09-23.
+- A shared dirty tree (373 modified files). Anything uncommitted in cost-core, `sse.rs` or the principal files can collide. Check for NUL-filled files and CRLF after any abrupt shutdown.
+- A Postgres versus Quickwit drift gate must exist, or CR's lexical half silently degrades again.
+- Secrets printed in critic transcripts: `GRAPH_INDEX_GDPR_NATS_PASSWORD` and the first 40 characters of `CODEX_SUBSCRIPTION_INTERNAL_API_KEY`. Rotate both.
+- Trust text can again outrun behavior if it lands before the proofs.

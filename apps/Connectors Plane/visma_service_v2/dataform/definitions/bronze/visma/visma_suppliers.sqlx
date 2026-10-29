@@ -1,0 +1,65 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_suppliers",
+  description: "Bronze: Supplier master data from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.str("accountUsedForPayment")} AS `accountUsedForPayment`,
+  ${bronze.str("cashAccount")} AS `cashAccount`,
+  ${bronze.str("chargeBearer")} AS `chargeBearer`,
+  ${bronze.str("corporateId")} AS `corporateId`,
+  ${bronze.str("creditTerms")} AS `creditTerms`,
+  ${bronze.str("currencyId")} AS `currencyId`,
+  ${bronze.bool("currencyOverride")} AS `currencyOverride`,
+  ${bronze.bool("currencyRateOverride")} AS `currencyRateOverride`,
+  ${bronze.str("documentLanguage")} AS `documentLanguage`,
+  ${bronze.int("internalId")} AS `internalId`,
+  ${bronze.bool("landedCostSupplier")} AS `landedCostSupplier`,
+  ${bronze.str("lastModifiedDateTime")} AS `lastModifiedDateTime`,
+  ${bronze.str("location")} AS `location`,
+  ${bronze.str("mainAddress")} AS `mainAddress`,
+  ${bronze.str("mainContact")} AS `mainContact`,
+  ${bronze.str("metadata")} AS `metadata`,
+  ${bronze.str("name")} AS `name`,
+  ${bronze.str("number")} AS `number`,
+  ${bronze.str("parentRecord")} AS `parentRecord`,
+  ${bronze.bool("paySeparately")} AS `paySeparately`,
+  ${bronze.str("paymentBy")} AS `paymentBy`,
+  ${bronze.int("paymentLeadTime")} AS `paymentLeadTime`,
+  ${bronze.str("paymentMethod")} AS `paymentMethod`,
+  ${bronze.str("remitAddress")} AS `remitAddress`,
+  ${bronze.str("remitContact")} AS `remitContact`,
+  ${bronze.bool("retainageApply")} AS `retainageApply`,
+  ${bronze.float("retainagePct")} AS `retainagePct`,
+  ${bronze.str("status")} AS `status`,
+  ${bronze.str("supplierAddress")} AS `supplierAddress`,
+  ${bronze.str("supplierClass")} AS `supplierClass`,
+  ${bronze.str("supplierContact")} AS `supplierContact`,
+  ${bronze.str("supplierPaymentMethodDetails")} AS `supplierPaymentMethodDetails`,
+  ${bronze.str("timeStamp")} AS `timeStamp`,
+  ${bronze.str("vatRegistrationId")} AS `vatRegistrationId`,
+  ${bronze.str("vatZone")} AS `vatZone`,
+  ${bronze.str("accountReference")} AS `accountReference`,
+  ${bronze.str("glAccounts")} AS `glAccounts`,
+  ${bronze.str("paymentRefDisplayMask")} AS `paymentRefDisplayMask`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`,  -- v2 does not fetch this field
+
+  -- Fields v2 fetches that the v1 table never had
+  ${bronze.str("note")} AS `note`
+FROM ${ref("dw_staging_visma", "suppliers")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

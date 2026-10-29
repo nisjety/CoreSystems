@@ -1,0 +1,34 @@
+@media (prefers-reduced-motion: reduce) {
+	:global(html:not([data-motion="full"])) .staticOnReducedMotion {
+		margin-top: 0;
+		height: auto;
+		overflow: hidden;
+	}
+
+	:global(html:not([data-motion="full"])) .staticOnReducedMotion [data-product-loop-pin] {
+		position: relative;
+		min-height: 0;
+	}
+
+	:global(html:not([data-motion="full"])) .staticOnReducedMotion [data-product-loop-viewport] {
+		display: grid;
+		min-height: 0;
+		padding: 96px var(--verevon-page-pad);
+	}
+
+	:global(html:not([data-motion="full"])) .staticOnReducedMotion [data-product-loop-header],
+	:global(html:not([data-motion="full"])) .staticOnReducedMotion [data-product-loop-frame],
+	:global(html:not([data-motion="full"])) .staticOnReducedMotion [data-product-loop-circle],
+	:global(html:not([data-motion="full"])) .staticOnReducedMotion [data-product-loop-copy],
+	:global(html:not([data-motion="full"])) .staticOnReducedMotion [data-product-loop-connector] {
+		display: none;
+	}
+
+	:global(html:not([data-motion="full"])) .staticOnReducedMotion [data-product-loop-mobile-fallback] {
+		display: grid;
+		width: 100%;
+		max-width: 960px;
+		gap: 48px;
+		margin-inline: auto;
+	}
+}

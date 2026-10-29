@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="nb">
+<head>
+<meta charset="utf-8">
+<title>Verevon Sans Lab glyph sheet</title>
+<style>
+  @font-face { font-family: "VSL"; font-weight: 300; src: url("out/VerevonSansLab-Light.ttf"); }
+  @font-face { font-family: "VSL"; font-weight: 400; src: url("out/VerevonSansLab-Regular.ttf"); }
+  @font-face { font-family: "VSL"; font-weight: 700; src: url("out/VerevonSansLab-Bold.ttf"); }
+  body { margin: 0; padding: 16px 24px; background: #fff; color: #111; font-family: "VSL", sans-serif; font-weight: var(--w, 300); }
+  p { font-size: 104px; line-height: 1.22; margin: 0; letter-spacing: .03em; word-break: break-all; }
+</style>
+</head>
+<body>
+<p>ABCDEFGHIJKLM</p>
+<p>NOPQRSTUVWXYZ</p>
+<p>ÆØÅabcdefghijk</p>
+<p>lmnopqrstuvwx</p>
+<p>yzæøå0123456</p>
+<p>789.,:;!?-–/()</p>
+<p>'"+=_%</p>
+<script>
+  const w = new URLSearchParams(location.search).get("w");
+  if (w) document.body.style.setProperty("--w", w);
+</script>
+</body>
+</html>

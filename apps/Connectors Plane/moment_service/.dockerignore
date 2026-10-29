@@ -1,0 +1,25 @@
+# Keep secrets and local state OUT of the image layers.
+#
+# The Dockerfile does `COPY . .`, and Docker reads .dockerignore from the build
+# context root - without this file, a service-account key or .env sitting in the
+# working tree gets baked into an image layer and leaks to anyone who can pull
+# or inspect the image. Nothing here is needed at build time: docker-compose
+# injects the environment via env_file: and mounts the GCP key read-only.
+.env
+.env.*
+!.env.example
+app/gcp-credentials.json
+*-credentials.json
+gcp-credentials*.json
+
+.git
+.gitignore
+__pycache__/
+*.py[cod]
+.pytest_cache/
+data/
+*.db
+*.sqlite3
+*.log
+.venv/
+venv/

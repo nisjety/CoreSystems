@@ -1,0 +1,62 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero fixed assets. A tenant is the company; asset lifecycle is retained from Xero rather than inferred from absence.",
+  assertions: {
+    nonNull: ["tenant_id", "asset_id", "asset_key"],
+    uniqueKey: ["asset_key"]
+  }
+}
+
+WITH latest AS (
+  SELECT *
+  FROM ${ref("dw_bronze_xero", "xero_fixed_asset_observations")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, asset_id
+    ORDER BY asset_observed_at DESC, source_receipt_id DESC, source_version_id DESC
+  ) = 1
+)
+SELECT
+  CONCAT(latest.tenant_id, '|', latest.asset_id) AS asset_key,
+  latest.tenant_id,
+  latest.asset_id,
+  latest.asset_type_id,
+  IF(latest.asset_type_id IS NULL, NULL,
+     CONCAT(latest.tenant_id, '|', latest.asset_type_id)) AS asset_type_key,
+  latest.asset_type_id IS NOT NULL AND asset_type.asset_type_id IS NULL AS is_asset_type_unresolved,
+  latest.asset_name,
+  latest.asset_number,
+  latest.asset_status,
+  latest.warranty_expiry_date,
+  latest.serial_number,
+  latest.purchase_date,
+  latest.purchase_price,
+  latest.accounting_book_value,
+  latest.disposal_date,
+  latest.disposal_price,
+  latest.can_rollback,
+  latest.is_delete_enabled_for_date,
+  latest.book_depreciation_start_date,
+  latest.book_current_accumulated_depreciation,
+  latest.book_prior_accumulated_depreciation,
+  latest.book_current_capital_gain,
+  latest.book_current_gain_loss,
+  latest.book_cost_limit,
+  latest.book_residual_value,
+  latest.book_depreciation_method,
+  latest.book_depreciation_calculation_method,
+  latest.book_depreciation_rate,
+  latest.book_effective_life_years,
+  latest.book_effective_date_of_change_id,
+  latest.book_depreciation_averaging_method,
+  latest.is_source_deleted,
+  latest.disposal_date IS NOT NULL OR latest.asset_status = 'Disposed' AS is_disposed,
+  latest.asset_observed_at,
+  latest.source_record_id,
+  latest.source_version_id,
+  latest.source_receipt_id,
+  latest.source_run_id
+FROM latest
+LEFT JOIN ${ref("dw_1_silver_xero", "dim_fixed_asset_type")} AS asset_type
+  ON latest.tenant_id = asset_type.tenant_id
+ AND latest.asset_type_id = asset_type.asset_type_id

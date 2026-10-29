@@ -1,0 +1,36 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Current Xero fixed-asset configuration per company.",
+  assertions: { nonNull: ["tenant_id", "asset_settings_key"], uniqueKey: ["asset_settings_key"] }
+}
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(tenant_id, '|fixed-asset-settings')) AS asset_settings_key,
+  FARM_FINGERPRINT(tenant_id) AS company_key,
+  tenant_id,
+  asset_number_prefix,
+  asset_number_sequence,
+  asset_start_date,
+  last_depreciation_date,
+  is_tax_opted_in,
+  tax_start_date,
+  IF(default_gain_on_disposal_account_id IS NULL, NULL,
+     FARM_FINGERPRINT(CONCAT(tenant_id, '|', default_gain_on_disposal_account_id)))
+    AS default_gain_on_disposal_account_key,
+  IF(default_loss_on_disposal_account_id IS NULL, NULL,
+     FARM_FINGERPRINT(CONCAT(tenant_id, '|', default_loss_on_disposal_account_id)))
+    AS default_loss_on_disposal_account_key,
+  IF(default_capital_gain_on_disposal_account_id IS NULL, NULL,
+     FARM_FINGERPRINT(CONCAT(tenant_id, '|', default_capital_gain_on_disposal_account_id)))
+    AS default_capital_gain_on_disposal_account_key,
+  default_gain_on_disposal_account_id,
+  default_loss_on_disposal_account_id,
+  default_capital_gain_on_disposal_account_id,
+  is_default_gain_on_disposal_account_unresolved,
+  is_default_loss_on_disposal_account_unresolved,
+  is_default_capital_gain_on_disposal_account_unresolved,
+  is_source_deleted,
+  asset_observed_at,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_fixed_asset_settings")}

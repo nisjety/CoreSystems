@@ -1,0 +1,2 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+projects,,1,0,succeeded,1237,1237,1237,13,0,37,14454,1196,2026-09-29 19:34:13.363+00

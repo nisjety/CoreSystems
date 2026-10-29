@@ -1,0 +1,83 @@
+# Contract Manager Docker Compose Example for Traefik Integration
+# Location: /opt/coresystem-contract-manager/docker-compose.yml
+
+services:
+  contract-manager:
+    build: .
+    # Or use: image: your-registry/contract-manager:latest
+    container_name: coresystem-contract-manager
+    restart: unless-stopped
+    
+    environment:
+      # Django configuration
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DJANGO_DEBUG=False
+      - DJANGO_ALLOWED_HOSTS=contract.coresystem.com,localhost
+      - DJANGO_CSRF_TRUSTED_ORIGINS=https://contract.coresystem.com
+      
+      # Database configuration
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/contracts
+      
+      # Cloudflare proxy configuration
+      - DJANGO_USE_X_FORWARDED_HOST=True
+      - DJANGO_SECURE_PROXY_SSL_HEADER=HTTP_X_FORWARDED_PROTO,https
+      - DJANGO_SECURE_SSL_REDIRECT=False  # Traefik handles SSL
+      
+      # Application settings
+      - DJANGO_ADMIN_URL=admin/
+      - PORT=8001
+    
+    volumes:
+      - contract_media:/app/media
+      - contract_static:/app/staticfiles
+    
+    # Connect to Traefik's network
+    networks:
+      - coresystem_default  # Or 'internal' if that's where Traefik is
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/admin/login/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # Traefik labels for subdomain routing
+    labels:
+      # Enable Traefik routing
+      - "traefik.enable=true"
+      
+      # HTTPS router - main subdomain
+      - "traefik.http.routers.contract-manager.rule=Host(`contract.coresystem.com`)"
+      - "traefik.http.routers.contract-manager.entrypoints=websecure"
+      - "traefik.http.routers.contract-manager.tls=true"
+      
+      # Service configuration - specify internal port
+      - "traefik.http.services.contract-manager.loadbalancer.server.port=8001"
+      
+      # HTTP to HTTPS redirect
+      - "traefik.http.routers.contract-manager-http.rule=Host(`contract.coresystem.com`)"
+      - "traefik.http.routers.contract-manager-http.entrypoints=web"
+      - "traefik.http.routers.contract-manager-http.middlewares=redirect-to-https@file"
+      
+      # Specify which network Traefik should use (if container has multiple networks)
+      - "traefik.docker.network=coresystem_default"
+      
+      # Optional: Add rate limiting to protect against abuse
+      # - "traefik.http.routers.contract-manager.middlewares=admin-ratelimit@file"
+      
+      # Optional: Add IP whitelist for admin access
+      # - "traefik.http.routers.contract-manager.middlewares=dynamic-ipwhitelist@file"
+
+volumes:
+  contract_media:
+    driver: local
+  contract_static:
+    driver: local
+
+# Use external network that Traefik is connected to
+networks:
+  coresystem_default:
+    external: true
+    name: coresystem_default  # Or 'internal' if that's where Traefik is

@@ -1,0 +1,32 @@
+config { type: "assertion", schema: "dw_1_silver_xero_assertions", name: "xero_gold_cash_document_grain_reconciliation" }
+
+WITH counts AS (
+  SELECT 'expense_claim' AS entity,
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_expense_claim")}) AS silver_count,
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_expense_claim")}) AS gold_count
+  UNION ALL SELECT 'expense_claim_receipt',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_expense_claim_receipt")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_expense_claim_receipt")})
+  UNION ALL SELECT 'expense_claim_receipt_line',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_expense_claim_receipt_line")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_expense_claim_receipt_line")})
+  UNION ALL SELECT 'prepayment',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_prepayment")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_prepayment")})
+  UNION ALL SELECT 'prepayment_line',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_prepayment_line")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_prepayment_line")})
+  UNION ALL SELECT 'prepayment_allocation',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_prepayment_allocation")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_prepayment_allocation")})
+  UNION ALL SELECT 'non_invoice_payment',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_non_invoice_payment")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_non_invoice_payment")})
+  UNION ALL SELECT 'receipt',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_receipt")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_receipt")})
+  UNION ALL SELECT 'receipt_line',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_receipt_line")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_receipt_line")})
+)
+SELECT * FROM counts WHERE silver_count != gold_count

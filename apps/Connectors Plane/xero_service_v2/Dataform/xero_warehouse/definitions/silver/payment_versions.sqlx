@@ -1,0 +1,18 @@
+config {
+  type: "view",
+  schema: "dw_1_silver_xero",
+  description: "All observed typed payment versions, with supersession and Xero deletion status."
+}
+
+SELECT
+  bronze.*,
+  ROW_NUMBER() OVER (
+    PARTITION BY bronze.tenant_id, bronze.record_id
+    ORDER BY bronze.synced_at DESC, bronze.version_id DESC
+  ) > 1 AS is_superseded,
+  COALESCE(bronze.status = 'DELETED', FALSE) AS is_deleted,
+  staging.record_id IS NULL AS is_missing_from_staging
+FROM ${ref("dw_bronze_xero", "xero_payments")} AS bronze
+LEFT JOIN ${ref("dw_staging_xero", "payments")} AS staging
+  ON bronze.tenant_id = staging.tenant_id
+ AND bronze.record_id = staging.record_id

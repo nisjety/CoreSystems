@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  socrm-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: socrm-service
+    ports:
+      - "5006:5006"
+    environment:
+      # Service settings
+      - SOCRM_HOST=0.0.0.0
+      - SOCRM_PORT=5006
+      - FLASK_ENV=production
+      - FLASK_DEBUG=false
+      
+      # SuperOffice OAuth settings
+      - SOCRM_CLIENT_ID=${SOCRM_CLIENT_ID}
+      - SOCRM_CLIENT_SECRET=${SOCRM_CLIENT_SECRET}
+      - SOCRM_REDIRECT_URI=${SOCRM_REDIRECT_URI}
+      - SOCRM_TENANT=${SOCRM_TENANT:-sod}
+      
+      # Database
+      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/aquatiq_db}
+      
+      # Cache settings
+      - CACHE_DIR=/app/cache
+      - CACHE_TTL=3600
+      
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./cache:/app/cache
+    networks:
+      - aquatiq-network
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: socrm-postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=aquatiq_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - aquatiq-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: socrm-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - aquatiq-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  aquatiq-network:
+    driver: bridge

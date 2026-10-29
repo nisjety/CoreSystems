@@ -1,0 +1,214 @@
+# CoreSystem root .gitignore — one repo covers all 6 planes + verevon frontend.
+# Exclude large build artefacts, dependency dirs, and runtime state. Keep
+# tracked: source, docs, compose files, Dockerfiles, env templates.
+
+# ──────────────────────────────────────────────────────────────────────
+# Build artefacts
+# ──────────────────────────────────────────────────────────────────────
+# Rust
+target/
+**/target/
+*.rlib
+*.rmeta
+
+# Go
+bin/
+**/bin/
+**/dist/
+
+# ...but Rust's `src/bin/` is SOURCE, not build output. The `**/bin/` rule above
+# (intended for Go/compiled artifacts) silently swallowed every Cargo
+# multi-binary source file, while the `[[bin]]` entries in Cargo.toml and the
+# `COPY`/`cargo build --bin` lines in the Dockerfiles were committed as normal —
+# so a clean checkout could not build the affected crates at all, even though
+# `git status` looked clean in a working tree that still had the files.
+# A directory must be re-included before anything inside it can be, hence both
+# lines. Verify with `git archive HEAD | tar -x`, never `git status`.
+!**/src/bin/
+!**/src/bin/**
+
+# Next.js / Node
+.next/
+**/.next/
+out/
+**/out/
+**/node_modules/
+
+# Python
+__pycache__/
+**/__pycache__/
+**/.pytest_cache/
+**/*.egg-info/
+**/.venv/
+.venv/
+*.pyc
+*.pyo
+
+# Generated proto / SDK output
+**/gen/cpp/
+**/gen/python/_pb2*.py
+
+# ──────────────────────────────────────────────────────────────────────
+# Editor / OS
+# ──────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json
+
+# ──────────────────────────────────────────────────────────────────────
+# Secrets and local env
+# ──────────────────────────────────────────────────────────────────────
+# Catch every .env variant (including .env.production, .env.staging,
+# .env.external-services, .env.zammad — these have been observed to
+# contain real DB passwords + integration secrets in this tree). Also
+# catch service-named *.env files (apps/Control Plane/lago.env carries
+# real openssl-generated keys per its own header).
+.env
+.env.*
+*.env
+**/.env
+**/.env.*
+**/*.env
+# Track explicitly named template/example variants only.
+# NOTE: .env.docker is intentionally NOT tracked — in this tree those files
+# carry REAL DB/Twilio/Resend/Google/Microsoft/Okta secrets. Rotate any that
+# were ever committed and keep real values in a secret manager.
+!**/.env.example
+!**/.env.template
+!**/.env.sso.template
+!**/.env.zammad.example
+!**/*.env.example
+!**/*.env.template
+# Specific known-secret files (defence-in-depth in case the pattern
+# above ever loosens by accident).
+**/lago.env
+**/.env.external-services
+**/.env.docker
+**/*.env.docker
+
+# Generated runtime key material. Public keys are derived locally alongside
+# private keys so the complete trust bundle remains deployment-owned.
+**/.secrets/
+
+# ──────────────────────────────────────────────────────────────────────
+# Compiled Go service binaries (build artifacts — large, non-reproducible,
+# may embed baked-in config). A stray `git add -A` committed these; they are
+# untracked via `git rm --cached` and ignored here so they don't recur.
+# Specific paths (not a glob) so a real `server/` source dir is never ignored.
+# ──────────────────────────────────────────────────────────────────────
+apps/Control Plane/org-core/org-core
+apps/Control Plane/org-core/server
+apps/Control Plane/user-core/user-core
+apps/Control Plane/user-core/server
+# Caught unstaged during the 2026-08-20 branch consolidation: `go build ./...`
+# with no -o drops the binary next to main.go, named after its directory, so it
+# lands outside the `**/bin/` rules above and looks like an ordinary new file.
+apps/Model Plane/go/services/nats-provisioner/nats-provisioner
+
+# ──────────────────────────────────────────────────────────────────────
+# Claude Code agent worktrees — isolated git worktrees (full nested
+# checkouts + build artifacts) created for background agents. Never commit.
+# ──────────────────────────────────────────────────────────────────────
+.claude/worktrees/
+
+# Per-machine agent state: local settings, a scheduler lock, and a
+# launch.json whose runtimeArgs hardcode this checkout's absolute path. All
+# machine-specific. If genuinely shared project config is added here later,
+# re-include it explicitly with a `!` rule rather than dropping this one.
+.claude/
+
+# ──────────────────────────────────────────────────────────────────────
+# Logs and runtime state
+# ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+**/logs/
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+
+# ──────────────────────────────────────────────────────────────────────
+# Coverage and test output
+# ──────────────────────────────────────────────────────────────────────
+coverage/
+**/coverage/
+.nyc_output/
+**/.nyc_output/
+*.lcov
+
+# ──────────────────────────────────────────────────────────────────────
+# Local caches
+# ──────────────────────────────────────────────────────────────────────
+.pnpm-store/
+**/.pnpm-store/
+.turbo/
+**/.turbo/
+.cache/
+**/.cache/
+
+# ──────────────────────────────────────────────────────────────────────
+# Legacy nested-repo backups (created on 2026-05-20 when CoreSystem
+# absorbed Model Plane + Quarry-v2 into a single root repository). Kept
+# on disk in case the pre-root history is ever needed; not part of the
+# unified repo.
+# ──────────────────────────────────────────────────────────────────────
+.git.preroot-backup/
+**/.git.preroot-backup/
+
+# ──────────────────────────────────────────────────────────────────────
+# Sandbox / scratch
+# ──────────────────────────────────────────────────────────────────────
+/tmp/
+.scratch/
+
+# Playwright MCP browser-automation artifacts (screenshots/traces).
+# Also matched at any depth: these get created next to whichever package the
+# run started from, not just at the repo root.
+.playwright-mcp/
+**/.playwright-mcp/
+
+# Playwright's own run output
+test-results/
+**/test-results/
+playwright-report/
+**/playwright-report/
+blob-report/
+**/blob-report/
+.last-run.json
+
+# ──────────────────────────────────────────────────────────────────────
+# Ad-hoc UI screenshots captured while iterating on a design. Real product
+# and marketing assets live under a package's own public/ or assets/ dir
+# and are NOT covered by these rules — only loose captures dropped at a
+# plane or app root.
+# ──────────────────────────────────────────────────────────────────────
+apps/Frontend Plane/*.png
+apps/Frontend Plane/*.jpg
+apps/Frontend Plane/verevonv3/*.png
+apps/Frontend Plane/verevonv3/*.jpg
+apps/Frontend Plane/verevonv3/apps/*/*.png
+apps/Frontend Plane/verevonv3/apps/*/*.jpg
+**/image copy*.png
+**/screenshot-*.png
+
+# Nested checkout that is its own git repository; `git add` would otherwise
+# stage it as a gitlink with none of its contents.
+apps/Frontend Plane/agenci/
+
+# Screen recordings + compiled Go migrator binary (build artifacts)
+*.mov
+apps/Data Plane v2/tools/migrator/migrator
+
+# ──────────────────────────────────────────────────────────────────────
+# Deployment credentials. These must never be tracked, wherever they land.
+# ──────────────────────────────────────────────────────────────────────
+DEPLOYED_SERVICES_CREDENTIALS.txt
+**/DEPLOYED_SERVICES_CREDENTIALS.txt
+.env.generated-secrets
+**/.env.generated-secrets

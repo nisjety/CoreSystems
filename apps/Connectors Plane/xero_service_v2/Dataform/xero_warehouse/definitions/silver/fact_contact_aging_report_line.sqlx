@@ -1,0 +1,102 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "One Xero aged-report document row per contact, report snapshot, section and source row. This is report evidence, not an upserted invoice ledger, because Xero does not supply a stable document ID in these report rows.",
+  assertions: {
+    nonNull: ["tenant_id", "report_snapshot_key", "contact_aging_report_line_key", "report", "contact_id"],
+    uniqueKey: ["contact_aging_report_line_key"]
+  }
+}
+
+WITH row_cells AS (
+  SELECT *
+  FROM ${ref("dw_1_silver_xero", "fact_financial_report_cell")}
+  WHERE report IN ('report_aged_receivables_by_contact', 'report_aged_payables_by_contact')
+    AND row_type = 'Row'
+), row_metadata AS (
+  SELECT
+    tenant_id,
+    report_snapshot_key,
+    report_snapshot_id,
+    report,
+    report_type,
+    report_name,
+    report_titles,
+    run_id,
+    contact_id,
+    report_params,
+    report_parameter_hash,
+    report_date,
+    report_synced_at,
+    report_index,
+    section_index,
+    section_title,
+    row_index,
+    MAX(IF(column_header = 'Date', cell_value, NULL)) AS source_document_date_value,
+    MAX(IF(column_header = 'Due Date', cell_value, NULL)) AS source_document_due_date_value,
+    MAX(IF(column_header = 'Reference', NULLIF(cell_value, ''), NULL)) AS reference_value,
+    MAX(IF(column_header = 'Number', NULLIF(cell_value, ''), NULL)) AS number_value
+  FROM row_cells
+  GROUP BY
+    tenant_id, report_snapshot_key, report_snapshot_id, report, report_type,
+    report_name, report_titles, run_id, contact_id, report_params,
+    report_parameter_hash, report_date, report_synced_at, report_index,
+    section_index, section_title, row_index
+), successful_requests AS (
+  SELECT DISTINCT tenant_id, run_id, endpoint AS report, request_key
+  FROM ${ref("dw_staging_xero", "sync_run_entities")}
+  WHERE endpoint IN ('report_aged_receivables_by_contact', 'report_aged_payables_by_contact')
+    AND NOT error_present
+    AND termination = 'report-snapshot'
+    AND REGEXP_CONTAINS(request_key, r'^contact:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+)
+SELECT
+  CONCAT(
+    row.report_snapshot_key, '|', CAST(row.report_index AS STRING), '|',
+    CAST(row.section_index AS STRING), '|', CAST(row.row_index AS STRING)
+  ) AS contact_aging_report_line_key,
+  row.tenant_id,
+  row.report_snapshot_key,
+  row.report_snapshot_id,
+  row.report,
+  CASE row.report
+    WHEN 'report_aged_receivables_by_contact' THEN 'accounts_receivable'
+    WHEN 'report_aged_payables_by_contact' THEN 'accounts_payable'
+  END AS aging_ledger,
+  row.report_type,
+  row.report_name,
+  row.report_titles,
+  row.run_id AS report_run_id,
+  row.contact_id,
+  row.report_params,
+  row.report_parameter_hash,
+  SAFE_CAST(row.report_date AS DATE) AS requested_report_date,
+  row.report_index,
+  row.section_index,
+  row.section_title,
+  row.row_index,
+  SAFE_CAST(SPLIT(row.source_document_date_value, 'T')[SAFE_OFFSET(0)] AS DATE)
+    AS source_document_date,
+  SAFE_CAST(SPLIT(row.source_document_due_date_value, 'T')[SAFE_OFFSET(0)] AS DATE)
+    AS source_document_due_date,
+  COALESCE(row.reference_value, row.number_value) AS source_document_reference,
+  CASE
+    WHEN row.reference_value IS NOT NULL THEN 'reference'
+    WHEN row.number_value IS NOT NULL THEN 'number'
+  END AS source_document_reference_kind,
+  FALSE AS is_source_document_key_available,
+  request.request_key AS contact_request_key,
+  request.request_key IS NOT NULL AS is_contact_request_manifested,
+  COALESCE(coverage.is_report_run_contact_set_complete, FALSE)
+    AS is_report_run_contact_set_complete,
+  row.report_synced_at
+FROM row_metadata AS row
+LEFT JOIN successful_requests AS request
+  ON row.tenant_id = request.tenant_id
+ AND row.run_id = request.run_id
+ AND row.report = request.report
+ AND request.request_key = CONCAT('contact:', row.contact_id)
+LEFT JOIN ${ref("dw_1_silver_xero", "fact_contact_aging_report_run")} AS coverage
+  ON row.tenant_id = coverage.tenant_id
+ AND row.run_id = coverage.run_id
+ AND row.report = coverage.report

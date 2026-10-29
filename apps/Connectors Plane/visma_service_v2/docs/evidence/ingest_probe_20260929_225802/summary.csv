@@ -1,0 +1,4 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+sales_order_customers,,1,0,succeeded,6359,6359,6359,64,0,59,,2012,
+sales_order_inventory,,1,0,succeeded,5806,5806,5806,59,0,6,,783,
+sales_orders_v3,,1,0,succeeded,22022,22022,22022,221,0,22,,2382,

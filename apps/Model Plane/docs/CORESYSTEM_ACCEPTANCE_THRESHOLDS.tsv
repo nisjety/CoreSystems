@@ -1,0 +1,15 @@
+# CoreSystem acceptance thresholds v1
+#
+# This is an operator contract, not a credential/config file. Values are
+# source-derived proposals until Release/Infra and the owning plane approve
+# them. A conformance run must remain blocked while status is `proposed`.
+# Columns: id<TAB>unit<TAB>target<TAB>operator<TAB>owner<TAB>source<TAB>stop_rule<TAB>status
+decision_ttl_seconds	seconds	120	<=	Control + owner planes	user-core/internal/spaces/personal_thread_decision.go:19; user-core/internal/spaces/scheduled_step_decision.go:208	Any decision lifetime above target blocks candidate promotion	proposed
+decision_future_skew_seconds	seconds	60	<=	Control + owner planes	user-core/internal/spaces/run_action_decision.go:318; conversation-core/internal/http/run_action_decision.go:142	Any issued-at future skew above target blocks effect execution	proposed
+scheduled_step_decision_ttl_seconds	seconds	120	<=	Control + Orchestrator + Execution Core	user-core/internal/spaces/scheduled_step_decision.go:208	Missing or stale step decision blocks the scheduled step	proposed
+delivery_claim_lease_seconds	seconds	30	<=	Application notification-core	Application Plane/notification-core/internal/config/config.go:65; internal/notification/delivery_worker.go:55	A claim lease above target without HA evidence blocks delivery enablement	proposed
+delivery_callback_max_skew_seconds	seconds	300	<=	Application notification-core	Application Plane/notification-core/internal/notification/delivery_callback.go:17	Callback outside the skew window is rejected and blocks acknowledgement	proposed
+unknown_reconciliation_stale_after_seconds	seconds	900	<=	Application conversation-core	Application Plane/conversation-core/conversation-core-go/internal/config/config.go:187	An unresolved sending/unknown outcome beyond target blocks retry and remains visible as unknown	proposed
+provider_receipt_deadline_seconds	seconds	900	<=	Application + provider adapter	Release evidence requirement; no provider-specific value is assumed	Missing provider receipt by deadline is unknown, never success	proposed
+ha_recovery_window_seconds	seconds	60	<=	Release/Infra + plane owners	Release evidence requirement; must be measured with two workers and restart	Recovery above target blocks candidate promotion	proposed
+zdr_residual_content_bytes	bytes	0	==	All owner planes	Release evidence requirement; inspect durable rows, queues, snapshots, and logs	Any residual content when ZDR is enabled blocks the run	proposed

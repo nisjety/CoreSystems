@@ -1,0 +1,33 @@
+query AccountById(
+  $id: String!
+) {
+  accountById(
+    id: $id
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    accountId
+    accountCd
+    type
+    accountClassId
+    active
+    description
+    curyId
+    taxCategoryId
+    useDefaultSubaccount
+    deletedDatabaseRecord
+    isCashAccount
+    controlAccountModule
+    publicCode1
+    publicCode2
+    externalCode1
+    externalCode2
+    analysisCode
+    externalCode1Description
+    externalCode2Description
+    analysisCodeDescription
+    groupCd
+    createdInDataMartDateTime
+  }
+}

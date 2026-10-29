@@ -1,0 +1,67 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "One authoritative Xero payment-to-invoice application per payment. It uses the current Payments feed, not the stale nested invoice-payment snapshot.",
+  assertions: {
+    nonNull: ["tenant_id", "payment_id", "payment_application_key"],
+    uniqueKey: ["payment_application_key"]
+  }
+}
+
+WITH payments AS (
+  SELECT *
+  FROM ${ref("fact_payment")}
+  WHERE payment_type IN ('ACCRECPAYMENT', 'ACCPAYPAYMENT')
+), applications AS (
+  SELECT
+    p.payment_key AS payment_application_key,
+    p.payment_key,
+    p.tenant_id,
+    p.payment_id,
+    p.payment_type,
+    p.status AS payment_status,
+    p.is_deleted,
+    p.is_missing_from_staging,
+    p.contact_id,
+    p.contact_name,
+    p.account_id,
+    p.account_code,
+    p.invoice_id,
+    p.invoice_number,
+    i.invoice_key,
+    i.invoice_type,
+    i.status AS invoice_status,
+    i.currency_code,
+    p.payment_date,
+    p.reference,
+    p.amount AS source_application_amount_in_currency,
+    p.bank_amount AS source_bank_amount,
+    p.currency_rate AS source_exchange_rate,
+    p.updated_at,
+    p.synced_at,
+    p.first_seen_at,
+    p.version_id,
+    i.invoice_id IS NOT NULL AS is_invoice_resolved,
+    i.invoice_id IS NOT NULL
+      AND ((p.payment_type = 'ACCRECPAYMENT' AND i.invoice_type != 'ACCREC')
+        OR (p.payment_type = 'ACCPAYPAYMENT' AND i.invoice_type != 'ACCPAY')) AS is_invoice_type_mismatch
+  FROM payments AS p
+  LEFT JOIN ${ref("fact_invoice")} AS i
+    ON p.tenant_id = i.tenant_id
+   AND p.invoice_id = i.invoice_id
+)
+SELECT
+  *,
+  payment_status = 'AUTHORISED'
+    AND NOT is_deleted
+    AND is_invoice_resolved
+    AND NOT is_invoice_type_mismatch AS is_reportable,
+  IF(
+    payment_status = 'AUTHORISED'
+      AND NOT is_deleted
+      AND is_invoice_resolved
+      AND NOT is_invoice_type_mismatch,
+    source_application_amount_in_currency,
+    NULL
+  ) AS application_amount_in_currency
+FROM applications

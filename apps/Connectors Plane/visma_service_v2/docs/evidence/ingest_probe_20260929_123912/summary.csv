@@ -1,0 +1,9 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+branches,,1,0,succeeded,1,1,1,1,0,1,14571,484,2026-01-21 12:45:50.307+00
+branches,,2,0,succeeded,1,1,1,1,0,1,14570,323,2026-01-21 12:45:50.307+00
+currencies,,1,0,succeeded,12,12,12,1,0,12,14569,333,
+currencies,,2,0,succeeded,12,12,12,1,0,12,14568,338,
+departments,,1,0,succeeded,54,54,54,1,0,54,14567,539,
+departments,,2,0,succeeded,54,54,54,1,0,54,14566,317,
+accounts,,1,0,succeeded,614,614,614,1,0,614,14565,584,
+accounts,,2,0,succeeded,614,614,614,1,0,614,14564,550,

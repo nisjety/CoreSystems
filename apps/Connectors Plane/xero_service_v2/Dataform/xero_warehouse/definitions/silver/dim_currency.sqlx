@@ -1,0 +1,11 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Tenant-scoped Xero currency reference data at one row per currency code.",
+  assertions: { nonNull: ["tenant_id", "currency_code", "currency_key"], uniqueKey: ["currency_key"] }
+}
+
+SELECT CONCAT(tenant_id, '|', currency_code) AS currency_key,
+       tenant_id, currency_code, currency_description,
+       record_id AS currency_internal_id, first_seen_at, synced_at
+FROM ${ref("dw_bronze_xero", "xero_currencies")}

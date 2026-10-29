@@ -1,0 +1,25 @@
+{
+  "endpoint_name": "supplier_balances_v2",
+  "bigquery_table": "visma_supplier_balances_v2",
+  "primary_key": [
+    "branch",
+    "supplier.internalId"
+  ],
+  "source": "erp_rest",
+  "enabled": true,
+  "api_method": "get_supplier_balances_v2",
+  "api_endpoint": "/v2/supplier/balance",
+  "pagination_profile": "finance_page_number",
+  "modified_field": null,
+  "merge_type": "upsert",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": [
+    "branch",
+    "supplier.internalId"
+  ],
+  "notes": "Found 100 row(s) via discover_erp_endpoints.py. Key chosen from a sample of 100 row(s); the full ingest run is what proves it. Stored raw for later Dataform mapping. Key set by hand: a sample cannot show it.",
+  "default_query": {
+    "fromFinPeriod": "200001",
+    "toFinPeriod": "203012"
+  }
+}

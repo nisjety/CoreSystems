@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "dw_staging_xero",
+  name: "attachment_list_snapshots",
+  description: "Append-only complete Accounting attachment-list responses, one row per tenant and source sidecar. Empty ID arrays represent observed deletions."
+}

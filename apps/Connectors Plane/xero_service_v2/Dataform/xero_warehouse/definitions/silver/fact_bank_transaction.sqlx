@@ -1,0 +1,17 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero bank transactions, retaining deleted and internal transfer records for audit.",
+  assertions: { nonNull: ["tenant_id", "bank_transaction_id", "bank_transaction_key"], uniqueKey: ["bank_transaction_key"] }
+}
+
+SELECT CONCAT(tenant_id, '|', bank_transaction_id) AS bank_transaction_key,
+       tenant_id, bank_transaction_id, record_id AS bank_transaction_internal_id,
+       transaction_type, status, status = 'DELETED' AS is_deleted,
+       transaction_type IN ('SPEND', 'RECEIVE') AS is_external_cash_flow,
+       is_reconciled, bank_account_id, bank_account_code, bank_account_name,
+       contact_id, contact_name, reference, transaction_date_local,
+       currency_code, currency_rate, line_amount_types, line_item_count,
+       sub_total, total_tax, total, has_attachments,
+       updated_at, first_seen_at, synced_at
+FROM ${ref("dw_bronze_xero", "xero_bank_transactions")}

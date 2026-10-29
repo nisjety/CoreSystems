@@ -1,0 +1,44 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Lifecycle-aware Xero Projects user directory from fully certified Projects runs. Xero does not expose a project-role bridge in this API.",
+  assertions: {
+    nonNull: ["tenant_id", "user_id", "project_user_key"],
+    uniqueKey: ["project_user_key"]
+  }
+}
+
+WITH source AS (
+  SELECT user.*, lifecycle.is_current, lifecycle.is_removed,
+         lifecycle.removed_in_run_id, lifecycle.removed_observed_at,
+         lifecycle.record_state, lifecycle.first_seen_at, lifecycle.last_seen_at
+  FROM ${ref("dw_bronze_xero", "xero_project_entity_lifecycle")} AS lifecycle
+  INNER JOIN ${ref("dw_bronze_xero", "xero_project_user_observations")} AS user
+    ON lifecycle.tenant_id = user.tenant_id
+   AND lifecycle.last_seen_source_run_id = user.source_run_id
+   AND lifecycle.entity_id = user.user_id
+  WHERE lifecycle.entity_type = 'user'
+)
+SELECT
+  CONCAT(tenant_id, '|', user_id) AS project_user_key,
+  tenant_id,
+  user_id,
+  user_name,
+  user_email,
+  project_observed_at,
+  source_record_id,
+  source_version_id,
+  source_receipt_id,
+  source_run_id,
+  is_current,
+  is_removed,
+  removed_in_run_id,
+  removed_observed_at,
+  record_state,
+  first_seen_at,
+  last_seen_at
+FROM source
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY tenant_id, user_id
+  ORDER BY project_observed_at DESC, source_receipt_id DESC, source_version_id DESC
+) = 1

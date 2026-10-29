@@ -1,0 +1,28 @@
+query Branches(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  branches(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    branchId
+    branchCode
+    branchName
+    bAccountId
+    active
+    mainBranch
+    ledgerId
+    parentBranchId
+    countryId
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+  }
+}

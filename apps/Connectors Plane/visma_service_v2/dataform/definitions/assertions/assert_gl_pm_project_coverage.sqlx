@@ -1,0 +1,15 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_gl_pm_project_coverage",
+  description: "The project-module lines of the general ledger must find their project. Returns the group-wide share when less than 90 % of the PM rows of fact_general_ledger carry a project_id. The rest are contra and clearing lines that have project 'X' in Visma (Aquatiq AS: half of its PM rows); the share was 97 % on 2026-10-13. Ported from the 60 % floor of v1's monitor_pm_pipeline.py, raised because v2 links through the journal lines.",
+  tags: ["assertion", "silver", "project", "general_ledger"]
+}
+
+SELECT
+  COUNT(*) AS pm_rows,
+  COUNTIF(project_id IS NOT NULL) AS pm_rows_with_project,
+  SAFE_DIVIDE(COUNTIF(project_id IS NOT NULL), COUNT(*)) AS project_coverage
+FROM ${ref("visma_silver", "fact_general_ledger")}
+WHERE module = 'PM'
+HAVING SAFE_DIVIDE(COUNTIF(project_id IS NOT NULL), COUNT(*)) < 0.90

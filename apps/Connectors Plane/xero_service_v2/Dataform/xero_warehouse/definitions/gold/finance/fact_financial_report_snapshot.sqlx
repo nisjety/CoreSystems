@@ -1,0 +1,16 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Historical Xero report-run facts. These are source report snapshots and must not be summed with general-ledger facts.",
+  assertions: { nonNull: ["tenant_id", "report_snapshot_id", "report_snapshot_key"], uniqueKey: ["report_snapshot_key"] }
+}
+
+SELECT FARM_FINGERPRINT(s.tenant_id) AS company_key,
+       FARM_FINGERPRINT(CAST(COALESCE(s.report_to, SAFE_CAST(s.report_date AS DATE)) AS STRING)) AS date_key,
+       s.report_snapshot_key, s.tenant_id, s.report_snapshot_id,
+       s.report, s.report_id, s.report_type, s.report_name, s.report_titles,
+       s.report_date, s.report_from, s.report_to, s.run_id, s.contact_id,
+       s.report_params, s.report_parameter_hash, s.report_updated_utc,
+       TRUE AS is_report_snapshot, TRUE AS is_non_additive,
+       s.first_seen_at, s.synced_at, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_financial_report_snapshot")} AS s

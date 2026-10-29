@@ -1,0 +1,41 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  name: "fact_batch_payment",
+  description: "Silver: current Xero batch-payment headers. Grain: one row per tenant and batch payment.",
+  tags: ["silver", "xero", "fact"]
+}
+
+WITH current_batches AS (
+  SELECT *
+  FROM ${ref("dw_staging_xero", "batch_payments")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, record_id
+    ORDER BY synced_at DESC
+  ) = 1
+)
+
+SELECT
+  tenant_id,
+  synced_at,
+  first_seen_at,
+  batch_payment_id,
+  record_id AS batch_payment_internal_id,
+  bank_account_id,
+  account_currency_code,
+  batch_payment_type,
+  status,
+  payment_date,
+  payment_date_local,
+  updated_at,
+  reference,
+  particulars,
+  code,
+  details,
+  narrative,
+  reconciled_statement_line_id,
+  SAFE_CAST(total_amount AS FLOAT64) AS total_amount,
+  payment_count,
+  is_reconciled,
+  'xero' AS _source
+FROM current_batches

@@ -1,0 +1,42 @@
+[
+  {
+    "id": "data-is-a-snapshot-until-the-scheduler-runs",
+    "found": "2026-10-12",
+    "severity": "check_before_reporting",
+    "summary": "The data is a snapshot of 2026-10-01/02. The scheduler that refreshes v2's staging has not run in production yet, and the sync heartbeat table does not exist yet. Anything that depends on 'now' (open items, overdue, backlog) is as of the snapshot: check visma_sync_status (or the heartbeat once it exists) and confirm a figure that drives a decision live.",
+    "skill": "data-freshness",
+    "anchor": "The data is a snapshot"
+  },
+  {
+    "id": "project-ledger-double-counts-the-merger-move",
+    "found": "2026-10-13",
+    "severity": "double_counting",
+    "summary": "Aquatiq AS's project ledger starts on 2025-12-31 with 25 projects moved in from the merged companies (233 lines, 70.1M income, 60.6M cost); Hygiene Systems, Food Factory and Consult carry opening balances from 2023-09-30. All of it is flagged is_historical_project_migration and left out of the *_excluding_historical_* columns, but still counts in income_amount and expense_amount. Totals that include flagged lines count it twice: filter NOT is_historical_project_migration.",
+    "skill": "project-profitability",
+    "anchor": "The move into Aquatiq AS"
+  },
+  {
+    "id": "sales-totals-include-intercompany-and-zero-cost-lines",
+    "found": "2026-10-13",
+    "severity": "wrong_totals",
+    "summary": "BI_SalesOrder sums include quotes and returns unless filtered by the order type's behavior (bronze visma_sales_order_types) and intercompany sales (13.0% of 2025 value has ic <> '00'). 39% of the value has no cost: a margin over all lines reads 71.4%, over the costed lines 53.1%; use has_cost, margin_amount_nok and amount_price_with_cost_nok. department_code follows each company's department segment; product_category is still empty.",
+    "skill": "sales-reporting",
+    "anchor": "Intercompany sales are in the totals"
+  },
+  {
+    "id": "merged-companies-are-frozen",
+    "found": "2026-10-12",
+    "severity": "wrong_totals",
+    "summary": "Food Factory, Hygiene Systems, Sense and Consult were merged into Aquatiq AS and stopped booking: their newest ledger postings are from 2026-02-09, and their open items, order backlog and period close flags are frozen. Leave them out of current receivables, payables and backlog.",
+    "skill": "tenants-and-entities",
+    "anchor": "Historical tenants"
+  },
+  {
+    "id": "journal-batch-header-totals-disagree-with-their-lines",
+    "found": "2026-10-13",
+    "severity": "check_before_reporting",
+    "summary": "49 journal batches in 36 company-periods (Aquatiq AS, Group, Hygiene Systems, Sense, Sensilist; modules AP and AR) have Visma header totals that disagree with Visma's own lines, a source data issue (the lines staged equal what Visma returns), recorded in visma_silver_common.qa_journal_batch_known_mismatch. The ledger lines still net to zero. Name it when you review those periods; do not use the header totals as control totals.",
+    "skill": "period-end-review",
+    "anchor": "batch totals disagree with its lines"
+  }
+]

@@ -1,0 +1,258 @@
+config {
+  type: "table",
+  schema: "xero_datamart",
+  description: "Finance consumption mart at Xero journal-line grain. Finance-governed account mappings are applied on transaction date; source-native functional-currency measures remain separate from any future NOK conversion.",
+  assertions: { nonNull: ["finance_activity_key", "tenant_id", "journal_line_id"], uniqueKey: ["finance_activity_key"] }
+}
+
+WITH effective_mappings AS (
+  SELECT
+    mapping_id,
+    tenant_id,
+    account_id,
+    valid_from,
+    valid_to,
+    mapping_source,
+    mapping_version,
+    bs_pl,
+    fsli_1,
+    fsli_2,
+    fsli_3,
+    ebitda_flag,
+    net_income_flag,
+    cash_flow_1,
+    cash_flow_2,
+    cash_flow_3,
+    working_capital_flag,
+    capex_flag,
+    intercompany_flag,
+    approved_at
+  FROM ${ref("xero_reference", "xero_account_reporting_mapping")}
+  WHERE is_active IS TRUE
+    AND NULLIF(TRIM(mapping_id), '') IS NOT NULL
+    AND NULLIF(TRIM(mapping_source), '') IS NOT NULL
+    AND NULLIF(TRIM(mapping_version), '') IS NOT NULL
+    AND NULLIF(TRIM(bs_pl), '') IS NOT NULL
+    AND NULLIF(TRIM(fsli_1), '') IS NOT NULL
+    AND valid_from IS NOT NULL
+    AND approved_at IS NOT NULL
+    AND (valid_to IS NULL OR valid_to > valid_from)
+), mapping_candidates AS (
+  SELECT
+    g.journal_line_key,
+    COUNT(mapping.mapping_id) OVER (
+      PARTITION BY g.journal_line_key
+    ) AS mapping_match_count,
+    ROW_NUMBER() OVER (
+      PARTITION BY g.journal_line_key
+      ORDER BY mapping.valid_from DESC, mapping.approved_at DESC, mapping.mapping_version DESC,
+               mapping.mapping_id DESC
+    ) AS mapping_rank,
+    mapping.mapping_id,
+    mapping.mapping_source,
+    mapping.mapping_version,
+    mapping.valid_from,
+    mapping.valid_to,
+    mapping.approved_at,
+    mapping.bs_pl,
+    mapping.fsli_1,
+    mapping.fsli_2,
+    mapping.fsli_3,
+    mapping.ebitda_flag,
+    mapping.net_income_flag,
+    mapping.cash_flow_1,
+    mapping.cash_flow_2,
+    mapping.cash_flow_3,
+    mapping.working_capital_flag,
+    mapping.capex_flag,
+    mapping.intercompany_flag
+  FROM ${ref("xero_gold_finance", "fact_general_ledger")} AS g
+  LEFT JOIN effective_mappings AS mapping
+    ON g.tenant_id = mapping.tenant_id
+   AND g.account_id = mapping.account_id
+   AND g.transaction_date >= mapping.valid_from
+   AND (mapping.valid_to IS NULL OR g.transaction_date < mapping.valid_to)
+), enriched AS (
+  SELECT
+    g.*,
+    d.year,
+    d.quarter,
+    d.month,
+    d.day_of_month AS day,
+    period.financial_period_id,
+    period.fiscal_year,
+    period.fiscal_month,
+    period.fiscal_quarter,
+    g.is_financial_period_derived AS is_fiscal_period_derived,
+    a.account_description,
+    a.account_type AS dim_account_type,
+    a.account_class,
+    a.reporting_code,
+    a.reporting_name,
+    mapping.mapping_match_count AS effective_account_mapping_match_count,
+    mapping.mapping_match_count > 1 AS is_effective_account_mapping_ambiguous,
+    CASE WHEN mapping.mapping_match_count = 1 THEN mapping.mapping_id END
+      AS effective_account_mapping_id,
+    CASE WHEN mapping.mapping_match_count = 1 THEN mapping.mapping_source END
+      AS effective_account_mapping_source,
+    CASE WHEN mapping.mapping_match_count = 1 THEN mapping.mapping_version END
+      AS effective_account_mapping_version,
+    CASE WHEN mapping.mapping_match_count = 1 THEN mapping.valid_from END
+      AS effective_mapping_valid_from,
+    CASE WHEN mapping.mapping_match_count = 1 THEN mapping.valid_to END
+      AS effective_mapping_valid_to,
+    CASE WHEN mapping.mapping_match_count = 1 THEN mapping.approved_at END
+      AS effective_mapping_approved_at,
+    CASE WHEN mapping.mapping_match_count = 1 THEN mapping.bs_pl END AS effective_source_bs_pl,
+    CASE WHEN mapping.mapping_match_count = 1 THEN mapping.fsli_1 END AS effective_source_fsli_1,
+    CASE WHEN mapping.mapping_match_count = 1 THEN mapping.fsli_2 END AS effective_source_fsli_2,
+    CASE WHEN mapping.mapping_match_count = 1 THEN mapping.fsli_3 END AS effective_source_fsli_3,
+    CASE WHEN mapping.mapping_match_count = 1 THEN mapping.ebitda_flag END AS effective_ebitda_flag,
+    CASE WHEN mapping.mapping_match_count = 1 THEN mapping.net_income_flag END
+      AS effective_net_income_flag,
+    CASE WHEN mapping.mapping_match_count = 1 THEN mapping.cash_flow_1 END AS effective_cash_flow_1,
+    CASE WHEN mapping.mapping_match_count = 1 THEN mapping.cash_flow_2 END AS effective_cash_flow_2,
+    CASE WHEN mapping.mapping_match_count = 1 THEN mapping.cash_flow_3 END AS effective_cash_flow_3,
+    CASE WHEN mapping.mapping_match_count = 1 THEN mapping.working_capital_flag END
+      AS effective_working_capital_flag,
+    CASE WHEN mapping.mapping_match_count = 1 THEN mapping.capex_flag END AS effective_capex_flag,
+    CASE WHEN mapping.mapping_match_count = 1 THEN mapping.intercompany_flag END
+      AS effective_intercompany_flag,
+    a.account_key IS NULL AS is_account_unresolved,
+    t1.tracking_category_key AS tracking_category_1_key,
+    t1.tracking_option_key AS tracking_option_1_key,
+    t2.tracking_category_key AS tracking_category_2_key,
+    t2.tracking_option_key AS tracking_option_2_key
+  FROM ${ref("xero_gold_finance", "fact_general_ledger")} AS g
+  LEFT JOIN ${ref("xero_gold_common", "dim_date")} AS d
+    ON g.date_key = d.date_key
+  LEFT JOIN ${ref("xero_gold_common", "dim_financial_period")} AS period
+    ON g.financial_period_key = period.financial_period_key
+  LEFT JOIN ${ref("xero_gold_finance", "dim_account")} AS a
+    ON g.account_key = a.account_key
+  LEFT JOIN mapping_candidates AS mapping
+    ON g.journal_line_key = mapping.journal_line_key
+   AND mapping.mapping_rank = 1
+  LEFT JOIN ${ref("xero_gold_common", "dim_tracking_option")} AS t1
+    ON g.tenant_id = t1.tenant_id
+   AND g.tracking_category_1_id = t1.tracking_category_id
+   AND g.tracking_option_1_name = t1.option_name
+  LEFT JOIN ${ref("xero_gold_common", "dim_tracking_option")} AS t2
+    ON g.tenant_id = t2.tenant_id
+   AND g.tracking_category_2_id = t2.tracking_category_id
+   AND g.tracking_option_2_name = t2.option_name
+), classified AS (
+  SELECT
+    enriched.*,
+    COALESCE(
+      effective_source_bs_pl,
+      CASE account_class
+        WHEN 'ASSET' THEN 'BS'
+        WHEN 'LIABILITY' THEN 'BS'
+        WHEN 'EQUITY' THEN 'BS'
+        WHEN 'REVENUE' THEN 'P&L'
+        WHEN 'EXPENSE' THEN 'P&L'
+      END
+    ) AS bs_pl,
+    COALESCE(
+      effective_source_fsli_1,
+      CASE account_class
+        WHEN 'ASSET' THEN 'Assets'
+        WHEN 'LIABILITY' THEN 'Equity and liabilities'
+        WHEN 'EQUITY' THEN 'Equity and liabilities'
+        WHEN 'REVENUE' THEN 'Revenue'
+        WHEN 'EXPENSE' THEN 'Operating expenses'
+      END
+    ) AS fsli_1,
+    CASE
+      WHEN effective_account_mapping_id IS NOT NULL THEN 'finance_governed_account_mapping'
+      WHEN account_class IN ('ASSET', 'LIABILITY', 'EQUITY', 'REVENUE', 'EXPENSE')
+        THEN 'native_account_class_fallback'
+      ELSE 'unmapped'
+    END AS account_mapping_method
+  FROM enriched
+)
+
+SELECT
+  FARM_FINGERPRINT(journal_line_key) AS finance_activity_key,
+  date_key,
+  transaction_date AS date,
+  year,
+  quarter,
+  month,
+  day,
+  financial_period_key,
+  financial_period_id,
+  fiscal_year,
+  fiscal_month,
+  fiscal_quarter,
+  financial_period_basis,
+  is_fiscal_period_derived,
+  company_key,
+  tenant_id,
+  account_key,
+  account_id,
+  account_code,
+  account_name,
+  account_description,
+  COALESCE(CONCAT(account_code, ' - ', account_name), account_code, account_name) AS account,
+  dim_account_type,
+  account_class,
+  effective_source_bs_pl AS source_bs_pl,
+  effective_source_fsli_1 AS source_fsli_1,
+  effective_source_fsli_2 AS source_fsli_2,
+  effective_source_fsli_3 AS source_fsli_3,
+  effective_ebitda_flag AS ebitda_flag,
+  effective_net_income_flag AS net_income_flag,
+  effective_cash_flow_1 AS cash_flow_1,
+  effective_cash_flow_2 AS cash_flow_2,
+  effective_cash_flow_3 AS cash_flow_3,
+  effective_working_capital_flag AS working_capital_flag,
+  effective_capex_flag AS capex_flag,
+  effective_intercompany_flag AS intercompany_flag,
+  effective_account_mapping_match_count AS account_mapping_match_count,
+  is_effective_account_mapping_ambiguous AS is_account_mapping_ambiguous,
+  effective_account_mapping_id AS account_mapping_id,
+  effective_account_mapping_source AS account_mapping_source,
+  effective_account_mapping_version AS account_mapping_version,
+  effective_mapping_valid_from AS mapping_valid_from,
+  effective_mapping_valid_to AS mapping_valid_to,
+  effective_mapping_approved_at AS mapping_approved_at,
+  bs_pl,
+  fsli_1,
+  account_mapping_method,
+  bs_pl IS NOT NULL AND fsli_1 IS NOT NULL AS is_financial_statement_classification_complete,
+  reporting_code,
+  reporting_name,
+  functional_currency,
+  tracking_category_1_key,
+  tracking_option_1_key,
+  tracking_category_1_id,
+  tracking_option_1_name,
+  tracking_category_2_key,
+  tracking_option_2_key,
+  tracking_category_2_id,
+  tracking_option_2_name,
+  journal_line_key,
+  journal_id,
+  journal_line_id,
+  journal_number,
+  source_type,
+  source_id,
+  reference,
+  description,
+  debit_amount,
+  credit_amount,
+  signed_net_amount,
+  signed_net_amount AS amount_functional_currency,
+  CAST(NULL AS NUMERIC) AS amount_nok,
+  FALSE AS is_nok_amount_available,
+  is_account_unresolved,
+  (tracking_category_1_id IS NOT NULL OR tracking_option_1_name IS NOT NULL)
+    AND tracking_option_1_key IS NULL AS is_tracking_1_unresolved,
+  (tracking_category_2_id IS NOT NULL OR tracking_option_2_name IS NOT NULL)
+    AND tracking_option_2_key IS NULL AS is_tracking_2_unresolved,
+  is_orphan_line,
+  synced_at,
+  'xero' AS source_system
+FROM classified

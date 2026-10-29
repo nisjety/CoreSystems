@@ -1,0 +1,12 @@
+[
+  {"name":"policy_id","type":"STRING","mode":"REQUIRED","description":"Stable unique finance policy identifier."},
+  {"name":"tenant_id","type":"STRING","mode":"REQUIRED","description":"Xero tenant/organisation UUID."},
+  {"name":"conversion_scope","type":"STRING","mode":"REQUIRED","description":"Conversion scope; the current finance readiness contract requires FUNCTIONAL_CURRENCY."},
+  {"name":"valid_from","type":"DATE","mode":"REQUIRED","description":"Inclusive finance-policy effective date."},
+  {"name":"valid_to","type":"DATE","mode":"NULLABLE","description":"Exclusive finance-policy effective date; NULL means open-ended."},
+  {"name":"policy_source","type":"STRING","mode":"REQUIRED","description":"Finance-approved policy source or identifier."},
+  {"name":"policy_version","type":"STRING","mode":"REQUIRED","description":"Immutable finance-policy version identifier."},
+  {"name":"allow_filled_forward_rate","type":"BOOLEAN","mode":"REQUIRED","description":"Whether a market rate from an earlier calendar day is approved for this period."},
+  {"name":"approved_at","type":"TIMESTAMP","mode":"REQUIRED","description":"Timestamp of finance approval."},
+  {"name":"is_active","type":"BOOLEAN","mode":"REQUIRED","description":"Whether the policy row may be applied."}
+]

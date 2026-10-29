@@ -1,0 +1,55 @@
+[package]
+name = "inference-core"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mp-contracts = { path = "../../crates/mp-contracts" }
+mp-events = { path = "../../crates/mp-events" }
+mp-ids = { path = "../../crates/mp-ids" }
+mp-telemetry = { path = "../../crates/mp-telemetry" }
+
+tokio = { workspace = true }
+tonic = { workspace = true }
+tonic-health = "0.12"
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+axum = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+chrono = { workspace = true }
+tokio-stream = "0.1"
+
+# ZDR attestation digest. Same crate/version as execution-core, session-core and
+# model-gateway so attestation digests are byte-comparable across services.
+sha2 = "0.10"
+
+# HTTP client for provider calls
+reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
+async-trait = "0.1"
+futures-util = "0.3"
+base64 = "0.22"
+jsonwebtoken = { workspace = true }
+
+# Concurrent cache
+dashmap = "6"
+
+# Hot-swappable runtime routing policy (lock-free reads)
+arc-swap = "1.9"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+wiremock = "0.6"
+rsa = { version = "0.9", features = ["pem"] }
+rand = "0.8"
+
+[lib]
+name = "inference_core"
+path = "src/lib.rs"

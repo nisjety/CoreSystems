@@ -1,0 +1,1469 @@
+tenant,name,endpoint,source,status,records,written,seconds,min_remaining,error,finished
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,project_tasks,erp_rest,failed,0,0,0,14954,"Error: upstream returned non-success status 400: {""message"":""Either ProjectId or ProjectInternalId or PublicId must be specified""}",2026-09-30T23:08:33Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,project_tasks,erp_rest,failed,0,0,0,14967,"Error: upstream returned non-success status 400: {""message"":""Either ProjectId or ProjectInternalId or PublicId must be specified""}",2026-09-30T23:08:33Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,project_tasks,erp_rest,failed,0,0,0,14998,"Error: upstream returned non-success status 400: {""message"":""Either ProjectId or ProjectInternalId or PublicId must be specified""}",2026-09-30T23:08:33Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,project_tasks,erp_rest,failed,0,0,0,14964,"Error: upstream returned non-success status 400: {""message"":""Either ProjectId or ProjectInternalId or PublicId must be specified""}",2026-09-30T23:08:33Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,accounts,erp_rest,ok,225,225,0,14997,,2026-09-30T23:08:34Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,accounts,erp_rest,ok,442,442,0,14966,,2026-09-30T23:08:34Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,accounts,erp_rest,ok,423,423,1,14963,,2026-09-30T23:08:34Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,attributes,erp_rest,ok,1,1,0,14965,,2026-09-30T23:08:34Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,accounts,erp_rest,ok,1274,1274,1,14953,,2026-09-30T23:08:34Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,attributes,erp_rest,ok,41,41,0,14996,,2026-09-30T23:08:34Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,attributes,erp_rest,ok,1,1,0,14962,,2026-09-30T23:08:35Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,attributes,erp_rest,ok,2,2,0,14952,,2026-09-30T23:08:35Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,branches,erp_rest,ok,1,1,0,14964,,2026-09-30T23:08:35Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,branches,erp_rest,ok,1,1,0,14995,,2026-09-30T23:08:35Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,branches,erp_rest,ok,1,1,0,14961,,2026-09-30T23:08:35Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,carriers,erp_rest,empty,0,0,0,14963,,2026-09-30T23:08:36Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,branches,erp_rest,ok,1,1,0,14951,,2026-09-30T23:08:36Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,carriers,erp_rest,empty,0,0,0,14994,,2026-09-30T23:08:36Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,carriers,erp_rest,empty,0,0,0,14960,,2026-09-30T23:08:36Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,cash_accounts,erp_rest,ok,8,8,1,14993,,2026-09-30T23:08:37Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,cash_accounts,erp_rest,ok,12,12,1,14959,,2026-09-30T23:08:37Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,cash_sales,erp_rest,empty,0,0,0,14992,,2026-09-30T23:08:37Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,cash_accounts,erp_rest,ok,26,26,1,14962,,2026-09-30T23:08:38Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,cash_sales,erp_rest,empty,0,0,0,14958,,2026-09-30T23:08:38Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,carriers,erp_rest,empty,0,0,2,14950,,2026-09-30T23:08:38Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,contacts,erp_rest,ok,9,9,0,14991,,2026-09-30T23:08:38Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,cash_sales,erp_rest,empty,0,0,0,14961,,2026-09-30T23:08:39Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,contacts,erp_rest,ok,30,30,0,14957,,2026-09-30T23:08:39Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,credit_terms,erp_rest,ok,11,11,0,14990,,2026-09-30T23:08:39Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,cash_accounts,erp_rest,ok,8,8,0,14949,,2026-09-30T23:08:39Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,credit_terms,erp_rest,ok,12,12,0,14956,,2026-09-30T23:08:39Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,contacts,erp_rest,ok,1,1,0,14960,,2026-09-30T23:08:39Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,currencies,erp_rest,ok,9,9,0,14989,,2026-09-30T23:08:39Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,cash_sales,erp_rest,empty,0,0,0,14948,,2026-09-30T23:08:40Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,currencies,erp_rest,ok,9,9,0,14955,,2026-09-30T23:08:40Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,credit_terms,erp_rest,ok,14,14,0,14959,,2026-09-30T23:08:40Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,currency_rate_types,erp_rest,ok,1,1,0,14988,,2026-09-30T23:08:40Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,contacts,erp_rest,ok,53,53,0,14947,,2026-09-30T23:08:40Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,currency_rate_types,erp_rest,ok,1,1,0,14954,,2026-09-30T23:08:40Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,currencies,erp_rest,ok,10,10,0,14958,,2026-09-30T23:08:40Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,credit_terms,erp_rest,ok,7,7,0,14946,,2026-09-30T23:08:41Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,currency_rate_types,erp_rest,ok,1,1,0,14957,,2026-09-30T23:08:41Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,currencies,erp_rest,ok,6,6,0,14945,,2026-09-30T23:08:41Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,currency_rate_types,erp_rest,ok,1,1,1,14944,,2026-09-30T23:08:43Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,currency_rates,erp_rest,ok,80,80,3,14987,,2026-09-30T23:08:43Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,currency_rates,erp_rest,ok,2466,2466,3,14953,,2026-09-30T23:08:44Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,currency_rates,erp_rest,ok,163,163,0,14943,,2026-09-30T23:08:44Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,customer_classes,erp_rest,ok,3,3,0,14986,,2026-09-30T23:08:44Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,customer_classes,erp_rest,ok,6,6,0,14952,,2026-09-30T23:08:44Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,customer_classes,erp_rest,ok,3,3,0,14942,,2026-09-30T23:08:44Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,customer_contracts,erp_rest,empty,0,0,0,14985,,2026-09-30T23:08:45Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,currency_rates,erp_rest,ok,4841,4841,4,14956,,2026-09-30T23:08:45Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,customer_contracts,erp_rest,empty,0,0,1,14941,,2026-09-30T23:08:45Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,customer_contracts,erp_rest,empty,0,0,1,14951,,2026-09-30T23:08:45Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,customer_classes,erp_rest,ok,6,6,0,14955,,2026-09-30T23:08:46Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,customer_credit_write_offs,erp_rest,ok,1,1,1,14984,,2026-09-30T23:08:46Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,customer_credit_write_offs,erp_rest,empty,0,0,0,14940,,2026-09-30T23:08:46Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,customer_credit_write_offs,erp_rest,empty,0,0,0,14950,,2026-09-30T23:08:46Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,customer_debit_notes,erp_rest,empty,0,0,0,14983,,2026-09-30T23:08:47Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,customer_contracts,erp_rest,empty,0,0,1,14954,,2026-09-30T23:08:47Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,customer_overdue_charges,erp_rest,empty,0,0,0,14982,,2026-09-30T23:08:47Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,customer_credit_write_offs,erp_rest,empty,0,0,0,14953,,2026-09-30T23:08:48Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,customer_debit_notes,erp_rest,ok,2,2,1,14949,,2026-09-30T23:08:48Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,customer_debit_notes,erp_rest,ok,3,3,1,14939,,2026-09-30T23:08:48Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,customer_payment_methods,erp_rest,empty,0,0,0,14981,,2026-09-30T23:08:48Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,customer_overdue_charges,erp_rest,empty,0,0,0,14948,,2026-09-30T23:08:48Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,customer_overdue_charges,erp_rest,empty,0,0,0,14938,,2026-09-30T23:08:48Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,customer_debit_notes,erp_rest,ok,1,1,1,14952,,2026-09-30T23:08:49Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,deferral_codes,erp_rest,ok,1,1,0,14980,,2026-09-30T23:08:49Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,customer_payment_methods,erp_rest,empty,0,0,0,14947,,2026-09-30T23:08:49Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,customer_payment_methods,erp_rest,empty,0,0,0,14937,,2026-09-30T23:08:49Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,customer_overdue_charges,erp_rest,empty,0,0,0,14951,,2026-09-30T23:08:49Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,departments,erp_rest,ok,1,1,0,14979,,2026-09-30T23:08:49Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,deferral_codes,erp_rest,ok,2,2,0,14936,,2026-09-30T23:08:49Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,deferral_codes,erp_rest,ok,6,6,0,14946,,2026-09-30T23:08:49Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,departments,erp_rest,ok,1,1,0,14945,,2026-09-30T23:08:50Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dimensions,erp_rest,ok,23,23,0,14978,,2026-09-30T23:08:50Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,departments,erp_rest,ok,2,2,0,14935,,2026-09-30T23:08:50Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,discount_codes,erp_rest,empty,0,0,0,14977,,2026-09-30T23:08:50Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dimensions,erp_rest,ok,23,23,0,14934,,2026-09-30T23:08:50Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,discount_codes,erp_rest,empty,0,0,0,14933,,2026-09-30T23:08:51Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_ar_historical_data,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:51Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_ar_historical_data,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:52Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_branches,datamart_graphql,ok,1,1,0,,,2026-09-30T23:08:52Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_branches,datamart_graphql,ok,1,1,0,,,2026-09-30T23:08:52Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_budgets,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:52Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_budgets,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:53Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,customer_payment_methods,erp_rest,ok,2,2,3,14950,,2026-09-30T23:08:53Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dimensions,erp_rest,ok,23,23,2,14944,,2026-09-30T23:08:53Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_countries,datamart_graphql,ok,260,260,0,,,2026-09-30T23:08:53Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,discount_codes,erp_rest,ok,4,4,0,14943,,2026-09-30T23:08:53Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,deferral_codes,erp_rest,ok,7,7,0,14949,,2026-09-30T23:08:53Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_employees,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:53Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_ar_historical_data,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:54Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_financial_periods,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:54Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,departments,erp_rest,ok,1,1,0,14948,,2026-09-30T23:08:54Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_countries,datamart_graphql,ok,260,260,1,,,2026-09-30T23:08:54Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_branches,datamart_graphql,ok,1,1,0,,,2026-09-30T23:08:55Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_inventory_items,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:55Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dimensions,erp_rest,ok,23,23,0,14947,,2026-09-30T23:08:55Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_employees,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:55Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_budgets,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:55Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,discount_codes,erp_rest,ok,4,4,0,14946,,2026-09-30T23:08:55Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_payment_methods,datamart_graphql,ok,8,8,0,,,2026-09-30T23:08:55Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_financial_periods,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:56Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_ar_historical_data,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:56Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_sales_persons,datamart_graphql,ok,3,3,0,,,2026-09-30T23:08:56Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_countries,datamart_graphql,ok,260,260,0,,,2026-09-30T23:08:56Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_inventory_items,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:56Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_branches,datamart_graphql,ok,1,1,0,,,2026-09-30T23:08:56Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_supplier_classes,datamart_graphql,ok,7,7,0,,,2026-09-30T23:08:57Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_employees,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:57Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_payment_methods,datamart_graphql,ok,4,4,0,,,2026-09-30T23:08:57Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_budgets,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:57Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_financial_periods,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:57Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_terms,datamart_graphql,ok,11,11,0,,,2026-09-30T23:08:57Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_sales_persons,datamart_graphql,ok,1,1,0,,,2026-09-30T23:08:57Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_countries,datamart_graphql,ok,260,260,0,,,2026-09-30T23:08:58Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_inventory_items,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:58Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_vat_categories,datamart_graphql,ok,19,19,0,,,2026-09-30T23:08:58Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_supplier_classes,datamart_graphql,ok,4,4,0,,,2026-09-30T23:08:58Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_employees,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:58Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_payment_methods,datamart_graphql,ok,7,7,0,,,2026-09-30T23:08:58Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_vat_zones,datamart_graphql,ok,13,13,0,,,2026-09-30T23:08:58Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_terms,datamart_graphql,ok,7,7,0,,,2026-09-30T23:08:59Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_financial_periods,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:59Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_warehouse_locations,datamart_graphql,empty,0,0,0,,,2026-09-30T23:08:59Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_sales_persons,datamart_graphql,ok,2,2,0,,,2026-09-30T23:08:59Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_vat_categories,datamart_graphql,ok,15,15,0,,,2026-09-30T23:08:59Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_inventory_items,datamart_graphql,empty,0,0,0,,,2026-09-30T23:09:00Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_supplier_classes,datamart_graphql,ok,8,8,0,,,2026-09-30T23:09:00Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_warehouses,datamart_graphql,ok,1,1,1,,,2026-09-30T23:09:00Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_vat_zones,datamart_graphql,ok,5,5,0,,,2026-09-30T23:09:00Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_payment_methods,datamart_graphql,ok,7,7,0,,,2026-09-30T23:09:01Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_terms,datamart_graphql,ok,12,12,0,,,2026-09-30T23:09:01Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,earning_types,erp_rest,ok,4,4,0,14976,,2026-09-30T23:09:01Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_warehouse_locations,datamart_graphql,empty,0,0,0,,,2026-09-30T23:09:01Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_sales_persons,datamart_graphql,ok,5,5,0,,,2026-09-30T23:09:02Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_vat_categories,datamart_graphql,ok,50,50,0,,,2026-09-30T23:09:02Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_warehouses,datamart_graphql,ok,1,1,0,,,2026-09-30T23:09:02Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_supplier_classes,datamart_graphql,ok,8,8,0,,,2026-09-30T23:09:02Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_vat_zones,datamart_graphql,ok,9,9,0,,,2026-09-30T23:09:02Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,earning_types,erp_rest,ok,5,5,0,14932,,2026-09-30T23:09:03Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_terms,datamart_graphql,ok,14,14,0,,,2026-09-30T23:09:03Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_warehouse_locations,datamart_graphql,empty,0,0,0,,,2026-09-30T23:09:03Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_vat_categories,datamart_graphql,ok,50,50,0,,,2026-09-30T23:09:03Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_warehouses,datamart_graphql,ok,1,1,0,,,2026-09-30T23:09:04Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_vat_zones,datamart_graphql,ok,9,9,0,,,2026-09-30T23:09:04Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,earning_types,erp_rest,ok,4,4,0,14942,,2026-09-30T23:09:04Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_warehouse_locations,datamart_graphql,empty,0,0,0,,,2026-09-30T23:09:04Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_warehouses,datamart_graphql,ok,1,1,0,,,2026-09-30T23:09:05Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,earning_types,erp_rest,ok,4,4,0,14945,,2026-09-30T23:09:06Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,expense_receipts,erp_rest,empty,0,0,5,14974,,2026-09-30T23:09:07Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,financial_periods,erp_rest,ok,48,48,0,14973,,2026-09-30T23:09:08Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,fixed_asset_classes,erp_rest,ok,6,6,0,14972,,2026-09-30T23:09:08Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,fixed_asset_property_tax_groups,erp_rest,empty,0,0,0,14971,,2026-09-30T23:09:09Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,fixed_assets,erp_rest,empty,0,0,0,14970,,2026-09-30T23:09:10Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,expense_receipts,erp_rest,empty,0,0,5,14940,,2026-09-30T23:09:10Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,financial_periods,erp_rest,ok,60,60,0,14939,,2026-09-30T23:09:11Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,inventory_item_classes,erp_rest,ok,5,5,0,14969,,2026-09-30T23:09:11Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,inventory_item_post_classes,erp_rest,ok,7,7,0,14968,,2026-09-30T23:09:11Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,fixed_asset_classes,erp_rest,ok,12,12,0,14938,,2026-09-30T23:09:11Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,expense_receipts,erp_rest,empty,0,0,5,14943,,2026-09-30T23:09:12Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,inventory_receipt_transfers,erp_rest,empty,0,0,0,14967,,2026-09-30T23:09:12Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,fixed_asset_property_tax_groups,erp_rest,empty,0,0,0,14937,,2026-09-30T23:09:12Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,financial_periods,erp_rest,ok,60,60,0,14942,,2026-09-30T23:09:12Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,landed_cost_codes,erp_rest,empty,0,0,0,14966,,2026-09-30T23:09:13Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,fixed_asset_classes,erp_rest,ok,14,14,0,14941,,2026-09-30T23:09:13Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,fixed_assets,erp_rest,ok,2,2,1,14936,,2026-09-30T23:09:13Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,languages,erp_rest,ok,6,6,0,14965,,2026-09-30T23:09:13Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,fixed_asset_property_tax_groups,erp_rest,empty,0,0,0,14940,,2026-09-30T23:09:13Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,ledgers,erp_rest,ok,4,4,0,14964,,2026-09-30T23:09:14Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,inventory_item_classes,erp_rest,ok,9,9,0,14935,,2026-09-30T23:09:14Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,lot_serial_classes,erp_rest,ok,1,1,0,14963,,2026-09-30T23:09:14Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,inventory_item_post_classes,erp_rest,ok,10,10,0,14934,,2026-09-30T23:09:14Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,fixed_assets,erp_rest,ok,13,13,1,14939,,2026-09-30T23:09:15Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,inventory_receipt_transfers,erp_rest,empty,0,0,0,14933,,2026-09-30T23:09:15Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,inventory_item_classes,erp_rest,ok,9,9,0,14938,,2026-09-30T23:09:15Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,number_sequences,erp_rest,ok,75,75,1,14962,,2026-09-30T23:09:15Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,landed_cost_codes,erp_rest,empty,0,0,0,14932,,2026-09-30T23:09:16Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,inventory_item_post_classes,erp_rest,ok,10,10,0,14937,,2026-09-30T23:09:16Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,organizations,erp_rest,ok,1,1,0,14961,,2026-09-30T23:09:16Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,languages,erp_rest,ok,6,6,0,14931,,2026-09-30T23:09:16Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,inventory_receipt_transfers,erp_rest,empty,0,0,0,14936,,2026-09-30T23:09:17Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,packaging_types,erp_rest,empty,0,0,0,14960,,2026-09-30T23:09:17Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,ledgers,erp_rest,ok,4,4,0,14930,,2026-09-30T23:09:17Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,landed_cost_codes,erp_rest,empty,0,0,0,14935,,2026-09-30T23:09:17Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,lot_serial_classes,erp_rest,ok,1,1,0,14929,,2026-09-30T23:09:17Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,payment_methods,erp_rest,ok,8,8,0,14959,,2026-09-30T23:09:17Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,languages,erp_rest,ok,6,6,0,14934,,2026-09-30T23:09:18Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,project_account_groups,erp_rest,ok,9,9,0,14958,,2026-09-30T23:09:18Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,ledgers,erp_rest,ok,4,4,0,14933,,2026-09-30T23:09:18Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,number_sequences,erp_rest,ok,75,75,1,14928,,2026-09-30T23:09:18Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,lot_serial_classes,erp_rest,ok,1,1,0,14932,,2026-09-30T23:09:19Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,expense_receipts,erp_rest,ok,1026,1026,16,14928,,2026-09-30T23:09:19Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,purchase_receipt_transfers,erp_rest,empty,0,0,1,14957,,2026-09-30T23:09:20Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,financial_periods,erp_rest,ok,60,60,0,14927,,2026-09-30T23:09:20Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,organizations,erp_rest,ok,1,1,1,14927,,2026-09-30T23:09:20Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,sales_categories,erp_rest,empty,0,0,0,14956,,2026-09-30T23:09:20Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,packaging_types,erp_rest,empty,0,0,0,14926,,2026-09-30T23:09:20Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,fixed_asset_classes,erp_rest,ok,3,3,0,14926,,2026-09-30T23:09:20Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,number_sequences,erp_rest,ok,75,75,1,14931,,2026-09-30T23:09:21Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,payment_methods,erp_rest,ok,7,7,0,14925,,2026-09-30T23:09:21Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,fixed_asset_property_tax_groups,erp_rest,empty,0,0,0,14925,,2026-09-30T23:09:21Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,sales_order_types,erp_rest,ok,14,14,0,14955,,2026-09-30T23:09:21Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,project_account_groups,erp_rest,ok,9,9,0,14924,,2026-09-30T23:09:21Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,stocktakes_v2,erp_rest,empty,0,0,0,14954,,2026-09-30T23:09:22Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,fixed_assets,erp_rest,empty,0,0,0,14924,,2026-09-30T23:09:22Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,purchase_receipt_transfers,erp_rest,empty,0,0,0,14923,,2026-09-30T23:09:22Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,organizations,erp_rest,ok,1,1,1,14930,,2026-09-30T23:09:22Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,supplier_classes,erp_rest,ok,7,7,0,14953,,2026-09-30T23:09:22Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,inventory_item_classes,erp_rest,ok,13,13,0,14923,,2026-09-30T23:09:23Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,sales_categories,erp_rest,empty,0,0,0,14922,,2026-09-30T23:09:23Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,packaging_types,erp_rest,empty,0,0,0,14929,,2026-09-30T23:09:23Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,supplier_inbox_rules,erp_rest,ok,1,1,0,14952,,2026-09-30T23:09:23Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,sales_order_types,erp_rest,ok,11,11,0,14921,,2026-09-30T23:09:23Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,payment_methods,erp_rest,ok,7,7,0,14928,,2026-09-30T23:09:23Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,inventory_item_post_classes,erp_rest,ok,14,14,0,14922,,2026-09-30T23:09:23Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,unit_of_measures,erp_rest,ok,24,24,0,14951,,2026-09-30T23:09:24Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,stocktakes_v2,erp_rest,empty,0,0,0,14920,,2026-09-30T23:09:24Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,inventory_receipt_transfers,erp_rest,empty,0,0,0,14921,,2026-09-30T23:09:24Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,vat_categories,erp_rest,ok,19,19,0,14950,,2026-09-30T23:09:24Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,supplier_classes,erp_rest,ok,8,8,0,14919,,2026-09-30T23:09:25Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,landed_cost_codes,erp_rest,empty,0,0,0,14920,,2026-09-30T23:09:25Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,vat_zones,erp_rest,ok,13,13,0,14949,,2026-09-30T23:09:25Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,languages,erp_rest,ok,6,6,0,14919,,2026-09-30T23:09:25Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,supplier_inbox_rules,erp_rest,ok,8,8,0,14918,,2026-09-30T23:09:25Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,ledgers,erp_rest,ok,4,4,0,14918,,2026-09-30T23:09:26Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,unit_of_measures,erp_rest,ok,26,26,0,14917,,2026-09-30T23:09:26Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,project_account_groups,erp_rest,ok,9,9,2,14927,,2026-09-30T23:09:26Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,vats,erp_rest,ok,25,25,1,14948,,2026-09-30T23:09:26Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,lot_serial_classes,erp_rest,ok,1,1,0,14917,,2026-09-30T23:09:26Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,warehouses,erp_rest,ok,1,1,0,14947,,2026-09-30T23:09:27Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,purchase_receipt_transfers,erp_rest,empty,0,0,0,14926,,2026-09-30T23:09:27Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,sales_categories,erp_rest,empty,0,0,0,14925,,2026-09-30T23:09:27Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,discounts,erp_rest,empty,0,0,0,14946,,2026-09-30T23:09:27Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,vat_categories,erp_rest,ok,50,50,1,14916,,2026-09-30T23:09:27Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,number_sequences,erp_rest,ok,77,77,1,14916,,2026-09-30T23:09:28Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_accounts,datamart_graphql,ok,225,225,0,,,2026-09-30T23:09:28Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,sales_order_types,erp_rest,ok,11,11,0,14924,,2026-09-30T23:09:28Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,vat_zones,erp_rest,ok,9,9,0,14915,,2026-09-30T23:09:28Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,stocktakes_v2,erp_rest,empty,0,0,0,14923,,2026-09-30T23:09:28Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_states,datamart_graphql,ok,806,806,1,,,2026-09-30T23:09:29Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,supplier_classes,erp_rest,ok,8,8,0,14922,,2026-09-30T23:09:29Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,organizations,erp_rest,ok,1,1,1,14915,,2026-09-30T23:09:29Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,vats,erp_rest,ok,63,63,1,14914,,2026-09-30T23:09:29Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,packaging_types,erp_rest,empty,0,0,0,14914,,2026-09-30T23:09:30Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,supplier_inbox_rules,erp_rest,ok,10,10,0,14921,,2026-09-30T23:09:30Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,warehouses,erp_rest,failed,1,0,0,14913,"Error: config error: sync validation failed: 1 rejected row(s), 0 exact duplicate row(s) dropped; first rejection: missing validation field replenishmentClass.id; first key: ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd1; first record keys: _source,_synced_at,active,address,avgDefaultCost,branch,contact,description,dropShipLocation,fifoDefaultCost,locationEntry,locations,lockSitePICountEntry,metadata,rece",2026-09-30T23:09:30Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,employees,erp_rest,ok,3,3,0,14945,,2026-09-30T23:09:30Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,payment_methods,erp_rest,ok,4,4,0,14913,,2026-09-30T23:09:30Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,unit_of_measures,erp_rest,ok,24,24,0,14920,,2026-09-30T23:09:30Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,discounts,erp_rest,empty,0,0,0,14912,,2026-09-30T23:09:31Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,sales_persons,erp_rest,ok,3,3,0,14944,,2026-09-30T23:09:31Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,project_account_groups,erp_rest,ok,48,48,0,14912,,2026-09-30T23:09:31Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_accounts,datamart_graphql,ok,423,423,0,,,2026-09-30T23:09:32Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,purchase_receipt_transfers,erp_rest,empty,0,0,0,14911,,2026-09-30T23:09:32Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,countries,erp_rest,ok,260,260,1,14941,,2026-09-30T23:09:32Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,vat_categories,erp_rest,ok,50,50,1,14919,,2026-09-30T23:09:32Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_suppliers,datamart_graphql,ok,25,25,0,,,2026-09-30T23:09:32Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,sales_categories,erp_rest,empty,0,0,0,14910,,2026-09-30T23:09:32Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,vat_zones,erp_rest,ok,9,9,0,14918,,2026-09-30T23:09:33Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_states,datamart_graphql,ok,806,806,1,,,2026-09-30T23:09:33Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,sales_order_types,erp_rest,ok,12,12,0,14909,,2026-09-30T23:09:33Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,kit_assemblies,erp_rest,empty,0,0,0,14940,,2026-09-30T23:09:33Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,stocktakes_v2,erp_rest,empty,0,0,0,14908,,2026-09-30T23:09:34Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,employees,erp_rest,ok,2,2,1,14911,,2026-09-30T23:09:34Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,sales_persons,erp_rest,ok,2,2,0,14910,,2026-09-30T23:09:35Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,supplier_classes,erp_rest,ok,4,4,0,14907,,2026-09-30T23:09:35Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,vats,erp_rest,ok,63,63,1,14917,,2026-09-30T23:09:35Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,warehouses,erp_rest,failed,1,0,1,14916,"Error: config error: sync validation failed: 1 rejected row(s), 0 exact duplicate row(s) dropped; first rejection: missing validation field replenishmentClass.id; first key: ffa4a061-8084-11e9-b307-0aa512338dd61; first record keys: _source,_synced_at,active,address,avgDefaultCost,branch,contact,description,dropShipLocation,fifoDefaultCost,locationEntry,locations,lockSitePICountEntry,metadata,rece",2026-09-30T23:09:36Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,supplier_inbox_rules,erp_rest,ok,5,5,1,14906,,2026-09-30T23:09:36Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,discounts,erp_rest,empty,0,0,0,14915,,2026-09-30T23:09:36Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,unit_of_measures,erp_rest,ok,22,22,0,14905,,2026-09-30T23:09:36Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_accounts,datamart_graphql,ok,442,442,1,,,2026-09-30T23:09:38Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,vat_categories,erp_rest,ok,15,15,1,14904,,2026-09-30T23:09:38Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,vat_zones,erp_rest,failed,5,0,0,14903,"Error: config error: sync validation failed: 3 rejected row(s), 0 exact duplicate row(s) dropped; first rejection: missing validation field defaultTaxCategory; first key: 2b6e5cd6-6ce0-11ee-970e-02541785618303; first record keys: _source,_synced_at,description,id,metadata,tenant_id",2026-09-30T23:09:39Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_states,datamart_graphql,ok,806,806,1,,,2026-09-30T23:09:39Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,cash_transactions,erp_rest,failed,344,0,6,14936,"Error: config error: sync validation failed: 4 rejected row(s), 0 exact duplicate row(s) dropped; first rejection: missing validation field description; first key: d1507c4a-7717-11ee-970e-025417856183500321; first record keys: _source,_synced_at,amount,cashAccount,controlTotal,currency,disbReceipt,entryType,finPeriod,financialPeriod,financialsDetail,hold,lastModifiedDateTime,referenceNbr,status,t",2026-09-30T23:09:40Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,countries,erp_rest,ok,260,260,5,14907,,2026-09-30T23:09:40Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,vats,erp_rest,ok,49,49,1,14902,,2026-09-30T23:09:40Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,employees,erp_rest,empty,0,0,1,14914,,2026-09-30T23:09:40Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_general_ledger_balances,datamart_graphql,ok,95,95,0,,,2026-09-30T23:09:41Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_suppliers,datamart_graphql,ok,128,128,0,,,2026-09-30T23:09:41Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,warehouses,erp_rest,failed,1,0,0,14901,"Error: config error: sync validation failed: 1 rejected row(s), 0 exact duplicate row(s) dropped; first rejection: missing validation field replenishmentClass.id; first key: 2b6e5cd6-6ce0-11ee-970e-0254178561831; first record keys: _source,_synced_at,active,address,avgDefaultCost,branch,contact,description,dropShipLocation,fifoDefaultCost,locationEntry,locations,lockSitePICountEntry,metadata,rece",2026-09-30T23:09:41Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,sales_persons,erp_rest,ok,5,5,0,14913,,2026-09-30T23:09:41Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_project_tasks,datamart_graphql,empty,0,0,0,,,2026-09-30T23:09:41Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,kit_assemblies,erp_rest,empty,0,0,0,14906,,2026-09-30T23:09:41Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,discounts,erp_rest,empty,0,0,0,14900,,2026-09-30T23:09:41Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,kit_specifications,erp_rest,empty,0,0,0,14935,,2026-09-30T23:09:42Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,countries,erp_rest,ok,260,260,0,14910,,2026-09-30T23:09:42Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,cash_transactions,erp_rest,ok,282,282,1,14903,,2026-09-30T23:09:43Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_suppliers,datamart_graphql,ok,122,122,1,,,2026-09-30T23:09:43Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_accounts,datamart_graphql,ok,1274,1274,1,,,2026-09-30T23:09:43Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,supplier_balances_v2,erp_rest,ok,22,22,1,14934,,2026-09-30T23:09:43Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_general_ledger_balances,datamart_graphql,ok,470,470,1,,,2026-09-30T23:09:44Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,kit_assemblies,erp_rest,empty,0,0,0,14909,,2026-09-30T23:09:44Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_project_tasks,datamart_graphql,empty,0,0,0,,,2026-09-30T23:09:44Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,customer_credit_notes,erp_rest,ok,1,1,1,14933,,2026-09-30T23:09:44Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_states,datamart_graphql,ok,806,806,1,,,2026-09-30T23:09:45Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,kit_specifications,erp_rest,empty,0,0,1,14902,,2026-09-30T23:09:45Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,inventory_transfers,erp_rest,empty,0,0,1,14932,,2026-09-30T23:09:46Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,employees,erp_rest,ok,11,11,0,14899,,2026-09-30T23:09:46Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,fixed_asset_transactions,erp_rest,empty,0,0,1,14931,,2026-09-30T23:09:47Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,sales_persons,erp_rest,ok,1,1,1,14898,,2026-09-30T23:09:47Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,supplier_balances_v2,erp_rest,ok,124,124,1,14900,,2026-09-30T23:09:47Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,cash_transactions,erp_rest,ok,331,331,3,14905,,2026-09-30T23:09:48Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,projects,erp_rest,empty,0,0,0,14930,,2026-09-30T23:09:48Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,countries,erp_rest,ok,260,260,1,14895,,2026-09-30T23:09:48Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_general_ledger_balances,datamart_graphql,ok,795,795,1,,,2026-09-30T23:09:49Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_suppliers,datamart_graphql,ok,79,79,0,,,2026-09-30T23:09:49Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_project_tasks,datamart_graphql,empty,0,0,0,,,2026-09-30T23:09:50Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,customer_credit_notes,erp_rest,ok,17,17,2,14899,,2026-09-30T23:09:50Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,kit_assemblies,erp_rest,empty,0,0,0,14894,,2026-09-30T23:09:50Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,suppliers,erp_rest,ok,25,25,1,14929,,2026-09-30T23:09:50Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,kit_specifications,erp_rest,empty,0,0,0,14904,,2026-09-30T23:09:50Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,inventory_transfers,erp_rest,empty,0,0,0,14898,,2026-09-30T23:09:50Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_customers,datamart_graphql,ok,8,8,0,,,2026-09-30T23:09:50Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,fixed_asset_transactions,erp_rest,ok,64,64,0,14897,,2026-09-30T23:09:51Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,expense_claims,erp_rest,empty,0,0,0,14928,,2026-09-30T23:09:51Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,supplier_balances_v2,erp_rest,ok,121,121,1,14902,,2026-09-30T23:09:51Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,projects,erp_rest,empty,0,0,1,14896,,2026-09-30T23:09:52Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,cash_transactions,erp_rest,failed,349,0,2,14890,"Error: config error: sync validation failed: 35 rejected row(s), 0 exact duplicate row(s) dropped; first rejection: missing validation field description; first key: 2b6e5cd6-6ce0-11ee-970e-025417856183500007; first record keys: _source,_synced_at,amount,cashAccount,controlTotal,currency,disbReceipt,entryType,finPeriod,financialPeriod,financialsDetail,hold,lastModifiedDateTime,owner,referenceNbr,s",2026-09-30T23:09:52Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_supplier_payment_lines,datamart_graphql,ok,151,151,0,,,2026-09-30T23:09:52Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_supplier_payments,datamart_graphql,ok,153,153,1,,,2026-09-30T23:09:54Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_general_ledger_balances,datamart_graphql,ok,681,681,1,,,2026-09-30T23:09:54Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_subaccounts,datamart_graphql,ok,4,4,0,,,2026-09-30T23:09:54Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_project_tasks,datamart_graphql,ok,260,260,1,,,2026-09-30T23:09:55Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,customer_credit_notes,erp_rest,ok,29,29,3,14901,,2026-09-30T23:09:55Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_supplier_documents,datamart_graphql,ok,147,147,1,,,2026-09-30T23:09:55Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,suppliers,erp_rest,ok,127,127,3,14894,,2026-09-30T23:09:56Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,kit_specifications,erp_rest,empty,0,0,1,14889,,2026-09-30T23:09:56Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,inventory_transfers,erp_rest,empty,0,0,0,14900,,2026-09-30T23:09:56Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,purchase_orders,erp_rest,ok,8,8,0,14927,,2026-09-30T23:09:56Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_customers,datamart_graphql,ok,59,59,0,,,2026-09-30T23:09:57Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,supplier_balances_v2,erp_rest,ok,62,62,0,14888,,2026-09-30T23:09:57Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,inventory_receipts,erp_rest,empty,0,0,1,14926,,2026-09-30T23:09:58Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,fixed_asset_transactions,erp_rest,ok,230,230,1,14897,,2026-09-30T23:09:58Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,projects,erp_rest,empty,0,0,5,14896,,2026-09-30T23:10:03Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,expense_claims,erp_rest,empty,0,0,6,14893,,2026-09-30T23:10:03Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,customer_credit_notes,erp_rest,ok,63,63,6,14887,,2026-09-30T23:10:03Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,inventory_transfers,erp_rest,empty,0,0,0,14886,,2026-09-30T23:10:04Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,budgets,erp_rest,empty,0,0,6,14903,,2026-09-30T23:10:05Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,fixed_asset_transactions,erp_rest,empty,0,0,0,14885,,2026-09-30T23:10:05Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_supplier_payment_lines,datamart_graphql,ok,1315,1315,1,,,2026-09-30T23:10:05Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,customer_balances,erp_rest,ok,6,6,2,14902,,2026-09-30T23:10:07Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,projects,erp_rest,ok,61,61,2,14884,,2026-09-30T23:10:07Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_supplier_payments,datamart_graphql,ok,1315,1315,2,,,2026-09-30T23:10:08Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,suppliers,erp_rest,ok,122,122,4,14894,,2026-09-30T23:10:08Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,customer_balances_v2,erp_rest,ok,6,6,1,14901,,2026-09-30T23:10:08Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_subaccounts,datamart_graphql,ok,59,59,1,,,2026-09-30T23:10:09Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_customers,datamart_graphql,ok,15,15,1,,,2026-09-30T23:10:09Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,suppliers,erp_rest,ok,79,79,2,14883,,2026-09-30T23:10:09Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_general_ledger_balances_v2,datamart_graphql,ok,1024,1024,1,,,2026-09-30T23:10:10Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_customers,datamart_graphql,ok,153,153,14,,,2026-09-30T23:10:23Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,expense_claims,erp_rest,empty,0,0,14,14893,,2026-09-30T23:10:23Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,purchase_receipts,erp_rest,ok,5,5,13,14900,,2026-09-30T23:10:23Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_supplier_documents,datamart_graphql,ok,1372,1372,14,,,2026-09-30T23:10:23Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,journal_transactions,erp_rest,failed,0,0,0,14899,"Error: upstream returned non-success status 400: {""message"":""'LastModifiedDateTime' is not allowed to be more than 6 month back in time if 'FinePeriodId' is not defined""}",2026-09-30T23:10:24Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,purchase_orders,erp_rest,ok,28,28,1,14892,,2026-09-30T23:10:25Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_locations,datamart_graphql,ok,37,37,0,,,2026-09-30T23:10:25Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_supplier_payment_lines,datamart_graphql,ok,1147,1147,1,,,2026-09-30T23:10:25Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_sales_prices,datamart_graphql,ok,16,16,0,,,2026-09-30T23:10:26Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_supplier_payments,datamart_graphql,ok,1154,1154,2,,,2026-09-30T23:10:27Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_customer_payments,datamart_graphql,ok,43,43,1,,,2026-09-30T23:10:27Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,inventory_receipts,erp_rest,empty,0,0,3,14891,,2026-09-30T23:10:28Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_subaccounts,datamart_graphql,ok,99,99,1,,,2026-09-30T23:10:28Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_customer_payment_lines,datamart_graphql,ok,44,44,0,,,2026-09-30T23:10:28Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_sales_orders,datamart_graphql,ok,13,13,10,,,2026-09-30T23:10:39Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,budgets,erp_rest,empty,0,0,10,14863,,2026-09-30T23:10:39Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_supplier_documents,datamart_graphql,ok,1164,1164,10,,,2026-09-30T23:10:39Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_customer_documents,datamart_graphql,ok,56,56,1,,,2026-09-30T23:10:41Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,expense_claims,erp_rest,ok,195,195,17,14881,,2026-09-30T23:10:41Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,purchase_orders,erp_rest,empty,0,0,2,14892,,2026-09-30T23:10:41Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,inventory_adjustments,erp_rest,empty,0,0,0,14898,,2026-09-30T23:10:41Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,inventory_receipts,erp_rest,empty,0,0,0,14891,,2026-09-30T23:10:42Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_supplier_payment_lines,datamart_graphql,ok,368,368,0,,,2026-09-30T23:10:42Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,project_budgets,erp_rest,empty,0,0,0,14897,,2026-09-30T23:10:42Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,customer_balances,erp_rest,ok,55,55,3,14862,,2026-09-30T23:10:42Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_supplier_payments,datamart_graphql,ok,390,390,0,,,2026-09-30T23:10:42Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,customer_balances_v2,erp_rest,ok,50,50,0,14861,,2026-09-30T23:10:43Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_subaccounts,datamart_graphql,ok,93,93,0,,,2026-09-30T23:10:43Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,sales_order_inventory,erp_rest,ok,138,138,1,,,2026-09-30T23:10:43Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,sales_order_customers,erp_rest,ok,7,7,0,,,2026-09-30T23:10:44Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_supplier_documents,datamart_graphql,ok,596,596,1,,,2026-09-30T23:10:44Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,customers,erp_rest,ok,8,8,1,14896,,2026-09-30T23:10:45Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,budgets,erp_rest,empty,0,0,4,14863,,2026-09-30T23:10:46Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,purchase_orders,erp_rest,ok,15,15,1,14880,,2026-09-30T23:10:46Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_general_ledger_balances_v2,datamart_graphql,ok,4044,4044,3,,,2026-09-30T23:10:46Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,supplier_locations,erp_rest,ok,25,25,0,14895,,2026-09-30T23:10:46Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,customer_balances,erp_rest,ok,14,14,0,14862,,2026-09-30T23:10:47Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,inventory_receipts,erp_rest,empty,0,0,0,14879,,2026-09-30T23:10:47Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,purchase_receipts,erp_rest,empty,0,0,0,14860,,2026-09-30T23:10:47Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,journal_transactions,erp_rest,failed,0,0,0,14859,"Error: upstream returned non-success status 400: {""message"":""'LastModifiedDateTime' is not allowed to be more than 6 month back in time if 'FinePeriodId' is not defined""}",2026-09-30T23:10:48Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_locations,datamart_graphql,ok,189,189,1,,,2026-09-30T23:10:49Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,customer_balances_v2,erp_rest,ok,14,14,2,14861,,2026-09-30T23:10:49Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,inventory_items,erp_rest,ok,144,144,2,14893,,2026-09-30T23:10:49Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_sales_prices,datamart_graphql,empty,0,0,0,,,2026-09-30T23:10:49Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_contacts,datamart_graphql,ok,48,48,0,,,2026-09-30T23:10:50Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_addresses,datamart_graphql,ok,50,50,0,,,2026-09-30T23:10:50Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_customer_payments,datamart_graphql,ok,149,149,1,,,2026-09-30T23:10:50Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_customer_payment_lines,datamart_graphql,ok,169,169,0,,,2026-09-30T23:10:51Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_supplier_document_lines,datamart_graphql,ok,226,226,1,,,2026-09-30T23:10:52Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_sales_orders,datamart_graphql,ok,49,49,0,,,2026-09-30T23:10:52Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,budgets,erp_rest,empty,0,0,5,14851,,2026-09-30T23:10:52Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_customer_documents,datamart_graphql,ok,191,191,1,,,2026-09-30T23:10:54Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,inventory_adjustments,erp_rest,empty,0,0,1,14858,,2026-09-30T23:10:55Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_general_ledger_balances_v2,datamart_graphql,ok,5230,5230,6,,,2026-09-30T23:10:56Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,project_budgets,erp_rest,empty,0,0,0,14857,,2026-09-30T23:10:56Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,sales_order_inventory,erp_rest,empty,0,0,1,,,2026-09-30T23:10:57Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,purchase_receipts,erp_rest,empty,0,0,1,14860,,2026-09-30T23:10:57Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,journal_transactions,erp_rest,failed,0,0,0,14859,"Error: upstream returned non-success status 400: {""message"":""'LastModifiedDateTime' is not allowed to be more than 6 month back in time if 'FinePeriodId' is not defined""}",2026-09-30T23:10:58Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,sales_order_customers,erp_rest,ok,59,59,0,,,2026-09-30T23:10:58Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_locations,datamart_graphql,ok,138,138,0,,,2026-09-30T23:10:59Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_sales_prices,datamart_graphql,empty,0,0,0,,,2026-09-30T23:10:59Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,customer_balances,erp_rest,ok,126,126,7,14849,,2026-09-30T23:11:00Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_customer_payments,datamart_graphql,ok,262,262,0,,,2026-09-30T23:11:00Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_customer_payment_lines,datamart_graphql,ok,309,309,0,,,2026-09-30T23:11:01Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,customer_balances_v2,erp_rest,ok,122,122,1,14847,,2026-09-30T23:11:01Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_sales_orders,datamart_graphql,empty,0,0,0,,,2026-09-30T23:11:01Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,project_transactions,erp_rest,empty,0,0,9,14848,,2026-09-30T23:11:01Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_customer_documents,datamart_graphql,ok,267,267,0,,,2026-09-30T23:11:02Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,inventory_adjustments,erp_rest,empty,0,0,0,14858,,2026-09-30T23:11:03Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,supplier_payments,erp_rest,ok,141,141,1,14846,,2026-09-30T23:11:03Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,project_budgets,erp_rest,empty,0,0,0,14857,,2026-09-30T23:11:03Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_general_ledger_balances_v2,datamart_graphql,ok,3828,3828,3,,,2026-09-30T23:11:04Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,customers,erp_rest,ok,59,59,5,14856,,2026-09-30T23:11:04Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,sales_order_inventory,erp_rest,empty,0,0,0,,,2026-09-30T23:11:04Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,time_cards,erp_rest,empty,0,0,1,14842,,2026-09-30T23:11:04Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,sales_order_customers,erp_rest,ok,14,14,0,,,2026-09-30T23:11:05Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,purchase_receipts,erp_rest,ok,18,18,1,14846,,2026-09-30T23:11:05Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,supplier_locations,erp_rest,ok,127,127,1,14854,,2026-09-30T23:11:05Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,supplier_documents,erp_rest,ok,145,145,1,14840,,2026-09-30T23:11:05Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,journal_transactions,erp_rest,failed,0,0,0,14845,"Error: upstream returned non-success status 400: {""message"":""'LastModifiedDateTime' is not allowed to be more than 6 month back in time if 'FinePeriodId' is not defined""}",2026-09-30T23:11:06Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,inventory_items,erp_rest,ok,34,34,0,14853,,2026-09-30T23:11:06Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_locations,datamart_graphql,ok,243,243,0,,,2026-09-30T23:11:06Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,customers,erp_rest,ok,15,15,1,14856,,2026-09-30T23:11:07Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_contacts,datamart_graphql,ok,266,266,0,,,2026-09-30T23:11:07Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_sales_prices,datamart_graphql,ok,12,12,0,,,2026-09-30T23:11:07Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,supplier_invoices,erp_rest,ok,145,145,2,14838,,2026-09-30T23:11:07Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,supplier_locations,erp_rest,ok,122,122,0,14854,,2026-09-30T23:11:07Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_addresses,datamart_graphql,ok,254,254,0,,,2026-09-30T23:11:08Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,subaccounts,erp_rest,ok,4,4,0,14837,,2026-09-30T23:11:08Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_customer_payments,datamart_graphql,ok,481,481,0,,,2026-09-30T23:11:08Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,inventory_items,erp_rest,ok,12,12,0,14853,,2026-09-30T23:11:08Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_sales_order_lines_v2,datamart_graphql,ok,47,47,0,,,2026-09-30T23:11:09Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_contacts,datamart_graphql,ok,151,151,0,,,2026-09-30T23:11:09Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_customer_payment_lines,datamart_graphql,ok,522,522,1,,,2026-09-30T23:11:10Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_customer_document_lines,datamart_graphql,ok,102,102,0,,,2026-09-30T23:11:10Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_addresses,datamart_graphql,ok,149,149,1,,,2026-09-30T23:11:10Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_sales_orders,datamart_graphql,ok,69,69,0,,,2026-09-30T23:11:10Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,locations,erp_rest,ok,13,13,0,14836,,2026-09-30T23:11:10Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_supplier_document_lines,datamart_graphql,ok,1804,1804,2,,,2026-09-30T23:11:10Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,expense_transactions,expense_api,empty,0,0,0,,,2026-09-30T23:11:11Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,customer_sales_prices,erp_rest,ok,16,16,0,14835,,2026-09-30T23:11:12Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_customer_documents,datamart_graphql,ok,526,526,1,,,2026-09-30T23:11:12Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,inventory_adjustments,erp_rest,empty,0,0,0,14844,,2026-09-30T23:11:12Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_supplier_document_lines,datamart_graphql,ok,1701,1701,1,,,2026-09-30T23:11:12Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,customer_payments,erp_rest,ok,43,43,2,14834,,2026-09-30T23:11:14Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,project_budgets,erp_rest,failed,355,0,1,14840,"Error: config error: sync validation failed: 5 rejected row(s), 0 exact duplicate row(s) dropped; first rejection: duplicate primary key with different payload; first key: 2b6e5cd6-6ce0-11ee-970e-025417856183AB100161004001; first record keys: _source,_synced_at,accountGroupID,actualAmount,actualQty,committedAmount,committedInvoicedAmount,committedInvoicedQty,committedOpenAmount,committedOpenQty",2026-09-30T23:11:14Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,inventory_issues,erp_rest,ok,5,5,0,14833,,2026-09-30T23:11:15Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,sales_order_inventory,erp_rest,empty,0,0,0,,,2026-09-30T23:11:15Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,shipments,erp_rest,ok,5,5,0,14832,,2026-09-30T23:11:16Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,sales_order_customers,erp_rest,ok,152,152,1,,,2026-09-30T23:11:16Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,sales_orders_v3,erp_rest,ok,13,13,1,,,2026-09-30T23:11:17Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,project_transactions,erp_rest,empty,0,0,10,14808,,2026-09-30T23:11:23Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,project_transactions,erp_rest,empty,0,0,13,14808,,2026-09-30T23:11:24Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,customers,erp_rest,ok,153,153,9,14838,,2026-09-30T23:11:25Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,customer_invoices,erp_rest,ok,51,51,8,14831,,2026-09-30T23:11:26Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,supplier_locations,erp_rest,ok,79,79,0,14837,,2026-09-30T23:11:26Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,customer_documents,erp_rest,ok,53,53,1,14830,,2026-09-30T23:11:27Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,inventory_items,erp_rest,ok,114,114,1,14835,,2026-09-30T23:11:28Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_contacts,datamart_graphql,ok,338,338,0,,,2026-09-30T23:11:29Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_addresses,datamart_graphql,ok,414,414,0,,,2026-09-30T23:11:29Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,general_ledger_transactions,erp_rest,ok,2666,2666,3,14826,,2026-09-30T23:11:30Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,supplier_payments,erp_rest,ok,1310,1310,6,14794,,2026-09-30T23:11:31Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,supplier_payments,erp_rest,ok,1154,1154,8,14796,,2026-09-30T23:11:31Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_supplier_document_lines,datamart_graphql,ok,2123,2123,2,,,2026-09-30T23:11:32Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,time_cards,erp_rest,failed,0,0,0,14795,Error: config error: partition dimension 'employeeCd' produced no values,2026-09-30T23:11:32Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,time_cards,erp_rest,empty,0,0,1,14791,,2026-09-30T23:11:32Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_journal_transactions,datamart_graphql,ok,2666,2666,2,,,2026-09-30T23:11:33Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,customer_locations,erp_rest,ok,7,7,1,,,2026-09-30T23:11:34Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,project_tasks,erp_rest,failed,0,0,0,14998,"Error: upstream returned non-success status 400: {""message"":""Either ProjectId or ProjectInternalId or PublicId must be specified""}",2026-09-30T23:11:35Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,supplier_payments,erp_rest,ok,389,389,3,14831,,2026-09-30T23:11:35Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,accounts,erp_rest,ok,239,239,0,14997,,2026-09-30T23:11:36Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,attributes,erp_rest,ok,1,1,0,14996,,2026-09-30T23:11:37Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,supplier_documents,erp_rest,ok,1164,1164,5,14783,,2026-09-30T23:11:37Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,branches,erp_rest,ok,1,1,0,14995,,2026-09-30T23:11:37Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,supplier_documents,erp_rest,ok,1365,1365,5,14777,,2026-09-30T23:11:37Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,carriers,erp_rest,empty,0,0,0,14994,,2026-09-30T23:11:38Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,cash_accounts,erp_rest,ok,8,8,1,14993,,2026-09-30T23:11:39Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,cash_sales,erp_rest,empty,0,0,0,14992,,2026-09-30T23:11:40Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,contacts,erp_rest,ok,58,58,0,14991,,2026-09-30T23:11:40Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,time_cards,erp_rest,empty,0,0,5,14819,,2026-09-30T23:11:41Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,credit_terms,erp_rest,ok,11,11,0,14990,,2026-09-30T23:11:41Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,currencies,erp_rest,ok,9,9,0,14989,,2026-09-30T23:11:42Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,currency_rate_types,erp_rest,ok,1,1,0,14988,,2026-09-30T23:11:42Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,supplier_documents,erp_rest,ok,596,596,2,14813,,2026-09-30T23:11:43Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,currency_rates,erp_rest,ok,897,897,1,14987,,2026-09-30T23:11:44Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,customer_classes,erp_rest,ok,4,4,1,14986,,2026-09-30T23:11:45Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,customer_contracts,erp_rest,empty,0,0,0,14985,,2026-09-30T23:11:46Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,customer_credit_write_offs,erp_rest,empty,0,0,0,14984,,2026-09-30T23:11:46Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,customer_debit_notes,erp_rest,ok,1,1,1,14983,,2026-09-30T23:11:48Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,customer_overdue_charges,erp_rest,empty,0,0,0,14982,,2026-09-30T23:11:49Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,supplier_invoices,erp_rest,ok,1164,1164,12,14771,,2026-09-30T23:11:50Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,customer_payment_methods,erp_rest,empty,0,0,1,14981,,2026-09-30T23:11:50Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,supplier_invoices,erp_rest,ok,596,596,7,14807,,2026-09-30T23:11:50Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,subaccounts,erp_rest,ok,98,98,0,14770,,2026-09-30T23:11:51Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,deferral_codes,erp_rest,ok,2,2,0,14980,,2026-09-30T23:11:51Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,subaccounts,erp_rest,ok,93,93,0,14806,,2026-09-30T23:11:51Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_sales_order_lines_v2,datamart_graphql,ok,3,3,0,,,2026-09-30T23:11:52Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,departments,erp_rest,ok,1,1,1,14979,,2026-09-30T23:11:52Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_sales_order_lines_v2,datamart_graphql,ok,78,78,1,,,2026-09-30T23:11:52Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_customer_document_lines,datamart_graphql,ok,692,692,1,,,2026-09-30T23:11:53Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dimensions,erp_rest,ok,23,23,1,14978,,2026-09-30T23:11:53Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,supplier_invoices,erp_rest,ok,1365,1365,15,14763,,2026-09-30T23:11:53Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,discount_codes,erp_rest,empty,0,0,0,14977,,2026-09-30T23:11:54Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_customer_document_lines,datamart_graphql,ok,830,830,1,,,2026-09-30T23:11:54Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,subaccounts,erp_rest,ok,59,59,0,14762,,2026-09-30T23:11:54Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,locations,erp_rest,ok,96,96,0,14769,,2026-09-30T23:11:54Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_ar_historical_data,datamart_graphql,empty,0,0,0,,,2026-09-30T23:11:55Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,locations,erp_rest,ok,164,164,1,14804,,2026-09-30T23:11:55Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_sales_order_lines_v2,datamart_graphql,ok,691,691,1,,,2026-09-30T23:11:56Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_branches,datamart_graphql,ok,1,1,0,,,2026-09-30T23:11:56Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_budgets,datamart_graphql,empty,0,0,1,,,2026-09-30T23:11:57Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_countries,datamart_graphql,ok,260,260,26,,,2026-09-30T23:12:23Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_customer_document_lines,datamart_graphql,ok,1166,1166,27,,,2026-09-30T23:12:23Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,expense_transactions,expense_api,ok,1704,1704,28,,,2026-09-30T23:12:23Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,expense_transactions,expense_api,ok,1223,1223,27,,,2026-09-30T23:12:23Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_employees,datamart_graphql,empty,0,0,0,,,2026-09-30T23:12:24Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,customer_sales_prices,erp_rest,empty,0,0,4,14768,,2026-09-30T23:12:28Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,locations,erp_rest,ok,99,99,4,14761,,2026-09-30T23:12:28Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_financial_periods,datamart_graphql,empty,0,0,3,,,2026-09-30T23:12:28Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,customer_sales_prices,erp_rest,ok,12,12,4,14803,,2026-09-30T23:12:28Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_inventory_items,datamart_graphql,empty,0,0,0,,,2026-09-30T23:12:28Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_payment_methods,datamart_graphql,ok,8,8,0,,,2026-09-30T23:12:29Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_sales_persons,datamart_graphql,empty,0,0,0,,,2026-09-30T23:12:30Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,expense_transactions,expense_api,ok,906,906,2,,,2026-09-30T23:12:30Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_supplier_classes,datamart_graphql,ok,8,8,0,,,2026-09-30T23:12:30Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,customer_sales_prices,erp_rest,empty,0,0,0,14760,,2026-09-30T23:12:30Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_terms,datamart_graphql,ok,11,11,0,,,2026-09-30T23:12:31Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_vat_categories,datamart_graphql,ok,24,24,0,,,2026-09-30T23:12:31Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_vat_zones,datamart_graphql,ok,15,15,0,,,2026-09-30T23:12:32Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_warehouse_locations,datamart_graphql,empty,0,0,0,,,2026-09-30T23:12:32Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_warehouses,datamart_graphql,ok,1,1,0,,,2026-09-30T23:12:33Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,earning_types,erp_rest,ok,4,4,0,14976,,2026-09-30T23:12:34Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,customer_payments,erp_rest,ok,262,262,6,14765,,2026-09-30T23:12:34Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,inventory_issues,erp_rest,empty,0,0,0,14764,,2026-09-30T23:12:34Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,customer_payments,erp_rest,ok,149,149,4,14758,,2026-09-30T23:12:35Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,shipments,erp_rest,empty,0,0,0,14763,,2026-09-30T23:12:35Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,inventory_issues,erp_rest,empty,0,0,0,14757,,2026-09-30T23:12:36Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,sales_orders_v3,erp_rest,empty,0,0,0,,,2026-09-30T23:12:36Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,shipments,erp_rest,ok,7,7,0,14756,,2026-09-30T23:12:36Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,customer_payments,erp_rest,ok,481,481,10,14798,,2026-09-30T23:12:38Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,sales_orders_v3,erp_rest,ok,49,49,1,,,2026-09-30T23:12:38Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,inventory_issues,erp_rest,empty,0,0,0,14797,,2026-09-30T23:12:39Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,shipments,erp_rest,ok,6,6,0,14796,,2026-09-30T23:12:39Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,expense_receipts,erp_rest,empty,0,0,5,14974,,2026-09-30T23:12:39Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,financial_periods,erp_rest,ok,48,48,0,14973,,2026-09-30T23:12:40Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,fixed_asset_classes,erp_rest,ok,6,6,0,14972,,2026-09-30T23:12:41Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,sales_orders_v3,erp_rest,ok,69,69,1,,,2026-09-30T23:12:41Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,fixed_asset_property_tax_groups,erp_rest,empty,0,0,1,14971,,2026-09-30T23:12:42Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,fixed_assets,erp_rest,empty,0,0,2,14970,,2026-09-30T23:12:45Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,inventory_item_classes,erp_rest,ok,5,5,0,14969,,2026-09-30T23:12:45Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,inventory_item_post_classes,erp_rest,ok,7,7,0,14968,,2026-09-30T23:12:46Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,inventory_receipt_transfers,erp_rest,empty,0,0,0,14967,,2026-09-30T23:12:47Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,landed_cost_codes,erp_rest,empty,0,0,0,14966,,2026-09-30T23:12:47Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,languages,erp_rest,ok,6,6,0,14965,,2026-09-30T23:12:48Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,ledgers,erp_rest,ok,4,4,1,14964,,2026-09-30T23:12:49Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,lot_serial_classes,erp_rest,ok,1,1,0,14963,,2026-09-30T23:12:50Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,number_sequences,erp_rest,ok,74,74,1,14962,,2026-09-30T23:12:52Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,organizations,erp_rest,ok,1,1,0,14961,,2026-09-30T23:12:52Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,packaging_types,erp_rest,empty,0,0,0,14960,,2026-09-30T23:12:53Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,payment_methods,erp_rest,ok,8,8,1,14959,,2026-09-30T23:12:54Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,project_account_groups,erp_rest,ok,27,27,1,14958,,2026-09-30T23:12:56Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,purchase_receipt_transfers,erp_rest,empty,0,0,2,14957,,2026-09-30T23:12:58Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,sales_categories,erp_rest,empty,0,0,0,14956,,2026-09-30T23:12:59Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,sales_order_types,erp_rest,ok,11,11,0,14955,,2026-09-30T23:13:00Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,stocktakes_v2,erp_rest,empty,0,0,0,14954,,2026-09-30T23:13:00Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,supplier_classes,erp_rest,ok,8,8,0,14953,,2026-09-30T23:13:01Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,supplier_inbox_rules,erp_rest,empty,0,0,0,14952,,2026-09-30T23:13:01Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,unit_of_measures,erp_rest,ok,24,24,0,14951,,2026-09-30T23:13:02Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,vat_categories,erp_rest,ok,24,24,0,14950,,2026-09-30T23:13:03Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,vat_zones,erp_rest,ok,15,15,0,14949,,2026-09-30T23:13:04Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,customer_invoices,erp_rest,ok,156,156,26,14754,,2026-09-30T23:13:04Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,vats,erp_rest,ok,30,30,1,14948,,2026-09-30T23:13:05Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,warehouses,erp_rest,failed,1,0,0,14947,"Error: config error: sync validation failed: 1 rejected row(s), 0 exact duplicate row(s) dropped; rows per reason: missing validation field replenishmentClass.id: 1; first rejection: missing validation field replenishmentClass.id; first key: bed46bb6-21cc-11e9-b307-0aa512338dd61; first record keys: _source,_synced_at,active,address,avgDefaultCost,branch,contact,description,dropShipLocation,fifoDe",2026-09-30T23:13:05Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,discounts,erp_rest,empty,0,0,0,14946,,2026-09-30T23:13:06Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,customer_documents,erp_rest,ok,175,175,1,14752,,2026-09-30T23:13:06Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_accounts,datamart_graphql,ok,239,239,0,,,2026-09-30T23:13:07Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_states,datamart_graphql,ok,806,806,1,,,2026-09-30T23:13:08Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,employees,erp_rest,ok,6,6,0,14945,,2026-09-30T23:13:09Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,sales_persons,erp_rest,empty,0,0,0,14944,,2026-09-30T23:13:09Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,countries,erp_rest,ok,260,260,0,14941,,2026-09-30T23:13:10Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_suppliers,datamart_graphql,ok,63,63,0,,,2026-09-30T23:13:11Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,kit_assemblies,erp_rest,empty,0,0,0,14940,,2026-09-30T23:13:11Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,cash_transactions,erp_rest,failed,657,0,3,14933,"Error: config error: sync validation failed: 2 rejected row(s), 0 exact duplicate row(s) dropped; rows per reason: missing validation field description: 2; first rejection: missing validation field description; first key: bed46bb6-21cc-11e9-b307-0aa512338dd6500423; first record keys: _source,_synced_at,amount,cashAccount,controlTotal,currency,disbReceipt,entryType,finPeriod,financialPeriod,financ",2026-09-30T23:13:15Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_general_ledger_balances,datamart_graphql,ok,201,201,0,,,2026-09-30T23:13:16Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_project_tasks,datamart_graphql,ok,59,59,0,,,2026-09-30T23:13:16Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,kit_specifications,erp_rest,empty,0,0,0,14932,,2026-09-30T23:13:17Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,supplier_balances_v2,erp_rest,ok,56,56,0,14931,,2026-09-30T23:13:18Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,customer_credit_notes,erp_rest,ok,40,40,3,14930,,2026-09-30T23:13:21Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,inventory_transfers,erp_rest,empty,0,0,0,14929,,2026-09-30T23:13:21Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,fixed_asset_transactions,erp_rest,empty,0,0,0,14928,,2026-09-30T23:13:22Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,customer_invoices,erp_rest,ok,225,225,47,14760,,2026-09-30T23:13:23Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,projects,erp_rest,ok,29,29,1,14927,,2026-09-30T23:13:24Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,general_ledger_transactions,erp_rest,ok,13207,13207,18,14737,,2026-09-30T23:13:25Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,customer_documents,erp_rest,ok,255,255,2,14757,,2026-09-30T23:13:26Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,suppliers,erp_rest,ok,63,63,1,14926,,2026-09-30T23:13:26Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_customers,datamart_graphql,ok,25,25,0,,,2026-09-30T23:13:26Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,expense_claims,erp_rest,empty,0,0,0,14925,,2026-09-30T23:13:27Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_supplier_payment_lines,datamart_graphql,ok,427,427,1,,,2026-09-30T23:13:28Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_supplier_payments,datamart_graphql,ok,413,413,0,,,2026-09-30T23:13:29Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_subaccounts,datamart_graphql,ok,8,8,0,,,2026-09-30T23:13:30Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_supplier_documents,datamart_graphql,ok,382,382,1,,,2026-09-30T23:13:31Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,purchase_orders,erp_rest,empty,0,0,1,14924,,2026-09-30T23:13:32Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,inventory_receipts,erp_rest,empty,0,0,0,14923,,2026-09-30T23:13:32Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,budgets,erp_rest,empty,0,0,4,14900,,2026-09-30T23:13:37Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,dm_journal_transactions,datamart_graphql,ok,13207,13207,12,,,2026-09-30T23:13:37Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,customer_balances,erp_rest,ok,24,24,1,14899,,2026-09-30T23:13:39Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,customer_balances_v2,erp_rest,ok,24,24,0,14898,,2026-09-30T23:13:40Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_general_ledger_balances_v2,datamart_graphql,ok,1686,1686,2,,,2026-09-30T23:13:42Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,customer_locations,erp_rest,ok,59,59,4,,,2026-09-30T23:13:42Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,purchase_receipts,erp_rest,empty,0,0,1,14897,,2026-09-30T23:13:43Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,project_tasks,erp_rest,failed,0,0,1,14998,"Error: upstream returned non-success status 400: {""message"":""Either ProjectId or ProjectInternalId or PublicId must be specified""}",2026-09-30T23:13:44Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,journal_transactions,erp_rest,failed,0,0,0,14896,"Error: upstream returned non-success status 400: {""message"":""'LastModifiedDateTime' is not allowed to be more than 6 month back in time if 'FinePeriodId' is not defined""}",2026-09-30T23:13:44Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_locations,datamart_graphql,ok,95,95,9,,,2026-09-30T23:13:54Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,accounts,erp_rest,ok,474,474,9,14997,,2026-09-30T23:13:54Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_sales_prices,datamart_graphql,empty,0,0,0,,,2026-09-30T23:13:55Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,attributes,erp_rest,ok,1,1,1,14996,,2026-09-30T23:13:55Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_customer_payments,datamart_graphql,ok,255,255,0,,,2026-09-30T23:13:55Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,branches,erp_rest,ok,1,1,1,14995,,2026-09-30T23:13:56Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,general_ledger_transactions,erp_rest,ok,15078,15078,30,14740,,2026-09-30T23:13:56Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,carriers,erp_rest,empty,0,0,0,14994,,2026-09-30T23:13:57Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_customer_payment_lines,datamart_graphql,ok,341,341,1,,,2026-09-30T23:13:57Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_sales_orders,datamart_graphql,empty,0,0,0,,,2026-09-30T23:13:58Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,cash_accounts,erp_rest,ok,13,13,1,14993,,2026-09-30T23:13:59Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_customer_documents,datamart_graphql,ok,336,336,0,,,2026-09-30T23:13:59Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,inventory_adjustments,erp_rest,empty,0,0,0,14895,,2026-09-30T23:14:00Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,cash_sales,erp_rest,empty,0,0,0,14992,,2026-09-30T23:14:00Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,contacts,erp_rest,ok,2,2,0,14991,,2026-09-30T23:14:00Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,project_budgets,erp_rest,ok,105,105,0,14893,,2026-09-30T23:14:00Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,credit_terms,erp_rest,ok,12,12,0,14990,,2026-09-30T23:14:01Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,sales_order_inventory,erp_rest,empty,0,0,0,,,2026-09-30T23:14:01Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,customer_invoices,erp_rest,ok,444,444,80,14791,,2026-09-30T23:14:02Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,sales_order_customers,erp_rest,ok,22,22,0,,,2026-09-30T23:14:02Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,currencies,erp_rest,ok,11,11,1,14989,,2026-09-30T23:14:03Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,currency_rate_types,erp_rest,ok,1,1,0,14988,,2026-09-30T23:14:03Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,customers,erp_rest,ok,25,25,2,14892,,2026-09-30T23:14:04Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,supplier_locations,erp_rest,ok,63,63,1,14891,,2026-09-30T23:14:06Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,inventory_items,erp_rest,ok,73,73,1,14890,,2026-09-30T23:14:08Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,currency_rates,erp_rest,ok,3634,3634,4,14987,,2026-09-30T23:14:08Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,customer_classes,erp_rest,ok,6,6,0,14986,,2026-09-30T23:14:08Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_contacts,datamart_graphql,ok,160,160,0,,,2026-09-30T23:14:08Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_addresses,datamart_graphql,ok,156,156,1,,,2026-09-30T23:14:10Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,customer_documents,erp_rest,ok,510,510,8,14785,,2026-09-30T23:14:10Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,customer_contracts,erp_rest,empty,0,0,2,14985,,2026-09-30T23:14:11Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_supplier_document_lines,datamart_graphql,ok,472,472,1,,,2026-09-30T23:14:11Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,customer_credit_write_offs,erp_rest,empty,0,0,1,14984,,2026-09-30T23:14:12Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,dm_journal_transactions,datamart_graphql,ok,15078,15078,16,,,2026-09-30T23:14:13Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,customer_locations,erp_rest,ok,14,14,1,,,2026-09-30T23:14:14Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,supplier_payments,erp_rest,ok,413,413,3,14885,,2026-09-30T23:14:15Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,customer_debit_notes,erp_rest,empty,0,0,2,14983,,2026-09-30T23:14:15Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,project_tasks,erp_rest,failed,0,0,0,14995,"Error: upstream returned non-success status 400: {""message"":""Either ProjectId or ProjectInternalId or PublicId must be specified""}",2026-09-30T23:14:15Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,customer_overdue_charges,erp_rest,empty,0,0,0,14982,,2026-09-30T23:14:15Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,customer_payment_methods,erp_rest,ok,1,1,0,14981,,2026-09-30T23:14:16Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,deferral_codes,erp_rest,ok,8,8,0,14980,,2026-09-30T23:14:17Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,time_cards,erp_rest,empty,0,0,2,14878,,2026-09-30T23:14:17Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,departments,erp_rest,ok,2,2,2,14979,,2026-09-30T23:14:19Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,accounts,erp_rest,ok,388,388,3,14994,,2026-09-30T23:14:19Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,supplier_documents,erp_rest,ok,382,382,2,14874,,2026-09-30T23:14:19Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dimensions,erp_rest,ok,23,23,0,14978,,2026-09-30T23:14:20Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,attributes,erp_rest,ok,4,4,0,14993,,2026-09-30T23:14:20Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,discount_codes,erp_rest,ok,4,4,0,14977,,2026-09-30T23:14:20Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,branches,erp_rest,ok,1,1,0,14992,,2026-09-30T23:14:20Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_ar_historical_data,datamart_graphql,empty,0,0,0,,,2026-09-30T23:14:21Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,carriers,erp_rest,ok,32,32,0,14991,,2026-09-30T23:14:21Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_branches,datamart_graphql,ok,1,1,0,,,2026-09-30T23:14:21Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_budgets,datamart_graphql,empty,0,0,0,,,2026-09-30T23:14:22Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,cash_accounts,erp_rest,ok,9,9,1,14990,,2026-09-30T23:14:22Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_countries,datamart_graphql,ok,260,260,0,,,2026-09-30T23:14:23Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_employees,datamart_graphql,empty,0,0,0,,,2026-09-30T23:14:23Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,cash_sales,erp_rest,empty,0,0,1,14989,,2026-09-30T23:14:23Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_financial_periods,datamart_graphql,empty,0,0,0,,,2026-09-30T23:14:24Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,supplier_invoices,erp_rest,ok,383,382,4,14870,,2026-09-30T23:14:24Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,contacts,erp_rest,ok,63,63,1,14988,,2026-09-30T23:14:25Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_inventory_items,datamart_graphql,empty,0,0,0,,,2026-09-30T23:14:25Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,subaccounts,erp_rest,ok,8,8,0,14869,,2026-09-30T23:14:25Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_sales_order_lines_v2,datamart_graphql,empty,0,0,0,,,2026-09-30T23:14:25Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,credit_terms,erp_rest,ok,16,16,0,14987,,2026-09-30T23:14:25Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_payment_methods,datamart_graphql,ok,8,8,0,,,2026-09-30T23:14:25Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,currencies,erp_rest,ok,11,11,0,14986,,2026-09-30T23:14:26Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_sales_persons,datamart_graphql,empty,0,0,0,,,2026-09-30T23:14:26Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_supplier_classes,datamart_graphql,ok,8,8,0,,,2026-09-30T23:14:26Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,currency_rate_types,erp_rest,ok,1,1,0,14985,,2026-09-30T23:14:26Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_customer_document_lines,datamart_graphql,ok,671,671,1,,,2026-09-30T23:14:27Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_terms,datamart_graphql,ok,12,12,0,,,2026-09-30T23:14:27Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,locations,erp_rest,ok,46,46,0,14868,,2026-09-30T23:14:27Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_vat_categories,datamart_graphql,ok,50,50,0,,,2026-09-30T23:14:28Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,expense_transactions,expense_api,ok,1,1,0,,,2026-09-30T23:14:28Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,currency_rates,erp_rest,ok,2194,2194,1,14984,,2026-09-30T23:14:28Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_vat_zones,datamart_graphql,ok,9,9,0,,,2026-09-30T23:14:28Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,customer_sales_prices,erp_rest,empty,0,0,0,14867,,2026-09-30T23:14:28Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,customer_classes,erp_rest,ok,3,3,0,14983,,2026-09-30T23:14:29Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_warehouse_locations,datamart_graphql,empty,0,0,0,,,2026-09-30T23:14:29Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,customer_contracts,erp_rest,empty,0,0,1,14982,,2026-09-30T23:14:30Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_warehouses,datamart_graphql,ok,1,1,1,,,2026-09-30T23:14:30Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,customer_credit_write_offs,erp_rest,empty,0,0,0,14981,,2026-09-30T23:14:31Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,earning_types,erp_rest,ok,4,4,0,14976,,2026-09-30T23:14:31Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,customer_debit_notes,erp_rest,empty,0,0,1,14980,,2026-09-30T23:14:32Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,customer_overdue_charges,erp_rest,empty,0,0,2,14979,,2026-09-30T23:14:34Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,customer_payments,erp_rest,ok,255,255,6,14864,,2026-09-30T23:14:35Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,customer_payment_methods,erp_rest,empty,0,0,0,14978,,2026-09-30T23:14:35Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,inventory_issues,erp_rest,empty,0,0,0,14863,,2026-09-30T23:14:35Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,deferral_codes,erp_rest,ok,3,3,0,14977,,2026-09-30T23:14:36Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,shipments,erp_rest,empty,0,0,0,14862,,2026-09-30T23:14:36Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,sales_orders_v3,erp_rest,empty,0,0,0,,,2026-09-30T23:14:37Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,departments,erp_rest,ok,9,9,1,14976,,2026-09-30T23:14:37Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,general_ledger_transactions,erp_rest,ok,19508,19508,27,14764,,2026-09-30T23:14:37Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,expense_receipts,erp_rest,empty,0,0,6,14974,,2026-09-30T23:14:38Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dimensions,erp_rest,ok,23,23,0,14975,,2026-09-30T23:14:38Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,discount_codes,erp_rest,ok,4,4,0,14974,,2026-09-30T23:14:38Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,financial_periods,erp_rest,ok,72,72,0,14973,,2026-09-30T23:14:38Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_ar_historical_data,datamart_graphql,empty,0,0,0,,,2026-09-30T23:14:39Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,fixed_asset_classes,erp_rest,ok,25,25,0,14972,,2026-09-30T23:14:39Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,fixed_asset_property_tax_groups,erp_rest,empty,0,0,0,14971,,2026-09-30T23:14:39Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_branches,datamart_graphql,ok,1,1,0,,,2026-09-30T23:14:39Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_budgets,datamart_graphql,empty,0,0,0,,,2026-09-30T23:14:40Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_countries,datamart_graphql,ok,260,260,0,,,2026-09-30T23:14:41Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,fixed_assets,erp_rest,ok,38,38,1,14970,,2026-09-30T23:14:41Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_employees,datamart_graphql,empty,0,0,0,,,2026-09-30T23:14:42Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,inventory_item_classes,erp_rest,ok,9,9,0,14969,,2026-09-30T23:14:42Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_financial_periods,datamart_graphql,empty,0,0,0,,,2026-09-30T23:14:42Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,inventory_item_post_classes,erp_rest,ok,10,10,0,14968,,2026-09-30T23:14:42Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_inventory_items,datamart_graphql,empty,0,0,0,,,2026-09-30T23:14:43Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,inventory_receipt_transfers,erp_rest,empty,0,0,0,14967,,2026-09-30T23:14:43Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_payment_methods,datamart_graphql,ok,4,4,0,,,2026-09-30T23:14:43Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,landed_cost_codes,erp_rest,empty,0,0,0,14966,,2026-09-30T23:14:44Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_sales_persons,datamart_graphql,ok,1,1,0,,,2026-09-30T23:14:44Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,languages,erp_rest,ok,6,6,0,14965,,2026-09-30T23:14:44Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_supplier_classes,datamart_graphql,ok,11,11,0,,,2026-09-30T23:14:45Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,ledgers,erp_rest,ok,4,4,0,14964,,2026-09-30T23:14:45Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_terms,datamart_graphql,ok,16,16,0,,,2026-09-30T23:14:45Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,lot_serial_classes,erp_rest,ok,1,1,0,14963,,2026-09-30T23:14:45Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_vat_categories,datamart_graphql,ok,50,50,0,,,2026-09-30T23:14:46Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_vat_zones,datamart_graphql,ok,9,9,0,,,2026-09-30T23:14:46Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_warehouse_locations,datamart_graphql,empty,0,0,0,,,2026-09-30T23:14:47Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_warehouses,datamart_graphql,ok,1,1,0,,,2026-09-30T23:14:48Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,number_sequences,erp_rest,ok,75,75,2,14962,,2026-09-30T23:14:48Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,earning_types,erp_rest,ok,4,4,0,14973,,2026-09-30T23:14:48Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,organizations,erp_rest,ok,1,1,1,14961,,2026-09-30T23:14:49Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,packaging_types,erp_rest,empty,0,0,1,14960,,2026-09-30T23:14:50Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,payment_methods,erp_rest,ok,8,8,1,14959,,2026-09-30T23:14:51Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,project_account_groups,erp_rest,ok,9,9,0,14958,,2026-09-30T23:14:52Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,purchase_receipt_transfers,erp_rest,empty,0,0,1,14957,,2026-09-30T23:14:54Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,sales_categories,erp_rest,empty,0,0,0,14956,,2026-09-30T23:14:54Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,expense_receipts,erp_rest,empty,0,0,5,14971,,2026-09-30T23:14:54Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,sales_order_types,erp_rest,ok,11,11,4,14955,,2026-09-30T23:14:59Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,financial_periods,erp_rest,ok,60,60,4,14970,,2026-09-30T23:14:59Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,stocktakes_v2,erp_rest,empty,0,0,6,14954,,2026-09-30T23:15:06Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,fixed_asset_classes,erp_rest,ok,10,10,6,14969,,2026-09-30T23:15:06Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,dm_journal_transactions,datamart_graphql,ok,19508,19508,28,,,2026-09-30T23:15:06Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,supplier_classes,erp_rest,ok,8,8,0,14953,,2026-09-30T23:15:06Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,fixed_asset_property_tax_groups,erp_rest,empty,0,0,0,14968,,2026-09-30T23:15:06Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,fixed_assets,erp_rest,ok,3,3,0,14967,,2026-09-30T23:15:07Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,supplier_inbox_rules,erp_rest,ok,34,34,0,14952,,2026-09-30T23:15:07Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,inventory_item_classes,erp_rest,ok,9,9,0,14966,,2026-09-30T23:15:08Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,unit_of_measures,erp_rest,ok,24,24,0,14951,,2026-09-30T23:15:08Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,inventory_item_post_classes,erp_rest,ok,10,10,0,14965,,2026-09-30T23:15:08Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,inventory_receipt_transfers,erp_rest,empty,0,0,0,14964,,2026-09-30T23:15:09Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,vat_categories,erp_rest,ok,50,50,1,14950,,2026-09-30T23:15:09Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,landed_cost_codes,erp_rest,empty,0,0,0,14963,,2026-09-30T23:15:10Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,vat_zones,erp_rest,ok,9,9,0,14949,,2026-09-30T23:15:10Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,languages,erp_rest,ok,6,6,0,14962,,2026-09-30T23:15:10Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,ledgers,erp_rest,ok,4,4,0,14961,,2026-09-30T23:15:11Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,lot_serial_classes,erp_rest,ok,3,3,0,14960,,2026-09-30T23:15:11Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,vats,erp_rest,ok,63,63,1,14948,,2026-09-30T23:15:12Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,warehouses,erp_rest,failed,1,0,0,14947,"Error: config error: sync validation failed: 1 rejected row(s), 0 exact duplicate row(s) dropped; rows per reason: missing validation field replenishmentClass.id: 1; first rejection: missing validation field replenishmentClass.id; first key: 7d2c489e-21cc-11e9-b307-0aa512338dd61; first record keys: _source,_synced_at,active,address,avgDefaultCost,branch,contact,description,dropShipLocation,fifoDe",2026-09-30T23:15:12Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,discounts,erp_rest,empty,0,0,0,14946,,2026-09-30T23:15:13Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,number_sequences,erp_rest,ok,75,75,1,14959,,2026-09-30T23:15:13Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_accounts,datamart_graphql,ok,474,474,0,,,2026-09-30T23:15:14Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,organizations,erp_rest,ok,1,1,0,14958,,2026-09-30T23:15:14Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,packaging_types,erp_rest,ok,1,1,0,14957,,2026-09-30T23:15:15Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_states,datamart_graphql,ok,806,806,1,,,2026-09-30T23:15:15Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,payment_methods,erp_rest,ok,4,4,0,14956,,2026-09-30T23:15:15Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,employees,erp_rest,empty,0,0,1,14945,,2026-09-30T23:15:16Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,sales_persons,erp_rest,empty,0,0,0,14944,,2026-09-30T23:15:17Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,project_account_groups,erp_rest,ok,163,163,1,14955,,2026-09-30T23:15:17Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,purchase_receipt_transfers,erp_rest,empty,0,0,0,14954,,2026-09-30T23:15:17Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,countries,erp_rest,ok,260,260,1,14941,,2026-09-30T23:15:18Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,sales_categories,erp_rest,empty,0,0,0,14953,,2026-09-30T23:15:18Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,sales_order_types,erp_rest,ok,14,14,0,14952,,2026-09-30T23:15:19Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_suppliers,datamart_graphql,ok,333,333,0,,,2026-09-30T23:15:19Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,stocktakes_v2,erp_rest,ok,2,2,0,14951,,2026-09-30T23:15:19Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,kit_assemblies,erp_rest,empty,0,0,1,14940,,2026-09-30T23:15:20Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,supplier_classes,erp_rest,ok,11,11,3,14950,,2026-09-30T23:15:23Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,customer_locations,erp_rest,ok,152,152,17,,,2026-09-30T23:15:24Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,supplier_inbox_rules,erp_rest,empty,0,0,0,14949,,2026-09-30T23:15:24Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,unit_of_measures,erp_rest,ok,24,24,0,14948,,2026-09-30T23:15:24Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,project_tasks,erp_rest,failed,0,0,0,14998,"Error: upstream returned non-success status 400: {""message"":""Either ProjectId or ProjectInternalId or PublicId must be specified""}",2026-09-30T23:15:25Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,vat_categories,erp_rest,ok,50,50,1,14947,,2026-09-30T23:15:25Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,vat_zones,erp_rest,ok,9,9,0,14946,,2026-09-30T23:15:26Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,cash_transactions,erp_rest,failed,728,0,6,14932,"Error: config error: sync validation failed: 17 rejected row(s), 0 exact duplicate row(s) dropped; rows per reason: missing validation field description: 17; first rejection: missing validation field description; first key: 7d2c489e-21cc-11e9-b307-0aa512338dd6500259; first record keys: _source,_synced_at,amount,cashAccount,controlTotal,currency,disbReceipt,entryType,finPeriod,financialPeriod,fina",2026-09-30T23:15:27Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,vats,erp_rest,ok,63,63,1,14945,,2026-09-30T23:15:27Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,accounts,erp_rest,failed,417,0,2,14997,"Error: config error: sync validation failed: 2 rejected row(s), 0 exact duplicate row(s) dropped; rows per reason: missing validation field description: 2; first rejection: missing validation field description; first key: 9b1fa69b-5568-11ee-960c-0254178561833101; first record keys: _source,_synced_at,accountCD,accountClass,accountID,active,cashAccount,lastModifiedDateTime,metadata,postOption,publ",2026-09-30T23:15:28Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,warehouses,erp_rest,ok,1,1,0,14944,,2026-09-30T23:15:28Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,attributes,erp_rest,ok,11,11,0,14996,,2026-09-30T23:15:28Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,customer_invoices,erp_rest,ok,283,283,51,14859,,2026-09-30T23:15:28Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_general_ledger_balances,datamart_graphql,ok,1735,1735,2,,,2026-09-30T23:15:29Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,discounts,erp_rest,empty,0,0,0,14943,,2026-09-30T23:15:29Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,branches,erp_rest,ok,1,1,0,14995,,2026-09-30T23:15:29Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_project_tasks,datamart_graphql,empty,0,0,0,,,2026-09-30T23:15:29Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,carriers,erp_rest,empty,0,0,0,14994,,2026-09-30T23:15:30Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_accounts,datamart_graphql,ok,388,388,0,,,2026-09-30T23:15:30Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,kit_specifications,erp_rest,empty,0,0,0,14931,,2026-09-30T23:15:30Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_states,datamart_graphql,ok,806,806,1,,,2026-09-30T23:15:31Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,cash_accounts,erp_rest,ok,10,10,1,14993,,2026-09-30T23:15:31Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,employees,erp_rest,ok,10,10,1,14942,,2026-09-30T23:15:32Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,cash_sales,erp_rest,empty,0,0,0,14992,,2026-09-30T23:15:32Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,customer_documents,erp_rest,ok,324,324,3,14855,,2026-09-30T23:15:32Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,sales_persons,erp_rest,ok,1,1,1,14941,,2026-09-30T23:15:33Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,supplier_balances_v2,erp_rest,ok,326,326,3,14927,,2026-09-30T23:15:34Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,countries,erp_rest,ok,260,260,2,14938,,2026-09-30T23:15:36Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,contacts,erp_rest,ok,3447,3447,5,14991,,2026-09-30T23:15:38Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_suppliers,datamart_graphql,ok,57,57,2,,,2026-09-30T23:15:38Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,credit_terms,erp_rest,ok,16,16,0,14990,,2026-09-30T23:15:39Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,kit_assemblies,erp_rest,empty,0,0,3,14937,,2026-09-30T23:15:41Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,currencies,erp_rest,ok,11,11,4,14989,,2026-09-30T23:15:43Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,customer_credit_notes,erp_rest,ok,36,36,9,14926,,2026-09-30T23:15:43Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,inventory_transfers,erp_rest,empty,0,0,2,14925,,2026-09-30T23:15:46Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,cash_transactions,erp_rest,failed,196,0,4,14935,"Error: config error: sync validation failed: 4 rejected row(s), 0 exact duplicate row(s) dropped; rows per reason: missing validation field description: 4; first rejection: missing validation field description; first key: eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd500023; first record keys: _source,_synced_at,amount,cashAccount,controlTotal,currency,disbReceipt,entryType,finPeriod,financialPeriod,financ",2026-09-30T23:15:46Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,currency_rate_types,erp_rest,ok,1,1,2,14988,,2026-09-30T23:15:46Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,general_ledger_transactions,erp_rest,ok,7482,7482,13,14846,,2026-09-30T23:15:46Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_general_ledger_balances,datamart_graphql,ok,278,278,1,,,2026-09-30T23:15:47Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,currency_rates,erp_rest,ok,980,980,1,14987,,2026-09-30T23:15:48Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_project_tasks,datamart_graphql,ok,12,12,0,,,2026-09-30T23:15:48Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,customer_classes,erp_rest,ok,3,3,0,14986,,2026-09-30T23:15:48Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,kit_specifications,erp_rest,empty,0,0,0,14934,,2026-09-30T23:15:49Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,customer_contracts,erp_rest,empty,0,0,1,14985,,2026-09-30T23:15:49Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,supplier_balances_v2,erp_rest,ok,55,55,37,14933,,2026-09-30T23:16:26Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,customer_credit_write_offs,erp_rest,ok,1,1,36,14984,,2026-09-30T23:16:26Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,fixed_asset_transactions,erp_rest,ok,1094,1094,40,14914,,2026-09-30T23:16:27Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,projects,erp_rest,empty,0,0,0,14913,,2026-09-30T23:16:27Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,customer_credit_notes,erp_rest,ok,11,11,2,14932,,2026-09-30T23:16:29Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_journal_transactions,datamart_graphql,ok,7482,7482,43,,,2026-09-30T23:16:30Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,inventory_transfers,erp_rest,empty,0,0,5,14931,,2026-09-30T23:16:34Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,customer_debit_notes,erp_rest,ok,17,17,7,14983,,2026-09-30T23:16:34Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,customer_locations,erp_rest,ok,22,22,4,,,2026-09-30T23:16:34Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,customer_overdue_charges,erp_rest,empty,0,0,0,14982,,2026-09-30T23:16:35Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,fixed_asset_transactions,erp_rest,ok,110,110,0,14929,,2026-09-30T23:16:35Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,customer_payment_methods,erp_rest,empty,0,0,0,14981,,2026-09-30T23:16:35Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,project_tasks,erp_rest,failed,0,0,1,14998,"Error: upstream returned non-success status 400: {""message"":""Either ProjectId or ProjectInternalId or PublicId must be specified""}",2026-09-30T23:16:36Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,projects,erp_rest,ok,3,3,0,14928,,2026-09-30T23:16:36Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,deferral_codes,erp_rest,ok,9,9,0,14980,,2026-09-30T23:16:36Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,departments,erp_rest,ok,7,7,0,14979,,2026-09-30T23:16:37Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,accounts,erp_rest,ok,447,447,1,14997,,2026-09-30T23:16:37Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,suppliers,erp_rest,ok,333,333,9,14909,,2026-09-30T23:16:37Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dimensions,erp_rest,ok,23,23,0,14978,,2026-09-30T23:16:37Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,suppliers,erp_rest,ok,57,57,1,14927,,2026-09-30T23:16:38Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,discount_codes,erp_rest,empty,0,0,0,14977,,2026-09-30T23:16:38Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_customers,datamart_graphql,ok,22,22,1,,,2026-09-30T23:16:38Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,attributes,erp_rest,ok,3,3,1,14996,,2026-09-30T23:16:38Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_ar_historical_data,datamart_graphql,empty,0,0,0,,,2026-09-30T23:16:39Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,expense_claims,erp_rest,empty,0,0,1,14908,,2026-09-30T23:16:39Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_branches,datamart_graphql,ok,1,1,0,,,2026-09-30T23:16:39Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,branches,erp_rest,ok,1,1,1,14995,,2026-09-30T23:16:40Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_budgets,datamart_graphql,empty,0,0,0,,,2026-09-30T23:16:40Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_countries,datamart_graphql,ok,260,260,0,,,2026-09-30T23:16:41Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,carriers,erp_rest,empty,0,0,1,14994,,2026-09-30T23:16:41Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_employees,datamart_graphql,empty,0,0,0,,,2026-09-30T23:16:42Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,cash_accounts,erp_rest,ok,10,10,1,14993,,2026-09-30T23:16:42Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_customers,datamart_graphql,ok,5075,5075,4,,,2026-09-30T23:16:42Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_financial_periods,datamart_graphql,empty,0,0,0,,,2026-09-30T23:16:42Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_supplier_payment_lines,datamart_graphql,ok,3721,3721,3,,,2026-09-30T23:16:42Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,expense_claims,erp_rest,empty,0,0,0,14926,,2026-09-30T23:16:43Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_inventory_items,datamart_graphql,empty,0,0,0,,,2026-09-30T23:16:43Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,cash_sales,erp_rest,empty,0,0,1,14992,,2026-09-30T23:16:44Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_payment_methods,datamart_graphql,ok,5,5,0,,,2026-09-30T23:16:44Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_supplier_payment_lines,datamart_graphql,ok,629,629,1,,,2026-09-30T23:16:44Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_sales_persons,datamart_graphql,ok,1,1,0,,,2026-09-30T23:16:44Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,contacts,erp_rest,ok,166,166,1,14991,,2026-09-30T23:16:45Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_supplier_payments,datamart_graphql,ok,644,644,1,,,2026-09-30T23:16:46Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_supplier_classes,datamart_graphql,ok,9,9,1,,,2026-09-30T23:16:46Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_supplier_payments,datamart_graphql,ok,3772,3772,3,,,2026-09-30T23:16:46Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_subaccounts,datamart_graphql,ok,47,47,0,,,2026-09-30T23:16:46Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_terms,datamart_graphql,ok,16,16,0,,,2026-09-30T23:16:46Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,credit_terms,erp_rest,ok,16,16,1,14990,,2026-09-30T23:16:46Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_subaccounts,datamart_graphql,ok,111,111,0,,,2026-09-30T23:16:47Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_vat_categories,datamart_graphql,ok,48,48,0,,,2026-09-30T23:16:47Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_vat_zones,datamart_graphql,ok,9,9,0,,,2026-09-30T23:16:47Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_supplier_documents,datamart_graphql,ok,688,688,1,,,2026-09-30T23:16:47Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_warehouse_locations,datamart_graphql,empty,0,0,0,,,2026-09-30T23:16:48Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,purchase_orders,erp_rest,ok,41,41,2,14925,,2026-09-30T23:16:50Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_warehouses,datamart_graphql,ok,1,1,1,,,2026-09-30T23:16:50Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,currencies,erp_rest,ok,11,11,3,14989,,2026-09-30T23:16:50Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,earning_types,erp_rest,ok,4,4,1,14976,,2026-09-30T23:16:51Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,currency_rate_types,erp_rest,ok,1,1,1,14988,,2026-09-30T23:16:52Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_supplier_documents,datamart_graphql,ok,3901,3901,5,,,2026-09-30T23:16:52Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,inventory_receipts,erp_rest,ok,47,47,2,14924,,2026-09-30T23:16:53Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,purchase_orders,erp_rest,empty,0,0,2,14907,,2026-09-30T23:16:55Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,inventory_receipts,erp_rest,empty,0,0,1,14906,,2026-09-30T23:16:57Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,budgets,erp_rest,empty,0,0,4,14896,,2026-09-30T23:16:57Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,currency_rates,erp_rest,ok,4822,4822,6,14987,,2026-09-30T23:16:58Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,customer_balances,erp_rest,ok,59,59,1,14895,,2026-09-30T23:16:58Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,customer_balances_v2,erp_rest,ok,56,56,0,14894,,2026-09-30T23:16:59Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,customer_classes,erp_rest,ok,3,3,1,14986,,2026-09-30T23:16:59Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,customer_contracts,erp_rest,empty,0,0,1,14985,,2026-09-30T23:17:01Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,customer_credit_write_offs,erp_rest,empty,0,0,0,14984,,2026-09-30T23:17:01Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_general_ledger_balances_v2,datamart_graphql,ok,2661,2661,3,,,2026-09-30T23:17:02Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,customer_debit_notes,erp_rest,ok,1,1,1,14983,,2026-09-30T23:17:03Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,purchase_receipts,erp_rest,ok,42,42,1,14893,,2026-09-30T23:17:03Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,customer_overdue_charges,erp_rest,empty,0,0,1,14982,,2026-09-30T23:17:04Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,budgets,erp_rest,empty,0,0,7,14873,,2026-09-30T23:17:04Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,customer_balances,erp_rest,ok,22,22,1,14872,,2026-09-30T23:17:05Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,customer_payment_methods,erp_rest,ok,1,1,1,14981,,2026-09-30T23:17:06Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,customer_balances_v2,erp_rest,ok,22,22,0,14871,,2026-09-30T23:17:06Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,deferral_codes,erp_rest,ok,10,10,1,14980,,2026-09-30T23:17:07Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,departments,erp_rest,ok,6,6,0,14979,,2026-09-30T23:17:08Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dimensions,erp_rest,ok,23,23,0,14978,,2026-09-30T23:17:09Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,discount_codes,erp_rest,ok,4,4,0,14977,,2026-09-30T23:17:09Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_ar_historical_data,datamart_graphql,empty,0,0,0,,,2026-09-30T23:17:10Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_branches,datamart_graphql,ok,1,1,0,,,2026-09-30T23:17:10Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_budgets,datamart_graphql,empty,0,0,0,,,2026-09-30T23:17:11Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_countries,datamart_graphql,ok,260,260,0,,,2026-09-30T23:17:12Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_employees,datamart_graphql,empty,0,0,0,,,2026-09-30T23:17:12Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_financial_periods,datamart_graphql,empty,0,0,0,,,2026-09-30T23:17:13Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_general_ledger_balances_v2,datamart_graphql,ok,9335,9335,7,,,2026-09-30T23:17:13Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_inventory_items,datamart_graphql,empty,0,0,0,,,2026-09-30T23:17:14Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,purchase_receipts,erp_rest,empty,0,0,0,14870,,2026-09-30T23:17:14Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_payment_methods,datamart_graphql,ok,5,5,0,,,2026-09-30T23:17:14Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_sales_persons,datamart_graphql,ok,6,6,0,,,2026-09-30T23:17:15Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_supplier_classes,datamart_graphql,ok,9,9,0,,,2026-09-30T23:17:15Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_terms,datamart_graphql,ok,16,16,0,,,2026-09-30T23:17:16Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_vat_categories,datamart_graphql,ok,52,52,0,,,2026-09-30T23:17:17Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_vat_zones,datamart_graphql,ok,9,9,0,,,2026-09-30T23:17:17Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_warehouse_locations,datamart_graphql,empty,0,0,0,,,2026-09-30T23:17:18Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_warehouses,datamart_graphql,ok,2,2,1,,,2026-09-30T23:17:19Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,earning_types,erp_rest,ok,4,4,0,14976,,2026-09-30T23:17:20Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,journal_transactions,erp_rest,ok,2387,2387,41,14799,,2026-09-30T23:17:45Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_locations,datamart_graphql,ok,5146,5146,4,,,2026-09-30T23:17:49Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_sales_prices,datamart_graphql,ok,19,19,0,,,2026-09-30T23:17:50Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_customer_payments,datamart_graphql,ok,167,167,0,,,2026-09-30T23:17:51Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_customer_payment_lines,datamart_graphql,ok,174,174,0,,,2026-09-30T23:17:51Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_sales_orders,datamart_graphql,ok,193,193,1,,,2026-09-30T23:17:52Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_customer_documents,datamart_graphql,ok,202,202,0,,,2026-09-30T23:17:53Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,expense_receipts,erp_rest,ok,2610,2610,34,14969,,2026-09-30T23:17:54Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,financial_periods,erp_rest,ok,48,48,0,14968,,2026-09-30T23:17:55Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,inventory_adjustments,erp_rest,failed,55,0,2,14784,"Error: config error: sync validation failed: 1 rejected row(s), 0 exact duplicate row(s) dropped; rows per reason: missing validation field batchNumber: 1; first rejection: missing validation field batchNumber; first key: eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd1600035; first record keys: _source,_synced_at,adjusmentLines,branchNumber,controlCost,controlQuantity,date,description,hold,lastModifiedDate",2026-09-30T23:17:55Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,fixed_asset_classes,erp_rest,ok,10,10,0,14967,,2026-09-30T23:17:56Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,project_budgets,erp_rest,empty,0,0,0,14783,,2026-09-30T23:17:56Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,fixed_asset_property_tax_groups,erp_rest,empty,0,0,0,14966,,2026-09-30T23:17:56Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,sales_order_inventory,erp_rest,ok,24,24,0,,,2026-09-30T23:17:57Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,fixed_assets,erp_rest,empty,0,0,0,14965,,2026-09-30T23:17:57Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,inventory_item_classes,erp_rest,ok,9,9,0,14964,,2026-09-30T23:17:58Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,inventory_item_post_classes,erp_rest,ok,10,10,0,14963,,2026-09-30T23:17:58Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,inventory_receipt_transfers,erp_rest,empty,0,0,0,14962,,2026-09-30T23:17:59Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,sales_order_customers,erp_rest,ok,356,356,2,,,2026-09-30T23:17:59Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,landed_cost_codes,erp_rest,empty,0,0,0,14961,,2026-09-30T23:18:00Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,languages,erp_rest,ok,6,6,0,14960,,2026-09-30T23:18:00Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,ledgers,erp_rest,ok,4,4,0,14959,,2026-09-30T23:18:01Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,lot_serial_classes,erp_rest,ok,1,1,0,14958,,2026-09-30T23:18:02Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,number_sequences,erp_rest,ok,75,75,1,14957,,2026-09-30T23:18:03Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,organizations,erp_rest,ok,1,1,2,14956,,2026-09-30T23:18:06Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,packaging_types,erp_rest,empty,0,0,0,14955,,2026-09-30T23:18:06Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,payment_methods,erp_rest,ok,5,5,0,14954,,2026-09-30T23:18:07Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,project_account_groups,erp_rest,ok,110,110,1,14953,,2026-09-30T23:18:08Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,purchase_receipt_transfers,erp_rest,empty,0,0,0,14952,,2026-09-30T23:18:09Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,sales_categories,erp_rest,empty,0,0,0,14951,,2026-09-30T23:18:09Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,sales_order_types,erp_rest,ok,11,11,1,14950,,2026-09-30T23:18:11Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,stocktakes_v2,erp_rest,empty,0,0,0,14949,,2026-09-30T23:18:11Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,supplier_classes,erp_rest,ok,9,9,0,14948,,2026-09-30T23:18:12Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,supplier_inbox_rules,erp_rest,ok,1,1,0,14947,,2026-09-30T23:18:13Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,unit_of_measures,erp_rest,ok,24,24,0,14946,,2026-09-30T23:18:14Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,vat_categories,erp_rest,ok,52,52,2,14945,,2026-09-30T23:18:16Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,vat_zones,erp_rest,ok,9,9,0,14944,,2026-09-30T23:18:16Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,vats,erp_rest,ok,64,64,1,14943,,2026-09-30T23:18:18Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,warehouses,erp_rest,failed,2,0,0,14942,"Error: config error: sync validation failed: 2 rejected row(s), 0 exact duplicate row(s) dropped; rows per reason: missing validation field replenishmentClass.id: 2; missing validation field dropShipLocation.id: 1; missing validation field receiptLocation.id: 1; missing validation field returnLocation.id: 1; missing validation field shipLocation.id: 1; first rejection: missing validation field rep",2026-09-30T23:18:18Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,discounts,erp_rest,empty,0,0,0,14941,,2026-09-30T23:18:19Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_accounts,datamart_graphql,ok,447,447,3,,,2026-09-30T23:18:22Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_states,datamart_graphql,ok,807,807,1,,,2026-09-30T23:18:24Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,journal_transactions,erp_rest,ok,8772,8772,70,14767,,2026-09-30T23:18:24Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,employees,erp_rest,ok,16,16,0,14940,,2026-09-30T23:18:25Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_locations,datamart_graphql,ok,356,356,0,,,2026-09-30T23:18:25Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,sales_persons,erp_rest,ok,6,6,0,14939,,2026-09-30T23:18:26Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_sales_prices,datamart_graphql,empty,0,0,0,,,2026-09-30T23:18:26Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_customer_payments,datamart_graphql,ok,355,355,0,,,2026-09-30T23:18:26Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,countries,erp_rest,ok,260,260,1,14936,,2026-09-30T23:18:27Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_customer_payment_lines,datamart_graphql,ok,353,353,0,,,2026-09-30T23:18:27Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_sales_orders,datamart_graphql,empty,0,0,0,,,2026-09-30T23:18:28Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_suppliers,datamart_graphql,ok,450,450,1,,,2026-09-30T23:18:28Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_customer_documents,datamart_graphql,ok,355,355,1,,,2026-09-30T23:18:29Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,customers,erp_rest,ok,438,438,29,14778,,2026-09-30T23:18:29Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,kit_assemblies,erp_rest,empty,0,0,1,14935,,2026-09-30T23:18:29Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,inventory_adjustments,erp_rest,empty,0,0,0,14766,,2026-09-30T23:18:30Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,supplier_locations,erp_rest,ok,57,57,0,14777,,2026-09-30T23:18:30Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,project_budgets,erp_rest,empty,0,0,0,14765,,2026-09-30T23:18:31Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,inventory_items,erp_rest,ok,79,79,1,14776,,2026-09-30T23:18:31Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,cash_transactions,erp_rest,failed,278,0,1,14932,"Error: config error: sync validation failed: 4 rejected row(s), 0 exact duplicate row(s) dropped; rows per reason: missing validation field description: 4; first rejection: missing validation field description; first key: f630d6b0-5566-11ee-960c-025417856183500006; first record keys: _source,_synced_at,amount,cashAccount,controlTotal,currency,disbReceipt,entryType,finPeriod,financialPeriod,financ",2026-09-30T23:18:31Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,sales_order_inventory,erp_rest,empty,0,0,0,,,2026-09-30T23:18:31Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,sales_order_customers,erp_rest,ok,17,17,0,,,2026-09-30T23:18:32Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_general_ledger_balances,datamart_graphql,ok,523,523,1,,,2026-09-30T23:18:32Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_project_tasks,datamart_graphql,ok,354,354,1,,,2026-09-30T23:18:34Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,kit_specifications,erp_rest,empty,0,0,0,14931,,2026-09-30T23:18:34Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,customers,erp_rest,ok,22,22,2,14764,,2026-09-30T23:18:34Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,supplier_balances_v2,erp_rest,ok,169,169,2,14929,,2026-09-30T23:18:36Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,supplier_locations,erp_rest,ok,333,333,2,14760,,2026-09-30T23:18:36Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,inventory_items,erp_rest,ok,7,7,1,14759,,2026-09-30T23:18:38Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_contacts,datamart_graphql,ok,403,403,0,,,2026-09-30T23:18:39Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_addresses,datamart_graphql,ok,388,388,1,,,2026-09-30T23:18:40Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,customer_credit_notes,erp_rest,ok,46,46,4,14928,,2026-09-30T23:18:40Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,inventory_transfers,erp_rest,empty,0,0,0,14927,,2026-09-30T23:18:41Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,fixed_asset_transactions,erp_rest,empty,0,0,0,14926,,2026-09-30T23:18:42Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_contacts,datamart_graphql,ok,15325,15325,11,,,2026-09-30T23:18:42Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,projects,erp_rest,ok,113,113,1,14924,,2026-09-30T23:18:43Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_supplier_document_lines,datamart_graphql,ok,4959,4959,4,,,2026-09-30T23:18:44Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,suppliers,erp_rest,ok,450,450,7,14919,,2026-09-30T23:18:50Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,project_transactions,erp_rest,empty,0,0,8,14714,,2026-09-30T23:18:53Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_addresses,datamart_graphql,ok,15330,15330,10,,,2026-09-30T23:18:53Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_supplier_document_lines,datamart_graphql,ok,933,933,1,,,2026-09-30T23:18:54Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_customers,datamart_graphql,ok,5151,5151,5,,,2026-09-30T23:18:56Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,project_transactions,erp_rest,empty,0,0,5,14731,,2026-09-30T23:19:00Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,supplier_payments,erp_rest,ok,640,640,3,14724,,2026-09-30T23:19:03Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,time_cards,erp_rest,empty,0,0,2,14713,,2026-09-30T23:19:06Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,supplier_documents,erp_rest,ok,686,686,3,14706,,2026-09-30T23:19:10Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,expense_claims,erp_rest,ok,261,261,17,14916,,2026-09-30T23:19:13Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_supplier_payment_lines,datamart_graphql,ok,1319,1319,1,,,2026-09-30T23:19:15Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_supplier_payments,datamart_graphql,ok,1316,1316,2,,,2026-09-30T23:19:17Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_subaccounts,datamart_graphql,ok,65,65,1,,,2026-09-30T23:19:19Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,supplier_payments,erp_rest,ok,3759,3759,27,14676,,2026-09-30T23:19:21Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,time_cards,erp_rest,empty,0,0,4,14675,,2026-09-30T23:19:25Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_supplier_documents,datamart_graphql,ok,1735,1735,7,,,2026-09-30T23:19:26Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,supplier_invoices,erp_rest,ok,686,686,16,14699,,2026-09-30T23:19:26Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,subaccounts,erp_rest,ok,45,45,1,14698,,2026-09-30T23:19:27Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_sales_order_lines_v2,datamart_graphql,ok,536,536,2,,,2026-09-30T23:19:30Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_customer_document_lines,datamart_graphql,ok,645,645,2,,,2026-09-30T23:19:32Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,locations,erp_rest,ok,463,463,3,14693,,2026-09-30T23:19:35Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,expense_transactions,expense_api,ok,365,365,1,,,2026-09-30T23:19:36Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,customer_sales_prices,erp_rest,ok,19,19,0,14692,,2026-09-30T23:19:37Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,customer_payments,erp_rest,ok,167,167,3,14690,,2026-09-30T23:19:40Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,purchase_orders,erp_rest,ok,718,718,17,14908,,2026-09-30T23:19:44Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,supplier_documents,erp_rest,ok,3891,3891,19,14636,,2026-09-30T23:19:45Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,inventory_issues,erp_rest,ok,194,194,5,14688,,2026-09-30T23:19:45Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,shipments,erp_rest,ok,188,188,1,14686,,2026-09-30T23:19:47Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,sales_orders_v3,erp_rest,ok,189,189,3,,,2026-09-30T23:19:50Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,inventory_receipts,erp_rest,ok,361,361,16,14904,,2026-09-30T23:20:01Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,budgets,erp_rest,empty,0,0,3,14881,,2026-09-30T23:20:04Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,customer_balances,erp_rest,ok,55,55,1,14880,,2026-09-30T23:20:06Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,customer_balances_v2,erp_rest,ok,52,52,0,14879,,2026-09-30T23:20:07Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_general_ledger_balances_v2,datamart_graphql,ok,4756,4756,4,,,2026-09-30T23:20:11Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,purchase_receipts,erp_rest,ok,844,844,9,14870,,2026-09-30T23:20:20Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,customer_invoices,erp_rest,ok,188,188,36,14684,,2026-09-30T23:20:27Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,customer_documents,erp_rest,ok,199,199,1,14682,,2026-09-30T23:20:29Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,supplier_invoices,erp_rest,ok,3891,3891,51,14597,,2026-09-30T23:20:37Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,subaccounts,erp_rest,ok,107,107,1,14593,,2026-09-30T23:20:38Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_sales_order_lines_v2,datamart_graphql,empty,0,0,0,,,2026-09-30T23:20:39Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_customer_document_lines,datamart_graphql,ok,533,533,1,,,2026-09-30T23:20:40Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,general_ledger_transactions,erp_rest,ok,9115,9115,11,14671,,2026-09-30T23:20:40Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,locations,erp_rest,ok,71,71,1,14591,,2026-09-30T23:20:42Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,dm_journal_transactions,datamart_graphql,ok,9115,9115,12,,,2026-09-30T23:20:52Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,journal_transactions,erp_rest,ok,4914,4914,48,14767,,2026-09-30T23:21:09Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_locations,datamart_graphql,ok,5618,5618,13,,,2026-09-30T23:21:22Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_sales_prices,datamart_graphql,empty,0,0,0,,,2026-09-30T23:21:23Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_customer_payments,datamart_graphql,ok,271,271,0,,,2026-09-30T23:21:24Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,expense_transactions,expense_api,failed,17442,0,42,,"Error: config error: sync validation failed: 281 rejected row(s), 0 exact duplicate row(s) dropped; rows per reason: duplicate primary key with different payload: 281; first rejection: duplicate primary key with different payload; first key: 7d2c489e-21cc-11e9-b307-0aa512338dd6c4aede87-366e-4e86-b78a-02fc9a90acb6; first record keys: _source,_synced_at,abroadExpense,accountCredit,accountDebit,amou",2026-09-30T23:21:24Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_customer_payment_lines,datamart_graphql,ok,299,299,0,,,2026-09-30T23:21:25Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,customer_sales_prices,erp_rest,empty,0,0,2,14564,,2026-09-30T23:21:27Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_sales_orders,datamart_graphql,ok,220,220,2,,,2026-09-30T23:21:27Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_customer_documents,datamart_graphql,ok,326,326,1,,,2026-09-30T23:21:28Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,inventory_adjustments,erp_rest,empty,0,0,0,14766,,2026-09-30T23:21:29Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,customer_payments,erp_rest,ok,355,355,10,14554,,2026-09-30T23:21:38Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,inventory_issues,erp_rest,empty,0,0,0,14553,,2026-09-30T23:21:38Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,shipments,erp_rest,empty,0,0,0,14552,,2026-09-30T23:21:39Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,sales_orders_v3,erp_rest,empty,0,0,0,,,2026-09-30T23:21:40Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,project_budgets,erp_rest,failed,2056,0,15,14745,"Error: config error: sync validation failed: 65 rejected row(s), 0 exact duplicate row(s) dropped; rows per reason: duplicate primary key with different payload: 65; first rejection: duplicate primary key with different payload; first key: f630d6b0-5566-11ee-960c-025417856183AFF9003470004020; first record keys: _source,_synced_at,accountGroupID,actualAmount,actualQty,committedAmount,committedIn",2026-09-30T23:21:44Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,sales_order_inventory,erp_rest,empty,0,0,0,,,2026-09-30T23:21:45Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,sales_order_customers,erp_rest,ok,5068,5068,36,,,2026-09-30T23:22:21Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,customer_locations,erp_rest,ok,356,356,121,,,2026-09-30T23:22:54Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,project_tasks,erp_rest,failed,240,0,43,14883,"Error: config error: sync validation failed: 240 rejected row(s), 0 exact duplicate row(s) dropped; rows per reason: missing validation field attributes: 240; missing validation field defAccrualAccount.number: 240; missing validation field employees: 240; missing validation field plannedEnd: 240; missing validation field plannedStart: 240; missing validation field rateTable.id: 240; missing valida",2026-09-30T23:23:38Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,accounts,erp_rest,ok,436,436,1,14882,,2026-09-30T23:23:39Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,customer_invoices,erp_rest,ok,311,311,119,14548,,2026-09-30T23:23:39Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,attributes,erp_rest,ok,11,11,0,14881,,2026-09-30T23:23:40Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,branches,erp_rest,ok,1,1,0,14880,,2026-09-30T23:23:41Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,carriers,erp_rest,ok,22,22,0,14879,,2026-09-30T23:23:41Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,customer_documents,erp_rest,ok,347,347,3,14544,,2026-09-30T23:23:42Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,cash_accounts,erp_rest,ok,12,12,1,14878,,2026-09-30T23:23:42Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,cash_sales,erp_rest,empty,0,0,0,14877,,2026-09-30T23:23:43Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,contacts,erp_rest,ok,1534,1534,2,14876,,2026-09-30T23:23:46Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,credit_terms,erp_rest,ok,17,17,0,14875,,2026-09-30T23:23:47Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,currencies,erp_rest,ok,11,11,0,14874,,2026-09-30T23:23:47Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,currency_rate_types,erp_rest,ok,1,1,0,14873,,2026-09-30T23:23:48Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,currency_rates,erp_rest,ok,4800,4800,6,14872,,2026-09-30T23:23:54Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,customer_classes,erp_rest,ok,3,3,0,14871,,2026-09-30T23:23:55Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,customer_contracts,erp_rest,empty,0,0,1,14870,,2026-09-30T23:23:57Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,customer_credit_write_offs,erp_rest,empty,0,0,0,14869,,2026-09-30T23:23:57Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,customer_debit_notes,erp_rest,ok,2,2,2,14868,,2026-09-30T23:23:59Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,customer_overdue_charges,erp_rest,empty,0,0,0,14867,,2026-09-30T23:24:00Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,customer_payment_methods,erp_rest,ok,3,3,0,14866,,2026-09-30T23:24:01Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,deferral_codes,erp_rest,ok,2,2,0,14865,,2026-09-30T23:24:02Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,departments,erp_rest,ok,5,5,0,14864,,2026-09-30T23:24:02Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dimensions,erp_rest,ok,23,23,2,14863,,2026-09-30T23:24:05Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,discount_codes,erp_rest,ok,3,3,0,14862,,2026-09-30T23:24:06Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_ar_historical_data,datamart_graphql,empty,0,0,0,,,2026-09-30T23:24:06Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_branches,datamart_graphql,ok,1,1,0,,,2026-09-30T23:24:07Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_budgets,datamart_graphql,empty,0,0,0,,,2026-09-30T23:24:08Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_countries,datamart_graphql,ok,260,260,0,,,2026-09-30T23:24:08Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_employees,datamart_graphql,empty,0,0,0,,,2026-09-30T23:24:09Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_financial_periods,datamart_graphql,empty,0,0,0,,,2026-09-30T23:24:09Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_inventory_items,datamart_graphql,empty,0,0,0,,,2026-09-30T23:24:10Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_payment_methods,datamart_graphql,ok,4,4,0,,,2026-09-30T23:24:11Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_sales_persons,datamart_graphql,empty,0,0,0,,,2026-09-30T23:24:11Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_supplier_classes,datamart_graphql,ok,9,9,0,,,2026-09-30T23:24:12Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_terms,datamart_graphql,ok,17,17,0,,,2026-09-30T23:24:13Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_vat_categories,datamart_graphql,ok,51,51,0,,,2026-09-30T23:24:13Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_vat_zones,datamart_graphql,ok,9,9,1,,,2026-09-30T23:24:14Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_warehouse_locations,datamart_graphql,empty,0,0,0,,,2026-09-30T23:24:15Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_warehouses,datamart_graphql,ok,10,10,0,,,2026-09-30T23:24:16Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,earning_types,erp_rest,ok,4,4,0,14861,,2026-09-30T23:24:16Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,expense_receipts,erp_rest,ok,24602,24602,468,14098,,2026-09-30T23:24:39Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,financial_periods,erp_rest,ok,48,48,0,14097,,2026-09-30T23:24:40Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,fixed_asset_classes,erp_rest,ok,10,10,0,14096,,2026-09-30T23:24:41Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,fixed_asset_property_tax_groups,erp_rest,empty,0,0,1,14095,,2026-09-30T23:24:42Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,fixed_assets,erp_rest,empty,0,0,0,14094,,2026-09-30T23:24:42Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,inventory_item_classes,erp_rest,ok,10,10,1,14093,,2026-09-30T23:24:44Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,inventory_item_post_classes,erp_rest,ok,10,10,0,14092,,2026-09-30T23:24:45Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,inventory_receipt_transfers,erp_rest,empty,0,0,0,14091,,2026-09-30T23:24:46Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,landed_cost_codes,erp_rest,empty,0,0,1,14090,,2026-09-30T23:24:47Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,languages,erp_rest,ok,6,6,0,14089,,2026-09-30T23:24:48Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,ledgers,erp_rest,ok,4,4,0,14088,,2026-09-30T23:24:48Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,lot_serial_classes,erp_rest,ok,1,1,0,14087,,2026-09-30T23:24:49Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,number_sequences,erp_rest,ok,75,75,2,14086,,2026-09-30T23:24:51Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,general_ledger_transactions,erp_rest,ok,35273,35273,68,14507,,2026-09-30T23:24:51Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,organizations,erp_rest,ok,1,1,15,14085,,2026-09-30T23:25:06Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,packaging_types,erp_rest,empty,0,0,0,14084,,2026-09-30T23:25:07Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,payment_methods,erp_rest,ok,5,5,0,14083,,2026-09-30T23:25:08Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,project_account_groups,erp_rest,ok,62,62,0,14082,,2026-09-30T23:25:09Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,purchase_receipt_transfers,erp_rest,empty,0,0,0,14081,,2026-09-30T23:25:09Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,sales_categories,erp_rest,empty,0,0,0,14080,,2026-09-30T23:25:10Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,sales_order_types,erp_rest,ok,12,12,3,14079,,2026-09-30T23:25:13Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,stocktakes_v2,erp_rest,empty,0,0,0,14078,,2026-09-30T23:25:14Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,supplier_classes,erp_rest,ok,9,9,2,14077,,2026-09-30T23:25:16Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,supplier_inbox_rules,erp_rest,ok,4,4,0,14076,,2026-09-30T23:25:17Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,unit_of_measures,erp_rest,ok,24,24,0,14075,,2026-09-30T23:25:18Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,vat_categories,erp_rest,ok,48,48,1,14074,,2026-09-30T23:25:19Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,vat_zones,erp_rest,ok,9,9,0,14073,,2026-09-30T23:25:20Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,vats,erp_rest,ok,61,61,4,14072,,2026-09-30T23:25:24Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,dm_journal_transactions,datamart_graphql,ok,35273,35273,33,,,2026-09-30T23:25:24Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,warehouses,erp_rest,ok,1,1,0,14071,,2026-09-30T23:25:25Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,discounts,erp_rest,empty,0,0,0,14070,,2026-09-30T23:25:25Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_accounts,datamart_graphql,ok,417,417,0,,,2026-09-30T23:25:26Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,customer_locations,erp_rest,ok,17,17,2,,,2026-09-30T23:25:26Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_states,datamart_graphql,ok,806,806,1,,,2026-09-30T23:25:27Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,employees,erp_rest,ok,22,22,1,14069,,2026-09-30T23:25:28Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,sales_persons,erp_rest,ok,1,1,0,14068,,2026-09-30T23:25:29Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,countries,erp_rest,ok,260,260,1,14065,,2026-09-30T23:25:30Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_suppliers,datamart_graphql,ok,87,87,3,,,2026-09-30T23:25:34Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,kit_assemblies,erp_rest,empty,0,0,0,14064,,2026-09-30T23:25:34Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,cash_transactions,erp_rest,ok,179,179,1,14062,,2026-09-30T23:25:36Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_general_ledger_balances,datamart_graphql,ok,11820,11820,9,,,2026-09-30T23:25:46Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_project_tasks,datamart_graphql,ok,6513,6513,4,,,2026-09-30T23:25:50Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,kit_specifications,erp_rest,empty,0,0,0,14061,,2026-09-30T23:25:51Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,supplier_balances_v2,erp_rest,ok,71,71,0,14060,,2026-09-30T23:25:52Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,customer_credit_notes,erp_rest,ok,161,161,15,14058,,2026-09-30T23:26:07Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,inventory_transfers,erp_rest,empty,0,0,1,14057,,2026-09-30T23:26:08Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,fixed_asset_transactions,erp_rest,empty,0,0,0,14056,,2026-09-30T23:26:09Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,expense_receipts,erp_rest,ok,8606,8606,114,14839,,2026-09-30T23:26:11Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,financial_periods,erp_rest,ok,60,60,0,14838,,2026-09-30T23:26:12Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,fixed_asset_classes,erp_rest,ok,17,17,0,14837,,2026-09-30T23:26:13Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,fixed_asset_property_tax_groups,erp_rest,empty,0,0,0,14836,,2026-09-30T23:26:13Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,fixed_assets,erp_rest,ok,37,37,1,14835,,2026-09-30T23:26:14Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,inventory_item_classes,erp_rest,ok,10,10,0,14834,,2026-09-30T23:26:15Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,inventory_item_post_classes,erp_rest,ok,10,10,1,14833,,2026-09-30T23:26:16Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,inventory_receipt_transfers,erp_rest,empty,0,0,0,14832,,2026-09-30T23:26:17Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,landed_cost_codes,erp_rest,ok,6,6,0,14831,,2026-09-30T23:26:18Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,languages,erp_rest,ok,6,6,0,14830,,2026-09-30T23:26:18Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,ledgers,erp_rest,ok,4,4,1,14829,,2026-09-30T23:26:20Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,lot_serial_classes,erp_rest,ok,1,1,0,14828,,2026-09-30T23:26:20Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,projects,erp_rest,ok,734,734,12,14048,,2026-09-30T23:26:22Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,number_sequences,erp_rest,ok,75,75,2,14827,,2026-09-30T23:26:22Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,suppliers,erp_rest,ok,87,87,3,14047,,2026-09-30T23:26:26Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_customers,datamart_graphql,ok,4506,4506,5,,,2026-09-30T23:26:31Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,organizations,erp_rest,ok,1,1,12,14826,,2026-09-30T23:26:35Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,packaging_types,erp_rest,failed,1,0,0,14825,"Error: config error: sync validation failed: 1 rejected row(s), 0 exact duplicate row(s) dropped; rows per reason: missing validation field description: 1; first rejection: missing validation field description; first key: 61320c0a-102d-11ee-a0e0-0693d8a7c3ddPACK; first record keys: _source,_synced_at,activeByDefault,boxId,boxWeight,lastModifiedDateTime,maxVolume,maxWeight,metadata,tenant_id,volum",2026-09-30T23:26:36Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,payment_methods,erp_rest,ok,4,4,0,14824,,2026-09-30T23:26:36Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,project_account_groups,erp_rest,ok,70,70,0,14823,,2026-09-30T23:26:37Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,purchase_receipt_transfers,erp_rest,empty,0,0,0,14822,,2026-09-30T23:26:38Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,sales_categories,erp_rest,empty,0,0,0,14821,,2026-09-30T23:26:38Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,sales_order_types,erp_rest,ok,18,18,0,14820,,2026-09-30T23:26:39Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,stocktakes_v2,erp_rest,ok,21,21,13,14819,,2026-09-30T23:26:52Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,supplier_classes,erp_rest,ok,9,9,0,14818,,2026-09-30T23:26:53Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,supplier_inbox_rules,erp_rest,ok,40,40,0,14817,,2026-09-30T23:26:54Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,unit_of_measures,erp_rest,ok,29,29,0,14816,,2026-09-30T23:26:54Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,vat_categories,erp_rest,ok,51,51,1,14815,,2026-09-30T23:26:55Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,vat_zones,erp_rest,ok,9,9,0,14814,,2026-09-30T23:26:56Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,vats,erp_rest,ok,63,63,1,14813,,2026-09-30T23:26:57Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,warehouses,erp_rest,ok,10,10,1,14812,,2026-09-30T23:26:59Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,discounts,erp_rest,ok,13,13,0,14811,,2026-09-30T23:26:59Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_accounts,datamart_graphql,ok,436,436,0,,,2026-09-30T23:27:00Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_states,datamart_graphql,ok,806,806,1,,,2026-09-30T23:27:01Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,employees,erp_rest,ok,27,27,0,14810,,2026-09-30T23:27:02Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,sales_persons,erp_rest,empty,0,0,0,14809,,2026-09-30T23:27:03Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,countries,erp_rest,ok,260,260,0,14806,,2026-09-30T23:27:04Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_suppliers,datamart_graphql,ok,383,383,0,,,2026-09-30T23:27:05Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,kit_assemblies,erp_rest,ok,736,736,4,14798,,2026-09-30T23:27:09Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,cash_transactions,erp_rest,ok,275,275,1,14795,,2026-09-30T23:27:10Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_general_ledger_balances,datamart_graphql,ok,661,661,1,,,2026-09-30T23:27:12Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_project_tasks,datamart_graphql,ok,240,240,0,,,2026-09-30T23:27:12Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,project_tasks,erp_rest,ok,1606,1606,106,14693,,2026-09-30T23:27:14Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,accounts,erp_rest,ok,442,442,0,14692,,2026-09-30T23:27:15Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,attributes,erp_rest,ok,9,9,0,14691,,2026-09-30T23:27:15Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,branches,erp_rest,ok,1,1,0,14690,,2026-09-30T23:27:16Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,carriers,erp_rest,empty,0,0,0,14689,,2026-09-30T23:27:17Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,cash_accounts,erp_rest,ok,11,11,0,14688,,2026-09-30T23:27:17Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,kit_specifications,erp_rest,ok,637,637,5,14788,,2026-09-30T23:27:18Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,cash_sales,erp_rest,empty,0,0,0,14687,,2026-09-30T23:27:18Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,contacts,erp_rest,ok,319,319,0,14686,,2026-09-30T23:27:19Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,credit_terms,erp_rest,ok,16,16,0,14685,,2026-09-30T23:27:19Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,supplier_balances_v2,erp_rest,ok,313,313,1,14784,,2026-09-30T23:27:20Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,currencies,erp_rest,ok,12,12,0,14684,,2026-09-30T23:27:20Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,currency_rate_types,erp_rest,ok,1,1,0,14683,,2026-09-30T23:27:21Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,currency_rates,erp_rest,ok,1931,1931,1,14682,,2026-09-30T23:27:22Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,customer_classes,erp_rest,ok,3,3,0,14681,,2026-09-30T23:27:23Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,customer_contracts,erp_rest,empty,0,0,0,14680,,2026-09-30T23:27:24Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,customer_credit_write_offs,erp_rest,ok,1,1,1,14679,,2026-09-30T23:27:25Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,customer_debit_notes,erp_rest,ok,1,1,1,14678,,2026-09-30T23:27:27Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,customer_overdue_charges,erp_rest,empty,0,0,0,14677,,2026-09-30T23:27:28Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,customer_payment_methods,erp_rest,empty,0,0,0,14676,,2026-09-30T23:27:28Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,customers,erp_rest,ok,5151,5151,307,14664,,2026-09-30T23:27:29Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,deferral_codes,erp_rest,ok,15,15,0,14675,,2026-09-30T23:27:29Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,departments,erp_rest,ok,5,5,0,14674,,2026-09-30T23:27:30Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dimensions,erp_rest,ok,23,23,0,14673,,2026-09-30T23:27:30Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,supplier_locations,erp_rest,ok,450,450,1,14659,,2026-09-30T23:27:31Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,discount_codes,erp_rest,ok,2,2,0,14672,,2026-09-30T23:27:31Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_ar_historical_data,datamart_graphql,empty,0,0,0,,,2026-09-30T23:27:31Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,inventory_items,erp_rest,ok,94,94,1,14658,,2026-09-30T23:27:32Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_branches,datamart_graphql,ok,1,1,0,,,2026-09-30T23:27:32Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_budgets,datamart_graphql,empty,0,0,0,,,2026-09-30T23:27:33Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_countries,datamart_graphql,ok,260,260,0,,,2026-09-30T23:27:33Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_employees,datamart_graphql,empty,0,0,0,,,2026-09-30T23:27:34Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,customer_credit_notes,erp_rest,ok,218,218,14,14781,,2026-09-30T23:27:34Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_financial_periods,datamart_graphql,empty,0,0,0,,,2026-09-30T23:27:34Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_inventory_items,datamart_graphql,empty,0,0,0,,,2026-09-30T23:27:35Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_payment_methods,datamart_graphql,ok,5,5,0,,,2026-09-30T23:27:36Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,inventory_transfers,erp_rest,ok,263,263,2,14778,,2026-09-30T23:27:37Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_sales_persons,datamart_graphql,empty,0,0,1,,,2026-09-30T23:27:37Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_supplier_classes,datamart_graphql,ok,9,9,0,,,2026-09-30T23:27:38Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_terms,datamart_graphql,ok,16,16,0,,,2026-09-30T23:27:38Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_vat_categories,datamart_graphql,ok,47,47,0,,,2026-09-30T23:27:39Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_vat_zones,datamart_graphql,ok,9,9,0,,,2026-09-30T23:27:39Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,fixed_asset_transactions,erp_rest,ok,748,748,2,14770,,2026-09-30T23:27:39Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_warehouse_locations,datamart_graphql,empty,0,0,0,,,2026-09-30T23:27:40Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_warehouses,datamart_graphql,ok,1,1,0,,,2026-09-30T23:27:41Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,earning_types,erp_rest,ok,4,4,0,14671,,2026-09-30T23:27:42Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,projects,erp_rest,ok,114,114,2,14768,,2026-09-30T23:27:42Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_contacts,datamart_graphql,ok,15975,15975,11,,,2026-09-30T23:27:44Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,suppliers,erp_rest,ok,382,382,5,14764,,2026-09-30T23:27:47Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_customers,datamart_graphql,ok,5112,5112,6,,,2026-09-30T23:27:54Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_addresses,datamart_graphql,ok,15972,15972,12,,,2026-09-30T23:27:56Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_supplier_document_lines,datamart_graphql,ok,6236,6236,5,,,2026-09-30T23:28:01Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,supplier_payments,erp_rest,ok,1316,1316,8,14644,,2026-09-30T23:28:10Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,time_cards,erp_rest,empty,0,0,3,14627,,2026-09-30T23:28:14Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,supplier_documents,erp_rest,ok,1735,1735,6,14609,,2026-09-30T23:28:20Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,expense_receipts,erp_rest,ok,4253,4253,44,14662,,2026-09-30T23:28:26Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,financial_periods,erp_rest,ok,60,60,0,14661,,2026-09-30T23:28:27Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,fixed_asset_classes,erp_rest,ok,10,10,0,14660,,2026-09-30T23:28:28Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,fixed_asset_property_tax_groups,erp_rest,empty,0,0,0,14659,,2026-09-30T23:28:28Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,fixed_assets,erp_rest,ok,1,1,0,14658,,2026-09-30T23:28:29Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,inventory_item_classes,erp_rest,ok,9,9,0,14657,,2026-09-30T23:28:30Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,inventory_item_post_classes,erp_rest,ok,10,10,0,14656,,2026-09-30T23:28:30Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,inventory_receipt_transfers,erp_rest,empty,0,0,1,14655,,2026-09-30T23:28:32Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,landed_cost_codes,erp_rest,empty,0,0,0,14654,,2026-09-30T23:28:33Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,languages,erp_rest,ok,6,6,0,14653,,2026-09-30T23:28:33Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,ledgers,erp_rest,ok,4,4,0,14652,,2026-09-30T23:28:34Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,lot_serial_classes,erp_rest,ok,1,1,2,14651,,2026-09-30T23:28:37Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,number_sequences,erp_rest,ok,75,75,1,14650,,2026-09-30T23:28:38Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,organizations,erp_rest,ok,1,1,1,14649,,2026-09-30T23:28:39Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,packaging_types,erp_rest,empty,0,0,0,14648,,2026-09-30T23:28:40Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,payment_methods,erp_rest,ok,5,5,0,14647,,2026-09-30T23:28:41Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,project_account_groups,erp_rest,ok,66,66,1,14646,,2026-09-30T23:28:42Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,supplier_invoices,erp_rest,ok,1735,1735,21,14591,,2026-09-30T23:28:42Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,purchase_receipt_transfers,erp_rest,empty,0,0,0,14645,,2026-09-30T23:28:42Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,subaccounts,erp_rest,ok,65,65,0,14590,,2026-09-30T23:28:43Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,sales_categories,erp_rest,empty,0,0,0,14644,,2026-09-30T23:28:43Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,sales_order_types,erp_rest,ok,12,12,0,14643,,2026-09-30T23:28:44Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_sales_order_lines_v2,datamart_graphql,ok,659,659,1,,,2026-09-30T23:28:44Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,stocktakes_v2,erp_rest,empty,0,0,0,14642,,2026-09-30T23:28:44Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,supplier_classes,erp_rest,ok,9,9,0,14641,,2026-09-30T23:28:45Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_customer_document_lines,datamart_graphql,ok,779,779,1,,,2026-09-30T23:28:45Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,supplier_inbox_rules,erp_rest,empty,0,0,0,14640,,2026-09-30T23:28:45Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,unit_of_measures,erp_rest,ok,24,24,0,14639,,2026-09-30T23:28:46Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,vat_categories,erp_rest,ok,47,47,1,14638,,2026-09-30T23:28:47Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,vat_zones,erp_rest,ok,9,9,0,14637,,2026-09-30T23:28:48Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,vats,erp_rest,ok,60,60,2,14636,,2026-09-30T23:28:50Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,warehouses,erp_rest,ok,1,1,0,14635,,2026-09-30T23:28:50Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,discounts,erp_rest,ok,1,1,0,14634,,2026-09-30T23:28:51Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_accounts,datamart_graphql,ok,443,443,0,,,2026-09-30T23:28:52Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_states,datamart_graphql,ok,806,806,5,,,2026-09-30T23:28:58Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,employees,erp_rest,ok,19,19,1,14633,,2026-09-30T23:28:59Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,sales_persons,erp_rest,empty,0,0,0,14632,,2026-09-30T23:29:00Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,countries,erp_rest,ok,260,260,1,14629,,2026-09-30T23:29:02Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_suppliers,datamart_graphql,ok,125,125,1,,,2026-09-30T23:29:03Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,kit_assemblies,erp_rest,empty,0,0,0,14628,,2026-09-30T23:29:04Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,cash_transactions,erp_rest,ok,223,223,2,14625,,2026-09-30T23:29:06Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_general_ledger_balances,datamart_graphql,ok,481,481,1,,,2026-09-30T23:29:07Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_project_tasks,datamart_graphql,ok,1606,1606,2,,,2026-09-30T23:29:10Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,kit_specifications,erp_rest,empty,0,0,9,14624,,2026-09-30T23:29:19Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,supplier_balances_v2,erp_rest,ok,79,79,0,14623,,2026-09-30T23:29:20Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,expense_claims,erp_rest,ok,923,923,86,14754,,2026-09-30T23:29:20Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_supplier_payment_lines,datamart_graphql,ok,4580,4580,4,,,2026-09-30T23:29:24Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_supplier_payments,datamart_graphql,ok,4655,4655,4,,,2026-09-30T23:29:29Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_subaccounts,datamart_graphql,ok,66,66,0,,,2026-09-30T23:29:29Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,customer_credit_notes,erp_rest,ok,77,77,11,14622,,2026-09-30T23:29:32Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,inventory_transfers,erp_rest,empty,0,0,0,14621,,2026-09-30T23:29:32Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,fixed_asset_transactions,erp_rest,ok,32,32,0,14620,,2026-09-30T23:29:33Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_supplier_documents,datamart_graphql,ok,5821,5821,6,,,2026-09-30T23:29:36Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,projects,erp_rest,ok,302,302,4,14616,,2026-09-30T23:29:38Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,expense_claims,erp_rest,ok,1442,1442,188,14032,,2026-09-30T23:29:40Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,suppliers,erp_rest,ok,124,124,2,14614,,2026-09-30T23:29:40Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_supplier_payment_lines,datamart_graphql,ok,396,396,1,,,2026-09-30T23:29:41Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_supplier_payments,datamart_graphql,ok,431,431,1,,,2026-09-30T23:29:42Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_subaccounts,datamart_graphql,ok,1201,1201,2,,,2026-09-30T23:29:44Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_customers,datamart_graphql,ok,5210,5210,5,,,2026-09-30T23:29:46Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_supplier_documents,datamart_graphql,ok,1919,1919,2,,,2026-09-30T23:29:47Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,purchase_orders,erp_rest,empty,0,0,0,14031,,2026-09-30T23:29:48Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,inventory_receipts,erp_rest,empty,0,0,0,14030,,2026-09-30T23:29:48Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,budgets,erp_rest,empty,0,0,6,14007,,2026-09-30T23:29:55Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,purchase_orders,erp_rest,ok,1139,1139,26,14742,,2026-09-30T23:30:02Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,customer_balances,erp_rest,ok,1275,1275,19,13994,,2026-09-30T23:30:14Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,expense_claims,erp_rest,ok,452,452,27,14609,,2026-09-30T23:30:14Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_supplier_payment_lines,datamart_graphql,ok,641,641,1,,,2026-09-30T23:30:15Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_supplier_payments,datamart_graphql,ok,646,646,1,,,2026-09-30T23:30:16Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_subaccounts,datamart_graphql,ok,70,70,0,,,2026-09-30T23:30:17Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_supplier_documents,datamart_graphql,ok,1176,1176,1,,,2026-09-30T23:30:19Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,customer_balances_v2,erp_rest,ok,1242,1242,5,13981,,2026-09-30T23:30:19Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,purchase_orders,erp_rest,empty,0,0,0,14608,,2026-09-30T23:30:20Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,inventory_receipts,erp_rest,empty,0,0,0,14607,,2026-09-30T23:30:20Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,budgets,erp_rest,empty,0,0,4,14579,,2026-09-30T23:30:25Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,customer_balances,erp_rest,ok,204,204,1,14576,,2026-09-30T23:30:27Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,customer_balances_v2,erp_rest,ok,189,189,1,14574,,2026-09-30T23:30:28Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_general_ledger_balances_v2,datamart_graphql,ok,5314,5314,4,,,2026-09-30T23:30:33Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,purchase_receipts,erp_rest,empty,0,0,0,14573,,2026-09-30T23:30:34Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_general_ledger_balances_v2,datamart_graphql,ok,28120,28120,20,,,2026-09-30T23:30:39Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,purchase_receipts,erp_rest,empty,0,0,0,13980,,2026-09-30T23:30:40Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,locations,erp_rest,ok,5296,5296,116,14537,,2026-09-30T23:30:42Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,expense_transactions,expense_api,ok,2619,2619,6,,,2026-09-30T23:30:48Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,customer_sales_prices,erp_rest,empty,0,0,0,14536,,2026-09-30T23:30:49Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,customer_payments,erp_rest,ok,271,271,8,14533,,2026-09-30T23:30:57Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,inventory_issues,erp_rest,empty,0,0,0,14532,,2026-09-30T23:30:57Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,shipments,erp_rest,ok,189,189,1,14530,,2026-09-30T23:30:59Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,sales_orders_v3,erp_rest,ok,220,220,4,,,2026-09-30T23:31:04Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,customer_invoices,erp_rest,ok,267,267,88,14527,,2026-09-30T23:32:32Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,customer_documents,erp_rest,ok,314,314,4,14523,,2026-09-30T23:32:37Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,journal_transactions,erp_rest,ok,9407,9407,141,14401,,2026-09-30T23:32:55Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_locations,datamart_graphql,ok,5355,5355,4,,,2026-09-30T23:32:59Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_sales_prices,datamart_graphql,empty,0,0,0,,,2026-09-30T23:33:00Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_customer_payments,datamart_graphql,ok,809,809,1,,,2026-09-30T23:33:02Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_customer_payment_lines,datamart_graphql,ok,840,840,1,,,2026-09-30T23:33:03Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_sales_orders,datamart_graphql,ok,77,77,0,,,2026-09-30T23:33:04Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_customer_documents,datamart_graphql,ok,1198,1198,1,,,2026-09-30T23:33:05Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,inventory_adjustments,erp_rest,ok,1,1,0,14400,,2026-09-30T23:33:06Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,project_budgets,erp_rest,ok,1989,1989,8,14380,,2026-09-30T23:33:14Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,sales_order_inventory,erp_rest,empty,0,0,0,,,2026-09-30T23:33:15Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,general_ledger_transactions,erp_rest,ok,25000,25000,50,14497,,2026-09-30T23:33:27Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,dm_journal_transactions,datamart_graphql,ok,25000,25000,23,,,2026-09-30T23:33:50Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,inventory_receipts,erp_rest,ok,1520,1520,249,14726,,2026-09-30T23:34:12Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,budgets,erp_rest,empty,0,0,4,14698,,2026-09-30T23:34:17Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,sales_order_customers,erp_rest,ok,5123,5123,64,,,2026-09-30T23:34:20Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,customer_balances,erp_rest,ok,316,316,3,14694,,2026-09-30T23:34:20Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,customer_balances_v2,erp_rest,ok,309,309,2,14690,,2026-09-30T23:34:22Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_general_ledger_balances_v2,datamart_graphql,ok,7050,7050,5,,,2026-09-30T23:34:28Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,journal_transactions,erp_rest,ok,19108,19108,227,13782,,2026-09-30T23:34:28Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_locations,datamart_graphql,ok,4616,4616,3,,,2026-09-30T23:34:32Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_sales_prices,datamart_graphql,ok,83,83,0,,,2026-09-30T23:34:33Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_customer_payments,datamart_graphql,ok,3565,3565,3,,,2026-09-30T23:34:36Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_customer_payment_lines,datamart_graphql,ok,3681,3681,3,,,2026-09-30T23:34:39Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,purchase_receipts,erp_rest,ok,1325,1325,13,14676,,2026-09-30T23:34:41Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_sales_orders,datamart_graphql,ok,1157,1157,2,,,2026-09-30T23:34:41Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_customer_documents,datamart_graphql,ok,3980,3980,4,,,2026-09-30T23:34:46Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,inventory_adjustments,erp_rest,empty,0,0,0,13781,,2026-09-30T23:34:47Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,project_budgets,erp_rest,ok,8118,8118,40,13699,,2026-09-30T23:35:27Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,sales_order_inventory,erp_rest,empty,0,0,0,,,2026-09-30T23:35:28Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,sales_order_customers,erp_rest,ok,4357,4357,26,,,2026-09-30T23:35:54Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,journal_transactions,erp_rest,ok,19528,19528,200,14406,,2026-09-30T23:38:02Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_locations,datamart_graphql,ok,5522,5522,5,,,2026-09-30T23:38:07Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_sales_prices,datamart_graphql,ok,3,3,0,,,2026-09-30T23:38:08Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_customer_payments,datamart_graphql,ok,2396,2396,2,,,2026-09-30T23:38:10Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_customer_payment_lines,datamart_graphql,ok,2550,2550,2,,,2026-09-30T23:38:13Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_sales_orders,datamart_graphql,ok,3497,3497,4,,,2026-09-30T23:38:18Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_customer_documents,datamart_graphql,ok,2809,2809,3,,,2026-09-30T23:38:21Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,customers,erp_rest,ok,5210,5210,340,14327,,2026-09-30T23:40:00Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,supplier_locations,erp_rest,ok,124,124,1,14325,,2026-09-30T23:40:01Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,inventory_items,erp_rest,ok,107,107,1,14323,,2026-09-30T23:40:03Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_contacts,datamart_graphql,ok,15917,15917,12,,,2026-09-30T23:40:16Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_addresses,datamart_graphql,ok,15913,15913,12,,,2026-09-30T23:40:28Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_supplier_document_lines,datamart_graphql,ok,6013,6013,5,,,2026-09-30T23:40:33Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,supplier_payments,erp_rest,ok,646,646,7,14316,,2026-09-30T23:40:41Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,time_cards,erp_rest,empty,0,0,5,14296,,2026-09-30T23:40:47Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,supplier_documents,erp_rest,ok,1176,1176,3,14284,,2026-09-30T23:40:50Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,inventory_adjustments,erp_rest,ok,1712,1712,151,14388,,2026-09-30T23:40:53Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,supplier_invoices,erp_rest,ok,1176,1176,26,14272,,2026-09-30T23:41:16Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,subaccounts,erp_rest,ok,63,63,0,14271,,2026-09-30T23:41:17Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_sales_order_lines_v2,datamart_graphql,ok,77,77,0,,,2026-09-30T23:41:18Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_customer_document_lines,datamart_graphql,ok,7607,7607,7,,,2026-09-30T23:41:26Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,project_budgets,erp_rest,ok,1329,1319,44,14358,,2026-09-30T23:41:37Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,sales_order_inventory,erp_rest,ok,4165,4165,19,,,2026-09-30T23:41:57Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,sales_order_customers,erp_rest,ok,4295,4295,30,,,2026-09-30T23:42:27Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,customers,erp_rest,ok,4506,4506,522,13650,,2026-09-30T23:44:37Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,supplier_locations,erp_rest,ok,87,87,0,13649,,2026-09-30T23:44:38Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,inventory_items,erp_rest,ok,129,129,1,13647,,2026-09-30T23:44:39Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_contacts,datamart_graphql,ok,16355,16355,13,,,2026-09-30T23:44:53Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_addresses,datamart_graphql,ok,16455,16455,15,,,2026-09-30T23:45:09Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_supplier_document_lines,datamart_graphql,ok,27407,27407,23,,,2026-09-30T23:45:32Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,supplier_payments,erp_rest,ok,431,431,3,13642,,2026-09-30T23:45:35Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,time_cards,erp_rest,empty,0,0,6,13619,,2026-09-30T23:45:42Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,locations,erp_rest,ok,5232,5232,263,14217,,2026-09-30T23:45:50Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,supplier_documents,erp_rest,ok,1919,1919,9,13599,,2026-09-30T23:45:51Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,expense_transactions,expense_api,ok,4253,4253,10,,,2026-09-30T23:46:00Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,customer_sales_prices,erp_rest,empty,0,0,1,14216,,2026-09-30T23:46:01Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,customer_payments,erp_rest,ok,809,809,18,14207,,2026-09-30T23:46:19Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,inventory_issues,erp_rest,empty,0,0,0,14206,,2026-09-30T23:46:20Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,shipments,erp_rest,ok,1,1,1,14205,,2026-09-30T23:46:22Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,sales_orders_v3,erp_rest,ok,77,77,1,,,2026-09-30T23:46:24Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,supplier_invoices,erp_rest,ok,1919,1919,131,13579,,2026-09-30T23:48:02Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,subaccounts,erp_rest,ok,1201,1201,3,13566,,2026-09-30T23:48:06Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_sales_order_lines_v2,datamart_graphql,ok,1356,1356,2,,,2026-09-30T23:48:08Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_customer_document_lines,datamart_graphql,ok,6421,6421,6,,,2026-09-30T23:48:14Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,customers,erp_rest,ok,5112,5112,354,14306,,2026-09-30T23:48:21Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,supplier_locations,erp_rest,ok,382,382,3,14302,,2026-09-30T23:48:25Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,inventory_items,erp_rest,ok,4884,4884,57,14253,,2026-09-30T23:49:22Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,locations,erp_rest,ok,4519,4519,76,13520,,2026-09-30T23:49:31Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_contacts,datamart_graphql,ok,17161,17161,14,,,2026-09-30T23:49:36Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_addresses,datamart_graphql,ok,17129,17129,11,,,2026-09-30T23:49:48Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_supplier_document_lines,datamart_graphql,ok,20486,20486,16,,,2026-09-30T23:50:04Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,supplier_payments,erp_rest,ok,4655,4655,31,14206,,2026-09-30T23:50:35Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,time_cards,erp_rest,empty,0,0,7,14178,,2026-09-30T23:50:43Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,supplier_documents,erp_rest,ok,5821,5821,21,14119,,2026-09-30T23:51:05Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,customer_invoices,erp_rest,ok,916,916,304,14194,,2026-09-30T23:51:28Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,customer_documents,erp_rest,ok,995,995,7,14184,,2026-09-30T23:51:36Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,supplier_invoices,erp_rest,ok,5821,5821,104,14060,,2026-09-30T23:52:49Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,subaccounts,erp_rest,ok,66,66,0,14059,,2026-09-30T23:52:50Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_sales_order_lines_v2,datamart_graphql,ok,21245,21245,22,,,2026-09-30T23:53:13Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_customer_document_lines,datamart_graphql,ok,13888,13888,12,,,2026-09-30T23:53:25Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,expense_transactions,expense_api,ok,24668,24668,250,,,2026-09-30T23:53:41Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,customer_sales_prices,erp_rest,ok,83,83,1,13519,,2026-09-30T23:53:43Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,customer_payments,erp_rest,ok,3565,3565,69,13483,,2026-09-30T23:54:52Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,inventory_issues,erp_rest,empty,0,0,0,13482,,2026-09-30T23:54:53Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,shipments,erp_rest,ok,1,1,0,13481,,2026-09-30T23:54:54Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,locations,erp_rest,ok,5170,5170,93,14007,,2026-09-30T23:54:59Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,sales_orders_v3,erp_rest,ok,1157,1157,11,,,2026-09-30T23:55:06Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,expense_transactions,expense_api,ok,8689,8689,19,,,2026-09-30T23:55:18Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,customer_sales_prices,erp_rest,ok,3,3,0,14006,,2026-09-30T23:55:19Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,general_ledger_transactions,erp_rest,ok,93474,93474,272,14089,,2026-09-30T23:56:09Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,customer_payments,erp_rest,ok,2396,2396,93,13982,,2026-09-30T23:56:52Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,dm_journal_transactions,datamart_graphql,ok,93474,93474,125,,,2026-09-30T23:58:15Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,inventory_issues,erp_rest,ok,2802,2802,428,13955,,2026-10-01T00:04:00Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,shipments,erp_rest,ok,2975,2975,27,13930,,2026-10-01T00:04:28Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,sales_orders_v3,erp_rest,ok,3497,3497,62,,,2026-10-01T00:05:31Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,customer_invoices,erp_rest,ok,3708,3708,1199,13459,,2026-10-01T00:15:05Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,customer_documents,erp_rest,ok,3887,3887,38,14962,,2026-10-01T00:15:44Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,customer_locations,erp_rest,ok,5068,5068,2524,,,2026-10-01T00:15:55Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,general_ledger_transactions,erp_rest,failed,120417,0,183,14860,"Error: config error: sync validation failed: 4 rejected row(s), 0 exact duplicate row(s) dropped; rows per reason: duplicate primary key with different payload: 4; first rejection: duplicate primary key with different payload; first key: 9b1fa69b-5568-11ee-960c-025417856183ledger=10004911; first record keys: _partition_key,_source,_synced_at,account,batchNumber,begBalance,branch,creditAmount,cu",2026-10-01T00:18:58Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,dm_journal_transactions,datamart_graphql,ok,120417,120417,127,,,2026-10-01T00:21:06Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,customer_invoices,erp_rest,ok,2520,2520,1005,13929,,2026-10-01T00:22:17Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,customer_documents,erp_rest,ok,2740,2740,25,14959,,2026-10-01T00:22:42Z
+bb6c024e-5567-11ee-960c-025417856183,Aquatiq Sense AS,customer_locations,erp_rest,ok,5123,5123,2563,,,2026-10-01T00:40:59Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,general_ledger_transactions,erp_rest,ok,191027,191027,802,14785,,2026-10-01T00:54:22Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,customer_locations,erp_rest,ok,4357,4357,2155,,,2026-10-01T00:57:02Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,dm_journal_transactions,datamart_graphql,ok,191027,191027,245,,,2026-10-01T00:58:27Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,customer_locations,erp_rest,ok,4295,4295,2119,,,2026-10-01T01:33:47Z

@@ -1,0 +1,207 @@
+package insights
+
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+const (
+	SurfaceSocial            = "social"
+	SurfaceInbox             = "inbox"
+	SurfaceAgents            = "agents"
+	SurfaceChat              = "chat"
+	SurfaceKnowledge         = "knowledge"
+	SurfaceIngestion         = "ingestion"
+	SurfaceCampaigns         = "campaigns"
+	SurfaceExternalAnalytics = "external_analytics"
+
+	ConnectorStatusNative                   = "native"
+	ConnectorStatusPlanned                  = "planned"
+	ConnectorStatusRequiresTokenLease       = "requires_token_lease"
+	ConnectorStatusRequiresGovernedAction   = "requires_governed_action"
+	ConnectorStatusRequiresCredentialBroker = "requires_credential_broker"
+	ConnectorStatusRequiresEvidenceAdapter  = "requires_evidence_adapter"
+	ConnectorStatusDisabled                 = "disabled"
+)
+
+var ErrInvalidInput = errors.New("invalid input")
+
+type Repository interface {
+	RecordMetricEvent(ctx context.Context, event MetricEvent) (*MetricEvent, error)
+	ListMetricEvents(ctx context.Context, query OverviewQuery) ([]MetricEvent, error)
+	ListConnectorSlots(ctx context.Context, orgID string) ([]ConnectorSlot, error)
+	// ListOrgIDsWithMetricsSince returns the distinct org_ids that have at least
+	// one recorded metric event at or after `since`. It is the server-side org
+	// discovery the scheduled-brief delivery iterates — orgs are derived from the
+	// real recorded data, never from client input, so brief delivery stays
+	// IDOR-clean (no cross-tenant fan-out, no fabricated recipients).
+	ListOrgIDsWithMetricsSince(ctx context.Context, since time.Time) ([]string, error)
+}
+
+type OverviewQuery struct {
+	// OrgID is always resolved by the trusted gateway / event producer. It is
+	// the tenant boundary; browser query parameters never select a tenant.
+	OrgID string
+	// ActorUserID is an optional, verified user narrowing within OrgID. Empty
+	// means organization scope. It is deliberately not an authorization grant:
+	// the gateway only supplies the signed-in actor for scope=me.
+	ActorUserID string
+	Surfaces    []string
+	From        *time.Time
+	To          *time.Time
+}
+
+type IngestMetricEventInput struct {
+	ID             string         `json:"id"`
+	OrgID          string         `json:"org_id"`
+	ActorUserID    string         `json:"actor_user_id,omitempty"`
+	Surface        string         `json:"surface"`
+	Metric         string         `json:"metric"`
+	Value          float64        `json:"value"`
+	Unit           string         `json:"unit,omitempty"`
+	Source         string         `json:"source,omitempty"`
+	ConnectorType  string         `json:"connector_type,omitempty"`
+	Dimensions     map[string]any `json:"dimensions,omitempty"`
+	TimeWindow     *TimeWindow    `json:"time_window,omitempty"`
+	ObservedAt     time.Time      `json:"observed_at,omitempty"`
+	SourceTraceRef string         `json:"source_trace_ref,omitempty"`
+	RetentionClass string         `json:"retention_class,omitempty"`
+	OccurredAt     time.Time      `json:"occurred_at"`
+}
+
+type MetricEvent struct {
+	ID             string         `json:"id"`
+	OrgID          string         `json:"org_id"`
+	ActorUserID    string         `json:"actor_user_id,omitempty"`
+	Surface        string         `json:"surface"`
+	Metric         string         `json:"metric"`
+	Value          float64        `json:"value"`
+	Unit           string         `json:"unit,omitempty"`
+	Source         string         `json:"source,omitempty"`
+	ConnectorType  string         `json:"connector_type,omitempty"`
+	Dimensions     map[string]any `json:"dimensions,omitempty"`
+	TimeWindow     *TimeWindow    `json:"time_window,omitempty"`
+	ObservedAt     time.Time      `json:"observed_at"`
+	SourceTraceRef string         `json:"source_trace_ref,omitempty"`
+	RetentionClass string         `json:"retention_class,omitempty"`
+	OccurredAt     time.Time      `json:"occurred_at"`
+}
+
+type Overview struct {
+	OrgID        string            `json:"org_id"`
+	Plane        PlanePlacement    `json:"plane"`
+	Surfaces     []SurfaceOverview `json:"surfaces"`
+	Scorecards   []Scorecard       `json:"scorecards"`
+	Connectors   []ConnectorSlot   `json:"connectors"`
+	GeneratedAt  time.Time         `json:"generated_at"`
+	Window       TimeWindow        `json:"window"`
+	ConnectorLag []ConnectorGap    `json:"connector_lag"`
+}
+
+type TimeWindow struct {
+	From *time.Time `json:"from,omitempty"`
+	To   *time.Time `json:"to,omitempty"`
+}
+
+type SurfaceOverview struct {
+	Surface     string         `json:"surface"`
+	TotalEvents int            `json:"total_events"`
+	Metrics     []MetricRollup `json:"metrics"`
+	LastEventAt *time.Time     `json:"last_event_at,omitempty"`
+}
+
+type MetricRollup struct {
+	Metric string  `json:"metric"`
+	Value  float64 `json:"value"`
+	Unit   string  `json:"unit,omitempty"`
+	// Source is the real producer(s) that emitted the underlying events for this
+	// metric (e.g. "conversation-core"), for honest citation. Multiple distinct
+	// producers are joined with ", " (sorted). Empty when no event carried a
+	// source — never fabricated.
+	Source string `json:"source,omitempty"`
+}
+
+type Scorecard struct {
+	ID      string  `json:"id"`
+	Label   string  `json:"label"`
+	Surface string  `json:"surface"`
+	Metric  string  `json:"metric"`
+	Value   float64 `json:"value"`
+	Unit    string  `json:"unit,omitempty"`
+	// Source cites the real producer(s) behind this scorecard's value, threaded
+	// from the rolled-up metric. Empty when unattributed — never fabricated.
+	Source string `json:"source,omitempty"`
+}
+
+type ConnectorSlot struct {
+	Type                     string                    `json:"type"`
+	DisplayName              string                    `json:"display_name"`
+	Surface                  string                    `json:"surface"`
+	Status                   string                    `json:"status"`
+	Authorization            string                    `json:"authorization"`
+	TokenLeaseAudience       string                    `json:"token_lease_audience,omitempty"`
+	RequiredCapabilities     []string                  `json:"required_capabilities,omitempty"`
+	RequiredEnv              []string                  `json:"required_env,omitempty"`
+	ReferenceURLs            []string                  `json:"reference_urls,omitempty"`
+	Contracts                []ConnectorContract       `json:"contracts"`
+	ModelGrounding           ModelGroundingContract    `json:"model_grounding,omitempty"`
+	IntegrationSteps         []IntegrationStep         `json:"integration_steps,omitempty"`
+	AdvisoryInstructionPacks []AdvisoryInstructionPack `json:"advisory_instruction_packs,omitempty"`
+}
+
+// IntegrationStep is a declarative onboarding step. FixedOperation is
+// informational for clients; the Integration Core readiness endpoint never
+// accepts an operation from the caller.
+type IntegrationStep struct {
+	ID                   string   `json:"id"`
+	Label                string   `json:"label"`
+	Purpose              string   `json:"purpose"`
+	EndpointTemplate     string   `json:"endpoint_template,omitempty"`
+	Method               string   `json:"method,omitempty"`
+	FixedOperation       string   `json:"fixed_operation,omitempty"`
+	RequiredCapabilities []string `json:"required_capabilities,omitempty"`
+}
+
+// AdvisoryInstructionPack maps reviewed marketing-skill identifiers to small,
+// credential-free guidance. It does not load a local skill file, invoke an
+// agent, execute a command, or grant any provider capability.
+type AdvisoryInstructionPack struct {
+	ID                string   `json:"id"`
+	Mode              string   `json:"mode"`
+	RequiresReadiness bool     `json:"requires_readiness"`
+	SkillIDs          []string `json:"skill_ids"`
+	Instructions      []string `json:"instructions"`
+}
+
+// ModelGroundingContract names the credential-free evidence shape that a
+// Model Plane recommendation must receive. The registry declares what can be
+// grounded; it neither runs a model nor transfers source content.
+type ModelGroundingContract struct {
+	Contract                  string   `json:"contract,omitempty"`
+	RequiredFields            []string `json:"required_fields,omitempty"`
+	ExcludesZeroDataRetention bool     `json:"excludes_zero_data_retention,omitempty"`
+}
+
+type ConnectorContract struct {
+	Name              string   `json:"name"`
+	EndpointTemplate  string   `json:"endpoint_template"`
+	Method            string   `json:"method"`
+	RequestShape      string   `json:"request_shape"`
+	ResponseShape     string   `json:"response_shape"`
+	RequiredScopes    []string `json:"required_scopes,omitempty"`
+	DimensionExamples []string `json:"dimension_examples,omitempty"`
+	MetricExamples    []string `json:"metric_examples,omitempty"`
+}
+
+type ConnectorGap struct {
+	Type      string `json:"type"`
+	Reason    string `json:"reason"`
+	NextOwner string `json:"next_owner"`
+}
+
+type PlanePlacement struct {
+	ServicePlane     string   `json:"service_plane"`
+	ControlPlaneRole string   `json:"control_plane_role"`
+	Rules            []string `json:"rules"`
+}

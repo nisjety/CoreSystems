@@ -1,0 +1,293 @@
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::pipeline::types::*;
+
+const TRACE_INSERT_SQL: &str = r#"
+    INSERT INTO retrieval_runs (
+        trace_id, org_id, query, query_embedding_model, index_version,
+        filters_json, reranker_name, zdr_mode, top_k,
+        dense_retrieval_ms, sparse_retrieval_ms, rerank_ms, total_ms,
+        candidate_count_dense, candidate_count_sparse,
+        candidate_count_fused, candidate_count_reranked, mode_mix,
+        zdr_actions_applied, mode_mix_applied, actor_user_id
+    ) VALUES (
+        $1, $2, $3, $4, $5,
+        $6, $7, $8, $9,
+        $10, $11, $12, $13,
+        $14, $15, $16, $17, $18,
+        $19, $20, $21
+    )
+"#;
+
+const TRACE_LOOKUP_SQL: &str = r#"
+    SELECT trace_id, org_id, query, query_embedding_model, index_version,
+           reranker_name, zdr_mode, dense_retrieval_ms, sparse_retrieval_ms,
+           rerank_ms, total_ms, candidate_count_dense, candidate_count_sparse,
+           candidate_count_fused, candidate_count_reranked, created_at,
+           mode_mix
+    FROM retrieval_runs
+    WHERE trace_id = $1 AND org_id = $2
+      AND ($3::text IS NULL OR actor_user_id = $3)
+"#;
+
+fn trace_insert_sql() -> &'static str {
+    TRACE_INSERT_SQL
+}
+
+fn trace_lookup_sql() -> &'static str {
+    TRACE_LOOKUP_SQL
+}
+
+#[tracing::instrument(
+    name = "postgres.persist_trace",
+    skip_all,
+    fields(
+        otel.kind = "client",
+        db.system = "postgresql",
+        db.operation = "INSERT",
+        org_id = req.org_id.as_str(),
+        candidate_count = candidates.len(),
+        zdr_mode = zdr_mode,
+    ),
+)]
+#[allow(clippy::too_many_arguments)] // pre-existing arity; clippy 1.94 -D warnings
+pub async fn persist_trace(
+    pool: &PgPool,
+    req: &RetrievalRequest,
+    candidates: &[ScoredCandidate],
+    timings: &PipelineTimings,
+    reranker_name: Option<&str>,
+    zdr_mode: &str,
+    mode_mix: Option<&ResolvedWeights>,
+    // §16.1.3 — actions actually executed on this request (e.g.
+    // ["filter_restricted","strip_pii"]). Empty slice → SQL NULL, so
+    // a plain `disabled` mode that did nothing stays distinguishable
+    // from "we forgot to record anything".
+    zdr_actions_applied: &[&str],
+) -> anyhow::Result<String> {
+    let trace_id = Uuid::new_v4().to_string();
+
+    // Serialize mode_mix for the JSONB column. None → SQL NULL.
+    let mode_mix_json = mode_mix.map(|w| {
+        serde_json::json!({
+            "w_dense": w.w_dense,
+            "w_bm25":  w.w_bm25,
+            "w_graph": w.w_graph,
+            "w_wiki":  w.w_wiki,
+            "rerank":  w.rerank,
+        })
+    });
+
+    let zdr_actions_json = if zdr_actions_applied.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Array(
+            zdr_actions_applied
+                .iter()
+                .map(|s| serde_json::Value::String((*s).to_string()))
+                .collect(),
+        ))
+    };
+
+    // §16.1.1 — mode_mix vs mode_mix_applied. Since the 5-arm (now 6-arm,
+    // with keyword) fold-in (graph/wiki/visual/keyword all drive fused
+    // scoring), the applied mix IS the resolved mix — the column stays so
+    // historical rows (which recorded zeroed graph/wiki with the old
+    // scorer) remain interpretable. `mode_mix` above is deliberately left at
+    // its pre-visual shape for the same historical-comparability reason —
+    // `w_keyword` is added only here, matching how `w_visual` itself was
+    // added only here and not backfilled into `mode_mix`.
+    let mode_mix_applied_json = mode_mix.map(|w| {
+        serde_json::json!({
+            "w_dense": w.w_dense,
+            "w_bm25":  w.w_bm25,
+            "w_graph": w.w_graph,
+            "w_wiki":  w.w_wiki,
+            "w_visual": w.w_visual,
+            "w_keyword": w.w_keyword,
+            "rerank":  w.rerank,
+            "note":    "all arm weights applied by the fused RRF scorer",
+        })
+    });
+
+    // Phase 1 RLS: `retrieval_runs` is org-scoped and `req.org_id` is the
+    // verified requesting org, so this INSERT runs in an org-scoped
+    // transaction. The statement still binds `org_id` itself — the database
+    // policy's WITH CHECK is a backstop against that column being dropped or
+    // mis-bound later, not a replacement for it.
+    //
+    // The per-candidate INSERTs below share this SAME transaction. They write
+    // `retrieval_candidates`, which carries no `org_id`;
+    // `20260809180000_org_rls_child_tables.sql` makes it both reachable and
+    // isolated by deriving the org from its `retrieval_runs` parent via
+    // `trace_id`. That child policy's WITH CHECK looks the parent up inside this
+    // transaction, where the run row inserted just above is already visible —
+    // which is precisely why the two statements must stay on one transaction
+    // rather than the candidates opening their own.
+    //
+    // Sharing it also makes the run and its candidates atomic: a mid-loop
+    // failure now rolls the run row back too, so the caller's
+    // "trace persistence failed; returning unpersisted trace_id" is literally
+    // true instead of leaving a run with a truncated candidate list.
+    let mut tx = pg_org_scope::begin_org_scoped(pool, &req.org_id).await?;
+    sqlx::query(trace_insert_sql())
+        .bind(&trace_id)
+        .bind(&req.org_id)
+        .bind(&req.query)
+        .bind("text-embedding-3-large")
+        .bind("v2-current")
+        .bind(serde_json::to_value(&req.filters).unwrap_or_default())
+        .bind(reranker_name)
+        .bind(zdr_mode)
+        .bind(req.top_k.map(|k| k as i32))
+        .bind(timings.dense_ms as i32)
+        .bind(timings.sparse_ms as i32)
+        .bind(timings.rerank_ms as i32)
+        .bind(timings.total_ms as i32)
+        .bind(timings.candidate_count_dense as i32)
+        .bind(timings.candidate_count_sparse as i32)
+        .bind(timings.candidate_count_fused as i32)
+        .bind(timings.candidate_count_reranked as i32)
+        .bind(mode_mix_json)
+        .bind(zdr_actions_json)
+        .bind(mode_mix_applied_json)
+        .bind(&req.user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // Persist individual candidates
+    for (rank, candidate) in candidates.iter().enumerate() {
+        sqlx::query(
+            r#"
+            INSERT INTO retrieval_candidates (
+                trace_id, rank, knowledge_id, document_id,
+                dense_score, sparse_score, rerank_score, final_score,
+                source_chunk_ref
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "#,
+        )
+        .bind(&trace_id)
+        .bind(rank as i32 + 1)
+        .bind(&candidate.knowledge_id)
+        .bind(&candidate.document_id)
+        .bind(candidate.dense_score)
+        .bind(candidate.sparse_score)
+        .bind(candidate.rerank_score)
+        .bind(candidate.final_score)
+        .bind(&candidate.knowledge_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+
+    tracing::debug!(trace_id = %trace_id, candidates = candidates.len(), "trace persisted");
+    Ok(trace_id)
+}
+
+pub async fn get_trace(
+    pool: &PgPool,
+    trace_id: &str,
+    org_id: &str,
+    actor_user_id: Option<&str>,
+) -> anyhow::Result<Option<TraceDetail>> {
+    // Phase 1 RLS: `retrieval_runs` is org-scoped and `org_id` is the verified
+    // requesting org, so both reads below share one org-scoped transaction.
+    //
+    // The candidate read carries no org predicate of its own — it selects purely
+    // by `trace_id`. `20260809180000_org_rls_child_tables.sql` is what makes
+    // that safe rather than merely convenient: `retrieval_candidates` now has a
+    // policy deriving the org from its `retrieval_runs` parent, so a guessed
+    // `trace_id` belonging to another tenant returns nothing instead of that
+    // tenant's candidate list. Actor scoping still comes from the run lookup
+    // (the child policy checks org, not `actor_user_id`), which is why the early
+    // return below must stay ahead of the candidate read.
+    let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
+    let run = sqlx::query_as::<_, TraceRun>(trace_lookup_sql())
+        .bind(trace_id)
+        .bind(org_id)
+        .bind(actor_user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+    let Some(run) = run else {
+        // Dropping `tx` here rolls the (read-only) transaction back.
+        return Ok(None);
+    };
+
+    let candidates = sqlx::query_as::<_, TraceCandidateRow>(
+        r#"
+        SELECT rank, knowledge_id, document_id,
+               dense_score, sparse_score, rerank_score, final_score
+        FROM retrieval_candidates
+        WHERE trace_id = $1
+        ORDER BY rank
+        "#,
+    )
+    .bind(trace_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    Ok(Some(TraceDetail { run, candidates }))
+}
+
+#[derive(Debug, serde::Serialize, sqlx::FromRow)]
+pub struct TraceRun {
+    pub trace_id: String,
+    pub org_id: String,
+    pub query: String,
+    pub query_embedding_model: Option<String>,
+    pub index_version: Option<String>,
+    pub reranker_name: Option<String>,
+    pub zdr_mode: Option<String>,
+    pub dense_retrieval_ms: Option<i32>,
+    pub sparse_retrieval_ms: Option<i32>,
+    pub rerank_ms: Option<i32>,
+    pub total_ms: Option<i32>,
+    pub candidate_count_dense: Option<i32>,
+    pub candidate_count_sparse: Option<i32>,
+    pub candidate_count_fused: Option<i32>,
+    pub candidate_count_reranked: Option<i32>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Blend weights actually used for this query (D4+D5 spec §7).
+    /// JSONB shape: {w_dense, w_bm25, w_graph, w_wiki, rerank}.
+    #[sqlx(default)]
+    pub mode_mix: Option<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Serialize, sqlx::FromRow)]
+pub struct TraceCandidateRow {
+    pub rank: i32,
+    pub knowledge_id: Option<String>,
+    pub document_id: Option<String>,
+    pub dense_score: Option<f32>,
+    pub sparse_score: Option<f32>,
+    pub rerank_score: Option<f32>,
+    pub final_score: Option<f32>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct TraceDetail {
+    pub run: TraceRun,
+    pub candidates: Vec<TraceCandidateRow>,
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn trace_reads_are_tenant_and_actor_scoped() {
+        let sql = trace_lookup_sql();
+        assert!(sql.contains("trace_id = $1"));
+        assert!(sql.contains("org_id = $2"));
+        assert!(sql.contains("actor_user_id = $3"));
+    }
+
+    #[test]
+    fn trace_writes_persist_the_verified_actor() {
+        assert!(trace_insert_sql().contains("actor_user_id"));
+    }
+}

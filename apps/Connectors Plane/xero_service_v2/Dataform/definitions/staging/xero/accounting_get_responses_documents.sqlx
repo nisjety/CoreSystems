@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "staging_xero_documents",
+  name: "accounting_get_responses",
+  description: "Restricted metadata and GCS pointers for Accounting PDFs and attachments. Binary bodies never enter BigQuery."
+}

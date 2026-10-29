@@ -1,0 +1,95 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_gold_vat_activity_control_reconciliation"
+}
+
+WITH expected AS (
+  SELECT
+    tenant_id,
+    financial_period_key,
+    currency_code,
+    tax_type,
+    report_tax_type,
+    COUNT(*) AS source_line_count,
+    COUNT(DISTINCT source_document_key) AS source_document_count,
+    SUM(CASE WHEN tax_direction = 'output' THEN signed_tax_amount_in_currency ELSE 0 END) AS output_vat_in_currency,
+    SUM(CASE WHEN tax_direction = 'input' THEN signed_tax_amount_in_currency ELSE 0 END) AS input_vat_in_currency,
+    SUM(CASE
+      WHEN tax_direction = 'output' THEN signed_tax_amount_in_currency
+      WHEN tax_direction = 'input' THEN -signed_tax_amount_in_currency
+      ELSE 0
+    END) AS net_vat_position_in_currency
+  FROM ${ref("xero_gold_finance", "fact_vat_activity")}
+  WHERE is_reportable
+  GROUP BY 1, 2, 3, 4, 5
+), actual AS (
+  SELECT
+    tenant_id,
+    financial_period_key,
+    currency_code,
+    tax_type,
+    report_tax_type,
+    source_line_count,
+    source_document_count,
+    output_vat_in_currency,
+    input_vat_in_currency,
+    net_vat_position_in_currency,
+    amount_nok,
+    is_nok_amount_available
+  FROM ${ref("xero_datamart", "vat_activity_control")}
+), compared AS (
+  SELECT
+    COALESCE(e.tenant_id, a.tenant_id) AS tenant_id,
+    COALESCE(e.financial_period_key, a.financial_period_key) AS financial_period_key,
+    COALESCE(e.currency_code, a.currency_code) AS currency_code,
+    COALESCE(e.tax_type, a.tax_type) AS tax_type,
+    COALESCE(e.report_tax_type, a.report_tax_type) AS report_tax_type,
+    e.source_line_count AS expected_source_line_count,
+    a.source_line_count AS actual_source_line_count,
+    e.source_document_count AS expected_source_document_count,
+    a.source_document_count AS actual_source_document_count,
+    e.output_vat_in_currency AS expected_output_vat_in_currency,
+    a.output_vat_in_currency AS actual_output_vat_in_currency,
+    e.input_vat_in_currency AS expected_input_vat_in_currency,
+    a.input_vat_in_currency AS actual_input_vat_in_currency,
+    e.net_vat_position_in_currency AS expected_net_vat_position_in_currency,
+    a.net_vat_position_in_currency AS actual_net_vat_position_in_currency
+  FROM expected AS e
+  FULL OUTER JOIN actual AS a
+    ON e.tenant_id = a.tenant_id
+   AND COALESCE(e.financial_period_key, -1) = COALESCE(a.financial_period_key, -1)
+   AND e.currency_code = a.currency_code
+   AND COALESCE(e.tax_type, '') = COALESCE(a.tax_type, '')
+   AND COALESCE(e.report_tax_type, '') = COALESCE(a.report_tax_type, '')
+)
+
+SELECT
+  'aggregate_mismatch' AS violation_type,
+  tenant_id,
+  financial_period_key,
+  currency_code,
+  tax_type,
+  report_tax_type,
+  CAST(expected_source_line_count AS STRING) AS expected_value,
+  CAST(actual_source_line_count AS STRING) AS actual_value
+FROM compared
+WHERE COALESCE(expected_source_line_count, 0) != COALESCE(actual_source_line_count, 0)
+   OR COALESCE(expected_source_document_count, 0) != COALESCE(actual_source_document_count, 0)
+   OR ABS(COALESCE(expected_output_vat_in_currency, 0) - COALESCE(actual_output_vat_in_currency, 0)) > 0.0001
+   OR ABS(COALESCE(expected_input_vat_in_currency, 0) - COALESCE(actual_input_vat_in_currency, 0)) > 0.0001
+   OR ABS(COALESCE(expected_net_vat_position_in_currency, 0) - COALESCE(actual_net_vat_position_in_currency, 0)) > 0.0001
+
+UNION ALL
+
+SELECT
+  'unexpected_nok_amount',
+  tenant_id,
+  financial_period_key,
+  currency_code,
+  tax_type,
+  report_tax_type,
+  'NULL and FALSE',
+  CONCAT(CAST(amount_nok AS STRING), ' / ', CAST(is_nok_amount_available AS STRING))
+FROM actual
+WHERE amount_nok IS NOT NULL OR is_nok_amount_available

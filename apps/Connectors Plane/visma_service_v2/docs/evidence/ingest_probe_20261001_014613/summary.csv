@@ -1,0 +1,11 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+project_budgets,,1,0,succeeded,5268,5268,5268,53,0,68,14520,8100,
+project_budgets,,2,0,succeeded,5268,5268,5268,53,0,68,14467,5504,
+expense_transactions,,1,0,succeeded,30586,30586,30586,153,0,186,,3032,2026-09-30 06:10:33.572+00
+expense_transactions,,2,0,succeeded,6,6,30586,1,0,6,,709,2026-09-30 06:10:33.572+00
+project_tasks,,1,0,succeeded,3113,3113,3113,1239,0,2,13215,5330,2026-09-30 12:54:13.88+00
+project_tasks,,2,0,succeeded,2741,2741,3113,1239,0,2,12583,35527,2026-09-30 12:54:13.88+00
+journal_transactions,,1,0,succeeded,67514,67514,67514,649,0,0,13976,3208,2026-10-01 03:33:05.86+00
+journal_transactions,,2,0,succeeded,67514,67514,67514,649,0,0,13782,24589,2026-10-01 03:33:05.86+00
+general_ledger_transactions,,1,0,succeeded,574956,574956,574956,575,0,956,13425,48827,2026-10-01 03:33:05+00
+general_ledger_transactions,,2,0,succeeded,1403,1403,574956,2,0,403,14737,600,2026-10-01 03:33:05+00

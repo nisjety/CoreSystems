@@ -1,0 +1,18 @@
+# Read-only account keys belong only to Integration Core. Empty bindings are
+# valid during onboarding; never mount credentials into Marketing or Verevon.
+services:
+  integration-api:
+    environment:
+      MARKETING_PROVIDERS_BINDINGS_FILE: /run/secrets/marketing_providers_bindings
+    secrets:
+      - marketing_providers_bindings
+      - cookiebot_data_api_key
+      - algolia_analytics_api_key
+
+secrets:
+  marketing_providers_bindings:
+    file: ${INTEGRATION_LOCAL_SITE_SOURCES_BINDINGS_FILE:?set protected provider bindings}
+  cookiebot_data_api_key:
+    file: ${INTEGRATION_LOCAL_COOKIEBOT_KEY_FILE:?set protected Cookiebot Data API key file}
+  algolia_analytics_api_key:
+    file: ${INTEGRATION_LOCAL_ALGOLIA_KEY_FILE:?set protected Algolia analytics key file}

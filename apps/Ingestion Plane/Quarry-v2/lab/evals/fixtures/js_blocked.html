@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JavaScript Required: Content Hidden</title>
+    <meta name="description" content="A page where the meaningful content is rendered exclusively by JavaScript.">
+</head>
+<body>
+    <header>
+        <nav>
+            <a href="/">Home</a>
+        </nav>
+    </header>
+    <main>
+        <article>
+            <h1>JavaScript Required</h1>
+            <p>You need a JavaScript-enabled browser to view the article content. Please enable JavaScript and reload the page.</p>
+            <noscript>
+                <p>This page does not function without JavaScript. The static fallback only includes navigation and this notice.</p>
+            </noscript>
+            <div id="article-mount-point"></div>
+        </article>
+    </main>
+    <footer>
+        <a href="/privacy">Privacy</a>
+    </footer>
+    <script src="/static/runtime.bundle.js"></script>
+    <script>
+        window.__APP_CONFIG__ = { apiBase: "/api/v1", featureFlags: ["streaming"] };
+    </script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+service	status
+NAME                          IMAGE                COMMAND                  SERVICE    CREATED         STATUS                   PORTS
+visma_service_v2-postgres-1   postgres:16-alpine   "docker-entrypoint.s…"   postgres   2 days ago      Up 23 hours (healthy)    0.0.0.0:5433->5432/tcp, [::]:5433->5432/tcp
+visma_service_v2-vsv2-1       vsv2:local           "/usr/local/bin/vsv2…"   vsv2       7 minutes ago   Up 7 minutes (healthy)   

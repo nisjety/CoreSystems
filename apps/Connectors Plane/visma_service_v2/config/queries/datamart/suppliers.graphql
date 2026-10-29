@@ -1,0 +1,37 @@
+query Suppliers(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  suppliers(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    supplierId
+    supplierCd
+    supplierName
+    status
+    accountRef
+    parentBAccountId
+    documentLanguage
+    currencyId
+    parentAccountId
+    supplierClassId
+    termsId
+    mainLocationId
+    mainAddressId
+    mainContactId
+    noteId
+    deletedDatabaseRecord
+    lastModifiedDateTime
+    createdInDataMartDateTime
+  }
+}

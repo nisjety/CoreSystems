@@ -1,0 +1,191 @@
+config {
+  type: "table",
+  schema: "visma_datamart",
+  name: "BI_ProjectPortfolioPnL",
+  description: "Power BI project portfolio P&L at tenant plus project grain. Uses project transaction lines as the canonical source for project profitability and balance-side project activity.",
+  tags: ["gold", "bi", "project", "finance"]
+}
+
+WITH project_line AS (
+  SELECT
+    f.*,
+    d.year,
+    d.quarter,
+    d.month
+  FROM ${ref("visma_gold_finance", "fact_project_portfolio_line")} AS f
+  LEFT JOIN ${ref("visma_gold_common", "dim_date")} AS d
+    ON d.date_key = f.date_key
+),
+
+project_rollup AS (
+  SELECT
+    tenant_id,
+    organization_name,
+    entity_code,
+    entity_name,
+    group_name,
+    base_currency,
+    project_id,
+    ANY_VALUE(project_key)                           AS source_project_key,
+    ANY_VALUE(company_key)                           AS company_key,
+    COUNT(DISTINCT business_unit_id)                 AS business_unit_count,
+    CASE
+      WHEN COUNT(DISTINCT business_unit_id) = 1 THEN ANY_VALUE(business_unit_key)
+    END                                              AS business_unit_key,
+    ANY_VALUE(project_name)                           AS project_name,
+    ANY_VALUE(project_status)                         AS project_status,
+    ANY_VALUE(customer_id)                            AS customer_id,
+    ANY_VALUE(customer_name)                          AS customer_name,
+    ANY_VALUE(project_manager_name)                   AS project_manager_name,
+    ANY_VALUE(project_start_date)                     AS project_start_date,
+    ANY_VALUE(project_end_date)                       AS project_end_date,
+    CASE
+      WHEN COUNT(DISTINCT business_unit_id) = 1 THEN ANY_VALUE(business_unit_id)
+    END                                               AS business_unit_id,
+    CASE
+      WHEN COUNT(DISTINCT business_unit_name) = 1 THEN ANY_VALUE(business_unit_name)
+      WHEN COUNT(DISTINCT business_unit_name) > 1 THEN 'Mixed'
+    END                                               AS business_unit_name,
+    MIN(transaction_date)                             AS first_transaction_date,
+    MAX(transaction_date)                             AS last_transaction_date,
+    MIN(year)                                         AS first_transaction_year,
+    MAX(year)                                         AS last_transaction_year,
+    COUNT(*)                                          AS line_count,
+    COUNT(DISTINCT reference_number)                  AS document_count,
+    COUNT(DISTINCT financial_period)                  AS financial_period_count,
+    COUNTIF(project_reporting_type_code = 'I')        AS income_line_count,
+    COUNTIF(project_reporting_type_code = 'E')        AS expense_line_count,
+    COUNTIF(project_reporting_type_code = 'L')        AS liability_line_count,
+    COUNTIF(project_reporting_type_code = 'A')        AS asset_line_count,
+    COUNTIF(project_reporting_type_code = 'O')        AS other_line_count,
+    SUM(income_amount)                                AS income_amount,
+    SUM(expense_amount)                               AS expense_amount,
+    SUM(liability_amount_raw)                         AS liability_amount_raw,
+    SUM(liability_amount_abs)                         AS liability_amount_abs,
+    SUM(asset_amount_raw)                             AS asset_amount_raw,
+    SUM(asset_amount_abs)                             AS asset_amount_abs,
+    SUM(result_contribution_amount)                   AS result_amount,
+    SUM(liability_amount_raw + asset_amount_raw)      AS balance_amount,
+    SUM(balance_contribution_amount)                  AS balance_activity_amount_abs,
+    -- Carried-over history: the accounts 3999/4999 and the opening balances booked on ordinary
+    -- accounts (seed_project_history_rule). Income and cost are taken on whatever account the line sits.
+    SUM(IF(is_historical_project_migration, income_amount, 0))
+                                                        AS historical_income_amount,
+    SUM(IF(is_historical_project_migration, expense_amount, 0))
+                                                        AS historical_cost_amount,
+    COUNTIF(is_historical_project_migration)          AS historical_line_count
+  FROM project_line
+  GROUP BY
+    tenant_id,
+    organization_name,
+    entity_code,
+    entity_name,
+    group_name,
+    base_currency,
+    project_id
+)
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(
+    CAST(tenant_id AS STRING), '|',
+    CAST(project_id AS STRING)
+  ))                                                  AS project_portfolio_bi_key,
+  source_project_key                                  AS project_key,
+  company_key,
+  business_unit_key,
+  tenant_id,
+  organization_name,
+  entity_code,
+  entity_name,
+  COALESCE(
+    CONCAT(entity_code, ' - ', entity_name),
+    entity_name,
+    entity_code
+  )                                                   AS entity,
+  group_name,
+  base_currency,
+  project_id,
+  project_name,
+  COALESCE(
+    CONCAT(project_id, ' - ', project_name),
+    project_name,
+    project_id
+  )                                                   AS project,
+  project_status,
+  customer_id,
+  customer_name,
+  COALESCE(
+    CONCAT(customer_id, ' - ', customer_name),
+    customer_name,
+    customer_id
+  )                                                   AS customer,
+  project_manager_name,
+  project_start_date,
+  project_end_date,
+  business_unit_id,
+  business_unit_name,
+  COALESCE(
+    CONCAT(business_unit_id, ' - ', business_unit_name),
+    business_unit_name,
+    business_unit_id
+  )                                                   AS business_unit,
+  business_unit_count,
+  first_transaction_date,
+  last_transaction_date,
+  first_transaction_year,
+  last_transaction_year,
+  line_count,
+  document_count,
+  financial_period_count,
+  income_line_count,
+  expense_line_count,
+  liability_line_count,
+  asset_line_count,
+  other_line_count,
+  income_amount,
+  expense_amount,
+  result_amount,
+  SAFE_DIVIDE(result_amount, NULLIF(income_amount, 0)) AS margin_ratio,
+  SAFE_MULTIPLY(
+    SAFE_DIVIDE(result_amount, NULLIF(income_amount, 0)),
+    100
+  )                                                   AS margin_pct,
+  liability_amount_raw,
+  liability_amount_abs,
+  asset_amount_raw,
+  asset_amount_abs,
+  balance_amount,
+  balance_activity_amount_abs,
+  historical_income_amount,
+  historical_cost_amount,
+  income_amount - historical_income_amount            AS income_excluding_historical_amount,
+  expense_amount - historical_cost_amount             AS cost_excluding_historical_amount,
+  (income_amount - historical_income_amount)
+    - (expense_amount - historical_cost_amount)       AS result_excluding_historical_amount,
+  SAFE_MULTIPLY(
+    SAFE_DIVIDE(
+      (income_amount - historical_income_amount)
+        - (expense_amount - historical_cost_amount),
+      NULLIF(income_amount - historical_income_amount, 0)
+    ),
+    100
+  )                                                   AS margin_excluding_historical_pct,
+  historical_line_count,
+  income_line_count > 0                               AS has_income_activity,
+  expense_line_count > 0                              AS has_expense_activity,
+  (liability_line_count > 0 OR asset_line_count > 0)  AS has_balance_activity,
+  (income_line_count > 0 OR expense_line_count > 0)   AS has_pnl_activity,
+  (
+    income_line_count > 0
+    OR expense_line_count > 0
+    OR liability_line_count > 0
+    OR asset_line_count > 0
+  )                                                   AS has_reporting_activity,
+  (
+    income_amount = 0
+    AND expense_amount = 0
+    AND liability_amount_abs = 0
+    AND asset_amount_abs = 0
+  )                                                   AS is_zero_net_project,
+  'visma_project_transactions'                        AS source_system
+FROM project_rollup

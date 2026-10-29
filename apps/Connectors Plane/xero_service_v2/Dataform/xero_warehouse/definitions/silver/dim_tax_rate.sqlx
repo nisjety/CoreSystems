@@ -1,0 +1,28 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Tenant-scoped Xero tax rates, with native component detail retained as an array.",
+  assertions: { nonNull: ["tenant_id", "tax_type", "tax_rate_key"], uniqueKey: ["tax_rate_key"] }
+}
+
+SELECT CONCAT(tenant_id, '|', tax_type) AS tax_rate_key,
+       tenant_id, tax_type, ANY_VALUE(record_id) AS tax_rate_internal_id,
+       ANY_VALUE(tax_name) AS tax_name, ANY_VALUE(status) AS status,
+       LOGICAL_OR(COALESCE(is_active, FALSE)) AS is_active,
+       MAX(display_tax_rate) AS display_tax_rate,
+       MAX(effective_rate) AS effective_rate,
+       ANY_VALUE(report_tax_type) AS report_tax_type,
+       LOGICAL_OR(COALESCE(can_apply_to_assets, FALSE)) AS can_apply_to_assets,
+       LOGICAL_OR(COALESCE(can_apply_to_equity, FALSE)) AS can_apply_to_equity,
+       LOGICAL_OR(COALESCE(can_apply_to_expenses, FALSE)) AS can_apply_to_expenses,
+       LOGICAL_OR(COALESCE(can_apply_to_liabilities, FALSE)) AS can_apply_to_liabilities,
+       LOGICAL_OR(COALESCE(can_apply_to_revenue, FALSE)) AS can_apply_to_revenue,
+       ARRAY_AGG(STRUCT(
+         tax_component_name AS component_name,
+         tax_component_rate AS component_rate,
+         tax_component_is_compound AS is_compound,
+         tax_component_is_non_recoverable AS is_non_recoverable
+       ) ORDER BY tax_component_name) AS tax_components,
+       MIN(first_seen_at) AS first_seen_at, MAX(synced_at) AS synced_at
+FROM ${ref("dw_bronze_xero", "xero_tax_rates")}
+GROUP BY tenant_id, tax_type

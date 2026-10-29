@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Profile Restore Verification: Authenticated Dashboard</title>
+    <meta name="description" content="A simulated post-login dashboard that requires a restored session profile.">
+</head>
+<body>
+    <header>
+        <nav>
+            <a href="/">Home</a>
+            <a href="/account">Account</a>
+            <a href="/logout">Sign out</a>
+        </nav>
+    </header>
+    <main>
+        <article>
+            <h1>Welcome back, authenticated user</h1>
+            <p>This page is the post-login dashboard. Reaching it requires that the browser session carries the auth cookie and localStorage entries captured during the prior login flow.</p>
+            <h2>Session-dependent content</h2>
+            <p>The dashboard greets the user, displays workspace data, and links to account settings. Without a valid restored profile, the request would land on the login page instead.</p>
+            <p>The eval harness uses this fixture to simulate a profile-restore scenario: a SessionSnapshot is captured on a "logged-in" hydrated session, then a fresh session is rehydrated from the snapshot and verified to land on this dashboard rather than the login page.</p>
+            <h2>What gets verified</h2>
+            <p>The fingerprint of this page should be stable across capture-then-restore cycles. Cookies, localStorage, and viewport must all roundtrip intact for the simulation to be meaningful.</p>
+        </article>
+    </main>
+    <footer>
+        <a href="/privacy">Privacy</a>
+        <a href="/terms">Terms</a>
+    </footer>
+</body>
+</html>

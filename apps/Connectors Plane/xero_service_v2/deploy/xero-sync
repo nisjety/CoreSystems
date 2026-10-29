@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# xero-sync — run a sync tier via the always-running onboarding container.
+# Installed on the VPS at /usr/local/bin/xero-sync; invoked by cron (crontab -l).
+#
+# Uses `docker exec` (NOT `docker run`): the sync binary (/app/xero) and the
+# PKCE / GCS / connection-store env all live in the onboarding container
+# (xero_service_v2-onboarding-1), which is always up (it's the BFF). This:
+#   (a) pins the image so `docker system prune` can't delete it out from under
+#       cron — the previous `docker run xero-service-v2:latest` silently failed
+#       with "Unable to find image locally" every run once the image was pruned;
+#   (b) avoids short-lived --rm containers that broke Traefik's docker provider;
+#   (c) reuses the exact env + PKCE auth the Sync/Backfill UI buttons use, so a
+#       newly-onboarded org is automatically included in every tier (the sync
+#       reads the tenant list from the shared connection store each run).
+#
+# Examples (see deploy/crontab.example for the full cadence):
+#   xero-sync sync --window-days 3          # incremental
+#   xero-sync sync --full                   # master
+#   xero-sync sync --reports                # report snapshots
+set -euo pipefail
+
+CONTAINER="${XERO_ONBOARDING_CONTAINER:-xero_service_v2-onboarding-1}"
+
+if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
+  echo "xero-sync: onboarding container '$CONTAINER' is not running — cannot sync" >&2
+  exit 1
+fi
+
+exec docker exec "$CONTAINER" /app/xero "$@"

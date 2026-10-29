@@ -1,0 +1,35 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero recurring-invoice template lines joined to the matching header snapshot.",
+  assertions: { nonNull: ["tenant_id", "line_item_id", "repeating_invoice_line_key"], uniqueKey: ["repeating_invoice_line_key"] }
+}
+
+WITH lines AS (
+  SELECT l.*, h.repeating_invoice_key, h.invoice_type, h.status, h.is_deleted,
+         h.currency_code, h.line_amount_types, h.line_item_count,
+         h.sub_total AS header_sub_total,
+         COUNT(*) OVER (PARTITION BY l.tenant_id, l.repeating_invoice_id) AS observed_line_count,
+         COUNTIF(l.line_amount IS NULL) OVER (PARTITION BY l.tenant_id, l.repeating_invoice_id) AS missing_amount_count,
+         SUM(IF(h.line_amount_types = 'Inclusive', l.line_amount - COALESCE(l.tax_amount, 0), l.line_amount))
+           OVER (PARTITION BY l.tenant_id, l.repeating_invoice_id) AS observed_net_subtotal
+  FROM ${ref("dw_bronze_xero", "xero_repeating_invoice_line_snapshots")} AS l
+  JOIN ${ref("dw_1_silver_xero", "dim_repeating_invoice")} AS h
+    ON l.tenant_id = h.tenant_id AND l.repeating_invoice_id = h.repeating_invoice_id
+   AND l.synced_at = h.synced_at
+)
+SELECT CONCAT(tenant_id, '|', repeating_invoice_id, '|', line_item_id) AS repeating_invoice_line_key,
+       tenant_id, repeating_invoice_id, repeating_invoice_key, line_item_id,
+       record_id AS repeating_invoice_line_internal_id, line_position,
+       invoice_type, status, is_deleted, currency_code, line_amount_types,
+       account_id, account_code, item_code, description, quantity, unit_amount,
+       line_amount AS line_amount_raw, tax_amount, tax_type,
+       IF(line_amount_types = 'Inclusive', line_amount - COALESCE(tax_amount, 0), line_amount) AS net_amount_in_currency,
+       tracking_category_1_id, tracking_option_1_id,
+       tracking_category_2_id, tracking_option_2_id,
+       line_item_count, observed_line_count, missing_amount_count,
+       header_sub_total, observed_net_subtotal,
+       (line_item_count IS DISTINCT FROM observed_line_count OR header_sub_total IS NULL
+        OR ABS(COALESCE(observed_net_subtotal, 0) - header_sub_total) > 0.02) AS is_line_set_ambiguous,
+       synced_at
+FROM lines

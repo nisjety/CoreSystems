@@ -1,0 +1,2 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+customer_locations,,1,0,succeeded,12837,12837,12837,6360,0,9,,774,

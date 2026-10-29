@@ -1,0 +1,84 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "schemaVersion": 39,
+  "tags": ["dpv2", "retrieval"],
+  "time": {"from": "now-1h", "to": "now"},
+  "title": "Data Plane v2 — Retrieval Overview",
+  "uid": "dpv2-retrieval",
+  "version": 1,
+  "refresh": "30s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Retrieval p95 latency (s)",
+      "id": 1,
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(dpv2_retrieval_duration_seconds_bucket[5m])))", "refId": "A", "legendFormat": "p95"},
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(dpv2_retrieval_duration_seconds_bucket[5m])))", "refId": "B", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(dpv2_retrieval_duration_seconds_bucket[5m])))", "refId": "C", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null},
+        {"color": "yellow", "value": 0.8},
+        {"color": "red", "value": 2.0}
+      ]}}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests / sec",
+      "id": 2,
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [
+        {"expr": "sum(rate(dpv2_retrieval_requests_total[1m]))", "refId": "A", "legendFormat": "retrieval"},
+        {"expr": "sum(rate(dpv2_retrieval_errors_total[1m]))", "refId": "B", "legendFormat": "errors"},
+        {"expr": "sum(rate(dpv2_retrieval_zero_results_total[1m]))", "refId": "C", "legendFormat": "zero-result"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Embed cache hit ratio",
+      "id": 3,
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [
+        {"expr": "rate(dpv2_embed_cache_hits_total[5m]) / (rate(dpv2_embed_cache_hits_total[5m]) + rate(dpv2_embed_requests_total[5m]))", "refId": "A", "legendFormat": "hit-rate"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "title": "Embed retry rate",
+      "id": 4,
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [
+        {"expr": "rate(dpv2_embed_retries_total[5m]) / rate(dpv2_embed_requests_total[5m])", "refId": "A", "legendFormat": "retry-rate"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "percentunit"}, "overrides": []}
+    },
+    {
+      "type": "stat",
+      "title": "Trace persist failures (last 5m)",
+      "id": 5,
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 16},
+      "targets": [
+        {"expr": "increase(dpv2_trace_persist_failures_total[5m])", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null},
+        {"color": "yellow", "value": 1},
+        {"color": "red", "value": 10}
+      ]}}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "title": "gRPC p95 latency by method (s)",
+      "id": 6,
+      "gridPos": {"h": 8, "w": 18, "x": 6, "y": 16},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (le, service, method) (rate(dpv2_grpc_duration_seconds_bucket[5m])))", "refId": "A", "legendFormat": "{{service}}/{{method}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    }
+  ]
+}

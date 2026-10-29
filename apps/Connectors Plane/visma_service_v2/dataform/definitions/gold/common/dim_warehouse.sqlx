@@ -1,0 +1,37 @@
+config {
+  type: "table",
+  schema: "visma_gold_common",
+  name: "dim_warehouse",
+  description: "Conformed warehouse dimension with surrogate key.",
+  tags: ["gold", "common", "dimension", "conformed"]
+}
+
+-- =============================================================================
+-- Conformed warehouse dimension
+-- Source: visma_silver.dim_warehouse
+-- Why: Shared across sales orders, purchase orders, shipments, receipts,
+--      and inventory movements. Central to all logistics reporting.
+-- =============================================================================
+
+SELECT
+    -- Warehouse identity is physical: tenant + warehouse_id only. business_unit_id
+    -- is NOT part of the key — it is derived per-line in the facts and would
+    -- otherwise orphan most fact rows from this dimension.
+    FARM_FINGERPRINT(CONCAT(
+        CAST(tenant_id AS STRING), '|',
+        CAST(warehouse_id AS STRING)
+    ))                                          AS warehouse_key,
+    tenant_id,
+    business_unit_id,
+    warehouse_id,
+    warehouse_name,
+    is_active,
+    branch_number,
+    branch_name,
+    receipt_location_id,
+    receipt_location_description,
+    ship_location_id,
+    ship_location_description,
+    'visma' AS source_system
+
+FROM ${ref("visma_silver", "dim_warehouse")}

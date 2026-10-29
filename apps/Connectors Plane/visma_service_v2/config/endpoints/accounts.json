@@ -1,0 +1,39 @@
+{
+  "endpoint_name": "accounts",
+  "bigquery_table": "visma_accounts",
+  "primary_key": "accountCD",
+  "source": "erp_rest",
+  "api_method": "get_accounts",
+  "api_endpoint": "/v1/account",
+  "pagination_profile": "numbertoread_skip",
+  "modified_field": null,
+  "merge_type": "upsert",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": [
+    "accountCD",
+    "type",
+    "active"
+  ],
+  "notes": "DataMart normalizer parity vs ERP (scripts/normalizer_parity.py, 2026-09-29, after correcting wrong-domain values): 12 of 17 ERP fields equal on all 614 shared keys, ZERO wrong values. controlAccountModule differs only by the ERP's trailing-space padding on 35 rows ('FA   ' vs 'FA').",
+  "datamart": {
+    "ready": false,
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    },
+    "query_file": "config/queries/account.graphql",
+    "type_name": "Account",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": false,
+    "join_normalizer": "normalize_account",
+    "fallback_source": "erp_rest",
+    "root_field": "accounts",
+    "compare_excludes": [
+      "allowManualEntry",
+      "postOption",
+      "lastModifiedDateTime",
+      "metadata",
+      "timeStamp"
+    ]
+  }
+}

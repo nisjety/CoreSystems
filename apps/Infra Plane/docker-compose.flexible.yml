@@ -1,0 +1,4 @@
+# Compatibility entry point. CoreSystem Infra intentionally has one local-only
+# traffic stack; it does not provide shared databases to other planes.
+include:
+  - path: ./docker-compose.yml

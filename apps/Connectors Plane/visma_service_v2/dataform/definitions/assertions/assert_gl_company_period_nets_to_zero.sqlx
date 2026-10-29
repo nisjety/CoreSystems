@@ -1,0 +1,45 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_gl_company_period_nets_to_zero",
+  description: "Every company and financial period must net to zero: for each (tenant_id, financial_period) the debit and credit amounts agree within half a cent. Catches batches that straddle periods and gaps that no single batch shows. Returns the lines of each company-period that does not.",
+  tags: ["assertion", "silver", "general_ledger", "integrity"]
+}
+
+-- Grain: (tenant_id, financial_period). This is not implied by the batch check: a batch that
+-- nets to zero in total can still leave a period out of balance if its lines fall in different
+-- periods. NULL amounts count as 0. Threshold: 0.005 (half a cent).
+-- Amounts are cast to NUMERIC before they are summed, so the sums do not depend on the order of
+-- summation (see assert_gl_batch_nets_to_zero).
+-- Each failing line carries its company-period totals so the imbalance can be traced from the row.
+SELECT
+  tenant_id,
+  financial_period,
+  module,
+  batch_number,
+  ledger,
+  ref_number,
+  line_number,
+  account_cd,
+  debit_amount,
+  credit_amount,
+  period_debit,
+  period_credit,
+  period_debit - period_credit AS period_difference
+FROM (
+  SELECT
+    tenant_id,
+    financial_period,
+    module,
+    batch_number,
+    ledger,
+    ref_number,
+    line_number,
+    account_cd,
+    CAST(COALESCE(debit_amount, 0) AS NUMERIC) AS debit_amount,
+    CAST(COALESCE(credit_amount, 0) AS NUMERIC) AS credit_amount,
+    SUM(CAST(COALESCE(debit_amount, 0) AS NUMERIC)) OVER (PARTITION BY tenant_id, financial_period) AS period_debit,
+    SUM(CAST(COALESCE(credit_amount, 0) AS NUMERIC)) OVER (PARTITION BY tenant_id, financial_period) AS period_credit
+  FROM ${ref("visma_silver", "fact_general_ledger")}
+)
+WHERE ABS(period_debit - period_credit) > NUMERIC '0.005'

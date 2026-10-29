@@ -1,0 +1,16 @@
+config { type: "assertion", schema: "dw_1_silver_xero_assertions", name: "xero_gold_general_ledger_balance_grain_reconciliation" }
+
+WITH silver AS (
+  SELECT balance_row_key
+  FROM ${ref("dw_1_silver_xero", "fact_general_ledger_balance")}
+), gold AS (
+  SELECT balance_row_key
+  FROM ${ref("xero_gold_finance", "fact_general_ledger_balance")}
+)
+SELECT
+  COALESCE(silver.balance_row_key, gold.balance_row_key) AS balance_row_key,
+  silver.balance_row_key IS NULL AS missing_from_silver,
+  gold.balance_row_key IS NULL AS missing_from_gold
+FROM silver
+FULL OUTER JOIN gold USING (balance_row_key)
+WHERE silver.balance_row_key IS NULL OR gold.balance_row_key IS NULL

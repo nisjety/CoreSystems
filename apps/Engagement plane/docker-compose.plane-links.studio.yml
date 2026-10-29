@@ -1,0 +1,176 @@
+# Opt-in owner transports. Each core receives its own short-lived tokens;
+# service credentials are mounted only into its renewal worker, never the API.
+x-link-worker: &link-worker
+  image: engagement-plane-bearer-links:local
+  build:
+    context: ./visibility-core
+    dockerfile: Dockerfile
+    target: bearer-refresh
+    additional_contexts:
+      studio-plane-client: ./pkg/planeclient
+  init: true
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  command: [--studio-bundle]
+  networks: [inter-plane-bus]
+  healthcheck:
+    test: [CMD, /app/integration-bearer-refresh, --studio-bundle, --check]
+    interval: 20s
+    timeout: 5s
+    retries: 3
+    start_period: 15s
+
+x-worker-environment: &worker-environment
+  AUTH_CORE_URL: http://auth-core:3011
+  STUDIO_ORGANIZATION_ID: ${STUDIO_ORGANIZATION_ID:?set the fixed Studio organization}
+  STUDIO_BEARER_DIRECTORY: /run/studio-planes
+  STUDIO_SERVICE_KEY_FILE: /run/secrets/studio_service_key
+
+x-link-environment: &link-environment
+  STUDIO_ORGANIZATION_ID: ${STUDIO_ORGANIZATION_ID:?set the fixed Studio organization}
+  QUARRY_URL: http://quarry-edge:8082
+  QUARRY_BEARER_TOKEN_FILE: /run/studio-planes/quarry
+  MODEL_GATEWAY_URL: http://model-gateway:8080
+  MODEL_BEARER_TOKEN_FILE: /run/studio-planes/model
+  INFERENCE_BEARER_TOKEN_FILE: /run/studio-planes/inference
+
+services:
+  engagement-plane-tokens-init:
+    image: alpine:3.24.1
+    user: '0:0'
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]
+    security_opt: [no-new-privileges:true]
+    command: [sh, -ec, 'chown 100:101 /marketing /anbud; chown 10001:10001 /social /leads; chmod 0700 /marketing /anbud /social /leads']
+    volumes:
+      - marketing-plane-tokens:/marketing
+      - social-plane-tokens:/social
+      - leads-plane-tokens:/leads
+      - anbud-plane-tokens:/anbud
+
+  marketing-plane-tokens:
+    <<: *link-worker
+    user: '100:101'
+    environment:
+      <<: *worker-environment
+      STUDIO_SERVICE_ID: marketing-core
+    secrets:
+      - source: marketing_plane_link_key
+        target: studio_service_key
+    volumes: [marketing-plane-tokens:/run/studio-planes]
+    depends_on:
+      engagement-plane-tokens-init: {condition: service_completed_successfully}
+
+  social-plane-tokens:
+    <<: *link-worker
+    user: '10001:10001'
+    environment:
+      <<: *worker-environment
+      STUDIO_SERVICE_ID: social-core
+    secrets:
+      - source: social_plane_link_key
+        target: studio_service_key
+    volumes: [social-plane-tokens:/run/studio-planes]
+    depends_on:
+      engagement-plane-tokens-init: {condition: service_completed_successfully}
+
+  leads-plane-tokens:
+    <<: *link-worker
+    user: '10001:10001'
+    environment:
+      <<: *worker-environment
+      STUDIO_SERVICE_ID: leads-core
+    secrets:
+      - source: leads_plane_link_key
+        target: studio_service_key
+    volumes: [leads-plane-tokens:/run/studio-planes]
+    depends_on:
+      engagement-plane-tokens-init: {condition: service_completed_successfully}
+
+  anbud-plane-tokens:
+    <<: *link-worker
+    profiles: [anbud]
+    user: '100:101'
+    environment:
+      <<: *worker-environment
+      STUDIO_SERVICE_ID: anbud-core
+    secrets:
+      - source: anbud_plane_link_key
+        target: studio_service_key
+    volumes: [anbud-plane-tokens:/run/studio-planes]
+    depends_on:
+      engagement-plane-tokens-init: {condition: service_completed_successfully}
+
+  marketing-core:
+    environment:
+      <<: *link-environment
+      MARKETING_QUARRY_URL: http://quarry-edge:8082
+      MARKETING_QUARRY_BEARER_TOKEN_FILE: /run/studio-planes/quarry
+    volumes: [marketing-plane-tokens:/run/studio-planes:ro]
+    depends_on:
+      marketing-plane-tokens: {condition: service_healthy}
+
+  social-core:
+    environment:
+      <<: *link-environment
+      INTEGRATION_CORE_TENANT_ORGANIZATION_ID: ${STUDIO_ORGANIZATION_ID:?set the fixed Studio organization}
+      INTEGRATION_CORE_TENANT_BEARER_TOKEN_FILE: /run/studio-planes/integration
+    volumes: [social-plane-tokens:/run/studio-planes:ro]
+    depends_on:
+      social-plane-tokens: {condition: service_healthy}
+
+  leads-core:
+    environment:
+      <<: *link-environment
+      INTEGRATION_CORE_TENANT_ORGANIZATION_ID: ${STUDIO_ORGANIZATION_ID:?set the fixed Studio organization}
+      INTEGRATION_CORE_TENANT_BEARER_TOKEN_FILE: /run/studio-planes/integration
+    volumes: [leads-plane-tokens:/run/studio-planes:ro]
+    depends_on:
+      leads-plane-tokens: {condition: service_healthy}
+
+  anbud-core:
+    profiles: [anbud]
+    build:
+      context: ./anbud-core
+      dockerfile: Dockerfile
+      additional_contexts:
+        studio-plane-client: ./pkg/planeclient
+    environment:
+      <<: *link-environment
+      PORT: '3138'
+      INTEGRATION_CORE_URL: http://integration-api:3026
+    ports: ['127.0.0.1:3138:3138']
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    networks: [engagement-net, inter-plane-bus]
+    volumes: [anbud-plane-tokens:/run/studio-planes:ro]
+    depends_on:
+      anbud-plane-tokens: {condition: service_healthy}
+    healthcheck:
+      test: [CMD-SHELL, 'wget -qO- http://localhost:3138/ready >/dev/null']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+secrets:
+  marketing_plane_link_key:
+    file: ${STUDIO_LOCAL_SECRETS_DIR:-./.local/secrets}/marketing_plane_service_key
+  social_plane_link_key:
+    file: ${STUDIO_LOCAL_SECRETS_DIR:-./.local/secrets}/social_plane_service_key
+  leads_plane_link_key:
+    file: ${STUDIO_LOCAL_SECRETS_DIR:-./.local/secrets}/leads_plane_service_key
+  anbud_plane_link_key:
+    file: ${STUDIO_LOCAL_SECRETS_DIR:-./.local/secrets}/anbud_plane_service_key
+
+volumes:
+  marketing-plane-tokens:
+  social-plane-tokens:
+  leads-plane-tokens:
+  anbud-plane-tokens:

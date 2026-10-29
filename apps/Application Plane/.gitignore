@@ -1,0 +1,9 @@
+.env
+.env.zammad
+.env.local
+.env.*.local
+zammad-foundation/bootstrap/.env
+**/.env.local
+**/node_modules/
+convex-core/.convex-tmp/
+.DS_Store

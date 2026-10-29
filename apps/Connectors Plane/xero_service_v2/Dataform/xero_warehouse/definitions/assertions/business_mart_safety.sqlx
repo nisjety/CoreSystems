@@ -1,0 +1,68 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_business_mart_safety",
+  description: "Business marts must preserve the source Gold grain and lifecycle/measure availability flags; no unsupported NOK or project-P&L value may be introduced."
+}
+
+SELECT 'sales_pipeline_grain_or_measure' AS violation,
+  CAST(COALESCE(mart.sales_pipeline_key, source.quote_key) AS STRING) AS record_key
+FROM ${ref("xero_datamart", "sales_pipeline")} AS mart
+FULL OUTER JOIN ${ref("xero_gold_sales", "fact_quote")} AS source
+  ON mart.sales_pipeline_key = source.quote_key
+WHERE mart.sales_pipeline_key IS NULL
+   OR source.quote_key IS NULL
+   OR mart.is_source_open_pipeline IS DISTINCT FROM source.is_open_pipeline
+   OR mart.is_expired_at_observation IS DISTINCT FROM COALESCE(source.expiry_date < DATE(source.synced_at), FALSE)
+   OR mart.is_effective_open_pipeline IS DISTINCT FROM (
+     source.is_open_pipeline
+     AND NOT COALESCE(source.expiry_date < DATE(source.synced_at), FALSE)
+   )
+   OR mart.is_line_set_ambiguous IS DISTINCT FROM source.is_line_set_ambiguous
+   OR mart.source_pipeline_amount_in_currency IS DISTINCT FROM source.pipeline_amount_in_currency
+   OR mart.pipeline_amount_in_currency IS DISTINCT FROM IF(
+     source.is_open_pipeline
+     AND NOT COALESCE(source.expiry_date < DATE(source.synced_at), FALSE),
+     source.pipeline_amount_in_currency,
+     NULL
+   )
+   OR mart.is_pipeline_amount_available IS DISTINCT FROM (
+     IF(
+       source.is_open_pipeline
+       AND NOT COALESCE(source.expiry_date < DATE(source.synced_at), FALSE),
+       source.pipeline_amount_in_currency,
+       NULL
+     ) IS NOT NULL
+   )
+   OR mart.amount_nok IS NOT NULL
+   OR mart.is_nok_amount_available
+UNION ALL
+SELECT 'procurement_commitment_grain_or_measure',
+  CAST(COALESCE(mart.procurement_commitment_key, source.purchase_order_key) AS STRING) AS record_key
+FROM ${ref("xero_datamart", "procurement_commitments")} AS mart
+FULL OUTER JOIN ${ref("xero_gold_procurement", "fact_purchase_order")} AS source
+  ON mart.procurement_commitment_key = source.purchase_order_key
+WHERE mart.procurement_commitment_key IS NULL
+   OR source.purchase_order_key IS NULL
+   OR mart.is_open_commitment IS DISTINCT FROM source.is_open_commitment
+   OR mart.is_billed IS DISTINCT FROM source.is_billed
+   OR mart.is_line_set_ambiguous IS DISTINCT FROM source.is_line_set_ambiguous
+   OR mart.committed_amount_in_currency IS DISTINCT FROM source.committed_amount_in_currency
+   OR mart.is_commitment_amount_available IS DISTINCT FROM (source.committed_amount_in_currency IS NOT NULL)
+   OR mart.amount_nok IS NOT NULL
+   OR mart.is_nok_amount_available
+UNION ALL
+SELECT 'project_operations_grain_or_pnl',
+  CAST(COALESCE(mart.project_operations_key, source.project_key) AS STRING) AS record_key
+FROM ${ref("xero_datamart", "project_operations")} AS mart
+FULL OUTER JOIN ${ref("xero_gold_operations", "fact_project_operational_snapshot")} AS source
+  ON mart.project_operations_key = source.project_key
+WHERE mart.project_operations_key IS NULL
+   OR source.project_key IS NULL
+   OR mart.is_operationally_open IS DISTINCT FROM source.is_operationally_open
+   OR mart.is_current IS DISTINCT FROM source.is_current
+   OR mart.is_removed IS DISTINCT FROM source.is_removed
+   OR mart.is_project_pnl_available
+   OR mart.project_profit_amount IS NOT NULL
+   OR mart.project_profit_amount_nok IS NOT NULL
+   OR mart.is_nok_amount_available

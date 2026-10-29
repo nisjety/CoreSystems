@@ -1,0 +1,1 @@
+import{a as e}from"./http-C_MfZeN0.js";function t(t){return e(`/api/v1/social/calendar`,{headers:{"x-verevon-org-id":t}})}export{t as getSocialCalendar};

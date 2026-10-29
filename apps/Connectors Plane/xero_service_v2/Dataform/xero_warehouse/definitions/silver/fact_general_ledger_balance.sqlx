@@ -1,0 +1,102 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Xero Trial Balance account rows at one report snapshot, account, and report row grain. Debit and credit measures are additive only within one source snapshot; they must never be summed across snapshots.",
+  assertions: {
+    nonNull: ["tenant_id", "report_snapshot_id", "account_id", "balance_row_key"],
+    uniqueKey: ["balance_row_key"]
+  }
+}
+
+WITH account_rows AS (
+  SELECT
+    tenant_id,
+    report_snapshot_id,
+    report_snapshot_key,
+    report,
+    report_type,
+    report_name,
+    report_from,
+    report_to,
+    report_date,
+    report_index,
+    section_index,
+    section_title,
+    row_index,
+    row_label,
+    MAX(IF(column_header = 'Account', attribute_value, NULL)) AS account_id,
+    MAX(IF(column_header = 'Account', cell_value, NULL)) AS account_label,
+    COUNTIF(column_header = 'Account') AS account_column_count,
+    COUNTIF(column_header = 'Debit') AS debit_column_count,
+    COUNTIF(column_header = 'Credit') AS credit_column_count,
+    COUNTIF(column_header = 'YTD Debit') AS ytd_debit_column_count,
+    COUNTIF(column_header = 'YTD Credit') AS ytd_credit_column_count,
+    COUNTIF(column_header NOT IN ('Account', 'Debit', 'Credit', 'YTD Debit', 'YTD Credit'))
+      AS unexpected_column_count,
+    MAX(IF(column_header = 'Debit', source_numeric_value, NULL)) AS source_debit_amount,
+    MAX(IF(column_header = 'Credit', source_numeric_value, NULL)) AS source_credit_amount,
+    MAX(IF(column_header = 'YTD Debit', source_numeric_value, NULL)) AS source_ytd_debit_amount,
+    MAX(IF(column_header = 'YTD Credit', source_numeric_value, NULL)) AS source_ytd_credit_amount,
+    MAX(report_synced_at) AS report_synced_at
+  FROM ${ref("dw_1_silver_xero", "fact_financial_report_cell")}
+  WHERE report_type = 'TrialBalance'
+    AND row_type = 'Row'
+    AND attribute_id = 'account'
+    AND attribute_value IS NOT NULL
+  GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14
+), classified AS (
+  SELECT
+    *,
+    COALESCE(report_to, SAFE_CAST(report_date AS DATE)) AS balance_date,
+    account_column_count = 1
+      AND debit_column_count = 1
+      AND credit_column_count = 1
+      AND ytd_debit_column_count = 1
+      AND ytd_credit_column_count = 1
+      AND unexpected_column_count = 0
+      AND account_id IS NOT NULL AS is_structurally_complete
+  FROM account_rows
+)
+SELECT
+  CONCAT(
+    tenant_id, '|', report_snapshot_id, '|', CAST(report_index AS STRING), '|',
+    CAST(section_index AS STRING), '|', CAST(row_index AS STRING), '|', account_id
+  ) AS balance_row_key,
+  tenant_id,
+  report_snapshot_id,
+  report_snapshot_key,
+  report,
+  report_type,
+  report_name,
+  report_from,
+  report_to,
+  report_date,
+  balance_date,
+  report_index,
+  section_index,
+  section_title,
+  row_index,
+  row_label,
+  account_id,
+  account_label,
+  account_column_count,
+  debit_column_count,
+  credit_column_count,
+  ytd_debit_column_count,
+  ytd_credit_column_count,
+  unexpected_column_count,
+  is_structurally_complete,
+  is_structurally_complete AS is_reportable,
+  TRUE AS is_report_snapshot,
+  is_structurally_complete AS is_additive_within_snapshot,
+  TRUE AS is_non_additive_across_snapshots,
+  source_debit_amount,
+  source_credit_amount,
+  source_ytd_debit_amount,
+  source_ytd_credit_amount,
+  IF(is_structurally_complete, COALESCE(source_debit_amount, 0), NULL) AS debit_amount,
+  IF(is_structurally_complete, COALESCE(source_credit_amount, 0), NULL) AS credit_amount,
+  IF(is_structurally_complete, COALESCE(source_ytd_debit_amount, 0), NULL) AS ytd_debit_amount,
+  IF(is_structurally_complete, COALESCE(source_ytd_credit_amount, 0), NULL) AS ytd_credit_amount,
+  report_synced_at
+FROM classified

@@ -1,0 +1,30 @@
+{
+  "endpoint_name": "vat_categories",
+  "bigquery_table": "visma_vat_categories",
+  "primary_key": "vatCategoryId",
+  "source": "erp_rest",
+  "api_method": "get_vat_categories",
+  "api_endpoint": "/v1/vatcategory",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "vatCategoryId",
+    "description",
+    "active",
+    "lastModifiedDateTime"
+  ],
+  "notes": "VAT category master data for tax classification, keyed by vatCategoryId. Incremental by lastModifiedDateTime; createdDateTime is filter-only and not present in the response DTO. Groups vats by category (one_to_many).",
+  "datamart": {
+    "ready": false,
+    "query_file": "config/queries/vat_category.graphql",
+    "root_field": "vatCategories",
+    "type_name": "VatCategory",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "erp_rest",
+    "join_normalizer": "normalize_vat_category"
+  }
+}

@@ -1,0 +1,15 @@
+config {
+  type: "view",
+  schema: "xero_gold_finance",
+  description: "Payment rows whose referenced invoice currency is absent from the copied typed snapshot."
+}
+
+SELECT 'customer_payment' AS fact_name, tenant_id, payment_id,
+       invoice_id, status, source_payment_amount, bank_amount
+FROM ${ref("xero_gold_finance", "fact_customer_payment")}
+WHERE is_currency_unresolved
+UNION ALL
+SELECT 'supplier_payment', tenant_id, payment_id,
+       invoice_id, status, source_payment_amount, bank_amount
+FROM ${ref("xero_gold_finance", "fact_supplier_payment")}
+WHERE is_currency_unresolved

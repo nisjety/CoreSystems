@@ -1,0 +1,31 @@
+{
+  "endpoint_name": "customer_sales_prices",
+  "bigquery_table": "visma_customer_sales_prices",
+  "primary_key": "recordId",
+  "source": "erp_rest",
+  "api_method": "get_customer_sales_prices",
+  "api_endpoint": "/v1/customerSalesPrice",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "recordId",
+    "lastModifiedDateTime"
+  ],
+  "notes": "DataMart normalizer parity vs ERP (scripts/normalizer_parity.py, 2026-09-29, after correcting wrong-domain values): 6 of 14 fields equal on 17,088 shared keys (was 4). inventoryId is null: DataMart holds its internal item number, the ERP the item code. DataMart lists 19,136 prices against 17,088 from the ERP (2,048 DataMart-only, cause not established).",
+  "datamart": {
+    "ready": false,
+    "type_name": "SalesPrice",
+    "query_file": "config/queries/customer_sales_price.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_customer_sales_price",
+    "fallback_source": "erp_rest",
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    },
+    "root_field": "salesPrices"
+  }
+}

@@ -1,0 +1,39 @@
+[package]
+name = "quarry-browser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+quarry-core = { path = "../quarry-core" }
+quarry-security = { path = "../quarry-security" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true }
+anyhow = "1"
+bytes = "1"
+tempfile = "3"
+# 0.9 reorganized features: tokio runtime is built-in, and rustls/native-tls/fetcher
+# only exist for the optional Chrome downloader (which we don't use — the image
+# ships Chromium). Core CDP driver only → no fetcher, no zip backend needed.
+chromiumoxide = { version = "0.9", default-features = false, optional = true }
+futures = { version = "0.3", optional = true }
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[features]
+default = ["kernel"]
+chromiumoxide = ["dep:chromiumoxide", "dep:futures"]
+# Kernel cloud-browser provider. On-by-default since the dep graph is
+# zero-cost (already pulls reqwest from Browserless/Browserbase).
+kernel = []

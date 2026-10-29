@@ -1,0 +1,39 @@
+# Version control
+.git
+.gitignore
+
+# Rust build artifacts
+target/
+
+# Python virtualenv and cache
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Editor / OS
+.idea/
+.vscode/
+*.DS_Store
+*.swp
+
+# Docs
+docs/
+*.md
+
+# Test fixtures
+tests/
+
+# Scripts (not needed in container)
+scripts/
+
+# Tooling: only the package source goes in (built into the vsv2-bq-* venv); tests/scripts stay out
+tooling/tests/
+tooling/scripts/
+
+# Local env files (secrets — never bake into image)
+.env
+.env.*

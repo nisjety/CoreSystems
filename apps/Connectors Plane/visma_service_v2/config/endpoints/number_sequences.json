@@ -1,0 +1,26 @@
+{
+  "endpoint_name": "number_sequences",
+  "bigquery_table": "visma_number_sequences",
+  "primary_key": "numberingId",
+  "source": "erp_rest",
+  "api_method": "get_number_sequences",
+  "api_endpoint": "/v1/numberSequence",
+  "pagination_profile": "none",
+  "modified_field": null,
+  "merge_type": "upsert",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": [
+    "numberingId"
+  ],
+  "datamart": {
+    "ready": false,
+    "query_file": "config/queries/number_sequence.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "erp_rest",
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    }
+  }
+}

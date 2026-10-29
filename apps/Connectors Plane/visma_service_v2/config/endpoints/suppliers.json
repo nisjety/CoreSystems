@@ -1,0 +1,36 @@
+{
+  "endpoint_name": "suppliers",
+  "bigquery_table": "visma_suppliers",
+  "primary_key": "number",
+  "source": "erp_rest",
+  "api_method": "get_suppliers",
+  "api_endpoint": "/v1/supplier",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "number",
+    "name",
+    "status",
+    "creditTerms",
+    "vatZone",
+    "lastModifiedDateTime"
+  ],
+  "notes": "Supplier master data (business key = number). expandAccountInformation=true (default) adds glAccounts (AP 2400 etc.) needed for GL mapping. supplierPaymentMethodDetails[] holds bank/IBAN — PII/sensitive. creditTerms is a nested {id,description} object (NOT a plain string); currencyId is a plain STRING (e.g. 'NOK'); vatZone is nested {id,description,defaultVatCategory}. parentRecord is always an empty {} struct and is excluded downstream (empty struct -> schema conflict). createdDateTime is not confirmed in live responses (treat as nullable). vatRegistrationId, corporateId and currencyId are legitimately absent on foreign/private suppliers (measured 2026-09-29 on 1273 rows: 37%, 18% and 4% missing), so they are not validation_fields - requiring them rejected 484 rows and blocked the whole endpoint. Full reload is fast (~1,165 records <2s at page_size=1000) but incremental watermark via lastModifiedDateTime is still used for efficiency. DataMart normalizer parity vs ERP, all 1,273 shared keys (scripts/normalizer_parity.py, 2026-09-29): number, name, status, currencyId, documentLanguage, internalId, lastModifiedDateTime, accountReference, parentRecord equal; creditTerms, supplierClass, mainAddress, mainContact match on id but lack descriptions/details (need joins); ZERO wrong values. 22 of 35 ERP fields do not exist on DataMart's Supplier root (payment settings, vatZone, corporateId, vatRegistrationId, cashAccount, remit/supplier address+contact, timeStamp, ...), so DataMart cannot replace the ERP source for suppliers without enrichment: keep ready=false. ERP 'Inactive' is spelled 'InActive' in DataMart (normalizer maps it).",
+  "datamart": {
+    "ready": false,
+    "query_file": "config/queries/supplier.graphql",
+    "root_field": "suppliers",
+    "type_name": "Supplier",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "erp_rest",
+    "join_normalizer": "normalize_supplier"
+  },
+  "default_query": {
+    "expandAccountInformation": "true",
+    "expandNote": "true"
+  }
+}

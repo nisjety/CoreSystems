@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"name": "Aquatiq integrasjonen ",
+			"path": "../../.."
+		},
+		{
+			"name": "web-app",
+			"path": "../../../../../aquatiq web/web-app"
+		},
+		{
+			"name": "frontend",
+			"path": "../../../../Aquatiq Tools/apps/frontend"
+		}
+	],
+	"settings": {}
+}

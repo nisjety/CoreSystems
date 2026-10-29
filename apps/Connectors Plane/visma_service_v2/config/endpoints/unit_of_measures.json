@@ -1,0 +1,26 @@
+{
+  "endpoint_name": "unit_of_measures",
+  "bigquery_table": "visma_unit_of_measures",
+  "primary_key": [
+    "fromUnit",
+    "toUnit"
+  ],
+  "logical_keys": [
+    "fromUnit",
+    "toUnit"
+  ],
+  "source": "erp_rest",
+  "api_method": "get_unit_of_measures",
+  "api_endpoint": "/v1/unitofmeasure",
+  "pagination_profile": "none",
+  "modified_field": null,
+  "merge_type": "upsert",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": [
+    "fromUnit",
+    "toUnit",
+    "unitMultDiv",
+    "unitRate"
+  ],
+  "notes": "Unit-of-measure master data and conversion factors (e.g. EA, KG, L, BOX), keyed by the composite (fromUnit, toUnit). v1 had no api_method; 'get_unit_of_measures' is synthesized to satisfy the schema-required field — the generic ERP-REST adapter routes by api_endpoint, so api_method is a documentation label here. Conversion ratios (unitMultDiv, unitRate) drive multi-UOM inventory/purchasing/sales. Referenced by inventory_items (baseUom), purchase_orders/sales_orders/customer_sales_prices (uom). No row (0 of 43) carries lastModifiedDateTime, so there is no watermark and every sync is a full re-fetch."
+}

@@ -1,0 +1,14 @@
+{
+  "event_id": "01HXYZ01234567890ABCDEFGHI",
+  "event_type": "RUN_STARTED",
+  "schema_version": 1,
+  "ts": "2026-01-15T12:00:00Z",
+  "producer": "model-gateway",
+  "correlation_id": "corr-001",
+  "causation_id": "cause-001",
+  "idempotency_key": "req-001",
+  "org_id": "01HORG01234567890ABCDEFGHI",
+  "user_id": "01HUSR01234567890ABCDEFGHI",
+  "resource_ref": "run/01HRUN01234567890ABCDEFGHI",
+  "payload": {"goal": "test run", "agent_id": "general-v1"}
+}

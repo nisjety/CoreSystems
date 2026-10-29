@@ -1,0 +1,402 @@
+syntax = "proto3";
+
+package auth.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// AuthService provides authentication and authorization operations
+service AuthService {
+  // Authentication
+  rpc SignUp(SignUpRequest) returns (SignUpResponse);
+  rpc SignIn(SignInRequest) returns (SignInResponse);
+  rpc SignOut(SignOutRequest) returns (SignOutResponse);
+  rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
+  
+  // Email verification
+  rpc SendVerificationEmail(SendVerificationEmailRequest) returns (SendVerificationEmailResponse);
+  rpc VerifyEmail(VerifyEmailRequest) returns (VerifyEmailResponse);
+  
+  // Password management
+  rpc ForgotPassword(ForgotPasswordRequest) returns (ForgotPasswordResponse);
+  rpc ResetPassword(ResetPasswordRequest) returns (ResetPasswordResponse);
+  rpc ChangePassword(ChangePasswordRequest) returns (ChangePasswordResponse);
+  
+  // Two-factor authentication
+  rpc EnableTwoFactor(EnableTwoFactorRequest) returns (EnableTwoFactorResponse);
+  rpc VerifyTwoFactor(VerifyTwoFactorRequest) returns (VerifyTwoFactorResponse);
+  rpc DisableTwoFactor(DisableTwoFactorRequest) returns (DisableTwoFactorResponse);
+  rpc GenerateTwoFactorBackupCodes(GenerateTwoFactorBackupCodesRequest) returns (GenerateTwoFactorBackupCodesResponse);
+  
+  // Session management
+  rpc GetActiveSessions(GetActiveSessionsRequest) returns (GetActiveSessionsResponse);
+  rpc RevokeSession(RevokeSessionRequest) returns (RevokeSessionResponse);
+  rpc RevokeAllSessions(RevokeAllSessionsRequest) returns (RevokeAllSessionsResponse);
+  
+  // User management
+  rpc GetCurrentUser(GetCurrentUserRequest) returns (GetCurrentUserResponse);
+  rpc UpdateUserProfile(UpdateUserProfileRequest) returns (UpdateUserProfileResponse);
+  rpc DeleteAccount(DeleteAccountRequest) returns (DeleteAccountResponse);
+  
+  // OAuth/Social providers
+  rpc GetOAuthUrl(GetOAuthUrlRequest) returns (GetOAuthUrlResponse);
+  rpc HandleOAuthCallback(HandleOAuthCallbackRequest) returns (HandleOAuthCallbackResponse);
+  
+  // Organization management
+  rpc CreateOrganization(CreateOrganizationRequest) returns (CreateOrganizationResponse);
+  rpc ListOrganizations(ListOrganizationsRequest) returns (ListOrganizationsResponse);
+  rpc GetOrganization(GetOrganizationRequest) returns (GetOrganizationResponse);
+  rpc UpdateOrganization(UpdateOrganizationRequest) returns (UpdateOrganizationResponse);
+  rpc DeleteOrganization(DeleteOrganizationRequest) returns (DeleteOrganizationResponse);
+  rpc InviteMember(InviteMemberRequest) returns (InviteMemberResponse);
+  rpc RemoveMember(RemoveMemberRequest) returns (RemoveMemberResponse);
+  
+  // Health check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// Common messages
+
+message AuthUser {
+  string id = 1;
+  string email = 2;
+  string name = 3;
+  string image = 4;
+  bool email_verified = 5;
+  bool two_factor_enabled = 6;
+  string phone_number = 7;
+  bool phone_number_verified = 8;
+  string role = 9;
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp updated_at = 11;
+}
+
+message AuthSession {
+  string id = 1;
+  string token = 2;
+  string user_id = 3;
+  google.protobuf.Timestamp expires_at = 4;
+  string ip_address = 5;
+  string user_agent = 6;
+  google.protobuf.Timestamp created_at = 7;
+}
+
+message Organization {
+  string id = 1;
+  string name = 2;
+  string slug = 3;
+  google.protobuf.Struct metadata = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+// Authentication messages
+
+message SignUpRequest {
+  string email = 1;
+  string password = 2;
+  string name = 3;
+  optional string phone_number = 4;
+  optional string callback_url = 5;
+}
+
+message SignUpResponse {
+  AuthUser user = 1;
+  string token = 2;
+  AuthSession session = 3;
+}
+
+message SignInRequest {
+  string email = 1;
+  string password = 2;
+  optional string two_factor_code = 3;
+}
+
+message SignInResponse {
+  AuthUser user = 1;
+  string token = 2;
+  AuthSession session = 3;
+  bool requires_two_factor = 4;
+}
+
+message SignOutRequest {
+  string token = 1;
+}
+
+message SignOutResponse {
+  bool success = 1;
+}
+
+message RefreshTokenRequest {
+  string refresh_token = 1;
+}
+
+message RefreshTokenResponse {
+  string access_token = 1;
+  string refresh_token = 2;
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+// Email verification messages
+
+message SendVerificationEmailRequest {
+  string email = 1;
+  optional string callback_url = 2;
+}
+
+message SendVerificationEmailResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message VerifyEmailRequest {
+  string token = 1;
+}
+
+message VerifyEmailResponse {
+  bool success = 1;
+  AuthUser user = 2;
+}
+
+// Password management messages
+
+message ForgotPasswordRequest {
+  string email = 1;
+  optional string callback_url = 2;
+}
+
+message ForgotPasswordResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ResetPasswordRequest {
+  string token = 1;
+  string new_password = 2;
+}
+
+message ResetPasswordResponse {
+  bool success = 1;
+}
+
+message ChangePasswordRequest {
+  string user_token = 1;
+  string current_password = 2;
+  string new_password = 3;
+}
+
+message ChangePasswordResponse {
+  bool success = 1;
+}
+
+// Two-factor authentication messages
+
+message EnableTwoFactorRequest {
+  string user_token = 1;
+}
+
+message EnableTwoFactorResponse {
+  string secret = 1;
+  string qr_code = 2;
+  repeated string backup_codes = 3;
+}
+
+message VerifyTwoFactorRequest {
+  string user_token = 1;
+  string code = 2;
+}
+
+message VerifyTwoFactorResponse {
+  bool success = 1;
+  bool verified = 2;
+}
+
+message DisableTwoFactorRequest {
+  string user_token = 1;
+  string password = 2;
+}
+
+message DisableTwoFactorResponse {
+  bool success = 1;
+}
+
+message GenerateTwoFactorBackupCodesRequest {
+  string user_token = 1;
+}
+
+message GenerateTwoFactorBackupCodesResponse {
+  repeated string backup_codes = 1;
+}
+
+// Session management messages
+
+message GetActiveSessionsRequest {
+  string user_token = 1;
+}
+
+message GetActiveSessionsResponse {
+  repeated AuthSession sessions = 1;
+}
+
+message RevokeSessionRequest {
+  string user_token = 1;
+  string session_id = 2;
+}
+
+message RevokeSessionResponse {
+  bool success = 1;
+}
+
+message RevokeAllSessionsRequest {
+  string user_token = 1;
+}
+
+message RevokeAllSessionsResponse {
+  int32 revoked_count = 1;
+}
+
+// User management messages
+
+message GetCurrentUserRequest {
+  string token = 1;
+}
+
+message GetCurrentUserResponse {
+  AuthUser user = 1;
+}
+
+message UpdateUserProfileRequest {
+  string user_token = 1;
+  optional string name = 2;
+  optional string image = 3;
+  optional string phone_number = 4;
+  optional google.protobuf.Struct metadata = 5;
+}
+
+message UpdateUserProfileResponse {
+  AuthUser user = 1;
+}
+
+message DeleteAccountRequest {
+  string user_token = 1;
+  string password = 2;
+}
+
+message DeleteAccountResponse {
+  bool success = 1;
+}
+
+// OAuth messages
+
+message GetOAuthUrlRequest {
+  string provider = 1;
+  optional string redirect_url = 2;
+}
+
+message GetOAuthUrlResponse {
+  string url = 1;
+  string state = 2;
+}
+
+message HandleOAuthCallbackRequest {
+  string provider = 1;
+  string code = 2;
+  string state = 3;
+}
+
+message HandleOAuthCallbackResponse {
+  AuthUser user = 1;
+  string token = 2;
+  AuthSession session = 3;
+}
+
+// Organization messages
+
+message CreateOrganizationRequest {
+  string user_token = 1;
+  string name = 2;
+  string slug = 3;
+  optional google.protobuf.Struct metadata = 4;
+}
+
+message CreateOrganizationResponse {
+  Organization organization = 1;
+}
+
+message ListOrganizationsRequest {
+  string user_token = 1;
+}
+
+message ListOrganizationsResponse {
+  repeated Organization organizations = 1;
+}
+
+message GetOrganizationRequest {
+  string user_token = 1;
+  string organization_id = 2;
+}
+
+message GetOrganizationResponse {
+  Organization organization = 1;
+}
+
+message UpdateOrganizationRequest {
+  string user_token = 1;
+  string organization_id = 2;
+  optional string name = 3;
+  optional string slug = 4;
+  optional google.protobuf.Struct metadata = 5;
+}
+
+message UpdateOrganizationResponse {
+  Organization organization = 1;
+}
+
+message DeleteOrganizationRequest {
+  string user_token = 1;
+  string organization_id = 2;
+}
+
+message DeleteOrganizationResponse {
+  bool success = 1;
+}
+
+message InviteMemberRequest {
+  string user_token = 1;
+  string organization_id = 2;
+  string email = 3;
+  string role = 4;
+}
+
+message InviteMemberResponse {
+  bool success = 1;
+  string invitation_id = 2;
+}
+
+message RemoveMemberRequest {
+  string user_token = 1;
+  string organization_id = 2;
+  string user_id = 3;
+}
+
+message RemoveMemberResponse {
+  bool success = 1;
+}
+
+// Health check messages
+
+message HealthCheckRequest {
+  string service = 1;
+}
+
+message HealthCheckResponse {
+  enum ServingStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+    SERVICE_UNKNOWN = 3;
+  }
+  ServingStatus status = 1;
+  string message = 2;
+  google.protobuf.Struct details = 3;
+}

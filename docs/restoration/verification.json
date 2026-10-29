@@ -1,0 +1,10 @@
+{
+  "restored_files": 10886,
+  "mismatches": [],
+  "dev_files_changed": [
+    "Application Plane/convex-core/Dockerfile",
+    "Application Plane/convex-core/nats-subscriber.js"
+  ],
+  "root_image_preserved_as": "docs/restoration/backup-root-image.png",
+  "branch": "codex/restore-local-work"
+}

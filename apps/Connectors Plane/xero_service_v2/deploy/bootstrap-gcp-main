@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Create only the empty GCP foundation for the main Xero warehouse.
+set -euo pipefail
+
+PROJECT=prj-dw-main
+ORGANIZATION=224665845666
+BILLING_ACCOUNT=01C215-AFF5CF-7558C9
+LOCATION=europe-north2
+BUCKET=prj-dw-main-raw
+
+for command in gcloud bq jq; do
+  command -v "$command" >/dev/null || { echo "missing command: $command" >&2; exit 1; }
+done
+
+if parent="$(gcloud projects describe "$PROJECT" --format='value(parent.id)' 2>/dev/null)"; then
+  if [[ "$parent" != "$ORGANIZATION" ]]; then
+    echo "unexpected parent for $PROJECT: $parent" >&2
+    exit 1
+  fi
+else
+  gcloud projects create "$PROJECT" --organization="$ORGANIZATION" --name="$PROJECT"
+fi
+
+current_billing="$(gcloud billing projects describe "$PROJECT" --format='value(billingAccountName)')"
+if [[ -n "$current_billing" && "$current_billing" != "billingAccounts/$BILLING_ACCOUNT" ]]; then
+  echo "unexpected billing account for $PROJECT: $current_billing" >&2
+  exit 1
+fi
+if [[ -z "$current_billing" ]]; then
+  gcloud billing projects link "$PROJECT" --billing-account="$BILLING_ACCOUNT"
+fi
+
+gcloud services enable \
+  artifactregistry.googleapis.com \
+  bigquery.googleapis.com \
+  bigquerydatatransfer.googleapis.com \
+  cloudbuild.googleapis.com \
+  cloudfunctions.googleapis.com \
+  dataform.googleapis.com \
+  eventarc.googleapis.com \
+  iam.googleapis.com \
+  logging.googleapis.com \
+  pubsub.googleapis.com \
+  run.googleapis.com \
+  secretmanager.googleapis.com \
+  storage.googleapis.com \
+  --project="$PROJECT"
+
+for dataset in dw_staging_xero dw_1_bronze_xero dw_1_silver_xero; do
+  target="$PROJECT:$dataset"
+  if metadata="$(bq --project_id="$PROJECT" --format=prettyjson show "$target" 2>/dev/null)"; then
+    actual_location="$(jq -r '.location // empty | ascii_downcase' <<<"$metadata")"
+    label_count="$(jq -r '.labels // {} | length' <<<"$metadata")"
+    if [[ "$actual_location" != "$LOCATION" || "$label_count" != 0 ]]; then
+      echo "unexpected location or labels for $target" >&2
+      exit 1
+    fi
+  else
+    bq --project_id="$PROJECT" mk --dataset --location="$LOCATION" "$target"
+  fi
+done
+
+if bucket_metadata="$(gcloud storage buckets describe "gs://$BUCKET" --format=json 2>/dev/null)"; then
+  bucket_list="$(gcloud storage buckets list --project="$PROJECT" --format='value(name)')"
+  bucket_location="$(jq -r '.location // empty | ascii_downcase' <<<"$bucket_metadata")"
+  uniform_access="$(jq -r '.uniform_bucket_level_access // false' <<<"$bucket_metadata")"
+  public_access_prevention="$(jq -r '.public_access_prevention // empty' <<<"$bucket_metadata")"
+  bucket_label_count="$(jq -r '.labels // {} | length' <<<"$bucket_metadata")"
+  if [[ $'\n'"$bucket_list"$'\n' != *$'\n'"$BUCKET"$'\n'* \
+        || "$bucket_location" != "$LOCATION" \
+        || "$uniform_access" != true \
+        || "$public_access_prevention" != enforced \
+        || "$bucket_label_count" != 0 ]]; then
+    echo "unexpected owner, location, access settings, or labels for gs://$BUCKET" >&2
+    exit 1
+  fi
+else
+  gcloud storage buckets create "gs://$BUCKET" \
+    --project="$PROJECT" --location="$LOCATION" \
+    --uniform-bucket-level-access --public-access-prevention
+fi
+
+echo "Empty Xero foundation ready in $PROJECT; no tables, data, or labels were copied."

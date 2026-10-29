@@ -1,0 +1,19 @@
+{
+  "endpoint_name": "sales_order_customers",
+  "bigquery_table": "visma_sales_order_customers",
+  "primary_key": "internalId",
+  "source": "erp_rest",
+  "enabled": true,
+  "api_method": "get_sales_order_customers",
+  "api_endpoint": "https://salesorder.visma.net/api/v3/Customers",
+  "pagination_profile": "salesorder_page_index",
+  "page_size": 100,
+  "modified_field": null,
+  "merge_type": "upsert",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": [
+    "internalId",
+    "id"
+  ],
+  "notes": "Sales Order API customer list (its own view of the customer master, with default location and sales accounts). Full fetch: 6,359 rows, equal to the API's totalCount; internalId is unique. pageIndex is zero-based. The API offers no modified filter, so this is a full refresh."
+}

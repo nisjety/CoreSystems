@@ -1,0 +1,38 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Tenant-scoped Xero fixed-asset types with chart-of-account reference quality flags.",
+  assertions: { nonNull: ["tenant_id", "asset_type_id", "asset_type_key"], uniqueKey: ["asset_type_key"] }
+}
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(tenant_id, '|', asset_type_id)) AS asset_type_key,
+  FARM_FINGERPRINT(tenant_id) AS company_key,
+  tenant_id,
+  asset_type_id,
+  asset_type_name,
+  IF(fixed_asset_account_id IS NULL, NULL,
+     FARM_FINGERPRINT(CONCAT(tenant_id, '|', fixed_asset_account_id))) AS fixed_asset_account_key,
+  IF(accumulated_depreciation_account_id IS NULL, NULL,
+     FARM_FINGERPRINT(CONCAT(tenant_id, '|', accumulated_depreciation_account_id)))
+    AS accumulated_depreciation_account_key,
+  IF(depreciation_expense_account_id IS NULL, NULL,
+     FARM_FINGERPRINT(CONCAT(tenant_id, '|', depreciation_expense_account_id)))
+    AS depreciation_expense_account_key,
+  fixed_asset_account_id,
+  accumulated_depreciation_account_id,
+  depreciation_expense_account_id,
+  is_fixed_asset_account_unresolved,
+  is_accumulated_depreciation_account_unresolved,
+  is_depreciation_expense_account_unresolved,
+  lock_private_use_account,
+  locked_asset_count,
+  book_depreciation_method,
+  book_depreciation_calculation_method,
+  book_depreciation_rate,
+  book_effective_life_years,
+  book_depreciation_averaging_method,
+  is_source_deleted,
+  asset_observed_at,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_fixed_asset_type")}

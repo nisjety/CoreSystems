@@ -1,0 +1,25 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_cutover_day_project_lines_resolve_by_segment2",
+  description: "On the day before a tenant's subaccount structure changes (Aquatiq AS: 2025-12-31) every project transaction line must take its business unit from segment 2 of the new structure. Returns the lines that did not: they sit on the old default (Chemistry) and leave their project with two business units. The merger move was posted that day with the new structure, so a line that is not matched is a new kind of posting that needs a look.",
+  tags: ["assertion", "silver", "project", "business_unit"]
+}
+
+SELECT
+  l.tenant_id,
+  l.transaction_date,
+  l.business_unit_match_rule,
+  l.source_segment_2_value,
+  COUNT(*) AS lines
+FROM ${ref("visma_silver", "fact_project_transaction_line")} AS l
+JOIN (
+  SELECT tenant_id, MIN(valid_from) AS first_day
+  FROM ${ref("visma_silver_excel", "business_unit_mapping")}
+  WHERE source_segment_2_value IS NOT NULL
+  GROUP BY tenant_id
+) AS c
+  ON  c.tenant_id = l.tenant_id
+  AND l.transaction_date = DATE_SUB(c.first_day, INTERVAL 1 DAY)
+WHERE l.business_unit_match_rule != 'cutover_day_segment2_match'
+GROUP BY l.tenant_id, l.transaction_date, l.business_unit_match_rule, l.source_segment_2_value

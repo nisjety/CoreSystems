@@ -1,0 +1,129 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Xero tax activity at immutable document-line grain. It retains lifecycle and line-set quality flags so tax control totals can exclude incomplete records without discarding audit evidence.",
+  assertions: {
+    nonNull: ["tenant_id", "tax_activity_key", "tax_activity_source", "source_document_id", "source_line_id"],
+    uniqueKey: ["tax_activity_key"]
+  }
+}
+
+WITH tax_rates AS (
+  SELECT tenant_id, tax_type, report_tax_type
+  FROM ${ref("dw_1_silver_xero", "dim_tax_rate")}
+), source_lines AS (
+  SELECT
+    invoice_line_key AS tax_activity_key,
+    tenant_id,
+    CASE invoice_type
+      WHEN 'ACCREC' THEN 'customer_invoice_line'
+      WHEN 'ACCPAY' THEN 'supplier_invoice_line'
+    END AS tax_activity_source,
+    'invoice' AS source_document_type,
+    invoice_id AS source_document_id,
+    invoice_key AS source_document_key,
+    line_item_id AS source_line_id,
+    invoice_line_key AS source_line_key,
+    invoice_date_local AS activity_date,
+    currency_code,
+    account_id,
+    account_code,
+    tax_type,
+    CASE WHEN invoice_type = 'ACCREC' THEN 'output' ELSE 'input' END AS tax_direction,
+    net_amount_in_currency,
+    COALESCE(tax_amount, 0) AS signed_tax_amount_in_currency,
+    status,
+    is_deleted,
+    is_voided,
+    is_line_set_ambiguous,
+    invoice_key IS NOT NULL AS is_source_document_reconciled,
+    invoice_key IS NOT NULL
+      AND NOT COALESCE(is_deleted, FALSE)
+      AND NOT COALESCE(is_voided, FALSE)
+      AND status IN ('AUTHORISED', 'PAID')
+      AND invoice_date_local IS NOT NULL
+      AND NOT is_removed_from_source
+      AND NOT COALESCE(is_line_set_ambiguous, FALSE) AS is_reportable,
+    synced_at AS source_observed_at
+  FROM ${ref("dw_1_silver_xero", "fact_invoice_line")}
+  WHERE invoice_type IN ('ACCREC', 'ACCPAY')
+
+  UNION ALL
+
+  SELECT
+    credit_note_line_key,
+    tenant_id,
+    CASE credit_note_type
+      WHEN 'ACCRECCREDIT' THEN 'customer_credit_note_line'
+      WHEN 'ACCPAYCREDIT' THEN 'supplier_credit_note_line'
+    END,
+    'credit_note',
+    credit_note_id,
+    credit_note_key,
+    line_item_id,
+    credit_note_line_key,
+    credit_note_date_local,
+    currency_code,
+    account_id,
+    account_code,
+    tax_type,
+    CASE WHEN credit_note_type = 'ACCRECCREDIT' THEN 'output' ELSE 'input' END,
+    -net_amount_in_currency,
+    -COALESCE(tax_amount, 0),
+    status,
+    is_deleted,
+    is_voided,
+    is_line_set_ambiguous,
+    credit_note_key IS NOT NULL,
+    credit_note_key IS NOT NULL
+      AND NOT COALESCE(is_deleted, FALSE)
+      AND NOT COALESCE(is_voided, FALSE)
+      AND status IN ('AUTHORISED', 'PAID')
+      AND credit_note_date_local IS NOT NULL
+      AND NOT COALESCE(is_line_set_ambiguous, FALSE),
+    synced_at
+  FROM ${ref("dw_1_silver_xero", "fact_credit_note_line")}
+  WHERE credit_note_type IN ('ACCRECCREDIT', 'ACCPAYCREDIT')
+
+  UNION ALL
+
+  SELECT
+    bank_transaction_line_key,
+    tenant_id,
+    'bank_transaction_line',
+    'bank_transaction',
+    bank_transaction_id,
+    bank_transaction_key,
+    line_item_id,
+    bank_transaction_line_key,
+    transaction_date_local,
+    currency_code,
+    account_id,
+    account_code,
+    tax_type,
+    CASE WHEN transaction_type = 'RECEIVE' THEN 'output' ELSE 'input' END,
+    net_amount_in_currency,
+    COALESCE(tax_amount, 0),
+    status,
+    is_deleted,
+    FALSE,
+    is_line_set_ambiguous,
+    bank_transaction_key IS NOT NULL,
+    bank_transaction_key IS NOT NULL
+      AND NOT COALESCE(is_deleted, FALSE)
+      AND status = 'AUTHORISED'
+      AND transaction_type IN ('RECEIVE', 'SPEND')
+      AND transaction_date_local IS NOT NULL
+      AND NOT COALESCE(is_line_set_ambiguous, FALSE),
+    synced_at
+  FROM ${ref("dw_1_silver_xero", "fact_bank_transaction_line")}
+)
+
+SELECT
+  s.*,
+  rates.report_tax_type,
+  'xero' AS source_system
+FROM source_lines AS s
+LEFT JOIN tax_rates AS rates
+  ON s.tenant_id = rates.tenant_id
+ AND s.tax_type = rates.tax_type

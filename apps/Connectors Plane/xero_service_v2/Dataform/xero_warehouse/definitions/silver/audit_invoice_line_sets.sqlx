@@ -1,0 +1,15 @@
+config {
+  type: "view",
+  schema: "dw_1_silver_xero",
+  description: "Invoices whose copied typed child set cannot be reconciled; retain all rows pending a fresh authoritative Xero fetch."
+}
+
+SELECT tenant_id, invoice_id, ANY_VALUE(invoice_number) AS invoice_number,
+       ANY_VALUE(line_item_count) AS header_line_count,
+       ANY_VALUE(observed_line_count) AS observed_line_count,
+       ANY_VALUE(sub_total) AS header_subtotal,
+       ANY_VALUE(observed_line_net) AS observed_line_net,
+       COUNT(*) AS preserved_child_rows
+FROM ${ref("fact_invoice_line")}
+WHERE is_line_set_ambiguous
+GROUP BY 1, 2

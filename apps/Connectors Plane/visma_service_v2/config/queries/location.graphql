@@ -1,0 +1,20 @@
+query Locations(
+  $pageSize: Int!,
+  $lastId: String,
+  $updatedInDataMart: DateTime
+) {
+  locations(
+    pageSize: $pageSize
+    lastId: $lastId
+    updatedInDataMart: $updatedInDataMart
+  ) {
+    id
+    companyId
+    bAccountId
+    locationId
+    locationName: name
+    priceClassId
+    active: isActive
+    updatedInDataMartDateTime
+  }
+}

@@ -1,0 +1,27 @@
+query PaymentMethods(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  paymentMethods(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    paymentMethodId
+    active
+    meansOfPayment
+    description
+    useInAP
+    deletedDatabaseRecord
+    lastModifiedDateTime
+    createdInDataMartDateTime
+  }
+}

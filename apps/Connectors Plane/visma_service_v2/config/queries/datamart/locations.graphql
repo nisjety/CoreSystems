@@ -1,0 +1,49 @@
+query Locations(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  locations(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    bAccountId
+    locationId
+    locationCd
+    name
+    supplierAddressId
+    addressId
+    supplierContactId
+    contactId
+    taxRegistrationId
+    cashAccountId
+    paymentMethodId
+    paymentLeadTime
+    paySeparately
+    paymentBy
+    paymentByType
+    supplierRemitAddressId
+    supplierRemitContactId
+    chargeBearer
+    accountUsedForPayment
+    corporateId
+    paymentRefDisplayMask
+    isActive
+    lastModifiedDateTime
+    vatZoneId
+    supplierVatZoneId
+    customerVatZoneId
+    priceClassId
+    gln
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+  }
+}

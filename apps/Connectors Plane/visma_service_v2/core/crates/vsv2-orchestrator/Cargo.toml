@@ -1,0 +1,33 @@
+[package]
+name = "vsv2-orchestrator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+vsv2-common    = { workspace = true }
+vsv2-auth      = { workspace = true }
+vsv2-ratelimit = { workspace = true }
+vsv2-state     = { workspace = true }
+vsv2-erp-rest  = { workspace = true }
+vsv2-datamart  = { workspace = true }
+vsv2-expense   = { workspace = true }
+tokio          = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+serde_yaml     = { workspace = true }
+thiserror      = { workspace = true }
+chrono         = { workspace = true }
+tracing        = { workspace = true }
+uuid           = { workspace = true }
+tempfile       = { workspace = true }
+sha2           = { workspace = true }
+async-trait    = "0.1"
+
+[dev-dependencies]
+tokio-test  = { workspace = true }
+pretty_assertions = { workspace = true }
+mockito     = { workspace = true }
+sqlx        = { workspace = true }

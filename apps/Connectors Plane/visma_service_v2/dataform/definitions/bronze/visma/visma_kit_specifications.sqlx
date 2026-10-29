@@ -1,0 +1,36 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_kit_specifications",
+  description: "Bronze: Kit assembly BOM specifications and revisions from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.bool("allowComponentAddition")} AS `allowComponentAddition`,
+  ${bronze.str("createdDateTime")} AS `createdDateTime`,
+  ${bronze.str("description")} AS `description`,
+  ${bronze.bool("isActive")} AS `isActive`,
+  ${bronze.bool("isNonStock")} AS `isNonStock`,
+  ${bronze.str("kitInventoryID")} AS `kitInventoryID`,
+  ${bronze.str("lastModifiedDateTime")} AS `lastModifiedDateTime`,
+  ${bronze.str("metadata")} AS `metadata`,
+  ${bronze.str("nonStockComponentLines")} AS `nonStockComponentLines`,
+  ${bronze.str("revision")} AS `revision`,
+  ${bronze.str("stockComponentLines")} AS `stockComponentLines`,
+  ${bronze.str("timestamp")} AS `timestamp`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`  -- v2 does not fetch this field
+FROM ${ref("dw_staging_visma", "kit_specifications")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

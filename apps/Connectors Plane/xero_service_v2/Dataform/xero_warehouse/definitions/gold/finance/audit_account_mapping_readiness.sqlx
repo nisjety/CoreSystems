@@ -1,0 +1,74 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "One row per Xero tenant describing current-chart mapping coverage. Every tenant remains visible when Account extraction is missing; native Xero classes are not presented as an approved Norwegian or group chart.",
+  assertions: {
+    nonNull: ["tenant_id", "account_mapping_readiness_state"],
+    uniqueKey: ["tenant_id"]
+  }
+}
+
+WITH coverage AS (
+  SELECT
+    tenant_id,
+    SUM(account_count) AS account_count,
+    SUM(active_account_count) AS active_account_count,
+    SUM(archived_account_count) AS archived_account_count,
+    SUM(missing_from_current_staging_account_count) AS missing_from_current_staging_account_count,
+    SUM(financially_classified_account_count) AS financially_classified_account_count,
+    SUM(financially_unclassified_account_count) AS financially_unclassified_account_count,
+    SUM(active_financially_classified_account_count) AS active_financially_classified_account_count,
+    SUM(active_financially_unclassified_account_count) AS active_financially_unclassified_account_count,
+    SUM(governed_mapping_account_count) AS governed_mapping_account_count,
+    SUM(active_governed_mapping_account_count) AS active_governed_mapping_account_count,
+    SUM(native_account_class_fallback_account_count) AS native_account_class_fallback_account_count,
+    SUM(active_native_account_class_fallback_account_count) AS active_native_account_class_fallback_account_count,
+    SUM(unmapped_account_count) AS unmapped_account_count,
+    SUM(active_unmapped_account_count) AS active_unmapped_account_count,
+    MAX(latest_account_observed_at) AS latest_account_observed_at
+  FROM ${ref("dw_1_silver_xero", "audit_account_mapping_coverage")}
+  GROUP BY tenant_id
+)
+
+SELECT
+  company.company_key,
+  company.tenant_id,
+  company.organisation_name,
+  company.base_currency,
+  coverage.account_count,
+  coverage.active_account_count,
+  coverage.archived_account_count,
+  coverage.missing_from_current_staging_account_count,
+  coverage.financially_classified_account_count,
+  coverage.financially_unclassified_account_count,
+  coverage.active_financially_classified_account_count,
+  coverage.active_financially_unclassified_account_count,
+  coverage.governed_mapping_account_count,
+  coverage.active_governed_mapping_account_count,
+  coverage.native_account_class_fallback_account_count,
+  coverage.active_native_account_class_fallback_account_count,
+  coverage.unmapped_account_count,
+  coverage.active_unmapped_account_count,
+  coverage.tenant_id IS NOT NULL
+    AND COALESCE(coverage.active_account_count, 0) > 0
+    AND COALESCE(coverage.active_financially_unclassified_account_count, 0) = 0
+    AS is_native_financial_classification_complete,
+  coverage.tenant_id IS NOT NULL
+    AND COALESCE(coverage.active_account_count, 0) > 0
+    AND COALESCE(coverage.active_governed_mapping_account_count, 0)
+      = coverage.active_account_count
+    AS is_group_chart_mapping_ready,
+  CASE
+    WHEN coverage.tenant_id IS NULL THEN 'missing_account_coverage'
+    WHEN coverage.active_account_count = 0 THEN 'no_active_accounts'
+    WHEN coverage.active_unmapped_account_count > 0 THEN 'unmapped_active_accounts'
+    WHEN coverage.active_governed_mapping_account_count = coverage.active_account_count
+      THEN 'finance_governed_group_chart'
+    WHEN coverage.active_native_account_class_fallback_account_count = coverage.active_account_count
+      THEN 'native_account_class_only'
+    ELSE 'mixed_mapping_methods'
+  END AS account_mapping_readiness_state,
+  coverage.latest_account_observed_at,
+  'xero' AS source_system
+FROM ${ref("xero_gold_common", "dim_company")} AS company
+LEFT JOIN coverage USING (tenant_id)

@@ -1,0 +1,146 @@
+config { type: "assertion", schema: "dw_1_silver_xero_assertions", name: "xero_gold_reference_data_safety" }
+
+WITH grain AS (
+  SELECT 'tracking_category' AS entity,
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "dim_tracking_category")}) AS silver_count,
+         (SELECT COUNT(*) FROM ${ref("xero_gold_common", "dim_tracking_category")}) AS gold_count
+  UNION ALL
+  SELECT 'tracking_option',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "dim_tracking_option")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_common", "dim_tracking_option")})
+  UNION ALL
+  SELECT 'budget',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "dim_budget")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "dim_budget")})
+  UNION ALL
+  SELECT 'report_snapshot',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_financial_report_snapshot")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_financial_report_snapshot")})
+  UNION ALL
+  SELECT 'report_cell',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_financial_report_cell")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_financial_report_cell")})
+), unsafe AS (
+  SELECT 'tracking_option_category_reference' AS entity,
+         CAST(o.tracking_option_key AS STRING) AS record_id
+  FROM ${ref("xero_gold_common", "dim_tracking_option")} AS o
+  LEFT JOIN ${ref("xero_gold_common", "dim_tracking_category")} AS c
+    ON o.tracking_category_key = c.tracking_category_key
+  WHERE c.tracking_category_key IS NULL
+  UNION ALL
+  SELECT 'budget_detail_flag', CAST(budget_key AS STRING)
+  FROM ${ref("xero_gold_finance", "dim_budget")}
+  WHERE is_detail_available IS TRUE AND COALESCE(budget_line_count, 0) <= 0
+  UNION ALL
+  SELECT 'report_cell_orphan_snapshot', report_cell_key
+  FROM ${ref("xero_gold_finance", "fact_financial_report_cell")}
+  WHERE is_orphan_snapshot
+  UNION ALL
+  SELECT 'report_cell_numeric_flag', report_cell_key
+  FROM ${ref("xero_gold_finance", "fact_financial_report_cell")}
+  WHERE (is_numeric_value AND source_numeric_value IS NULL)
+     OR (NOT is_numeric_value AND source_numeric_value IS NOT NULL)
+  UNION ALL
+  SELECT 'report_snapshot_flag', report_snapshot_key
+  FROM ${ref("xero_gold_finance", "fact_financial_report_snapshot")}
+  WHERE is_report_snapshot IS NOT TRUE OR is_non_additive IS NOT TRUE
+  UNION ALL
+  SELECT 'report_cell_flag', report_cell_key
+  FROM ${ref("xero_gold_finance", "fact_financial_report_cell")}
+  WHERE is_report_snapshot IS NOT TRUE OR is_non_additive IS NOT TRUE
+), tracking_option_references AS (
+  SELECT 'fact_customer_invoice_line' AS entity, tracking_option_1_key AS tracking_option_key
+  FROM ${ref("xero_gold_finance", "fact_customer_invoice_line")}
+  UNION ALL
+  SELECT 'fact_customer_invoice_line', tracking_option_2_key
+  FROM ${ref("xero_gold_finance", "fact_customer_invoice_line")}
+  UNION ALL
+  SELECT 'fact_supplier_invoice_line', tracking_option_1_key
+  FROM ${ref("xero_gold_finance", "fact_supplier_invoice_line")}
+  UNION ALL
+  SELECT 'fact_supplier_invoice_line', tracking_option_2_key
+  FROM ${ref("xero_gold_finance", "fact_supplier_invoice_line")}
+  UNION ALL
+  SELECT 'fact_customer_credit_note_line', tracking_option_1_key
+  FROM ${ref("xero_gold_finance", "fact_customer_credit_note_line")}
+  UNION ALL
+  SELECT 'fact_customer_credit_note_line', tracking_option_2_key
+  FROM ${ref("xero_gold_finance", "fact_customer_credit_note_line")}
+  UNION ALL
+  SELECT 'fact_supplier_credit_note_line', tracking_option_1_key
+  FROM ${ref("xero_gold_finance", "fact_supplier_credit_note_line")}
+  UNION ALL
+  SELECT 'fact_supplier_credit_note_line', tracking_option_2_key
+  FROM ${ref("xero_gold_finance", "fact_supplier_credit_note_line")}
+  UNION ALL
+  SELECT 'fact_customer_overpayment_line', tracking_option_1_key
+  FROM ${ref("xero_gold_finance", "fact_customer_overpayment_line")}
+  UNION ALL
+  SELECT 'fact_customer_overpayment_line', tracking_option_2_key
+  FROM ${ref("xero_gold_finance", "fact_customer_overpayment_line")}
+  UNION ALL
+  SELECT 'fact_supplier_overpayment_line', tracking_option_1_key
+  FROM ${ref("xero_gold_finance", "fact_supplier_overpayment_line")}
+  UNION ALL
+  SELECT 'fact_supplier_overpayment_line', tracking_option_2_key
+  FROM ${ref("xero_gold_finance", "fact_supplier_overpayment_line")}
+  UNION ALL
+  SELECT 'fact_bank_transaction_line', tracking_option_1_key
+  FROM ${ref("xero_gold_finance", "fact_bank_transaction_line")}
+  UNION ALL
+  SELECT 'fact_bank_transaction_line', tracking_option_2_key
+  FROM ${ref("xero_gold_finance", "fact_bank_transaction_line")}
+  UNION ALL
+  SELECT 'fact_purchase_order_line', tracking_option_1_key
+  FROM ${ref("xero_gold_procurement", "fact_purchase_order_line")}
+  UNION ALL
+  SELECT 'fact_purchase_order_line', tracking_option_2_key
+  FROM ${ref("xero_gold_procurement", "fact_purchase_order_line")}
+  UNION ALL
+  SELECT 'fact_quote_line', tracking_option_1_key
+  FROM ${ref("xero_gold_sales", "fact_quote_line")}
+  UNION ALL
+  SELECT 'fact_quote_line', tracking_option_2_key
+  FROM ${ref("xero_gold_sales", "fact_quote_line")}
+), broken_tracking_option_references AS (
+  SELECT CONCAT('tracking_option_reference:', references.entity) AS entity,
+         CAST(references.tracking_option_key AS STRING) AS record_id
+  FROM tracking_option_references AS references
+  LEFT JOIN ${ref("xero_gold_common", "dim_tracking_option")} AS options
+    ON references.tracking_option_key = options.tracking_option_key
+  WHERE references.tracking_option_key IS NOT NULL
+    AND options.tracking_option_key IS NULL
+), branding_theme_references AS (
+  SELECT 'fact_customer_invoice' AS entity, company_key, branding_theme_key
+  FROM ${ref("xero_gold_finance", "fact_customer_invoice")}
+  UNION ALL
+  SELECT 'fact_supplier_invoice', company_key, branding_theme_key
+  FROM ${ref("xero_gold_finance", "fact_supplier_invoice")}
+  UNION ALL
+  SELECT 'fact_quote', company_key, branding_theme_key
+  FROM ${ref("xero_gold_sales", "fact_quote")}
+  UNION ALL
+  SELECT 'fact_purchase_order', company_key, branding_theme_key
+  FROM ${ref("xero_gold_procurement", "fact_purchase_order")}
+  UNION ALL
+  SELECT 'dim_repeating_invoice', company_key, branding_theme_key
+  FROM ${ref("xero_gold_finance", "dim_repeating_invoice")}
+), broken_branding_theme_references AS (
+  SELECT CONCAT('branding_theme_reference:', references.entity) AS entity,
+         CAST(references.branding_theme_key AS STRING) AS record_id
+  FROM branding_theme_references AS references
+  LEFT JOIN ${ref("xero_gold_common", "dim_branding_theme")} AS themes
+    ON references.company_key = themes.company_key
+   AND references.branding_theme_key = themes.branding_theme_key
+  WHERE references.branding_theme_key IS NOT NULL
+    AND themes.branding_theme_key IS NULL
+)
+SELECT entity, CAST(silver_count AS STRING) AS record_id
+FROM grain
+WHERE silver_count != gold_count
+UNION ALL
+SELECT entity, record_id FROM unsafe
+UNION ALL
+SELECT entity, record_id FROM broken_tracking_option_references
+UNION ALL
+SELECT entity, record_id FROM broken_branding_theme_references

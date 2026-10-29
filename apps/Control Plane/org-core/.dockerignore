@@ -1,0 +1,17 @@
+# Go service — exclude everything not needed for go build
+.git
+.gitignore
+*.md
+.env*
+!.env.example
+.DS_Store
+.vscode
+.idea
+# Test and coverage artifacts
+*_test.go
+coverage/
+*.out
+# Local binaries
+org-core
+server
+bin/

@@ -1,0 +1,34 @@
+node_modules
+**/node_modules
+.pnpm-store
+dist
+**/dist
+.git
+.env
+.env.*
+!.env.example
+# Never ship the host's incremental tsc cache into the image — a stale
+# .tsbuildinfo makes `tsc -b` skip files or report phantom errors. Excluding it
+# forces a clean, deterministic full typecheck on every Docker build.
+*.tsbuildinfo
+.tsbuildinfo
+# The root image builds only the Solid/Vite SPA. The Rust gateway and separate
+# Next.js marketing app have their own build contexts and must not inflate this
+# context (the latter also contains large design-reference media).
+apps/gateway
+apps/verevon-web
+apps/**/target
+apps/**/.next
+**/.playwright-mcp
+**/.playwright-cli
+**/.fallow
+**/.claude
+**/.design-frames
+docs/
+README.md
+*.snap
+*.spec.ts
+*.test.ts
+*.test.tsx
+test-results
+playwright-report

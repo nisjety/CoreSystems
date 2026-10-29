@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "dw_staging_xero",
+  name: "linked_transactions",
+  description: "Current Xero billable-expense links from etl/xero/linked_transactions.py."
+}

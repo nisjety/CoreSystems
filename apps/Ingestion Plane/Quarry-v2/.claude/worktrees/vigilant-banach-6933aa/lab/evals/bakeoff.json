@@ -1,0 +1,128 @@
+{
+  "challenger_label": "quarry",
+  "baseline_label": "firecrawl",
+  "fixtures": [
+    {
+      "id": "article_basic",
+      "category": "static_article",
+      "challenger_pass": true,
+      "baseline_pass": null,
+      "verdict": "solo",
+      "challenger_duration_ms": 7,
+      "baseline_duration_ms": null,
+      "challenger_bytes": 1146,
+      "baseline_bytes": null
+    },
+    {
+      "id": "article_js_heavy",
+      "category": "js_heavy",
+      "challenger_pass": true,
+      "baseline_pass": null,
+      "verdict": "solo",
+      "challenger_duration_ms": 1,
+      "baseline_duration_ms": null,
+      "challenger_bytes": 582,
+      "baseline_bytes": null
+    },
+    {
+      "id": "blocked_page",
+      "category": "blocked",
+      "challenger_pass": true,
+      "baseline_pass": null,
+      "verdict": "solo",
+      "challenger_duration_ms": 1,
+      "baseline_duration_ms": null,
+      "challenger_bytes": 426,
+      "baseline_bytes": null
+    },
+    {
+      "id": "minimal_content",
+      "category": "minimal",
+      "challenger_pass": true,
+      "baseline_pass": null,
+      "verdict": "solo",
+      "challenger_duration_ms": 0,
+      "baseline_duration_ms": null,
+      "challenger_bytes": 166,
+      "baseline_bytes": null
+    },
+    {
+      "id": "table_heavy",
+      "category": "table_heavy",
+      "challenger_pass": true,
+      "baseline_pass": null,
+      "verdict": "solo",
+      "challenger_duration_ms": 3,
+      "baseline_duration_ms": null,
+      "challenger_bytes": 953,
+      "baseline_bytes": null
+    },
+    {
+      "id": "multi_section",
+      "category": "multi_section",
+      "challenger_pass": true,
+      "baseline_pass": null,
+      "verdict": "solo",
+      "challenger_duration_ms": 3,
+      "baseline_duration_ms": null,
+      "challenger_bytes": 1421,
+      "baseline_bytes": null
+    },
+    {
+      "id": "cache_warm",
+      "category": "cache_warm",
+      "challenger_pass": true,
+      "baseline_pass": null,
+      "verdict": "solo",
+      "challenger_duration_ms": 1,
+      "baseline_duration_ms": null,
+      "challenger_bytes": 625,
+      "baseline_bytes": null
+    },
+    {
+      "id": "js_blocked",
+      "category": "js_blocked",
+      "challenger_pass": true,
+      "baseline_pass": null,
+      "verdict": "solo",
+      "challenger_duration_ms": 1,
+      "baseline_duration_ms": null,
+      "challenger_bytes": 144,
+      "baseline_bytes": null
+    },
+    {
+      "id": "change_precision",
+      "category": "change_precision",
+      "challenger_pass": true,
+      "baseline_pass": null,
+      "verdict": "solo",
+      "challenger_duration_ms": 1,
+      "baseline_duration_ms": null,
+      "challenger_bytes": 607,
+      "baseline_bytes": null
+    },
+    {
+      "id": "profile_restore",
+      "category": "profile_restore",
+      "challenger_pass": true,
+      "baseline_pass": null,
+      "verdict": "solo",
+      "challenger_duration_ms": 1,
+      "baseline_duration_ms": null,
+      "challenger_bytes": 900,
+      "baseline_bytes": null
+    }
+  ],
+  "summary": {
+    "fixtures": 10,
+    "challenger_pass": 10,
+    "baseline_pass": 0,
+    "challenger_wins": 0,
+    "baseline_wins": 0,
+    "ties_pass": 0,
+    "ties_fail": 0,
+    "solo": 10,
+    "challenger_pass_rate": 1.0,
+    "baseline_pass_rate": 0.0
+  }
+}

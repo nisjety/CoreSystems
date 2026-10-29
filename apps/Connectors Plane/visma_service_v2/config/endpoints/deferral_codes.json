@@ -1,0 +1,28 @@
+{
+  "endpoint_name": "deferral_codes",
+  "bigquery_table": "visma_deferral_codes",
+  "primary_key": "deferralCode",
+  "source": "erp_rest",
+  "api_method": "get_deferral_codes",
+  "api_endpoint": "/v1/deferralCode",
+  "pagination_profile": "finance_page_number",
+  "modified_field": null,
+  "merge_type": "upsert",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": [
+    "deferralCode"
+  ],
+  "datamart": {
+    "ready": false,
+    "type_name": "DeferralCode",
+    "query_file": "config/queries/deferral_code.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_deferral_code",
+    "fallback_source": "erp_rest",
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    }
+  }
+}

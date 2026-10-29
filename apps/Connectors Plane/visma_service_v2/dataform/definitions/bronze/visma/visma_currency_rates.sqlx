@@ -1,0 +1,33 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_currency_rates",
+  description: "Bronze: Foreign exchange rate history from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.str("effectiveDate")} AS `effectiveDate`,
+  ${bronze.str("fromCurrencyId")} AS `fromCurrencyId`,
+  ${bronze.int("id")} AS `id`,
+  ${bronze.str("multDiv")} AS `multDiv`,
+  ${bronze.float("rate")} AS `rate`,
+  ${bronze.float("rateReciprocal")} AS `rateReciprocal`,
+  ${bronze.str("rateType")} AS `rateType`,
+  ${bronze.str("timeStamp")} AS `timeStamp`,
+  ${bronze.str("toCurrencyId")} AS `toCurrencyId`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`  -- v2 does not fetch this field
+FROM ${ref("dw_staging_visma", "currency_rates")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

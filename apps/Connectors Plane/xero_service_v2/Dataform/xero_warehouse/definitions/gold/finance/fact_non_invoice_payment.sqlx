@@ -1,0 +1,92 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Credit-note and overpayment Payment events at payment grain. Source amounts are separate from parent document and bank-transaction totals; only verified parent-linked payments expose an additive amount within this fact.",
+  assertions: { nonNull: ["tenant_id", "payment_id", "payment_key"], uniqueKey: ["payment_key"] }
+}
+
+WITH matched AS (
+  SELECT
+    p.*,
+    c.credit_note_id AS parent_credit_note_id,
+    c.credit_note_type AS parent_credit_note_type,
+    o.overpayment_id AS parent_overpayment_id,
+    o.overpayment_type AS parent_overpayment_type,
+    COALESCE(c.status, o.status) AS parent_status,
+    COALESCE(c.is_deleted, o.is_deleted, FALSE) AS is_parent_deleted,
+    COALESCE(c.is_voided, o.is_voided, FALSE) AS is_parent_voided,
+    UPPER(NULLIF(TRIM(COALESCE(c.currency_code, o.currency_code)), ''))
+      AS parent_currency_code,
+    company.base_currency
+  FROM ${ref("dw_1_silver_xero", "fact_non_invoice_payment")} AS p
+  LEFT JOIN ${ref("dw_1_silver_xero", "fact_credit_note")} AS c
+    ON p.tenant_id = c.tenant_id
+   AND p.invoice_id = c.credit_note_id
+   AND p.payment_type IN ('APCREDITPAYMENT', 'ARCREDITPAYMENT')
+  LEFT JOIN ${ref("dw_1_silver_xero", "fact_overpayment")} AS o
+    ON p.tenant_id = o.tenant_id
+   AND p.invoice_id = o.overpayment_id
+   AND p.payment_type = 'APOVERPAYMENTPAYMENT'
+  LEFT JOIN ${ref("xero_gold_common", "dim_company")} AS company
+    ON p.tenant_id = company.tenant_id
+), quality AS (
+  SELECT
+    *,
+    payment_type IN ('APCREDITPAYMENT', 'ARCREDITPAYMENT', 'APOVERPAYMENTPAYMENT')
+      AS is_supported_payment_type,
+    parent_credit_note_id IS NULL AND parent_overpayment_id IS NULL
+      AS is_parent_unresolved,
+    invoice_type IS NULL
+      AND parent_credit_note_type IS NULL
+      AND parent_overpayment_type IS NULL AS is_parent_type_unresolved,
+    CASE
+      WHEN payment_type = 'APCREDITPAYMENT' THEN
+        (invoice_type IS NOT NULL AND invoice_type != 'ACCPAYCREDIT')
+        OR (parent_credit_note_type IS NOT NULL AND parent_credit_note_type != 'ACCPAYCREDIT')
+      WHEN payment_type = 'ARCREDITPAYMENT' THEN
+        (invoice_type IS NOT NULL AND invoice_type != 'ACCRECCREDIT')
+        OR (parent_credit_note_type IS NOT NULL AND parent_credit_note_type != 'ACCRECCREDIT')
+      WHEN payment_type = 'APOVERPAYMENTPAYMENT' THEN
+        (invoice_type IS NOT NULL AND invoice_type != 'APOVERPAYMENT')
+        OR (parent_overpayment_type IS NOT NULL AND parent_overpayment_type != 'SPEND-OVERPAYMENT')
+      ELSE TRUE
+    END AS is_parent_type_mismatch,
+    parent_currency_code IS NULL AS is_parent_currency_unresolved,
+    parent_currency_code IS NOT NULL AND invoice_currency_code IS NOT NULL
+      AND parent_currency_code != invoice_currency_code AS is_parent_currency_mismatch
+  FROM matched
+), eligible AS (
+  SELECT
+    *,
+    is_supported_payment_type
+      AND status = 'AUTHORISED' AND NOT is_deleted
+      AND NOT is_raw_typed_mismatch AND NOT is_currency_unresolved
+      AND NOT is_parent_unresolved AND NOT is_parent_type_unresolved
+      AND NOT is_parent_type_mismatch
+      AND NOT is_parent_currency_unresolved AND NOT is_parent_currency_mismatch
+      AND NOT is_parent_deleted AND NOT is_parent_voided
+      AND parent_status IN ('AUTHORISED', 'PAID') AS is_reportable
+  FROM quality
+)
+SELECT
+  FARM_FINGERPRINT(tenant_id) AS company_key,
+  FARM_FINGERPRINT(CAST(DATE(payment_date) AS STRING)) AS date_key,
+  payment_key, tenant_id, payment_id, payment_type, status,
+  is_deleted, is_missing_from_staging, is_reconciled,
+  contact_id, contact_name, invoice_id AS parent_document_id,
+  invoice_type AS parent_document_type, parent_status,
+  account_id, account_code, DATE(payment_date) AS payment_date, reference,
+  invoice_currency_code AS currency_code, invoice_currency_source,
+  parent_currency_code, base_currency,
+  is_supported_payment_type, is_parent_unresolved, is_parent_type_unresolved,
+  is_parent_type_mismatch,
+  is_parent_currency_unresolved, is_parent_currency_mismatch,
+  is_parent_deleted, is_parent_voided,
+  is_raw_typed_mismatch, is_currency_unresolved, is_currency_invalid,
+  is_currency_conflict, is_reportable,
+  amount AS source_payment_amount, bank_amount, currency_rate AS source_exchange_rate,
+  IF(is_reportable, amount, NULL) AS payment_amount,
+  CAST(NULL AS NUMERIC) AS payment_amount_base,
+  CAST(NULL AS NUMERIC) AS payment_amount_nok,
+  synced_at, 'xero' AS source_system
+FROM eligible

@@ -1,0 +1,30 @@
+query BudgetById(
+  $id: String!
+) {
+  budgetById(
+    id: $id
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    branchId
+    groupId
+    parentGroupId
+    ledgerId
+    financialYear
+    released
+    releasedAmount
+    accountId
+    subaccountId
+    description
+    amount
+    distributedAmount
+    lastModifiedDateTime
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+    periods {
+      periodId
+      amount
+    }
+  }
+}

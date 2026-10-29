@@ -1,0 +1,20 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero contacts; one contact can be both a customer and a supplier.",
+  assertions: { nonNull: ["tenant_id", "contact_id", "contact_key"], uniqueKey: ["contact_key"] }
+}
+
+WITH latest AS (
+  SELECT * FROM ${ref("dw_bronze_xero", "xero_contacts")}
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY tenant_id, record_id ORDER BY synced_at DESC, version_id DESC) = 1
+)
+SELECT CONCAT(b.tenant_id, '|', b.contact_id) AS contact_key,
+       b.tenant_id, b.contact_id, b.record_id AS contact_internal_id,
+       b.contact_number, b.contact_name, b.is_customer, b.is_supplier,
+       b.status, b.is_active, b.default_currency, b.tax_number,
+       b.updated_at, b.synced_at, b.version_id,
+       s.record_id IS NULL AS is_missing_from_staging
+FROM latest AS b
+LEFT JOIN ${ref("dw_staging_xero", "contacts")} AS s
+  ON b.tenant_id = s.tenant_id AND b.record_id = s.record_id

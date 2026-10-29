@@ -1,0 +1,83 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Audit-only history of raw Xero Accounting GET response observations. Each row is anchored to an immutable raw receipt and pinned GCS object; no mutable convenience projection is a warehouse authority."
+}
+
+WITH raw_response_rows AS (
+  SELECT
+    response.generation,
+    response.tenant_id,
+    response.endpoint,
+    response.operation_id,
+    response.parent_record_id,
+    response.canonical_record_id,
+    response.run_id,
+    response.receipt_id,
+    response.version_id AS raw_record_version_id,
+    JSON_VALUE(receipt.metadata_json, '$."x-request-descriptor"') AS request_descriptor,
+    receipt.source_bucket,
+    receipt.source_object,
+    JSON_VALUE(receipt.metadata_json, '$."x-response-content-type"') AS response_content_type,
+    receipt.http_status,
+    SAFE_CAST(JSON_VALUE(receipt.metadata_json, '$."x-response-binary"') AS BOOL) AS is_binary,
+    response.payload_json IS NOT NULL AS payload_in_bigquery,
+    response.payload_json,
+    response.observed_at AS observed_at,
+    ROW_NUMBER() OVER (
+      PARTITION BY response.tenant_id, response.operation_id, response.run_id,
+                   JSON_VALUE(receipt.metadata_json, '$."x-request-descriptor"')
+      ORDER BY response.observed_at DESC, response.receipt_id DESC, response.version_id DESC
+    ) AS response_rank,
+    COUNT(*) OVER (
+      PARTITION BY response.tenant_id, response.operation_id, response.run_id,
+                   JSON_VALUE(receipt.metadata_json, '$."x-request-descriptor"')
+    ) AS physical_raw_response_count,
+    MIN(response.observed_at) OVER (
+      PARTITION BY response.tenant_id, response.operation_id, response.run_id,
+                   JSON_VALUE(receipt.metadata_json, '$."x-request-descriptor"')
+    ) AS first_observed_at,
+    MAX(response.observed_at) OVER (
+      PARTITION BY response.tenant_id, response.operation_id, response.run_id,
+                   JSON_VALUE(receipt.metadata_json, '$."x-request-descriptor"')
+    ) AS latest_observed_at
+  FROM ${ref("dw_bronze_xero", "xero_raw_direct_response_history")} AS response
+  INNER JOIN ${ref("dw_bronze_xero", "xero_raw_receipt_history")} AS receipt
+    ON response.receipt_id = receipt.receipt_id
+), audited AS (
+  SELECT
+    *,
+    TO_HEX(SHA256(CONCAT(
+      receipt_id, '|', COALESCE(raw_record_version_id, 'no-payload')
+    ))) AS direct_response_raw_audit_key
+  FROM raw_response_rows
+)
+SELECT
+  direct_response_raw_audit_key,
+  generation,
+  tenant_id,
+  endpoint,
+  operation_id,
+  parent_record_id,
+  canonical_record_id,
+  run_id,
+  receipt_id,
+  raw_record_version_id,
+  request_descriptor,
+  source_bucket,
+  source_object,
+  response_content_type,
+  http_status,
+  is_binary,
+  payload_in_bigquery,
+  payload_json,
+  observed_at,
+  response_rank,
+  physical_raw_response_count,
+  first_observed_at,
+  latest_observed_at,
+  response_rank = 1 AS is_latest_response,
+  physical_raw_response_count > 1 AS has_multiple_raw_responses,
+  response_rank > 1 AS is_prior_response,
+  'raw_receipt_authoritative' AS authority_status
+FROM audited

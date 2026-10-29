@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "dw_staging_xero",
+  name: "contact_group_member_snapshots",
+  description: "Contact membership from Xero group details, keyed by group and sync snapshot."
+}

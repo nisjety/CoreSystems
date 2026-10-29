@@ -1,0 +1,1156 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+import "model_plane/v1/verified_outcome.proto";
+import "model_plane/v1/proof_bundle.proto";
+
+// OrchestrationCore — authoritative state for plans, approvals, todos,
+// and subagent lineage. Mirrors the Rust mp-orchestration crate records and
+// their snake_case wire encodings. Single writer for plan/approval/todo
+// transitions and lineage edges.
+service OrchestrationCoreService {
+  // List plans for a run. Plans are ordered by creation time ascending.
+  rpc ListPlans(ListPlansRequest) returns (ListPlansResponse);
+
+  // Fetch a single plan by id.
+  rpc GetPlan(GetPlanRequest) returns (GetPlanResponse);
+
+  // Transition a plan to a new state. Rejects illegal transitions.
+  rpc TransitionPlan(TransitionPlanRequest) returns (TransitionPlanResponse);
+
+  // List todos for a thread (and optionally scoped to a run).
+  rpc ListTodos(ListTodosRequest) returns (ListTodosResponse);
+
+  // Fetch a single todo by id.
+  rpc GetTodo(GetTodoRequest) returns (GetTodoResponse);
+
+  // Transition a todo to a new state. Rejects illegal transitions.
+  rpc TransitionTodo(TransitionTodoRequest) returns (TransitionTodoResponse);
+
+  // Create an approval request and pause the run for it. Inserts the durable
+  // approval record and broadcasts APPROVAL state-change + RUN_PAUSED_FOR_APPROVAL
+  // so operator surfaces show the pause. Called by execution-core when a step's
+  // permission posture is "ask" and the tool is risky (HITL gate).
+  rpc CreateApproval(CreateApprovalRequest) returns (CreateApprovalResponse);
+
+  // List approvals for a run (and optionally scoped to a step).
+  rpc ListApprovals(ListApprovalsRequest) returns (ListApprovalsResponse);
+
+  // List all PENDING (state = REQUESTED) approvals, optionally scoped to one
+  // org. An empty org_id returns every pending approval across all orgs and is
+  // INTERNAL-ONLY — used by model-gateway to rehydrate its in-memory approval
+  // cache on boot so a restart never silently drops a pending HITL gate. A
+  // non-empty org_id scopes the result to that tenant (IDOR-safe read-through).
+  // (D-1) The request/response messages are org-suffixed to avoid colliding
+  // with the gateway-service ListPendingApprovals* messages in this package.
+  rpc ListPendingApprovals(OrgPendingApprovalsRequest) returns (OrgPendingApprovalsResponse);
+
+  // Fetch a single approval by id.
+  rpc GetApproval(GetApprovalRequest) returns (GetApprovalResponse);
+
+  // Record a decision (granted, denied, or timed_out) on an approval.
+  rpc DecideApproval(DecideApprovalRequest) returns (DecideApprovalResponse);
+
+  // Claim due durable approval deliveries for an authenticated internal
+  // worker. Claims are tenant-scoped, leased, and opaque; the caller identity
+  // is derived from its verified service credential, never from this request.
+  rpc ClaimApprovalDeliveries(ClaimApprovalDeliveriesRequest)
+      returns (ClaimApprovalDeliveriesResponse);
+
+  // Fetch the exact immutable action descriptor for an active delivery lease.
+  // This is service-only and lease-bound; normal approval readers never
+  // receive descriptor content.
+  rpc GetApprovalContinuation(GetApprovalContinuationRequest)
+      returns (GetApprovalContinuationResponse);
+
+  // Record the immutable receipt that a verified worker has begun the exact
+  // descriptor-backed continuation. The worker supplies only its active lease;
+  // Session Core derives fingerprint/version from retained descriptor data.
+  rpc RecordApprovalContinuationStarted(RecordApprovalContinuationStartedRequest)
+      returns (RecordApprovalContinuationStartedResponse);
+
+  // Append the terminal outcome for a started continuation. Completion requires
+  // an authoritative provider receipt; this alone does not settle the outbox.
+  rpc RecordApprovalContinuationOutcome(RecordApprovalContinuationOutcomeRequest)
+      returns (RecordApprovalContinuationOutcomeResponse);
+
+  // Acknowledge a claimed delivery as retryable or terminal. There is no
+  // delivered outcome until Execution Core can present a durable, authenticated
+  // continuation receipt proving that the paused work actually restarted.
+  rpc AcknowledgeApprovalDelivery(AcknowledgeApprovalDeliveryRequest)
+      returns (AcknowledgeApprovalDeliveryResponse);
+
+  // Fetch the subagent lineage for a thread.
+  rpc GetSubagentLineage(GetSubagentLineageRequest) returns (GetSubagentLineageResponse);
+
+  // Attach a subagent lineage edge (parent_run_id -> child_run_id).
+  rpc AttachSubagent(AttachSubagentRequest) returns (AttachSubagentResponse);
+
+  // Assemble the Verevon Proof Bundle for one run — the portable evidence
+  // record defined in proof_bundle.proto. Read-only; org-scoped.
+  rpc GetRunProofBundle(GetRunProofBundleRequest) returns (GetRunProofBundleResponse);
+
+  // Aggregate Verified Outcome Foundation metrics across every run for one
+  // organization (roadmap P1 item 5) — verified completion, false success,
+  // human approval effort, and verification coverage. Read-only; org-scoped.
+  rpc GetVerificationMetrics(GetVerificationMetricsRequest) returns (GetVerificationMetricsResponse);
+
+  // Stream orchestration events for a run. Server-streaming over gRPC;
+  // SSE-compatible at the gateway (/v1/runs/{id}/events).
+  rpc StreamRunEvents(StreamRunEventsRequest) returns (stream OrchestrationEvent);
+
+  // Publish a caller-supplied orchestration event into the run's broadcast
+  // (and bounded replay buffer) without owning the durable record behind it.
+  // Used by execution-core to surface live worker progress — e.g. the browser
+  // agent's dispatched actions and received observations — on the run-event
+  // stream. The server assigns the monotonic event_id and timestamp; callers
+  // leave them empty. Best-effort from the caller's perspective: a failure
+  // here must never fail the underlying work.
+  rpc RecordOrchestrationEvent(RecordOrchestrationEventRequest) returns (RecordOrchestrationEventResponse);
+}
+
+// OrchestratorWorkflowService — the production entry point into the durable
+// Temporal orchestration tier, served by orchestrator-core on the same gRPC
+// listener as its OrchestrationCoreService proxy.
+//
+// It is a separate service, not another method on OrchestrationCoreService,
+// because that service's authority lives in session-core (Rust) which
+// implements every one of its methods; adding a Temporal-start method there
+// would force an unrelated service to implement work it does not own. Durable
+// workflow starts belong to orchestrator-core alone.
+service OrchestratorWorkflowService {
+  // Start one durable Temporal workflow on the orchestrator task queue.
+  //
+  // Before this RPC existed, every workflow the worker registers had zero
+  // production callers. It is deliberately narrow:
+  //   * `workflow_type` is matched against a server-side ALLOWLIST of the
+  //     names the worker actually registers. An unknown name is rejected by
+  //     name; a caller string is never handed to Temporal as a workflow type.
+  //   * tenancy is server-authoritative. `org_id`/`user_id` are taken from the
+  //     verified caller and overwrite whatever `input` carries, so a caller
+  //     cannot start work in another organization.
+  //   * the workflow id is derived deterministically from
+  //     (workflow_type, org_id, run_id | idempotency_key), so a retried call
+  //     attaches to the existing execution instead of double-starting a run.
+  rpc StartWorkflow(StartWorkflowRequest) returns (StartWorkflowResponse);
+}
+
+// --- Enums ---
+
+// Lifecycle state of a plan.
+enum PlanState {
+  // Unknown or unspecified state.
+  PLAN_STATE_UNSPECIFIED = 0;
+  // Plan is being drafted and not yet proposed.
+  PLAN_STATE_DRAFT = 1;
+  // Plan has been proposed for review.
+  PLAN_STATE_PROPOSED = 2;
+  // Plan has been approved and may execute.
+  PLAN_STATE_APPROVED = 3;
+  // Plan was rejected and will not execute.
+  PLAN_STATE_REJECTED = 4;
+  // Plan is currently executing.
+  PLAN_STATE_EXECUTING = 5;
+  // Plan completed successfully.
+  PLAN_STATE_COMPLETED = 6;
+  // Plan failed during execution.
+  PLAN_STATE_FAILED = 7;
+  // Plan was superseded by another plan.
+  PLAN_STATE_SUPERSEDED = 8;
+  // Plan has been archived.
+  PLAN_STATE_ARCHIVED = 9;
+}
+
+// Lifecycle state of an individual plan step.
+enum PlanStepState {
+  // Unknown or unspecified state.
+  PLAN_STEP_STATE_UNSPECIFIED = 0;
+  // Step is waiting to execute.
+  PLAN_STEP_STATE_PENDING = 1;
+  // Step is currently running.
+  PLAN_STEP_STATE_RUNNING = 2;
+  // Step completed successfully.
+  PLAN_STEP_STATE_DONE = 3;
+  // Step was skipped.
+  PLAN_STEP_STATE_SKIPPED = 4;
+  // Step failed during execution.
+  PLAN_STEP_STATE_FAILED = 5;
+}
+
+// Category of approval request.
+enum ApprovalKind {
+  // Unknown or unspecified approval kind.
+  APPROVAL_KIND_UNSPECIFIED = 0;
+  // Approval for a plan.
+  APPROVAL_KIND_PLAN = 1;
+  // Approval for a tool call.
+  APPROVAL_KIND_TOOL_CALL = 2;
+  // Approval for a permission grant.
+  APPROVAL_KIND_PERMISSION = 3;
+  // Approval for a destructive operation.
+  APPROVAL_KIND_DESTRUCTIVE = 4;
+  // Approval for a high-cost operation.
+  APPROVAL_KIND_COST = 5;
+}
+
+// Lifecycle state of an approval request.
+enum ApprovalState {
+  // Unknown or unspecified state.
+  APPROVAL_STATE_UNSPECIFIED = 0;
+  // Approval has been requested and is awaiting decision.
+  APPROVAL_STATE_REQUESTED = 1;
+  // Approval has been granted.
+  APPROVAL_STATE_GRANTED = 2;
+  // Approval has been denied.
+  APPROVAL_STATE_DENIED = 3;
+  // Approval request timed out without a decision.
+  APPROVAL_STATE_TIMED_OUT = 4;
+}
+
+// Lifecycle state of a todo.
+enum TodoState {
+  // Unknown or unspecified state.
+  TODO_STATE_UNSPECIFIED = 0;
+  // Todo is waiting to start.
+  TODO_STATE_PENDING = 1;
+  // Todo is currently being worked on.
+  TODO_STATE_IN_PROGRESS = 2;
+  // Todo is blocked and cannot proceed.
+  TODO_STATE_BLOCKED = 3;
+  // Todo has been completed.
+  TODO_STATE_COMPLETED = 4;
+  // Todo has been cancelled.
+  TODO_STATE_CANCELLED = 5;
+}
+
+// Priority tier for a todo.
+enum TodoPriority {
+  // Unknown or unspecified priority.
+  TODO_PRIORITY_UNSPECIFIED = 0;
+  // Low priority.
+  TODO_PRIORITY_LOW = 1;
+  // Normal priority (default).
+  TODO_PRIORITY_NORMAL = 2;
+  // High priority.
+  TODO_PRIORITY_HIGH = 3;
+  // Urgent priority.
+  TODO_PRIORITY_URGENT = 4;
+}
+
+// Role classification for a subagent lineage edge.
+enum SubagentRole {
+  // Unknown or unspecified role.
+  SUBAGENT_ROLE_UNSPECIFIED = 0;
+  // Subagent is a code generator/implementer.
+  SUBAGENT_ROLE_CODER = 1;
+  // Subagent is a code reviewer.
+  SUBAGENT_ROLE_REVIEWER = 2;
+  // Subagent is a researcher/analyst.
+  SUBAGENT_ROLE_RESEARCHER = 3;
+  // Subagent is an explorer/investigator.
+  SUBAGENT_ROLE_EXPLORER = 4;
+  // Subagent is a generic multi-purpose agent.
+  SUBAGENT_ROLE_GENERIC = 5;
+}
+
+// --- Records ---
+
+// An individual step inside a plan.
+message PlanStep {
+  // Step identifier (ULID, prefix `step_`).
+  string id = 1;
+
+  // Human-readable title.
+  string title = 2;
+
+  // Optional operation slug tying this step to an execution op.
+  string operation = 3;
+
+  // Current state of the step.
+  PlanStepState state = 4;
+
+  // Creation timestamp.
+  google.protobuf.Timestamp created_at = 5;
+
+  // Last update timestamp.
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+// A durable plan record.
+message Plan {
+  // Plan identifier (ULID, prefix `plan_`).
+  string id = 1;
+
+  // Owning run identifier.
+  string run_id = 2;
+
+  // Owning thread identifier.
+  string thread_id = 3;
+
+  // Author (user or agent) who created the plan.
+  string author = 4;
+
+  // Current lifecycle state.
+  PlanState state = 5;
+
+  // Plan summary / intent.
+  string summary = 6;
+
+  // Ordered plan steps.
+  repeated PlanStep steps = 7;
+
+  // Optional id of the plan this one supersedes. Empty when not applicable.
+  string supersedes = 8;
+
+  // Arbitrary metadata blob.
+  google.protobuf.Struct metadata = 9;
+
+  // Creation timestamp.
+  google.protobuf.Timestamp created_at = 10;
+
+  // Last update timestamp.
+  google.protobuf.Timestamp updated_at = 11;
+}
+
+// A durable approval record.
+message Approval {
+  // Approval identifier (ULID, prefix `appr_`).
+  string id = 1;
+
+  // Owning run identifier.
+  string run_id = 2;
+
+  // Owning plan step id. Empty for run-level approvals.
+  string step_id = 3;
+
+  // Category of approval.
+  ApprovalKind kind = 4;
+
+  // Current lifecycle state.
+  ApprovalState state = 5;
+
+  // Principal whose approval is required.
+  string requested_of = 6;
+
+  // Principal who recorded the decision. Empty until decided.
+  string decided_by = 7;
+
+  // Free-form reason provided with the decision.
+  string decision_reason = 8;
+
+  // Arbitrary context attached to the request.
+  google.protobuf.Struct context = 9;
+
+  // When the approval was requested.
+  google.protobuf.Timestamp requested_at = 10;
+
+  // When the approval was decided. Unset while pending.
+  google.protobuf.Timestamp decided_at = 11;
+
+  // Hard deadline for the approval.
+  google.protobuf.Timestamp expires_at = 12;
+
+  // Owning tenant. Carried so a cross-org boot-rehydrate of pending approvals
+  // (ListPendingApprovals with empty org_id) can re-scope each entry to its
+  // tenant in the consumer's cache (D-1, IDOR-safe).
+  string org_id = 13;
+}
+
+// A durable todo record.
+message Todo {
+  // Todo identifier (ULID, prefix `todo_`).
+  string id = 1;
+
+  // Owning thread identifier.
+  string thread_id = 2;
+
+  // Optional owning run identifier. Empty when not tied to a run.
+  string run_id = 3;
+
+  // Principal assigned to the todo.
+  string assignee = 4;
+
+  // Short title.
+  string title = 5;
+
+  // Extended description. Empty when not provided.
+  string description = 6;
+
+  // Current lifecycle state.
+  TodoState state = 7;
+
+  // Priority tier.
+  TodoPriority priority = 8;
+
+  // Ids of todos that block this one.
+  repeated string blocked_by = 9;
+
+  // Arbitrary metadata blob.
+  google.protobuf.Struct metadata = 10;
+
+  // Creation timestamp.
+  google.protobuf.Timestamp created_at = 11;
+
+  // Last update timestamp.
+  google.protobuf.Timestamp updated_at = 12;
+
+  // Completion timestamp. Unset until terminal.
+  google.protobuf.Timestamp completed_at = 13;
+}
+
+// A single parent->child subagent lineage edge.
+message LineageEdge {
+  // Parent run identifier.
+  string parent_run_id = 1;
+
+  // Child run identifier.
+  string child_run_id = 2;
+
+  // Role of the child subagent.
+  SubagentRole role = 3;
+
+  // When the edge was recorded.
+  google.protobuf.Timestamp spawned_at = 4;
+}
+
+// Aggregated subagent lineage for a thread.
+message SubagentLineage {
+  // Owning thread identifier.
+  string thread_id = 1;
+
+  // Maximum depth observed across the lineage.
+  uint32 max_depth = 2;
+
+  // All lineage edges recorded for the thread.
+  repeated LineageEdge edges = 3;
+}
+
+// --- ListPlans ---
+
+message ListPlansRequest {
+  // Run whose plans are being listed.
+  string run_id = 1;
+}
+
+message ListPlansResponse {
+  // Plans ordered by creation time ascending.
+  repeated Plan plans = 1;
+}
+
+// --- GetPlan ---
+
+message GetPlanRequest {
+  // Plan identifier.
+  string plan_id = 1;
+}
+
+message GetPlanResponse {
+  // Plan record. Unset when not found.
+  Plan plan = 1;
+}
+
+// --- TransitionPlan ---
+
+message TransitionPlanRequest {
+  // Plan identifier.
+  string plan_id = 1;
+
+  // Target state. Must be reachable from the current state.
+  PlanState target_state = 2;
+
+  // Principal performing the transition.
+  string actor = 3;
+
+  // Optional reason for the transition.
+  string reason = 4;
+}
+
+message TransitionPlanResponse {
+  // Updated plan record.
+  Plan plan = 1;
+}
+
+// --- ListTodos ---
+
+message ListTodosRequest {
+  // Thread whose todos are being listed.
+  string thread_id = 1;
+
+  // Optional run filter. Empty means all runs in the thread.
+  string run_id = 2;
+}
+
+message ListTodosResponse {
+  // Todos ordered by creation time ascending.
+  repeated Todo todos = 1;
+}
+
+// --- GetTodo ---
+
+message GetTodoRequest {
+  // Todo identifier.
+  string todo_id = 1;
+}
+
+message GetTodoResponse {
+  // Todo record. Unset when not found.
+  Todo todo = 1;
+}
+
+// --- TransitionTodo ---
+
+message TransitionTodoRequest {
+  // Todo identifier.
+  string todo_id = 1;
+
+  // Target state. Must be reachable from the current state.
+  TodoState target_state = 2;
+
+  // Principal performing the transition.
+  string actor = 3;
+
+  // Optional reason for the transition.
+  string reason = 4;
+}
+
+message TransitionTodoResponse {
+  // Updated todo record.
+  Todo todo = 1;
+}
+
+// --- CreateApproval ---
+
+message CreateApprovalRequest {
+  // Run the approval gates.
+  string run_id = 1;
+
+  // Owning plan step id. Empty for run-level approvals.
+  string step_id = 2;
+
+  // Category of approval (typically TOOL_CALL or DESTRUCTIVE).
+  ApprovalKind kind = 3;
+
+  // Principal whose approval is required.
+  string requested_of = 4;
+
+  // Tenant + actor for the durable record.
+  string org_id = 5;
+  string user_id = 6;
+
+  // Free-form reason stored in the approval's context metadata.
+  string reason = 7;
+
+  // Optional TTL; the server computes expires_at = now + this. 0 = no deadline.
+  uint32 expires_in_seconds = 8;
+
+  // Optional caller-supplied id. When set, the durable approval uses this id
+  // instead of minting one — lets an upstream cache (the gateway's in-memory
+  // ApprovalStore) keep its id aligned with the durable record so a later
+  // DecideApproval can target it. Empty = server mints (matrix §4.1).
+  string client_approval_id = 9;
+
+  // Optional idempotency key. When set, the durable INSERT is a no-op on
+  // conflict with an existing (org_id, idempotency_key) row — so a retried
+  // request (e.g. the gateway re-asserting a pending gate) never creates a
+  // duplicate durable approval. Empty = no idempotency guard (D-1).
+  string idempotency_key = 10;
+
+  // Optional canonical JSON descriptor for the exact suspended action. It is
+  // validated, scope-bound, and encrypted into the dedicated continuation
+  // descriptor table; it contains no bearer, refresh token, or provider
+  // credential. The session-core deployment key is required whenever this
+  // field is non-empty. Empty means this approval is proposal-only and can
+  // never be resumed by a worker.
+  //
+  // Descriptors are removed when the approval expires/denies or its delivery
+  // reaches terminal/settled state. ZDR callers must leave this empty:
+  // retained continuation descriptors are intentionally incompatible with
+  // zero-data-retention execution.
+  string continuation_descriptor_json = 11;
+}
+
+message CreateApprovalResponse {
+  // The created approval (state = REQUESTED).
+  Approval approval = 1;
+}
+
+// --- ListApprovals ---
+
+message ListApprovalsRequest {
+  // Run whose approvals are being listed.
+  string run_id = 1;
+
+  // Optional step filter. Empty means run-level and all steps.
+  string step_id = 2;
+
+  // Tenant filter (Phase 6 IDOR fix). Empty → unscoped (internal-only
+  // callers). Non-empty → only approvals owned by this org are returned,
+  // regardless of what org the run itself belongs to.
+  string org_id = 3;
+}
+
+message ListApprovalsResponse {
+  // Approvals ordered by request time ascending.
+  repeated Approval approvals = 1;
+}
+
+// --- ListPendingApprovals (org-scoped; D-1 HITL durability) ---
+
+message OrgPendingApprovalsRequest {
+  // Tenant filter. Empty → ALL pending approvals across every org (the
+  // internal-only boot-rehydrate path). Non-empty → only this org's pending
+  // approvals (IDOR-safe read-through for a client-facing list).
+  string org_id = 1;
+}
+
+message OrgPendingApprovalsResponse {
+  // Pending (state = REQUESTED) approvals ordered by request time ascending.
+  repeated Approval approvals = 1;
+}
+
+// --- GetApproval ---
+
+message GetApprovalRequest {
+  // Approval identifier.
+  string approval_id = 1;
+
+  // Tenant filter (Phase 6 IDOR fix). Empty → unscoped (internal-only
+  // callers, e.g. session-core's own boot paths). Non-empty → the approval is
+  // only returned when it belongs to this org; a mismatch is treated as
+  // not-found (never a distinguishable "forbidden") so existence is not
+  // leaked across tenants.
+  string org_id = 2;
+}
+
+message GetApprovalResponse {
+  // Approval record. Unset when not found.
+  Approval approval = 1;
+}
+
+// --- DecideApproval ---
+
+message DecideApprovalRequest {
+  // Approval identifier.
+  string approval_id = 1;
+
+  // Decision state. Must be granted, denied, or timed_out.
+  ApprovalState decision = 2;
+
+  // Principal recording the decision.
+  string decided_by = 3;
+
+  // Optional free-form reason for the decision.
+  string decision_reason = 4;
+
+  // Tenant filter (Phase 6 IDOR fix). Empty → unscoped (internal-only
+  // callers, e.g. the in-loop browser-agent timeout/cancel fail-closed
+  // paths that already resolved the row themselves). Non-empty → the
+  // decision is only applied when the approval belongs to this org; a
+  // mismatch is treated as not-found, never a distinguishable "forbidden".
+  string org_id = 5;
+}
+
+message DecideApprovalResponse {
+  // Updated approval record.
+  Approval approval = 1;
+}
+
+// --- Approval delivery outbox ---
+
+// A leased identifier-only delivery record. This intentionally contains no
+// user prompt, tool arguments, provider response, or continuation data.
+message ApprovalDelivery {
+  // Stable identifier for this delivery attempt stream.
+  string delivery_id = 1;
+
+  // Durable granted approval authorizing the eventual continuation.
+  string approval_id = 2;
+
+  // Run bound to this approval.
+  string run_id = 3;
+
+  // Canonical tenant and run owner copied from the durable approval row.
+  string org_id = 4;
+  string user_id = 5;
+
+  // Opaque one-time lease capability. It is returned only to the claiming
+  // service and is retained in storage only as a hash.
+  string lease_token = 6;
+
+  // One-based claim attempt count, including this lease.
+  uint32 attempt = 7;
+
+  // Server-assigned expiration for the lease.
+  google.protobuf.Timestamp lease_expires_at = 8;
+}
+
+message ClaimApprovalDeliveriesRequest {
+  // Tenant to claim. It must exactly match the verified service identity.
+  string org_id = 1;
+
+  // Upper bound on returned claims. The server enforces a small fixed cap.
+  uint32 max_deliveries = 2;
+}
+
+message ClaimApprovalDeliveriesResponse {
+  // Claimed deliveries, each with an independent opaque lease token.
+  repeated ApprovalDelivery deliveries = 1;
+}
+
+// Service-only, lease-bound continuation lookup. The descriptor remains
+// unavailable when the active lease does not match, has expired, or was
+// created before descriptor-backed pausing existed.
+message GetApprovalContinuationRequest {
+  string org_id = 1;
+  string delivery_id = 2;
+  string approval_id = 3;
+  string lease_token = 4;
+}
+
+message GetApprovalContinuationResponse {
+  // False for a stale/mismatched lease and for a descriptor-free approval.
+  // These cases remain indistinguishable to avoid leaking durable state.
+  bool available = 1;
+
+  // Canonical descriptor JSON. Set only when available is true. This is
+  // sensitive action data; transport callers must use authenticated TLS. The
+  // backing descriptor is encrypted at rest and removed on terminal cleanup.
+  string continuation_descriptor_json = 2;
+}
+
+message RecordApprovalContinuationStartedRequest {
+  string org_id = 1;
+  string delivery_id = 2;
+  string approval_id = 3;
+  string lease_token = 4;
+}
+
+message RecordApprovalContinuationStartedResponse {
+  // Stable immutable receipt. A retry returns the original receipt ID.
+  string receipt_id = 1;
+
+  // True when an earlier worker already recorded this delivery's start. The
+  // caller must not execute the descriptor again.
+  bool already_started = 2;
+}
+
+enum ApprovalContinuationOutcome {
+  APPROVAL_CONTINUATION_OUTCOME_UNSPECIFIED = 0;
+  APPROVAL_CONTINUATION_OUTCOME_COMPLETED = 1;
+  APPROVAL_CONTINUATION_OUTCOME_FAILED = 2;
+  APPROVAL_CONTINUATION_OUTCOME_CANCELLED = 3;
+}
+
+message RecordApprovalContinuationOutcomeRequest {
+  string org_id = 1;
+  string delivery_id = 2;
+  string approval_id = 3;
+  string receipt_id = 4;
+  string lease_token = 5;
+  ApprovalContinuationOutcome outcome = 6;
+
+  // Required only for COMPLETED. This must be the bounded authoritative
+  // receipt returned by the provider/action boundary, never a model claim.
+  string provider_receipt_id = 7;
+
+  // Required only for FAILED or CANCELLED; validated against a finite
+  // allowlist and never stores raw provider diagnostics.
+  string failure_code = 8;
+
+  // Optional independent judgment on whether this outcome's claimed result
+  // actually happened (Verified Outcome Foundation, verevon-roadmap.md §3b).
+  // Absent from older callers; a missing field is stored as
+  // VERIFICATION_STATUS_UNSPECIFIED, never inferred from `outcome`.
+  VerificationResult verification = 9;
+}
+
+message RecordApprovalContinuationOutcomeResponse {
+  bool recorded = 1;
+  bool already_finalized = 2;
+}
+
+enum ApprovalDeliveryAcknowledgement {
+  // Unknown acknowledgement; rejected.
+  APPROVAL_DELIVERY_ACKNOWLEDGEMENT_UNSPECIFIED = 0;
+
+  // No durable execution proof was produced. Requeue with server-owned
+  // exponential backoff, or mark terminal when the bounded attempt limit is
+  // exhausted.
+  APPROVAL_DELIVERY_ACKNOWLEDGEMENT_RETRY = 1;
+
+  // The delivery cannot proceed safely. This never emits a run-resumed event.
+  APPROVAL_DELIVERY_ACKNOWLEDGEMENT_TERMINAL = 2;
+
+  // The exact descriptor-backed action completed and its immutable outcome
+  // carries an authoritative provider receipt. This settles the outbox only;
+  // it does not assert customer delivery.
+  APPROVAL_DELIVERY_ACKNOWLEDGEMENT_SETTLED = 3;
+}
+
+message AcknowledgeApprovalDeliveryRequest {
+  // Tenant filter. It must exactly match the verified service identity.
+  string org_id = 1;
+
+  // Delivery being acknowledged.
+  string delivery_id = 2;
+
+  // Exact opaque lease capability returned by ClaimApprovalDeliveries.
+  string lease_token = 3;
+
+  // Retry, terminal, or receipt-backed settled.
+  ApprovalDeliveryAcknowledgement acknowledgement = 4;
+
+  // A bounded allowlisted failure classification, not a free-form error.
+  string failure_code = 5;
+
+  // Required only for SETTLED. Session Core verifies this exact immutable
+  // receipt has a completed outcome and authoritative provider receipt.
+  string continuation_receipt_id = 6;
+}
+
+message AcknowledgeApprovalDeliveryResponse {
+  // False when the lease was already settled, expired, or no longer matches.
+  // These cases are deliberately indistinguishable so the response discloses
+  // no additional outbox state.
+  bool acknowledged = 1;
+
+  // True when the outbox item is permanently terminal. It does not mean the
+  // associated run resumed.
+  bool terminal = 2;
+
+  // Total claims made for this delivery.
+  uint32 attempt = 3;
+
+  // Next eligible retry time. Empty for terminal entries or exact replays.
+  google.protobuf.Timestamp next_attempt_at = 4;
+
+  // True only for a receipt-backed settled delivery. It means the worker
+  // finished its continuation protocol, not that a customer received a
+  // communication.
+  bool settled = 5;
+}
+
+// --- GetSubagentLineage ---
+
+message GetSubagentLineageRequest {
+  // Thread whose lineage is being fetched.
+  string thread_id = 1;
+}
+
+message GetSubagentLineageResponse {
+  // Aggregated lineage. Unset when the thread has no edges.
+  SubagentLineage lineage = 1;
+}
+
+// --- AttachSubagent ---
+
+message AttachSubagentRequest {
+  // Owning thread identifier.
+  string thread_id = 1;
+
+  // Parent run identifier.
+  string parent_run_id = 2;
+
+  // Child run identifier.
+  string child_run_id = 3;
+
+  // Role of the child subagent.
+  SubagentRole role = 4;
+}
+
+message AttachSubagentResponse {
+  // The edge that was recorded.
+  LineageEdge edge = 1;
+
+  // Updated aggregate lineage for the thread.
+  SubagentLineage lineage = 2;
+}
+
+// --- Run event streaming (additive) ---
+
+// Request to stream orchestration events for a single run.
+message StreamRunEventsRequest {
+  // Run identifier (server-streaming key).
+  string run_id = 1;
+
+  // Resume cursor. When set, the server first replays buffered events whose
+  // event_id sorts strictly after this value (ULID lexical order), then tails
+  // the live stream. Maps to the SSE `Last-Event-Id` header at the gateway.
+  // Empty = start from the live tail. If the requested cursor is older than
+  // the server's bounded replay buffer, the client should fall back to a
+  // fresh snapshot (ListPlans/ListTodos/ListApprovals).
+  string after_event_id = 2;
+}
+
+// A single orchestration event emitted for a run.
+// Mirrors the Rust `RunEvent` enum in mp-orchestration::run_event.
+message OrchestrationEvent {
+  // Event timestamp (server-assigned).
+  google.protobuf.Timestamp at = 1;
+
+  // Server-assigned monotonic event identifier (ULID). Used as the SSE `id:`
+  // line and as the `after_event_id` resume cursor. Sorts in emission order.
+  string event_id = 2;
+
+  // Event payload. Tags 10-16 align with the original 7-variant Rust enum
+  // order; tags 17-18 are additive browser-agent progress events (B4); tags
+  // 19-20 are additive user-initiated browser-run pause/resume events (Phase 2);
+  // tags 21-22 are additive browser-specific HITL approval-gate events
+  // (Phase 5 — "Approvals & policy"). Phase 5 reuses the general
+  // CreateApproval/DecideApproval RPCs and the generic
+  // RunPausedForApproval/RunResumedAfterApproval/ApprovalStateChanged events
+  // above unchanged (a browser-action approval IS a normal Approval record,
+  // kind=DESTRUCTIVE) — tags 21-22 are additive companions that carry the
+  // browser-specific detail (which action, why it was classified risky) the
+  // generic events don't, so the run timeline shows more than a bare
+  // "risky tool" label.
+  oneof event {
+    PlanTransitioned plan_transitioned = 10;
+    TodoTransitioned todo_transitioned = 11;
+    ApprovalStateChanged approval_state_changed = 12;
+    SubagentAttached subagent_attached = 13;
+    SubagentStopped subagent_stopped = 14;
+    RunPausedForApproval run_paused_for_approval = 15;
+    RunResumedAfterApproval run_resumed_after_approval = 16;
+    BrowserActionDispatched browser_action_dispatched = 17;
+    BrowserObservationReceived browser_observation_received = 18;
+    BrowserRunPaused browser_run_paused = 19;
+    BrowserRunResumed browser_run_resumed = 20;
+    BrowserActionApprovalRequired browser_action_approval_required = 21;
+    BrowserActionDecided browser_action_decided = 22;
+
+    // Verified Outcome Foundation (verevon-roadmap.md §3b, tag 23 — additive).
+    // Fired once a resumed continuation's independent VerificationResult is
+    // durably recorded, so the Agent Run Console can show it live without a
+    // separate fetch. Only emitted when the recording worker actually sent a
+    // verification result — an older worker's outcome (no `verification`
+    // field) never fires this event.
+    ApprovalContinuationVerified approval_continuation_verified = 23;
+  }
+
+  message PlanTransitioned {
+    string plan_id = 1;
+    string run_id = 2;
+    PlanState from = 3;
+    PlanState to = 4;
+  }
+
+  message TodoTransitioned {
+    string todo_id = 1;
+    string thread_id = 2;
+    TodoState from = 3;
+    TodoState to = 4;
+  }
+
+  message ApprovalStateChanged {
+    string approval_id = 1;
+    string run_id = 2;
+    ApprovalKind approval_kind = 3;
+    ApprovalState to = 4;
+    string decided_by = 5;
+  }
+
+  message SubagentAttached {
+    string parent_run_id = 1;
+    string child_run_id = 2;
+    SubagentRole role = 3;
+  }
+
+  message SubagentStopped {
+    string child_run_id = 1;
+    string status = 2;
+  }
+
+  message RunPausedForApproval {
+    string run_id = 1;
+    string approval_id = 2;
+  }
+
+  message RunResumedAfterApproval {
+    string run_id = 1;
+    string approval_id = 2;
+  }
+
+  // The browser agent dispatched an action to the browser executor (Quarry).
+  // Surfaced live so the UI run-event stream shows browser progress (B4).
+  message BrowserActionDispatched {
+    // Run this browser session belongs to (stream key).
+    string run_id = 1;
+    // Browser-agent plan id driving this session.
+    string plan_id = 2;
+    // Per-action id (e.g. `act_0001`).
+    string action_id = 3;
+    // Action type slug: goto|click|type|extract|observe|scroll|wait.
+    string action_type = 4;
+    // Target URL for navigations. Empty for non-goto actions.
+    string url = 5;
+    // Model's rationale for choosing this action (Phase 2). Empty when the
+    // planner is the deterministic fallback (no LLM reason available).
+    string reason = 6;
+  }
+
+  // The browser agent received an observation back from the executor (B4).
+  message BrowserObservationReceived {
+    // Run this browser session belongs to (stream key).
+    string run_id = 1;
+    // Browser-agent plan id driving this session.
+    string plan_id = 2;
+    // Id of the action that produced this observation.
+    string action_id = 3;
+    // Observation status slug: success|failed|timeout|blocked.
+    string status = 4;
+    // Page URL after the action settled. Empty when unavailable.
+    string page_url = 5;
+    // Page title after the action settled. Empty when unavailable.
+    string page_title = 6;
+    // Screenshot artifact reference id (Phase 2). Never inlined bytes — the
+    // client fetches evidence via the existing artifact endpoint. Empty when
+    // unavailable (e.g. a ZDR run that captured no persisted reference).
+    string screenshot_ref = 7;
+    // DOM snapshot artifact reference id (Phase 2). Same non-inlining rule as
+    // `screenshot_ref`. Empty until Quarry captures DOM snapshot references.
+    string dom_snapshot_ref = 8;
+  }
+
+  // User-initiated run pause (Phase 2 B5) — distinct from the pre-existing
+  // HITL `RunPausedForApproval`: this fires when a user explicitly pauses a
+  // running browser-agent loop from the UI, not when a risky tool call is
+  // gated behind approval.
+  message BrowserRunPaused {
+    string run_id = 1;
+    string plan_id = 2;
+  }
+
+  // User-initiated run resume (Phase 2 B5), mirrors `BrowserRunPaused`.
+  message BrowserRunResumed {
+    string run_id = 1;
+    string plan_id = 2;
+  }
+
+  // A browser action was classified risky (login, checkout, posting a form,
+  // a destructive operation, cross-domain navigation, or reuse of a
+  // persistent cookie-bearing profile — plan capability #8) and is paused
+  // for human approval (Phase 5). Fired by execution-core's in-loop gate
+  // right before dispatch, via the SAME `CreateApproval` RPC the generic
+  // tool-call HITL gate uses (`RunPausedForApproval`/`ApprovalStateChanged`
+  // above are broadcast by that RPC as usual) — this event is the
+  // browser-specific companion that names the actual action.
+  message BrowserActionApprovalRequired {
+    // Run this browser session belongs to (stream key).
+    string run_id = 1;
+    // Browser-agent plan id driving this session.
+    string plan_id = 2;
+    // Id of the gated action. Empty for a run-level gate that isn't tied to
+    // one specific dispatched action (e.g. persistent_cookie_use, gated once
+    // at run start rather than per-action).
+    string action_id = 3;
+    // Action type slug: goto|click|type|extract|observe|scroll|wait, or a
+    // synthetic slug for a run-level gate (e.g. "start_run").
+    string action_type = 4;
+    // Target URL, when known. Empty when not applicable.
+    string url = 5;
+    // CSS selector, when known. Empty when not applicable.
+    string selector = 6;
+    // Human-readable reason the action was classified risky.
+    string reason = 7;
+    // login|checkout|posting_form|destructive|cross_domain_navigation|persistent_cookie_use
+    string risk_category = 8;
+    // Durable approval id (from the CreateApproval call this event
+    // accompanies) — lets a UI jump straight to deciding it via the existing
+    // generic `POST /v1/orchestration/approvals/{id}/decide` route.
+    string approval_id = 9;
+  }
+
+  // The pending browser-action approval above was decided (granted, denied,
+  // or timed out). `DecideApproval` records the durable decision and the
+  // generic `ApprovalStateChanged` event. A later authenticated continuation
+  // dispatcher may emit `RunResumedAfterApproval` only after it can prove the
+  // exact paused work started; this companion lets the timeline show
+  // "checkout on example.com — granted", not just an approval id.
+  message BrowserActionDecided {
+    string run_id = 1;
+    string plan_id = 2;
+    string action_id = 3;
+    string approval_id = 4;
+    // granted|denied|timed_out
+    string decision = 5;
+    // Principal who decided, when known. Empty for a system timeout.
+    string decided_by = 6;
+  }
+
+  // Verified Outcome Foundation (verevon-roadmap.md §3b): a resumed
+  // continuation's independently-judged outcome, live on the run's own event
+  // stream. `verification` is never absent on this event — the recording
+  // handler only fires it when one was actually produced.
+  message ApprovalContinuationVerified {
+    string run_id = 1;
+    string delivery_id = 2;
+    string approval_id = 3;
+    string receipt_id = 4;
+    VerificationResult verification = 5;
+  }
+}
+
+// --- RecordOrchestrationEvent ---
+
+message RecordOrchestrationEventRequest {
+  // The event to publish. The server assigns `event_id` and `at` when empty.
+  OrchestrationEvent event = 1;
+}
+
+message RecordOrchestrationEventResponse {
+  // Server-assigned monotonic id of the published event (ULID).
+  string event_id = 1;
+}
+
+// --- StartWorkflow ---
+
+// Request to start one allowlisted durable workflow for a tenant-contained run.
+message StartWorkflowRequest {
+  // Canonical workflow type name. Must appear in the server-side allowlist of
+  // worker-registered workflows (e.g. "InteractiveRunSupervision"). Anything
+  // else is rejected without reaching Temporal.
+  string workflow_type = 1;
+
+  // Tenant that owns the run. It must either be empty or match the verified
+  // caller's organization exactly; a conflict is denied rather than coerced.
+  string org_id = 2;
+
+  // Acting viewer. Same containment rule as `org_id` for user principals.
+  // Service principals may leave it empty (system-initiated work).
+  string user_id = 3;
+
+  // Run identifier this workflow supervises. It anchors the deterministic
+  // workflow id and, for run-scoped workflows, is stamped onto the input.
+  // Must be a single NATS subject token (no '.', ' ', '*' or '>') so the
+  // run's lifecycle events land on mp.v1.run.<run_id>.event where the
+  // downstream `mp.v1.run.*.event` consumers can see them.
+  string run_id = 4;
+
+  // Workflow-type-specific input. Server-authoritative tenancy fields are
+  // overwritten after decoding, so supplying them here has no effect.
+  google.protobuf.Struct input = 5;
+
+  // Optional caller-chosen dedup anchor. When set it replaces `run_id` in the
+  // deterministic workflow id, letting a caller retry a start whose run id is
+  // assigned by the workflow itself.
+  string idempotency_key = 6;
+}
+
+// Identity of the workflow execution that was started or re-attached to.
+message StartWorkflowResponse {
+  // Deterministic Temporal workflow id that was started or re-attached to.
+  string workflow_id = 1;
+
+  // Temporal execution (run) id of the started or existing execution. This is
+  // Temporal's own identifier and is NOT the Model Plane run_id.
+  string temporal_run_id = 2;
+
+  // Canonical workflow type that was started, echoed from the allowlist.
+  string workflow_type = 3;
+}

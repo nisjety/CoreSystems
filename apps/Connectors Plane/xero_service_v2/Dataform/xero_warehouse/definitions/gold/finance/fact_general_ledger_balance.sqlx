@@ -1,0 +1,71 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Conformed Xero Trial Balance at source snapshot and account grain. Amounts are authoritative source balances and additive only within a single snapshot, never across balance dates or snapshots.",
+  assertions: { nonNull: ["tenant_id", "report_snapshot_id", "account_id", "balance_row_key"], uniqueKey: ["balance_row_key"] }
+}
+
+SELECT
+  FARM_FINGERPRINT(balance.tenant_id) AS company_key,
+  FARM_FINGERPRINT(CAST(balance.balance_date AS STRING)) AS date_key,
+  period.financial_period_key,
+  period.financial_period_basis,
+  period.is_derived AS is_financial_period_derived,
+  FARM_FINGERPRINT(CONCAT(balance.tenant_id, '|', balance.account_id)) AS account_key,
+  balance.balance_row_key,
+  balance.tenant_id,
+  balance.report_snapshot_id,
+  balance.report_snapshot_key,
+  balance.report,
+  balance.report_type,
+  balance.report_name,
+  balance.report_from,
+  balance.report_to,
+  balance.report_date,
+  balance.balance_date,
+  balance.report_index,
+  balance.section_index,
+  balance.section_title,
+  balance.row_index,
+  balance.row_label,
+  balance.account_id,
+  account.account_code,
+  account.account_name,
+  account.account_class,
+  account.bs_pl,
+  account.fsli_1,
+  company.base_currency AS functional_currency,
+  balance.account_column_count,
+  balance.debit_column_count,
+  balance.credit_column_count,
+  balance.ytd_debit_column_count,
+  balance.ytd_credit_column_count,
+  balance.unexpected_column_count,
+  balance.is_structurally_complete,
+  balance.is_reportable,
+  balance.is_report_snapshot,
+  balance.is_additive_within_snapshot,
+  balance.is_non_additive_across_snapshots,
+  balance.source_debit_amount,
+  balance.source_credit_amount,
+  balance.source_ytd_debit_amount,
+  balance.source_ytd_credit_amount,
+  balance.debit_amount,
+  balance.credit_amount,
+  balance.ytd_debit_amount,
+  balance.ytd_credit_amount,
+  balance.report_synced_at,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_general_ledger_balance")} AS balance
+LEFT JOIN ${ref("xero_gold_common", "dim_company")} AS company
+  USING (tenant_id)
+LEFT JOIN ${ref("xero_gold_finance", "dim_account")} AS account
+  ON balance.tenant_id = account.tenant_id
+ AND balance.account_id = account.account_id
+LEFT JOIN ${ref("dw_1_silver_xero", "bridge_company_date_fiscal_period")} AS fiscal_date
+  ON balance.tenant_id = fiscal_date.tenant_id
+ AND balance.balance_date = fiscal_date.calendar_date
+LEFT JOIN ${ref("xero_gold_common", "dim_financial_period")} AS period
+  ON fiscal_date.tenant_id = period.tenant_id
+ AND fiscal_date.fiscal_configuration_state_key = period.fiscal_configuration_state_key
+ AND fiscal_date.financial_period_id = period.financial_period_id

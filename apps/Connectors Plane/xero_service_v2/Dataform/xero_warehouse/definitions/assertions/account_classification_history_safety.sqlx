@@ -1,0 +1,47 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_account_classification_history_safety",
+  description: "Account classification history must retain one current observation per account, use valid observation-time intervals, and agree with the current account dimension."
+}
+
+WITH history AS (
+  SELECT *
+  FROM ${ref("dw_1_silver_xero", "dim_account_classification_history")}
+), invalid_current_cardinality AS (
+  SELECT
+    'current_classification_cardinality' AS violation,
+    CONCAT(tenant_id, '|', account_id) AS record_id
+  FROM history
+  GROUP BY tenant_id, account_id
+  HAVING COUNTIF(is_current_classification) != 1
+), invalid_intervals AS (
+  SELECT
+    'classification_observation_interval' AS violation,
+    account_classification_history_key AS record_id
+  FROM history
+  WHERE valid_to_observed_at IS NOT NULL
+    AND valid_to_observed_at < valid_from_observed_at
+), invalid_current_dimension AS (
+  SELECT
+    'current_account_classification_reference' AS violation,
+    COALESCE(current_account.account_key, history.account_key) AS record_id
+  FROM ${ref("dw_1_silver_xero", "dim_account")} AS current_account
+  FULL OUTER JOIN (
+    SELECT * FROM history WHERE is_current_classification
+  ) AS history
+    ON current_account.account_classification_history_key = history.account_classification_history_key
+  WHERE current_account.account_key IS NULL
+     OR history.account_key IS NULL
+     OR current_account.account_mapping_method IS DISTINCT FROM history.account_mapping_method
+     OR current_account.bs_pl IS DISTINCT FROM history.bs_pl
+     OR current_account.fsli_1 IS DISTINCT FROM history.fsli_1
+     OR current_account.is_financial_statement_classification_complete
+        IS DISTINCT FROM history.is_financial_statement_classification_complete
+)
+
+SELECT violation, record_id FROM invalid_current_cardinality
+UNION ALL
+SELECT violation, record_id FROM invalid_intervals
+UNION ALL
+SELECT violation, record_id FROM invalid_current_dimension

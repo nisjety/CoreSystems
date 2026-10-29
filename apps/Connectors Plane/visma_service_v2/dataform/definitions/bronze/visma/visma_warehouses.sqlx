@@ -1,0 +1,42 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_warehouses",
+  description: "Bronze: Warehouse master data with bin locations from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.bool("active")} AS `active`,
+  ${bronze.str("address")} AS `address`,
+  ${bronze.str("avgDefaultCost")} AS `avgDefaultCost`,
+  ${bronze.str("branch")} AS `branch`,
+  ${bronze.str("contact")} AS `contact`,
+  ${bronze.str("description")} AS `description`,
+  ${bronze.str("dropShipLocation")} AS `dropShipLocation`,
+  ${bronze.str("fifoDefaultCost")} AS `fifoDefaultCost`,
+  ${bronze.str("locationEntry")} AS `locationEntry`,
+  ${bronze.str("locations")} AS `locations`,
+  ${bronze.bool("lockSitePICountEntry")} AS `lockSitePICountEntry`,
+  ${bronze.str("metadata")} AS `metadata`,
+  ${bronze.str("receiptLocation")} AS `receiptLocation`,
+  ${bronze.str("returnLocation")} AS `returnLocation`,
+  ${bronze.str("shipLocation")} AS `shipLocation`,
+  ${bronze.str("timestamp")} AS `timestamp`,
+  ${bronze.str("warehouseID")} AS `warehouseID`,
+  ${bronze.str("replenishmentClass")} AS `replenishmentClass`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`  -- v2 does not fetch this field
+FROM ${ref("dw_staging_visma", "warehouses")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

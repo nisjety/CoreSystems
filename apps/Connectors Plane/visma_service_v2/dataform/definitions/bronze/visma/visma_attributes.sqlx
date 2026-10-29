@@ -1,0 +1,31 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_attributes",
+  description: "Bronze: Custom field/attribute definitions from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.str("attributeID")} AS `attributeID`,
+  ${bronze.str("controlType")} AS `controlType`,
+  ${bronze.str("description")} AS `description`,
+  ${bronze.str("details")} AS `details`,
+  ${bronze.bool("internal")} AS `internal`,
+  ${bronze.str("metadata")} AS `metadata`,
+  ${bronze.str("entryMask")} AS `entryMask`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`  -- v2 does not fetch this field
+FROM ${ref("dw_staging_visma", "attributes")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

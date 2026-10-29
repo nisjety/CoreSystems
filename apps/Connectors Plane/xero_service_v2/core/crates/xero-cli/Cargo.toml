@@ -1,0 +1,29 @@
+[package]
+name    = "xero-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "xero"
+path = "src/main.rs"
+
+[dependencies]
+xero-common = { workspace = true }
+xero-auth   = { workspace = true }
+xero-client = { workspace = true }
+xero-sync   = { workspace = true }
+xero-gcs    = { workspace = true }
+xero-store  = { workspace = true }
+tokio       = { workspace = true }
+clap        = { workspace = true }
+anyhow      = { workspace = true }
+tracing     = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono      = { workspace = true }
+uuid        = { workspace = true }
+serde_json  = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

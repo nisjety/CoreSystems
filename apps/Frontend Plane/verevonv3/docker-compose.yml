@@ -1,0 +1,290 @@
+name: frontend-plane-verevonv3
+
+# Frontend Plane: verevon v3.
+# This stack now owns the v3 SPA, its Rust gateway, and the shared Verevon NATS
+# bus used across planes. The browser talks to the same origin and nginx
+# reverse-proxies `/api` to `verevon-gateway-rs` over the shared inter-plane
+# network.
+x-build-metadata: &build-metadata
+  SOURCE_REVISION: ${SOURCE_REVISION:-unverified}
+  BUILD_DATE: ${BUILD_DATE:-unknown}
+
+services:
+  nats:
+    image: nats:2.14.2-alpine@sha256:952d157e28d5394a211229bd57a7b37ff9f184e58e2c8486a08fa909fd254e32
+    container_name: verevon-nats
+    restart: unless-stopped
+    # Keep the NATS secret in the container environment rather than rendering
+    # it into the Compose command line. The shell local is deliberately NOT
+    # named `token`: the secret-scanning pre-commit hook matches the shape
+    # `token="…"` regardless of whether the value is a literal or (as here) a
+    # variable reference, so this name keeps that check meaningful instead of
+    # training everyone to bypass it.
+    command: ["-c", "/etc/nats/shared.conf"]
+    environment:
+      VEREVON_NATS_TOKEN: ${VEREVON_NATS_TOKEN:?VEREVON_NATS_TOKEN is required}
+      NATS_STUDIO_LEAF_PASSWORD: ${NATS_STUDIO_LEAF_PASSWORD:?provide the protected Studio leaf credential}
+      NATS_CONTROL_LEAF_PASSWORD: ${NATS_CONTROL_LEAF_PASSWORD:?provide the protected Control leaf credential}
+      NATS_INGESTION_LEAF_PASSWORD: ${NATS_INGESTION_LEAF_PASSWORD:?provide the protected Ingestion leaf credential}
+    networks:
+      - inter-plane-bus
+    volumes:
+      - verevon-nats-data:/data
+      - ./nats.shared.conf:/etc/nats/shared.conf:ro
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: "0.25"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  gateway:
+    build:
+      context: ./apps/gateway
+      dockerfile: Dockerfile
+      args: *build-metadata
+    container_name: verevon-gateway-rs
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+    environment:
+      PORT: 3185
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
+      # Ownership honesty gate (PR-6): the SAME value retrieval-engine reads. The
+      # gateway reports gate_open = (this == strict) && identity_live at
+      # /api/v1/ownership/status; the SPA renders no privacy affordance otherwise.
+      CONTROL_PLANE_ENFORCEMENT: ${CONTROL_PLANE_ENFORCEMENT:-strict}
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
+      ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
+      ORG_CORE_SERVICE_TOKEN: ${GATEWAY_ORG_CORE_SERVICE_TOKEN:?GATEWAY_ORG_CORE_SERVICE_TOKEN must match Control Plane configuration}
+      # Space lifecycle and membership live in Convex — Application Plane owns
+      # that projection, and domains/spaces.rs queries it for every Space read.
+      #
+      # Both names were read by that handler and declared in NO compose file, so
+      # `personal_space_lifecycle` failed its first guard and every
+      # GET /api/v1/spaces answered 503 "space_lifecycle_unavailable". The Space
+      # surface had never been connected to its data source at all.
+      #
+      # 3210 is the client/query API the handler POSTs `/api/query` to (3211 is
+      # the site/subscription port Control Plane uses for a different purpose).
+      APPLICATION_CONVEX_URL: ${APPLICATION_CONVEX_URL:-http://convex-backend:3210}
+      # Convex's own validator accepts CONVEX_INTERNAL_SERVICE_KEY, falling back
+      # to INTERNAL_API_KEY, and throws when neither is set (convex/authz.ts
+      # assertServiceKey). Pointing at the first name means both sides resolve
+      # the same value by construction rather than by convention; convex-core's
+      # compose already requires it, and its startup.sh pushes it into the
+      # deployment with `convex env set`.
+      #
+      # Optional, not required: empty keeps the handler's honest 503 instead of
+      # refusing to boot a gateway whose other surfaces do not need Convex.
+      APPLICATION_CONVEX_SERVICE_KEY: ${CONVEX_INTERNAL_SERVICE_KEY:-}
+      SESSION_CORE_URL: ${SESSION_CORE_URL:-http://session-core:3017}
+      SESSION_CORE_SERVICE_TOKEN: ${SESSION_CORE_SERVICE_TOKEN:?SESSION_CORE_SERVICE_TOKEN must match Control Plane configuration}
+      USER_CORE_SERVICE_TOKEN: ${USER_CORE_GATEWAY_TOKEN:?USER_CORE_GATEWAY_TOKEN must match Control Plane configuration}
+      BILLING_CORE_URL: ${BILLING_CORE_URL:-http://billing-core:3014}
+      BILLING_CORE_SERVICE_TOKEN: ${GATEWAY_BILLING_CORE_SERVICE_TOKEN:?GATEWAY_BILLING_CORE_SERVICE_TOKEN must match Control Plane configuration}
+      INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
+      # Server-only Marketing authority. Launcher reads protected Studio inputs;
+      # an empty binding disables the API, and only matching live membership is
+      # admitted while Marketing Core remains a single-organization service.
+      MARKETING_CORE_URL: ${MARKETING_CORE_URL:-http://visibility-core:3165}
+      # The anbud core (tender matching) is reached on inter-plane-bus. Its key comes from the runner, read from
+      # Studio's protected anbud_internal_api_key; without it the routes answer not_configured.
+      ANBUD_CORE_URL: ${ANBUD_CORE_URL:-http://anbud-core:3138}
+      ANBUD_API_KEY: ${ANBUD_API_KEY:-}
+      ANBUD_API_KEY_HEADER: ${ANBUD_API_KEY_HEADER:-X-Internal-API-Key}
+      MARKETING_CORE_SERVICE_KEY: ${MARKETING_CORE_SERVICE_KEY:-}
+      MARKETING_CORE_ORGANIZATION_ID: ${MARKETING_CORE_ORGANIZATION_ID:-}
+      NOTIFICATION_CORE_URL: ${NOTIFICATION_CORE_URL:-http://notification-core:3140}
+      NOTIFICATION_CORE_SERVICE_TOKEN: ${NOTIFICATION_GATEWAY_SERVICE_TOKEN:?NOTIFICATION_GATEWAY_SERVICE_TOKEN must match Application Plane notification-core configuration}
+      CONVERSATION_CORE_SERVICE_TOKEN: ${CONVERSATION_GATEWAY_SERVICE_TOKEN:?CONVERSATION_GATEWAY_SERVICE_TOKEN must match Application Plane conversation-core configuration}
+      INFORMATION_CORE_URL: ${INFORMATION_CORE_URL:-http://information-core:3190}
+      CONVERSATION_CORE_URL: ${CONVERSATION_CORE_URL:-http://conversation-core-go:3160}
+      SOCIAL_CORE_URL: ${SOCIAL_CORE_URL:-http://social-core:3162}
+      # audit-core (Control Plane) is dual-homed on inter-plane-bus and binds
+      # HTTP_PORT 8187; insight-core (Application Plane, registry-only — no DB/NATS)
+      # binds 3163. Both were omitted here, so the gateway silently fell back to
+      # its config.rs default (audit) / left insight unwired. Pin them explicitly.
+      AUDIT_CORE_URL: ${AUDIT_CORE_URL:-http://audit-core:8187}
+      AUDIT_CORE_SERVICE_TOKEN: ${GATEWAY_AUDIT_CORE_SERVICE_TOKEN:?GATEWAY_AUDIT_CORE_SERVICE_TOKEN must match Control Plane configuration}
+      INSIGHT_CORE_URL: ${INSIGHT_CORE_URL:-http://insight-core:3163}
+      GRAPH_INDEX_URL: ${GRAPH_INDEX_URL:-http://dpv2-graph-index:9203}
+      DOCUMENTS_API_URL: ${DOCUMENTS_API_URL:-http://dpv2-documents-api:8010}
+      WIKI_STORE_URL: ${WIKI_STORE_URL:-http://dpv2-wiki-store:8011}
+      RETRIEVAL_ENGINE_URL: ${RETRIEVAL_ENGINE_URL:-http://dpv2-retrieval-engine:8004}
+      # Knowledge diagnostics use Data Plane service contracts only. Qdrant,
+      # Quickwit, MinIO, and Dragonfly remain private to dpv2-net.
+      EMBEDDING_ENGINE_URL: ${EMBEDDING_ENGINE_URL:-http://dpv2-embedding-engine:9202}
+      QUICKWIT_ADAPTER_URL: ${QUICKWIT_ADAPTER_URL:-http://dpv2-quickwit-adapter:9204}
+      FINSPO_CORE_URL: ${FINSPO_CORE_URL:-http://finspo-api:3130}
+      QUARRY_EDGE_URL: ${QUARRY_EDGE_URL:-http://quarry-edge:8082}
+      QUARRY_CONTROL_URL: ${QUARRY_CONTROL_URL:-http://quarry-control:8081}
+      # Result caching/rate limiting degrades safely to in-process storage when
+      # no frontend-owned cache contract is configured.
+      # imports service is reachable as "imports-api" on inter-plane-bus (the
+      # gateway default "imports-core" has no alias here → connection refused).
+      IMPORTS_API_URL: ${IMPORTS_API_URL:-http://imports-api:3025}
+      MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-http://model-gateway:8080}
+      MODEL_GATEWAY_DEV_BEARER: ${MODEL_GATEWAY_DEV_BEARER:-}
+      MODEL_PLANE_RECOMMEND_URL: ${MODEL_PLANE_RECOMMEND_URL:-http://model-gateway:8080/v1/recommend/plan}
+      # Search verticals: SearXNG (videos) + autocomplete-core (typeahead). Web/images/answer
+      # ride QUARRY_EDGE_URL above. Suggestions stay empty until AUTOCOMPLETE_INTERNAL_TOKEN is set.
+      SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
+      AUTOCOMPLETE_CORE_URL: ${AUTOCOMPLETE_CORE_URL:-http://autocomplete-core:3219}
+      AUTOCOMPLETE_INTERNAL_TOKEN: ${AUTOCOMPLETE_INTERNAL_TOKEN:-}
+      # Cross-plane GDPR erasure consumer. Points at control-shared-nats (Control
+      # Plane), NOT this stack's own `nats` service: only control-shared-nats
+      # hosts the CONTROLPLANE stream that org-core and user-core publish
+      # verevon.gdpr.erasure.requested into. Pointing this at verevon-nats would
+      # connect, bind nothing, and retry forever — a consumer that looks healthy
+      # and receives nothing. Both brokers sit on inter-plane-bus, so the name
+      # resolves. Unset ⇒ the consumer does not start (it warns), and org-scoped
+      # erasure will NOT purge the gateway's chat-history copy.
+      VEREVON_GATEWAY_GDPR_NATS_URL: ${VEREVON_GATEWAY_GDPR_NATS_URL:-nats://control-shared-nats:4222}
+      VEREVON_GATEWAY_GDPR_NATS_USER: ${VEREVON_GATEWAY_GDPR_NATS_USER:-verevon-gateway-gdpr}
+      VEREVON_GATEWAY_GDPR_NATS_PASSWORD: ${VEREVON_GATEWAY_GDPR_NATS_PASSWORD:?VEREVON_GATEWAY_GDPR_NATS_PASSWORD must match Control Plane control-shared-nats configuration}
+      # NOTE: there is deliberately no SCRAPE_ENHANCED_* stealth-proxy tier here.
+      # The BFF used to fetch bot-walled sites itself through Scrapfly / Bright
+      # Data, which sent the org's target URL and the page's full content to a
+      # third-party processor with no zdr bit, no org scoping, no robots check
+      # and no step receipt — triggered by exactly the 403/429 that meant Quarry
+      # had refused. Web fetch belongs to the Ingestion Plane; a stealth tier, if
+      # needed, goes behind quarry-edge as another DriverKind in its waterfall.
+      ALLOW_DEV_AUTH_BYPASS: ${ALLOW_DEV_AUTH_BYPASS:-0}
+      RUST_LOG: ${RUST_LOG:-info}
+      VEREVON_ALLOWED_ORIGINS: ${VEREVON_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:5199,http://127.0.0.1:5199,http://localhost:3186,http://127.0.0.1:3186,http://localhost:3187,http://127.0.0.1:3187}
+      VEREVON_PUBLIC_ORIGIN: ${VEREVON_PUBLIC_ORIGIN:-http://localhost:5173}
+    ports:
+      - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:3185:3185"
+    networks:
+      - inter-plane-bus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.75"
+    healthcheck:
+      # /health is served on :3185 (src/main.rs). curl is installed in the
+      # runtime stage of apps/gateway/Dockerfile for exactly this check.
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:3185/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+      additional_contexts:
+        quarry-sdk: ../../Ingestion Plane/Quarry-v2/sdks/typescript
+      args: *build-metadata
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 15s
+    ports:
+      - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:${VEREVONV3_HOST_PORT:-5173}:5173"
+    networks:
+      - inter-plane-bus
+    depends_on:
+      gateway:
+        condition: service_healthy
+    volumes:
+      # Mount entire app directory for hot reload
+      - .:/app
+      # Exclude node_modules from bind mount to avoid permission issues
+      - /app/node_modules
+      # Exclude .next cache
+      - /app/.next
+      # Exclude dist build output
+      - /app/dist
+    environment:
+      # Node otherwise derives a ~256 MiB heap from the container cgroup and
+      # Vite enters a GC/OOM loop while transforming this large workspace.
+      #
+      # 512 was enough until the chat surface grew (artifact panel, code
+      # highlighter, live run panel, run-watch). Vite then died mid-transform
+      # with "Ineffective mark-compacts near heap limit" at ~500 MiB, and the
+      # symptom was NOT an error page: index.html served 200, #root stayed
+      # empty, and the console was silent, because the crash happens in the
+      # dev server rather than the browser. Raised with headroom so the next
+      # module does not reproduce a blank page that looks like a UI bug.
+      #
+      # Keep this BELOW the container's memory limit below (2 GiB) — the heap is
+      # only part of Node's footprint, and a cap above the cgroup just moves the
+      # kill from V8 to the OOM killer.
+      NODE_OPTIONS: ${VEREVON_NODE_OPTIONS:---max-old-space-size=1536}
+      # Enable Vite HMR (Hot Module Replacement)
+      VITE_HMR_HOST: localhost
+      VITE_HMR_PORT: 5173
+      VITE_HMR_PROTOCOL: ws
+      # Server-only proxy target for Vite's /api + /health forwarding. Must be the
+      # gateway's compose service name in-container (127.0.0.1 only works for
+      # host-run `pnpm dev`). NOT VITE_-prefixed, so it stays out of the client
+      # bundle — the browser keeps calling same-origin /api (first-party cookie).
+      # This is Docker-internal service discovery, not a user-configurable
+      # browser endpoint. Pin the Compose service name so a legacy local .env
+      # value cannot point Vite at the retired verevon-gateway-rs container.
+      GATEWAY_PROXY_TARGET: http://gateway:3185
+      VITE_ALLOW_DEV_AUTH_BYPASS: ${VITE_ALLOW_DEV_AUTH_BYPASS:-false}
+      VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:-}
+    healthcheck:
+      test: ["CMD-SHELL", "curl --max-time 5 -sf http://127.0.0.1:5173 >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          # Vite's dev server + TS transform over this codebase steadily reaches
+          # ~760M, so a 768M ceiling put it in a restart loop (17 restarts in
+          # one session) that blanked the page mid-answer. Headroom measured
+          # against Docker's 7.7G VM, where the next-largest container is
+          # ~274M. Dev only — the built image is served by nginx and needs a
+          # fraction of this.
+          memory: 2G
+          cpus: "2.0"
+
+volumes:
+  verevon-nats-data:
+    # Docker volumes cannot be renamed. Keep the established JetStream store
+    # mounted through the new logical Verevon name so the local product rename
+    # does not discard durable messages, consumers, or stream metadata.
+    name: verevon-nats-data
+    external: true
+
+networks:
+  inter-plane-bus:
+    external: true
+    name: inter-plane-bus

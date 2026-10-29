@@ -1,0 +1,45 @@
+# Production compose for the Hostinger VPS.
+#
+# Intentionally lean: the sync needs only the Moment API and BigQuery, so no
+# redis/postgres here (the local dev docker-compose.yml keeps those).
+#
+# Usage (from the repo root on the VPS):
+#   docker compose -f deploy/docker-compose.prod.yml up -d --build
+#
+# Requires two untracked files in the repo root (never committed to git):
+#   .env                      - copy from .env.production, holds live secrets
+#   app/gcp-credentials.json  - BigQuery service account key
+
+services:
+  moment_service:
+    build:
+      context: ..
+    container_name: aquatiq-moment-service
+    env_file:
+      - ../.env
+    volumes:
+      # The credentials file is gitignored AND dockerignored, so it isn't in
+      # the image - mount it at the path GOOGLE_APPLICATION_CREDENTIALS
+      # resolves to (repo-root relative "app/gcp-credentials.json" ->
+      # /app/app/... inside the image).
+      #
+      # IMPORTANT: the image runs as `momentuser` (uid 1000). A root-owned
+      # `chmod 600` key mounts fine but is UNREADABLE to that user, and the app
+      # only logs a warning ("GCP client not available") before carrying on with
+      # BigQuery silently disabled. On the host:
+      #     chown 1000:1000 app/gcp-credentials.json
+      #     chmod 400 app/gcp-credentials.json
+      - ../app/gcp-credentials.json:/app/app/gcp-credentials.json:ro
+    restart: unless-stopped
+    # No published ports: the API stays internal. The weekly sync runs via
+    # "docker exec" from host cron (see moment-sync.cron), which needs no
+    # network exposure at all.
+    #
+    # If other containers on this VPS should reach the API, join the shared
+    # backend network instead of publishing a port:
+    # networks:
+    #   - aquatiq-backend
+
+# networks:
+#   aquatiq-backend:
+#     external: true

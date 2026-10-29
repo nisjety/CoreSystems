@@ -1,0 +1,80 @@
+config {
+  type: "table",
+  schema: "visma_silver",
+  name: "dim_location",
+  description: "Location master dimension from Visma. Grain: one row per tenant + business account + location id.",
+  tags: ["silver", "visma", "dimension"]
+}
+
+-- =============================================================================
+-- Silver dimension: Location master data
+-- Source: visma_locations
+-- Grain: tenant + business account + location id (the staging key is
+--        baccount.number + locationId)
+-- Why: Referenced by invoices, shipments, purchase orders, and warehouse
+--      operations. Provides address and tax zone context for transactions.
+-- =============================================================================
+
+WITH source_data AS (
+SELECT
+    tenantId                                    AS tenant_id,
+    -- A location id is unique only inside its business account (HOVED belongs
+    -- to thousands of them), so the account is part of the key.
+    JSON_VALUE(baccount, '$.number')            AS business_account_id,
+    SAFE_CAST(locationId AS STRING)             AS location_id,
+    locationName                                AS location_name,
+    active                                      AS is_active,
+    -- Unpack the nested address + VAT-zone JSON into scalar columns.
+    -- `address` carries nested country{} / county{} objects.
+    SAFE_CAST(JSON_VALUE(address, '$.addressId') AS INT64) AS address_id,
+    JSON_VALUE(address, '$.addressLine1')        AS address_line1,
+    JSON_VALUE(address, '$.addressLine2')        AS address_line2,
+    JSON_VALUE(address, '$.addressLine3')        AS address_line3,
+    JSON_VALUE(address, '$.postalCode')          AS postal_code,
+    JSON_VALUE(address, '$.city')                AS city,
+    JSON_VALUE(address, '$.country.id')          AS country_id,
+    JSON_VALUE(address, '$.country.name')        AS country_name,
+    JSON_VALUE(address, '$.county.id')           AS county_id,
+    JSON_VALUE(address, '$.county.name')         AS county_name,
+    JSON_VALUE(vatZone, '$.id')                  AS vat_zone_id,
+    JSON_VALUE(vatZone, '$.description')         AS vat_zone_description,
+    JSON_VALUE(vatZone, '$.defaultVatCategory')  AS vat_zone_default_vat_category,
+    vatRegistrationId                            AS vat_registration_id,
+    gln,
+    corporateId                                 AS corporate_id,
+    SAFE_CAST(lastModifiedDateTime AS TIMESTAMP) AS last_modified_at
+
+FROM ${ref("visma_locations")}
+WHERE isDeleted = false OR isDeleted IS NULL
+),
+current_tenant_business_unit AS (
+  SELECT
+         tenant_id,
+         business_unit_id,
+         business_unit_name,
+         ROW_NUMBER() OVER (
+           PARTITION BY tenant_id
+           ORDER BY
+             CASE
+               WHEN source_segment_2_value = '0' THEN 1
+               WHEN source_segment_2_value IS NULL THEN 2
+               ELSE 3
+             END,
+             COALESCE(valid_to, DATE '9999-12-31') DESC,
+             valid_from DESC
+         ) AS rn
+  FROM ${ref("visma_silver_excel", "business_unit_mapping")}
+  WHERE CURRENT_DATE() BETWEEN valid_from AND COALESCE(valid_to, DATE '9999-12-31')
+)
+SELECT
+  source_data.*,
+  current_tenant_business_unit.business_unit_id,
+  current_tenant_business_unit.business_unit_name
+FROM source_data
+LEFT JOIN current_tenant_business_unit
+  ON source_data.tenant_id = current_tenant_business_unit.tenant_id
+ AND current_tenant_business_unit.rn = 1
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY source_data.tenant_id, source_data.business_account_id, source_data.location_id
+  ORDER BY source_data.last_modified_at DESC, source_data.location_name DESC
+) = 1

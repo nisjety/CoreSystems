@@ -1,0 +1,12 @@
+# Dedicated Integration-owned public MCP OAuth client, not the CLI client.
+# User grants remain encrypted in Integration's database. No client secret.
+services:
+  integration-api:
+    environment:
+      ALGOLIA_MCP_OAUTH_CLIENT_FILE: /run/secrets/algolia_oauth_client
+    secrets:
+      - algolia_oauth_client
+
+secrets:
+  algolia_oauth_client:
+    file: ${INTEGRATION_LOCAL_ALGOLIA_OAUTH_CLIENT_FILE:?set protected owned Algolia client registration}

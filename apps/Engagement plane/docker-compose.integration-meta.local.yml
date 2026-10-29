@@ -1,0 +1,21 @@
+# Opt-in overlay for the canonical Integration Core's unified Meta app.
+# The launcher projects only this provider's approved IDs and mounted secret;
+# the entire provider .env must never become a container env_file.
+services:
+  integration-api:
+    environment:
+      META_APP_CLIENT_ID: ${INTEGRATION_LOCAL_META_APP_CLIENT_ID:?set the canonical unified Meta app ID}
+      META_APP_CLIENT_SECRET: ""
+      META_APP_CLIENT_SECRET_FILE: /run/secrets/meta_app_client_secret
+      META_CLIENT_SECRET: ""
+      META_JS_SDK_APP_ID: ${INTEGRATION_LOCAL_META_JS_SDK_APP_ID:-}
+      META_BUSINESS_LOGIN_CONFIG_ID: ${INTEGRATION_LOCAL_META_BUSINESS_LOGIN_CONFIG_ID:-}
+      META_BUSINESS_LOGIN_SUPPORT_MESSAGING_CONFIG_ID: ${INTEGRATION_LOCAL_META_BUSINESS_LOGIN_SUPPORT_MESSAGING_CONFIG_ID:-}
+      META_BUSINESS_LOGIN_CONVERSIONS_CONFIG_ID: ${INTEGRATION_LOCAL_META_BUSINESS_LOGIN_CONVERSIONS_CONFIG_ID:-}
+      META_BUSINESS_LOGIN_STUDIO_ADS_CONFIG_ID: ${INTEGRATION_LOCAL_META_BUSINESS_LOGIN_STUDIO_ADS_CONFIG_ID:-}
+    secrets:
+      - meta_app_client_secret
+
+secrets:
+  meta_app_client_secret:
+    file: ${INTEGRATION_LOCAL_META_APP_SECRET_FILE:?set a protected unified Meta app secret file}

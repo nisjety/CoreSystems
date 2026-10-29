@@ -1,0 +1,34 @@
+# Apply over Control Plane's development Compose with the dedicated launcher.
+# Preserves existing principals and hands the merged private registry to Auth.
+services:
+  auth-core:
+    user: root
+    cap_drop: ["ALL"]
+    # Used only by the entrypoint handoff before it drops to appuser.
+    cap_add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"]
+    tmpfs:
+      - /run/control-secrets:rw,noexec,nosuid,nodev,size=2m,mode=0710
+    environment:
+      PLANE_SERVICE_PRINCIPALS_JSON: !reset null
+      PLANE_SERVICE_PRINCIPALS_FILE: /run/secrets/marketing_auth_plane_principals
+    secrets:
+      - source: studio_marketing_auth_plane_principals
+        target: marketing_auth_plane_principals
+
+  # All Control cores run, but optional consumers must not require planes that
+  # are intentionally stopped in the Studio-only development layout.
+  session-core:
+    environment:
+      CONVEX_URL: ""
+      CONVEX_SERVICE_KEY: ""
+
+  audit-core:
+    environment:
+      AUDIT_EXTRA_NATS_BUSES: '[]'
+
+  audit-extra-nats-provisioner:
+    profiles: [control-extra-planes]
+
+secrets:
+  studio_marketing_auth_plane_principals:
+    file: ${STUDIO_MARKETING_AUTH_PRINCIPALS_FILE:?set a protected merged service registry}

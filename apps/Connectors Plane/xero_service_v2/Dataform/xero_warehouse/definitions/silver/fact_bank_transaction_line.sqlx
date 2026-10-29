@@ -1,0 +1,37 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Bank transaction lines at tenant, transaction, and line ID grain.",
+  assertions: { nonNull: ["tenant_id", "bank_transaction_id", "line_item_id", "bank_transaction_line_key"], uniqueKey: ["bank_transaction_line_key"] }
+}
+
+WITH lines AS (
+  SELECT l.*, h.bank_transaction_key, h.transaction_type, h.status,
+         h.is_deleted, h.is_external_cash_flow, h.bank_account_id,
+         h.contact_id, h.transaction_date_local, h.currency_code,
+         h.line_amount_types, h.line_item_count, h.sub_total AS header_sub_total,
+         COUNT(*) OVER (PARTITION BY l.tenant_id, l.bank_transaction_id) AS observed_line_count,
+         COUNTIF(l.line_amount IS NULL) OVER (PARTITION BY l.tenant_id, l.bank_transaction_id) AS missing_amount_count,
+         SUM(IF(h.line_amount_types = 'Inclusive', l.line_amount - COALESCE(l.tax_amount, 0), l.line_amount))
+           OVER (PARTITION BY l.tenant_id, l.bank_transaction_id) AS observed_net_subtotal
+  FROM ${ref("dw_bronze_xero", "xero_bank_transaction_lines")} AS l
+  LEFT JOIN ${ref("dw_1_silver_xero", "fact_bank_transaction")} AS h
+    ON l.tenant_id = h.tenant_id AND l.bank_transaction_id = h.bank_transaction_id
+)
+SELECT CONCAT(tenant_id, '|', bank_transaction_id, '|', line_item_id) AS bank_transaction_line_key,
+       tenant_id, bank_transaction_id, bank_transaction_key, line_item_id,
+       transaction_type, status, is_deleted, is_external_cash_flow,
+       bank_account_id, contact_id, transaction_date_local, currency_code,
+       line_amount_types, account_id, account_code, description,
+       quantity, unit_amount, line_amount AS line_amount_raw,
+       tax_amount, tax_type,
+       IF(line_amount_types = 'Inclusive', line_amount - COALESCE(tax_amount, 0), line_amount) AS net_amount_in_currency,
+       tracking_category_1_id, tracking_option_1_id,
+       tracking_category_2_id, tracking_option_2_id,
+       line_item_count, observed_line_count, header_sub_total, observed_net_subtotal,
+       missing_amount_count,
+       (bank_transaction_key IS NULL OR line_item_count IS DISTINCT FROM observed_line_count
+        OR header_sub_total IS NULL
+        OR ABS(COALESCE(observed_net_subtotal, 0) - header_sub_total) > 0.02) AS is_line_set_ambiguous,
+       synced_at
+FROM lines

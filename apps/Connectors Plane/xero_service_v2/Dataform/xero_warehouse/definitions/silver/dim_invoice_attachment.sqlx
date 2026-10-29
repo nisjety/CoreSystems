@@ -1,0 +1,61 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Invoice attachment metadata with explicit lifecycle inferred only from a newer complete detail attachment list. No file bytes are stored.",
+  assertions: {
+    nonNull: ["invoice_attachment_key", "tenant_id", "invoice_id", "attachment_id"],
+    uniqueKey: ["invoice_attachment_key"]
+  }
+}
+
+WITH latest_complete_list AS (
+  SELECT
+    tenant_id,
+    invoice_id,
+    attachments_json,
+    observed_at AS list_observed_at,
+    source_receipt_id AS list_receipt_id
+  FROM ${ref("dw_bronze_xero", "xero_invoice_attachment_lists")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, invoice_id
+    ORDER BY observed_at DESC, source_receipt_id DESC, source_version_id DESC
+  ) = 1
+), latest_attachment AS (
+  SELECT *
+  FROM ${ref("dw_bronze_xero", "xero_invoice_attachment_observations")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, invoice_id, attachment_id
+    ORDER BY observed_at DESC, source_receipt_id DESC, source_version_id DESC
+  ) = 1
+), status AS (
+  SELECT
+    attachment.*,
+    list.list_observed_at,
+    list.list_receipt_id,
+    EXISTS (
+      SELECT 1
+      FROM UNNEST(JSON_QUERY_ARRAY(list.attachments_json)) AS current_attachment
+      WHERE JSON_VALUE(current_attachment, '$.AttachmentID') = attachment.attachment_id
+    ) AS is_current
+  FROM latest_attachment AS attachment
+  JOIN latest_complete_list AS list USING (tenant_id, invoice_id)
+)
+SELECT
+  CONCAT(tenant_id, '|', invoice_id, '|', attachment_id) AS invoice_attachment_key,
+  tenant_id,
+  invoice_id,
+  attachment_id,
+  attachment_position,
+  file_name,
+  mime_type,
+  content_length_bytes,
+  source_url,
+  observed_at,
+  source_version_id,
+  source_receipt_id,
+  source_run_id,
+  list_observed_at,
+  list_receipt_id,
+  is_current,
+  NOT is_current AS is_removed_from_source
+FROM status

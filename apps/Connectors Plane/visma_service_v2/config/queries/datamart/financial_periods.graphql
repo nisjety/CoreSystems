@@ -1,0 +1,34 @@
+query FinancialPeriods(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  financialPeriods(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    finPeriodId
+    startDate
+    endDate
+    description
+    active
+    year
+    closedInGeneralLedger
+    closedInSupplierLedger
+    closedInCustomerLedger
+    closedInInventoryManagement
+    closedInCashManagement
+    closedInFixedAssets
+    lastModifiedDateTime
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+  }
+}

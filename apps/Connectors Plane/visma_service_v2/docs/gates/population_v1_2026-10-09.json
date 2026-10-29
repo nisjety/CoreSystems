@@ -1,0 +1,1995 @@
+{
+  "source": "v1",
+  "date": "2026-10-09",
+  "generated_utc": "2026-10-09T21:38:33+00:00",
+  "max_age_hours": 26.0,
+  "subset": false,
+  "exit_code": 1,
+  "tenants": [
+    {
+      "tenant_id": "33f319b9-4d57-11ee-960c-025417856183",
+      "name": "Aquatiq AS (pilot)",
+      "kind": "active",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 951,
+            "balance": "61387472.26",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/023672"
+          },
+          "warehouse": {
+            "open": 1183,
+            "balance": "69457785.58",
+            "last_sync": "2026-10-09T17:04:43+00:00",
+            "age_hours": 4.6,
+            "stale": false
+          },
+          "matched": 951,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {
+            "closed_without_timestamp": 232
+          },
+          "defect_keys": [
+            {
+              "kind": "closed_without_timestamp",
+              "key": "014557",
+              "detail": "Closed in Visma, lastModified 2026-04-14 15:53Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "014680",
+              "detail": "Closed in Visma, lastModified 2026-04-14 15:53Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "015412",
+              "detail": "Closed in Visma, lastModified 2026-03-26 11:17Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "015707",
+              "detail": "Closed in Visma, lastModified 2026-03-26 11:05Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "015748",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:25Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017037",
+              "detail": "Closed in Visma, lastModified 2026-03-26 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017087",
+              "detail": "Closed in Visma, lastModified 2026-04-14 12:40Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017139",
+              "detail": "Closed in Visma, lastModified 2026-04-07 09:47Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017526",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017567",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017732",
+              "detail": "Closed in Visma, lastModified 2026-03-26 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017766",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017767",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:44Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017781",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017784",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:44Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017787",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:44Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017792",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017795",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017809",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017814",
+              "detail": "Closed in Visma, lastModified 2026-03-26 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017817",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017818",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017819",
+              "detail": "Closed in Visma, lastModified 2026-03-26 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017828",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017829",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017835",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017840",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017856",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017867",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017873",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017883",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017893",
+              "detail": "Closed in Visma, lastModified 2026-03-25 14:33Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017930",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017932",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017952",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017971",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017981",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017982",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "017996",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:44Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018014",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018030",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018064",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018068",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018102",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:44Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018131",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:44Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018134",
+              "detail": "Closed in Visma, lastModified 2026-03-26 08:49Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018140",
+              "detail": "Closed in Visma, lastModified 2026-03-26 08:49Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018146",
+              "detail": "Closed in Visma, lastModified 2026-03-26 08:49Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018152",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018153",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018155",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018157",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018158",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018159",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018164",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018165",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018166",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018167",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018170",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018173",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018174",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018176",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018177",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018178",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018180",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018191",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018198",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018212",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:44Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018225",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018226",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018227",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018228",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018234",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018236",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018239",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018242",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018245",
+              "detail": "Closed in Visma, lastModified 2026-03-26 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018248",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018267",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:44Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018269",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018272",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018276",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:49Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018280",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:49Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018284",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018290",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018304",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018311",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018313",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018321",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018323",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018325",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018327",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018332",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018333",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018335",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018337",
+              "detail": "Closed in Visma, lastModified 2026-04-15 07:41Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018341",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018344",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018350",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018360",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018367",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018387",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018393",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018410",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:44Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018424",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:44Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018430",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018435",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:44Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018453",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:44Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018461",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018462",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018471",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018484",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018486",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018492",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018494",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018498",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:44Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018509",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018511",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018514",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018519",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018523",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:44Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018528",
+              "detail": "Closed in Visma, lastModified 2026-04-14 15:53Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018535",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018543",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018548",
+              "detail": "Closed in Visma, lastModified 2026-03-26 11:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018549",
+              "detail": "Closed in Visma, lastModified 2026-03-26 11:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018551",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018552",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018553",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018554",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018556",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018558",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018559",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018560",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018564",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018566",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018571",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018572",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018573",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018574",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018575",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018576",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018579",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018582",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018589",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018595",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018612",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018614",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018616",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018619",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018620",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018622",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018623",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018625",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018626",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018629",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018631",
+              "detail": "Closed in Visma, lastModified 2026-04-15 07:41Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018632",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018636",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018637",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018639",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018641",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018642",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018643",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018644",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018645",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018647",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018648",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018652",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018653",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018655",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018656",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018658",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018659",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018660",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018663",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018664",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018666",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018668",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018672",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018674",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018677",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018678",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018679",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018680",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018681",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018684",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018689",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018693",
+              "detail": "Closed in Visma, lastModified 2026-04-15 07:41Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018704",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:44Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018705",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018706",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018723",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018753",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018759",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018800",
+              "detail": "Closed in Visma, lastModified 2026-03-26 09:34Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018833",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018880",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018976",
+              "detail": "Closed in Visma, lastModified 2026-04-15 07:41Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018977",
+              "detail": "Closed in Visma, lastModified 2026-04-15 07:41Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018984",
+              "detail": "Closed in Visma, lastModified 2026-04-15 07:41Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "018993",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "019071",
+              "detail": "Closed in Visma, lastModified 2026-04-15 07:41Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "019083",
+              "detail": "Closed in Visma, lastModified 2026-04-15 07:41Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150006",
+              "detail": "Closed in Visma, lastModified 2026-03-26 14:38Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150008",
+              "detail": "Closed in Visma, lastModified 2026-03-26 14:38Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150010",
+              "detail": "Closed in Visma, lastModified 2026-03-26 14:38Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150016",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:18Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150026",
+              "detail": "Closed in Visma, lastModified 2026-03-26 11:22Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150223",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150224",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150241",
+              "detail": "Closed in Visma, lastModified 2026-03-26 08:49Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150242",
+              "detail": "Closed in Visma, lastModified 2026-03-26 08:49Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150243",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150244",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150245",
+              "detail": "Closed in Visma, lastModified 2026-03-27 07:15Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150250",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150251",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150252",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150253",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150254",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150255",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150256",
+              "detail": "Closed in Visma, lastModified 2026-03-30 08:24Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150261",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150262",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150267",
+              "detail": "Closed in Visma, lastModified 2026-03-25 09:44Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150280",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:27Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150281",
+              "detail": "Closed in Visma, lastModified 2026-04-14 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150285",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150286",
+              "detail": "Closed in Visma, lastModified 2026-04-14 07:26Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150295",
+              "detail": "Closed in Visma, lastModified 2026-04-07 08:50Z"
+            },
+            {
+              "kind": "closed_without_timestamp",
+              "key": "150315",
+              "detail": "Closed in Visma, lastModified 2026-04-15 10:28Z"
+            }
+          ],
+          "lookups": 232,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 255,
+            "balance": "23148511.36",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/Invoice/210507"
+          },
+          "warehouse": {
+            "open": 255,
+            "balance": "23148511.36",
+            "last_sync": "2026-10-09T14:05:10+00:00",
+            "age_hours": 7.6,
+            "stale": false
+          },
+          "matched": 255,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd",
+      "name": "Aqua Pharma AS",
+      "kind": "active",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 2,
+            "balance": "26797.03",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/100196"
+          },
+          "warehouse": {
+            "open": 2,
+            "balance": "26797.03",
+            "last_sync": "2026-10-01T05:00:21+00:00",
+            "age_hours": 208.6,
+            "stale": true
+          },
+          "matched": 2,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 7,
+            "balance": "161211.43",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/Invoice/201410"
+          },
+          "warehouse": {
+            "open": 7,
+            "balance": "161211.43",
+            "last_sync": "2026-10-08T13:00:39+00:00",
+            "age_hours": 32.6,
+            "stale": true
+          },
+          "matched": 7,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "ffa4a061-8084-11e9-b307-0aa512338dd6",
+      "name": "Aqua Pharma Group AS",
+      "kind": "active",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 29,
+            "balance": "31005314.93",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/100258"
+          },
+          "warehouse": {
+            "open": 29,
+            "balance": "31005314.93",
+            "last_sync": "2026-10-08T09:01:47+00:00",
+            "age_hours": 36.6,
+            "stale": true
+          },
+          "matched": 29,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 19,
+            "balance": "5771556.13",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/Invoice/200973"
+          },
+          "warehouse": {
+            "open": 19,
+            "balance": "5771556.13",
+            "last_sync": "2026-10-09T06:03:10+00:00",
+            "age_hours": 15.6,
+            "stale": false
+          },
+          "matched": 19,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "2b6e5cd6-6ce0-11ee-970e-025417856183",
+      "name": "Aquatiq AB",
+      "kind": "active",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 3,
+            "balance": "90863.00",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/100527"
+          },
+          "warehouse": {
+            "open": 3,
+            "balance": "90863.00",
+            "last_sync": "2026-10-06T12:04:07+00:00",
+            "age_hours": 81.6,
+            "stale": true
+          },
+          "matched": 3,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 5,
+            "balance": "20044.00",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/DebitAdj/200089"
+          },
+          "warehouse": {
+            "open": 5,
+            "balance": "20044.00",
+            "last_sync": "2026-10-08T14:04:40+00:00",
+            "age_hours": 31.6,
+            "stale": true
+          },
+          "matched": 5,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "d1507c4a-7717-11ee-970e-025417856183",
+      "name": "Aquatiq Aps",
+      "kind": "active",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 8,
+            "balance": "529749.81",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/100045"
+          },
+          "warehouse": {
+            "open": 8,
+            "balance": "529749.81",
+            "last_sync": "2026-10-06T08:15:16+00:00",
+            "age_hours": 85.4,
+            "stale": true
+          },
+          "matched": 8,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 3,
+            "balance": "43550.70",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/Invoice/200147"
+          },
+          "warehouse": {
+            "open": 3,
+            "balance": "43550.70",
+            "last_sync": "2026-10-05T09:11:04+00:00",
+            "age_hours": 108.5,
+            "stale": true
+          },
+          "matched": 3,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "bed46bb6-21cc-11e9-b307-0aa512338dd6",
+      "name": "Aquatiq Food Automation ApS",
+      "kind": "active",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 10,
+            "balance": "1556937.80",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/100250"
+          },
+          "warehouse": {
+            "open": 10,
+            "balance": "1556937.80",
+            "last_sync": "2026-10-08T11:13:18+00:00",
+            "age_hours": 34.4,
+            "stale": true
+          },
+          "matched": 10,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 3,
+            "balance": "79293.28",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/Invoice/200104"
+          },
+          "warehouse": {
+            "open": 3,
+            "balance": "79293.28",
+            "last_sync": "2026-10-08T11:13:40+00:00",
+            "age_hours": 34.4,
+            "stale": true
+          },
+          "matched": 3,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "7d2c489e-21cc-11e9-b307-0aa512338dd6",
+      "name": "Aquatiq Group AS",
+      "kind": "active",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 3,
+            "balance": "1090985.35",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/000196"
+          },
+          "warehouse": {
+            "open": 3,
+            "balance": "1090985.35",
+            "last_sync": "2026-10-02T20:10:58+00:00",
+            "age_hours": 169.5,
+            "stale": true
+          },
+          "matched": 3,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 9,
+            "balance": "977840.01",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/Invoice/203639"
+          },
+          "warehouse": {
+            "open": 9,
+            "balance": "977840.01",
+            "last_sync": "2026-10-08T02:30:18+00:00",
+            "age_hours": 43.1,
+            "stale": true
+          },
+          "matched": 9,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd",
+      "name": "Sensilist AS",
+      "kind": "active",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 11,
+            "balance": "204491.04",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/100187"
+          },
+          "warehouse": {
+            "open": 11,
+            "balance": "204491.04",
+            "last_sync": "2026-10-09T15:17:16+00:00",
+            "age_hours": 6.4,
+            "stale": false
+          },
+          "matched": 11,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 18,
+            "balance": "638936.78",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/Invoice/200675"
+          },
+          "warehouse": {
+            "open": 18,
+            "balance": "638936.78",
+            "last_sync": "2026-10-07T06:17:29+00:00",
+            "age_hours": 63.4,
+            "stale": true
+          },
+          "matched": 18,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "9b1fa69b-5568-11ee-960c-025417856183",
+      "name": "Consult AS",
+      "kind": "historical",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 121,
+            "balance": "1443183.25",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/103992"
+          },
+          "warehouse": {
+            "open": 121,
+            "balance": "1443183.25",
+            "last_sync": "2026-06-04T22:16:48+00:00",
+            "age_hours": 3047.4,
+            "stale": true
+          },
+          "matched": 121,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 0,
+            "balance": "0",
+            "pages": 0,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "not run: no open rows"
+          },
+          "warehouse": {
+            "open": 0,
+            "balance": "0",
+            "last_sync": "2026-06-05T13:19:47+00:00",
+            "age_hours": 3032.3,
+            "stale": true
+          },
+          "matched": 0,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "f630d6b0-5566-11ee-960c-025417856183",
+      "name": "Aquatiq Food Factory AS",
+      "kind": "historical",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 11,
+            "balance": "10042998.90",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/100303"
+          },
+          "warehouse": {
+            "open": 11,
+            "balance": "10042998.90",
+            "last_sync": "2026-05-14T21:10:18+00:00",
+            "age_hours": 3552.5,
+            "stale": true
+          },
+          "matched": 11,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 3,
+            "balance": "233.46",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/DebitAdj/200027"
+          },
+          "warehouse": {
+            "open": 0,
+            "balance": "0",
+            "last_sync": "2026-06-05T13:11:28+00:00",
+            "age_hours": 3032.5,
+            "stale": true
+          },
+          "matched": 0,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {
+            "missed_or_stale": 3
+          },
+          "defect_keys": [
+            {
+              "kind": "missed_or_stale",
+              "key": "DebitAdj|200027",
+              "detail": "open in Visma, lastModified 2024-02-28 12:27Z"
+            },
+            {
+              "kind": "missed_or_stale",
+              "key": "DebitAdj|200827",
+              "detail": "open in Visma, lastModified 2026-02-17 11:23Z"
+            },
+            {
+              "kind": "missed_or_stale",
+              "key": "DebitAdj|201040",
+              "detail": "open in Visma, lastModified 2025-02-12 11:27Z"
+            }
+          ],
+          "lookups": 0,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "61320c0a-102d-11ee-a0e0-0693d8a7c3dd",
+      "name": "Aquatiq Hygiene Systems AS",
+      "kind": "historical",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 79,
+            "balance": "14439442.25",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/102198"
+          },
+          "warehouse": {
+            "open": 79,
+            "balance": "14439442.25",
+            "last_sync": "2026-06-26T13:26:06+00:00",
+            "age_hours": 2528.2,
+            "stale": true
+          },
+          "matched": 79,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 0,
+            "balance": "0",
+            "pages": 0,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "not run: no open rows"
+          },
+          "warehouse": {
+            "open": 0,
+            "balance": "0",
+            "last_sync": "2026-06-05T13:14:04+00:00",
+            "age_hours": 3032.4,
+            "stale": true
+          },
+          "matched": 0,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "bb6c024e-5567-11ee-960c-025417856183",
+      "name": "Aquatiq Sense AS",
+      "kind": "historical",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 11,
+            "balance": "1847500.00",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/101172"
+          },
+          "warehouse": {
+            "open": 11,
+            "balance": "1847500.00",
+            "last_sync": "2026-06-22T09:35:59+00:00",
+            "age_hours": 2628.0,
+            "stale": true
+          },
+          "matched": 11,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 1,
+            "balance": "8374.43",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/DebitAdj/201152"
+          },
+          "warehouse": {
+            "open": 1,
+            "balance": "8374.43",
+            "last_sync": "2026-06-05T13:18:24+00:00",
+            "age_hours": 3032.3,
+            "stale": true
+          },
+          "matched": 1,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    }
+  ]
+}

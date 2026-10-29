@@ -1,0 +1,27 @@
+# The Go workspace is the shared context for services with local replace
+# directives. Keep every module manifest/source file, but omit host artifacts
+# and credentials that never participate in a production build.
+.git/
+.github/
+.idea/
+.vscode/
+.DS_Store
+
+**/bin/
+**/dist/
+**/coverage/
+**/*.test
+**/*.out
+**/*.prof
+**/*.log
+**/tmp/
+**/.cache/
+
+.env
+.env.*
+**/*.pem
+**/*.key
+**/keys/
+
+**/README.md
+**/docs/

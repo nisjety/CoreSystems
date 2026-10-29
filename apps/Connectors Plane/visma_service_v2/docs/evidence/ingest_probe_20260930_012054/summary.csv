@@ -1,0 +1,3 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+supplier_locations,,1,0,succeeded,6891,6891,6891,69,0,91,13702,2774,2026-09-29 19:14:45.663+00
+unit_of_measures,,1,0,succeeded,43,43,43,1,0,43,13701,656,

@@ -1,0 +1,50 @@
+config {
+  type: "view",
+  name: "xero_invoice_attachment_lists",
+  schema: "dw_bronze_xero",
+  description: "Validated, complete attachment arrays from one-invoice getInvoice responses. A missing or malformed array never proves removal."
+}
+
+WITH responses AS (
+  SELECT
+    generation,
+    tenant_id,
+    parent_record_id,
+    JSON_VALUE(payload_json, '$.Invoices[0].InvoiceID') AS payload_invoice_id,
+    ARRAY_LENGTH(JSON_QUERY_ARRAY(payload_json, '$.Invoices')) AS payload_invoice_count,
+    JSON_QUERY(payload_json, '$.Invoices[0].Attachments') AS attachments_json,
+    LOWER(JSON_VALUE(payload_json, '$.Invoices[0].HasAttachments')) AS has_attachments_flag,
+    observed_at,
+    version_id AS source_version_id,
+    receipt_id AS source_receipt_id,
+    run_id AS source_run_id
+  FROM ${ref("dw_bronze_xero", "xero_raw_direct_response_history")}
+  WHERE operation_id = 'getInvoice'
+)
+SELECT
+  generation,
+  tenant_id,
+  payload_invoice_id AS invoice_id,
+  attachments_json,
+  observed_at,
+  source_version_id,
+  source_receipt_id,
+  source_run_id
+FROM responses
+WHERE payload_invoice_count = 1
+  AND payload_invoice_id IS NOT NULL
+  AND (parent_record_id IS NULL OR parent_record_id = payload_invoice_id)
+  AND JSON_TYPE(SAFE.PARSE_JSON(attachments_json)) = 'array'
+  AND (
+    has_attachments_flag IS NULL
+    OR has_attachments_flag = IF(ARRAY_LENGTH(JSON_QUERY_ARRAY(attachments_json)) > 0, 'true', 'false')
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM UNNEST(JSON_QUERY_ARRAY(attachments_json)) AS attachment
+    WHERE NULLIF(TRIM(JSON_VALUE(attachment, '$.AttachmentID')), '') IS NULL
+  )
+  AND ARRAY_LENGTH(JSON_QUERY_ARRAY(attachments_json)) = (
+    SELECT COUNT(DISTINCT JSON_VALUE(attachment, '$.AttachmentID'))
+    FROM UNNEST(JSON_QUERY_ARRAY(attachments_json)) AS attachment
+  )

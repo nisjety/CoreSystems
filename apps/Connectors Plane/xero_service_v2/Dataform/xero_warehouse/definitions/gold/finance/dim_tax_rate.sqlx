@@ -1,0 +1,15 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Tenant-scoped Xero tax-rate dimension with native component detail retained.",
+  assertions: { nonNull: ["tenant_id", "tax_type", "tax_rate_key"], uniqueKey: ["tax_rate_key"] }
+}
+
+SELECT FARM_FINGERPRINT(CONCAT(tenant_id, '|', tax_type)) AS tax_rate_key,
+       FARM_FINGERPRINT(tenant_id) AS company_key,
+       tenant_id, tax_type, tax_name, status, is_active,
+       display_tax_rate, effective_rate, report_tax_type,
+       can_apply_to_assets, can_apply_to_equity, can_apply_to_expenses,
+       can_apply_to_liabilities, can_apply_to_revenue, tax_components,
+       first_seen_at, synced_at, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_tax_rate")}

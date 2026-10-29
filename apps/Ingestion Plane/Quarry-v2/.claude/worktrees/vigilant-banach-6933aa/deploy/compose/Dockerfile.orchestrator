@@ -1,0 +1,35 @@
+# quarry-orchestrator-go (Go Temporal worker: scrape/batch/crawl workflows + schedules)
+#
+# Connects to a Temporal cluster (TEMPORAL_ADDR), a quarry-control instance
+# (CONTROL_BASE_URL), and a quarry-edge runtime (RUNTIME_BASE_URL).
+# Pulls quarrycontracts + quarryotel from local pkg/ via go.mod replace.
+
+FROM golang:1.22-bookworm AS build
+WORKDIR /src
+
+COPY pkg ./pkg
+COPY services/quarry-orchestrator ./services/quarry-orchestrator
+
+WORKDIR /src/services/quarry-orchestrator
+RUN go mod download
+RUN CGO_ENABLED=0 GOOS=linux go build \
+        -ldflags="-s -w -extldflags=-static" \
+        -o /out/orchestrator ./cmd/orchestrator
+
+# ---- Runtime image -----------------------------------------------------------
+# Orchestrator is a Temporal worker — no public HTTP listener. Healthcheck
+# proves the process is up via /proc; bookworm-slim is enough.
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 65532 --user-group --no-create-home --shell /usr/sbin/nologin quarry
+
+COPY --from=build --chown=quarry:quarry /out/orchestrator /app/orchestrator
+
+USER quarry
+WORKDIR /app
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD pgrep -f orchestrator >/dev/null 2>&1 || exit 1
+ENTRYPOINT ["/app/orchestrator"]

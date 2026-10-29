@@ -1,0 +1,1 @@
+import{a as e}from"./http-C_MfZeN0.js";function t(e){return{"x-verevon-org-id":e}}function n(n){return e(`/api/v1/studio/projects`,{headers:t(n)})}export{n as listStudioProjects};

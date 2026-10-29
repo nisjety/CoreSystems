@@ -1,0 +1,7 @@
+config {
+  type: "declaration",
+  database: dataform.projectConfig.defaultDatabase,
+  schema: "dw_staging_xero",
+  name: "extended_list_snapshots",
+  description: "Immutable completed Assets/Projects list memberships, including empty lists."
+}

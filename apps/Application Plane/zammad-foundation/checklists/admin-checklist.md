@@ -1,0 +1,25 @@
+# Admin Checklist
+
+- Copy [`.env.zammad.example`](/Volumes/Lagring/Triodelab/CoreSystem/apps/Application%20Plane/.env.zammad.example) to `.env.zammad` and replace every placeholder secret.
+- Set `vm.max_map_count=262144` on the Docker host before starting Zammad.
+- Start the stack with `docker compose --env-file .env.zammad -f docker-compose.zammad.yml up -d`.
+- Complete the first-run wizard or provide `AUTOWIZARD_JSON`.
+- Create a Zammad admin access token for bootstrap work.
+- Run the bootstrap tool in dry-run mode first.
+- Apply the bootstrap and execute object migrations.
+- Restart `zammad-railsserver`, `zammad-scheduler`, and `zammad-websocket`.
+- Configure notification sender, sender format, and ticket hook settings.
+- Keep additional follow-up detection on `Subject & References`.
+- Set maximum email size according to your attachment policy.
+- Create the support calendar and starter SLAs.
+- Create the support roles and group access rules.
+- Add human agents with named accounts only.
+- Connect `support@` directly to Zammad.
+- Connect `billing@` directly to Zammad if billing is in scope.
+- Route `help@` as an alias only if replies may come back from `support@`.
+- Map group `Support::Triage` to the support sender identity.
+- Map group `Support::Billing` to the billing sender identity.
+- Create per-group signatures.
+- Create only the safe starter triggers.
+- Leave future webhook triggers disabled until the receiver is live.
+- Verify inbound new-ticket behavior, follow-up behavior, attachments, and outbound sender identity before inviting agents.

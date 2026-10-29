@@ -1,0 +1,44 @@
+{
+  "endpoint_name": "financial_periods",
+  "bigquery_table": "visma_financial_periods",
+  "primary_key": [
+    "year",
+    "period"
+  ],
+  "source": "erp_rest",
+  "api_method": "get_financial_periods",
+  "api_endpoint": "/v1/financialPeriod",
+  "pagination_profile": "none",
+  "modified_field": null,
+  "merge_type": "upsert",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": [
+    "year",
+    "period",
+    "description",
+    "startDate",
+    "endDate",
+    "active",
+    "closedInGeneralLedger",
+    "closedInSupplierLedger",
+    "closedInCustomerLedger",
+    "closedInInventoryManagement",
+    "closedInCashManagement",
+    "closedInFixedAssets"
+  ],
+  "notes": "DataMart root financialPeriods returned 0 rows on 2026-09-29 while the ERP has data (its ETL looks inactive for this entity), so the query file and root_field are filled in but join_normalizer 'normalize_financial_period' is NOT written or registered: a normalizer cannot be verified without rows. Write it (scripts/normalizer_parity.py) once DataMart returns data.",
+  "datamart": {
+    "ready": false,
+    "type_name": "FinancialPeriod",
+    "query_file": "config/queries/financial_period.graphql",
+    "root_field": "financialPeriods",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_financial_period",
+    "fallback_source": "erp_rest",
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    }
+  }
+}

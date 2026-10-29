@@ -1,0 +1,32 @@
+# Canonical Ingestion NATS keeps its token, volume and local QUARRY_EVENTS.
+services:
+  integration-api:
+    # Use this plane's existing broker credential, never the shared hub secret.
+    # Event types are already fully qualified. Legacy unqualified OAuth events
+    # remain local because the hub allows only the explicit integration prefix.
+    environment:
+      NATS_ENABLED: 'true'
+      NATS_URL: nats://ingestion-nats:4222
+      NATS_TOKEN: ${INGESTION_NATS_TOKEN:?INGESTION_NATS_TOKEN is required}
+      NATS_USERNAME: ''
+      NATS_PASSWORD: ''
+      NATS_SUBJECT_PREFIX: ''
+    depends_on:
+      nats: {condition: service_healthy}
+    networks: !override [integration-private, ingestion-net, inter-plane-bus]
+  nats:
+    entrypoint: ["/bin/sh", "/opt/shared-nats-leaf-entrypoint.sh"]
+    command: []
+    environment:
+      NATS_LEAF_DOMAIN: INGESTION
+      INGESTION_NATS_TOKEN: ${INGESTION_NATS_TOKEN:?INGESTION_NATS_TOKEN is required}
+    volumes:
+      - ./nats.local.conf:/etc/nats/nats.conf:ro
+      - ./nats.shared-leaf.conf:/etc/nats/shared-leaf.conf:ro
+      - ../Engagement plane/scripts/shared-nats-leaf-entrypoint.sh:/opt/shared-nats-leaf-entrypoint.sh:ro
+      - ${SHARED_NATS_SECRETS_DIR:-../Engagement plane/.local/secrets}/shared_nats_ingestion_leaf_password:/run/secrets/shared_nats_leaf_password:ro
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=8m

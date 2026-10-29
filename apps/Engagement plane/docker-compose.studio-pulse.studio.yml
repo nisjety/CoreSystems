@@ -1,0 +1,22 @@
+# Opt-in local Pulse bridge to the unified Studio Plane Marketing Core.
+# The demo remains bound to 127.0.0.1 and serves only a sanitized read-only
+# projection. Never mount OAuth tokens here or publish this demo on the LAN.
+services:
+  studio-demo:
+    environment:
+      STUDIO_MARKETING_CORE_KEY_FILE: /run/secrets/studio_marketing_core_key
+      STUDIO_MARKETING_CORE_URL: http://marketing-core:3165
+    secrets:
+      - studio_marketing_core_key
+    networks:
+      - default
+      - studio-pulse-net
+
+secrets:
+  studio_marketing_core_key:
+    file: ${STUDIO_MARKETING_CORE_KEY_FILE:-./.local/secrets/marketing_internal_api_key}
+
+networks:
+  studio-pulse-net:
+    external: true
+    name: studio-pulse-net

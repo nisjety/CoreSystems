@@ -1,0 +1,40 @@
+name: ${DATA_PLANE_COMPOSE_PROJECT:-data-plane-v2}
+
+# Disposable/local startup posture. This never fabricates a Control Plane
+# broker, Auth Core service principal, or Model Plane credential. Cross-plane
+# calls remain strict and fail closed until the real authorities are attached.
+# Only local event consumers and the Control-owned GDPR subscriber are paused.
+
+services:
+  retrieval-engine:
+    environment:
+      APP_ENV: standalone
+      ENABLE_SIGNED_EVENT_CONSUMERS: "0"
+  index-engine:
+    environment:
+      APP_ENV: standalone
+      ENABLE_SIGNED_EVENT_CONSUMERS: "0"
+  embedding-engine:
+    environment:
+      APP_ENV: standalone
+      ENABLE_SIGNED_EVENT_CONSUMERS: "0"
+  graph-index:
+    environment:
+      APP_ENV: standalone
+      ENABLE_SIGNED_EVENT_CONSUMERS: "0"
+  quickwit-adapter:
+    environment:
+      APP_ENV: standalone
+      ENABLE_SIGNED_EVENT_CONSUMERS: "0"
+  data-orchestrator:
+    environment:
+      APP_ENV: standalone
+      SIGNED_COST_EVENTS_ENABLED: "0"
+  documents-api:
+    environment:
+      APP_ENV: standalone
+      USER_CORE_GRANTS_REQUIRED: "0"
+      GDPR_DURABLE_CONSUMER_REQUIRED: "0"
+      NATS_SHARED_URL: ""
+      NATS_SHARED_USER: ""
+      NATS_SHARED_PASSWORD: ""

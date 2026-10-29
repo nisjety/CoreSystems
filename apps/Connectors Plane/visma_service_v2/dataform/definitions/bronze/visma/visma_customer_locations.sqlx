@@ -1,0 +1,50 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_customer_locations",
+  description: "Bronze: SalesOrders V3 customer locations with location-scoped priceClassId.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.str("address")} AS `address`,
+  ${bronze.str("contact")} AS `contact`,
+  ${bronze.str("corporateId")} AS `corporateId`,
+  ${bronze.str("countryId")} AS `countryId`,
+  ${bronze.str("customerId")} AS `customerId`,
+  ${bronze.str("defaultLocationId")} AS `defaultLocationId`,
+  CAST(NULL AS STRING) AS `exportType`,  -- v2 does not fetch this field
+  ${bronze.str("gln")} AS `gln`,
+  ${bronze.str("id")} AS `id`,
+  ${bronze.bool("insurance")} AS `insurance`,
+  ${bronze.int("internalId")} AS `internalId`,
+  ${bronze.str("locationId")} AS `locationId`,
+  ${bronze.str("name")} AS `name`,
+  ${bronze.str("preferredWarehouseId")} AS `preferredWarehouseId`,
+  ${bronze.str("priceClassId")} AS `priceClassId`,
+  ${bronze.int("priority")} AS `priority`,
+  ${bronze.bool("residentialDelivery")} AS `residentialDelivery`,
+  ${bronze.str("salesAccountId")} AS `salesAccountId`,
+  ${bronze.str("salesExportAccountId")} AS `salesExportAccountId`,
+  ${bronze.str("salesNonTaxableAccountId")} AS `salesNonTaxableAccountId`,
+  ${bronze.bool("saturdayDelivery")} AS `saturdayDelivery`,
+  ${bronze.str("shipTermsId")} AS `shipTermsId`,
+  ${bronze.str("shipViaId")} AS `shipViaId`,
+  ${bronze.str("shippingRule")} AS `shippingRule`,
+  ${bronze.str("taxRegistrationId")} AS `taxRegistrationId`,
+  ${bronze.str("taxZoneId")} AS `taxZoneId`,
+  ${bronze.str("warehouseId")} AS `warehouseId`,
+  ${bronze.str("salesEuAccountId")} AS `salesEuAccountId`
+FROM ${ref("dw_staging_visma", "customer_locations")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

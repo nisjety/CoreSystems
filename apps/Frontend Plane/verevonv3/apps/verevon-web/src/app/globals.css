@@ -1,0 +1,1766 @@
+@import "tailwindcss";
+
+@font-face {
+	font-family: Manrope;
+	font-style: normal;
+	font-weight: 200 800;
+	font-display: swap;
+	src: url("/fonts/manrope/manrope-latin-ext-variable.woff2") format("woff2");
+	unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+	font-family: Manrope;
+	font-style: normal;
+	font-weight: 200 800;
+	font-display: swap;
+	src: url("/fonts/manrope/manrope-latin-variable.woff2") format("woff2");
+	unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+	font-family: Geist;
+	font-style: normal;
+	font-weight: 100 900;
+	font-display: swap;
+	src: url("/fonts/geist/geist-variable.woff2") format("woff2");
+}
+
+@font-face {
+	font-family: "Verevon Sans";
+	font-style: normal;
+	font-weight: 300;
+	font-display: swap;
+	src: url("/fonts/verevon-sans/verevon-sans-300.woff") format("woff");
+}
+
+@font-face {
+	font-family: "Verevon Sans";
+	font-style: normal;
+	font-weight: 400;
+	font-display: swap;
+	src: url("/fonts/verevon-sans/verevon-sans-400.woff") format("woff");
+}
+
+@font-face {
+	font-family: "Verevon Sans";
+	font-style: normal;
+	font-weight: 700;
+	font-display: swap;
+	src: url("/fonts/verevon-sans/verevon-sans-700.woff") format("woff");
+}
+
+:root {
+	color: var(--foreground);
+	background: var(--background);
+
+	font-synthesis: none;
+	line-height: 1.5;
+	text-rendering: optimizeLegibility;
+	-webkit-font-smoothing: antialiased;
+
+	--background: #f8f8f7;
+	--foreground: #1a1a1a;
+
+	--card: #ffffff;
+	--card-foreground: #1a1a1a;
+	--popover: #ffffff;
+	--popover-foreground: #1a1a1a;
+	--primary: #171717;
+	--primary-foreground: #ffffff;
+	--secondary: #f1f1f0;
+	--secondary-foreground: #1a1a1a;
+	--muted: #f3f3f2;
+	--muted-foreground: #7a7a7f;
+	--accent: #f0f0ef;
+	--accent-foreground: #1a1a1a;
+	--destructive: #dc2626;
+	--destructive-foreground: #ffffff;
+	--border: #e7e7e5;
+	--input: #e9e9e7;
+	--ring: #ee7a50;
+	--radius: 0.75rem;
+
+	--verevon-bg: #f8f8f7;
+	--verevon-bg-soft: #f3f3f2;
+	--verevon-bg-cream: #f8f8f7;
+	--verevon-bg-mist: #ecebea;
+
+	--verevon-surface: #ffffff;
+	--verevon-surface-soft: #f4f4f3;
+	--verevon-surface-muted: #eeeeed;
+
+	--verevon-text: #1a1a1a;
+	--verevon-text-soft: #34363d;
+	--verevon-text-muted: #66615b;
+	--verevon-text-subtle: #a3a6ad;
+
+	--verevon-border: #e7e7e5;
+	--verevon-border-soft: #eeeeec;
+	--verevon-border-strong: #d8d8d4;
+
+	--verevon-footer-bg: #f6f6f4;
+
+	--verevon-primary: #171717;
+	--verevon-primary-hover: #34363d;
+	--verevon-primary-soft: #efefee;
+	--verevon-primary-dark: #111111;
+
+	--verevon-brand: #171717;
+	--verevon-blue-mist: #eef4ff;
+	--verevon-blue-grey: #4f7df3;
+	--verevon-ink-warm: #1c1c1c;
+	--verevon-teal-deep: #4f7df3;
+
+	--verevon-coral: #ee7a50;
+	--verevon-coral-hover: #dd6f3d;
+	--verevon-coral-glow: #ee7a50;
+	--verevon-coral-deep: #793819;
+	--verevon-coral-soft: #fff1e7;
+
+	--verevon-a-earth: #793819;
+	--verevon-a-accent: #ee7a50;
+	--verevon-b-apricot: #f7c8a8;
+	--verevon-b-mist: #e8d8c8;
+	--verevon-c-cream: #f4f1eb;
+	--verevon-c-white: #f7f4ee;
+	--verevon-d-panel-muted: #f1eee8;
+	--verevon-d-border: #d8d2c6;
+	--verevon-e-muted: #66615b;
+	--verevon-e-subtle: #8a8d96;
+	--verevon-g-blue-mist: #d9e3e4;
+	--verevon-g-blue-grey: #818e99;
+	--verevon-h-teal-deep: #29404a;
+	--verevon-h-ink-warm: #251f21;
+	--verevon-j-text: #171717;
+	--verevon-j-text-soft: #34363d;
+
+	/* ---------------------------------------------------------------------
+	 * Design system — documented in DESIGN.md
+	 * ------------------------------------------------------------------- */
+
+	/* Type scale (fluid). One source of truth for headline + body sizing.
+	 * In Tailwind v4 these also generate `text-display`, `text-h2`, … utilities. */
+	--text-display: clamp(3.35rem, 6.2vw, 8.2rem);
+	--text-display--line-height: 0.9;
+	--text-h1: clamp(3rem, 4.9vw, 6.2rem);
+	--text-h1--line-height: 0.94;
+	--text-h2: clamp(2.5rem, 3.9vw, 4.7rem);
+	--text-h2--line-height: 0.98;
+	--text-h3: clamp(1.55rem, 1.7vw, 2.2rem);
+	--text-h3--line-height: 1.04;
+	--text-body-lg: clamp(1.08rem, 1.1vw, 1.32rem);
+	--text-body-lg--line-height: 1.5;
+	--text-body: clamp(1rem, 1vw, 1.15rem);
+	--text-body--line-height: 1.55;
+	--text-body-sm: clamp(0.92rem, 0.92vw, 1.02rem);
+	--text-body-sm--line-height: 1.45;
+	--text-eyebrow: clamp(0.72rem, 0.74vw, 0.82rem);
+	--text-label: clamp(0.68rem, 0.7vw, 0.76rem);
+
+	/* Tracking presets paired with the scale */
+	--tracking-display: -0.072em;
+	--tracking-heading: -0.055em;
+	--tracking-eyebrow: 0.28em;
+	--tracking-label: 0.14em;
+
+	/* Elevation — cards, panels, floating surfaces */
+	--verevon-shadow-sm: 0 10px 28px rgba(23, 23, 23, 0.035);
+	--verevon-shadow-md: 0 24px 70px rgba(31, 31, 29, 0.09);
+	--verevon-shadow-lg: 0 48px 140px rgba(31, 31, 29, 0.13);
+	--verevon-shadow-hero: 0 34px 120px rgba(0, 0, 0, 0.18);
+	--verevon-hero-text-shadow: 0 1px 1px rgba(0, 0, 0, 0.12), 0 6px 18px rgba(0, 0, 0, 0.07);
+	--verevon-hero-button-shadow: 0 1px 1px rgba(0, 0, 0, 0.22), 0 8px 24px rgba(0, 0, 0, 0.16), 0 22px 64px rgba(0, 0, 0, 0.1);
+	--verevon-hero-nav-shadow: 0 1px 1px rgba(0, 0, 0, 0.08), 0 5px 14px rgba(0, 0, 0, 0.04);
+
+	/* Motion language — three tiers: micro (hover), reveal (scroll), cinematic (hero) */
+	--verevon-dur-micro: 320ms;
+	--verevon-dur-reveal: 640ms;
+	--verevon-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+	--verevon-ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+	/* Sovereign / trust accent — restrained terracotta tints reserved for
+	 * trust + governance surfaces (badges, residency markers, focus). */
+	--verevon-trust-tint: #fff1e7;
+	--verevon-trust-line: color-mix(in srgb, var(--verevon-coral) 28%, var(--verevon-border-strong));
+	--verevon-status-live: #2f7d55;
+	--verevon-status-live-soft: #e7f1ea;
+	--verevon-status-progress: var(--verevon-coral);
+	--verevon-status-progress-soft: var(--verevon-coral-soft);
+	--verevon-status-planned: #7a7a7f;
+	--verevon-status-planned-soft: #efefee;
+}
+
+@theme inline {
+	--color-background: var(--background);
+	--color-foreground: var(--foreground);
+
+	--color-card: var(--card);
+	--color-card-foreground: var(--card-foreground);
+	--color-popover: var(--popover);
+	--color-popover-foreground: var(--popover-foreground);
+	--color-primary: var(--primary);
+	--color-primary-foreground: var(--primary-foreground);
+	--color-secondary: var(--secondary);
+	--color-secondary-foreground: var(--secondary-foreground);
+	--color-muted: var(--muted);
+	--color-muted-foreground: var(--muted-foreground);
+	--color-accent: var(--accent);
+	--color-accent-foreground: var(--accent-foreground);
+	--color-destructive: var(--destructive);
+	--color-destructive-foreground: var(--destructive-foreground);
+	--color-border: var(--border);
+	--color-input: var(--input);
+	--color-ring: var(--ring);
+
+	--color-verevon-bg: var(--verevon-bg);
+	--color-verevon-bg-soft: var(--verevon-bg-soft);
+	--color-verevon-bg-cream: var(--verevon-bg-cream);
+	--color-verevon-bg-mist: var(--verevon-bg-mist);
+
+	--color-verevon-surface: var(--verevon-surface);
+	--color-verevon-surface-soft: var(--verevon-surface-soft);
+	--color-verevon-surface-muted: var(--verevon-surface-muted);
+
+	--color-verevon-text: var(--verevon-text);
+	--color-verevon-text-soft: var(--verevon-text-soft);
+	--color-verevon-text-muted: var(--verevon-text-muted);
+	--color-verevon-text-subtle: var(--verevon-text-subtle);
+
+	--color-verevon-border: var(--verevon-border);
+	--color-verevon-border-soft: var(--verevon-border-soft);
+	--color-verevon-border-strong: var(--verevon-border-strong);
+	--color-verevon-footer-bg: var(--verevon-footer-bg);
+
+	--color-verevon-coral: var(--verevon-coral);
+	--color-verevon-coral-hover: var(--verevon-coral-hover);
+	--color-verevon-coral-soft: var(--verevon-coral-soft);
+
+	--color-verevon-a-earth: var(--verevon-a-earth);
+	--color-verevon-c-white: var(--verevon-c-white);
+	--color-verevon-g-blue-mist: var(--verevon-g-blue-mist);
+	--color-verevon-h-teal-deep: var(--verevon-h-teal-deep);
+	--color-verevon-h-ink-warm: var(--verevon-h-ink-warm);
+	--color-verevon-j-text: var(--verevon-j-text);
+	--color-verevon-j-text-soft: var(--verevon-j-text-soft);
+
+	--font-manrope: Manrope, sans-serif;
+	--font-verevon: "Verevon Sans", Manrope, sans-serif;
+	--font-geist: Geist, sans-serif;
+	--font-geist-sans: Geist, sans-serif;
+	--font-sans: var(--font-geist-sans);
+	--font-mono: var(--font-geist-mono);
+
+	--radius-sm: calc(var(--radius) - 4px);
+	--radius-md: calc(var(--radius) - 2px);
+	--radius-lg: var(--radius);
+	--radius-xl: calc(var(--radius) + 4px);
+}
+
+html {
+	scroll-behavior: smooth;
+	background: var(--background);
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	overflow-x: hidden;
+	background: var(--background);
+	color: var(--foreground);
+	font-family:
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+}
+
+.verevon-hima-fog {
+	position: absolute;
+	top: -72vh;
+	left: 0;
+	width: 100%;
+	height: 72vh;
+	opacity: 0;
+	visibility: hidden;
+	transform: translate3d(0, 22vh, 0);
+	transition:
+		opacity var(--verevon-dur-reveal) var(--verevon-ease-out),
+		transform var(--verevon-dur-reveal) var(--verevon-ease-out),
+		visibility var(--verevon-dur-reveal) var(--verevon-ease-out);
+	background: linear-gradient(
+		to top,
+		var(--background) 0%,
+		color-mix(in srgb, var(--background) 92%, transparent) 19%,
+		color-mix(in srgb, var(--background) 74%, transparent) 34%,
+		color-mix(in srgb, var(--background) 48%, transparent) 47%,
+		color-mix(in srgb, var(--background) 34%, transparent) 56.5%,
+		color-mix(in srgb, var(--background) 24%, transparent) 65%,
+		color-mix(in srgb, var(--background) 16%, transparent) 73%,
+		color-mix(in srgb, var(--background) 10%, transparent) 80.2%,
+		color-mix(in srgb, var(--background) 5%, transparent) 86.1%,
+		color-mix(in srgb, var(--background) 2%, transparent) 91%,
+		color-mix(in srgb, var(--background) 1%, transparent) 95.2%,
+		transparent 100%
+	);
+}
+
+.verevon-hima-fog.scrolled {
+	opacity: 1;
+	visibility: visible;
+	transform: translate3d(0, 0, 0);
+}
+
+.verevon-hero-scroll-cue {
+	opacity: 0.74;
+	transition: opacity 320ms var(--verevon-ease-out);
+}
+
+.verevon-hero-scroll-cue:hover {
+	opacity: 1;
+}
+
+.verevon-hero-text-shadow {
+	text-shadow: var(--verevon-hero-text-shadow);
+}
+
+.verevon-hero-button-shadow {
+	text-shadow: var(--verevon-hero-button-shadow);
+}
+
+.verevon-hero-nav-shadow {
+	text-shadow: var(--verevon-hero-nav-shadow);
+}
+
+.verevon-hero-button-shadow svg {
+	filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.2)) drop-shadow(0 8px 16px rgba(0, 0, 0, 0.12));
+}
+
+/* The hero owns a single, deliberate next action. The contact route remains
+ * close at hand, but does not compete with the product journey. */
+[data-hero-copy] {
+	position: relative;
+}
+
+[data-hero-copy]::before {
+	position: absolute;
+	top: 0.3rem;
+	bottom: 0.15rem;
+	left: clamp(-1.25rem, -1.65vw, -0.55rem);
+	width: 1px;
+	background: linear-gradient(
+		to bottom,
+		transparent,
+		color-mix(in srgb, var(--verevon-c-white) 56%, transparent) 18%,
+		color-mix(in srgb, var(--verevon-c-white) 20%, transparent) 78%,
+		transparent
+	);
+	content: "";
+}
+
+.verevon-hero-primary {
+	border-top-color: color-mix(in srgb, var(--verevon-c-white) 58%, transparent);
+	font-weight: 500;
+}
+
+.verevon-hero-secondary {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.55rem;
+	padding: 0.8rem 0 0.2rem;
+	border-top: 1px solid color-mix(in srgb, var(--verevon-c-white) 22%, transparent);
+	font-family: var(--font-geist), sans-serif;
+	font-size: clamp(0.78rem, 0.78vw, 0.9rem);
+	font-weight: 400;
+	line-height: 1.15;
+	color: color-mix(in srgb, var(--verevon-c-white) 76%, transparent);
+	text-decoration: none;
+	transition: border-color 220ms ease, color 220ms ease;
+}
+
+.verevon-hero-secondary span {
+	display: inline-block;
+	transition: transform 260ms var(--verevon-ease-out);
+}
+
+.verevon-hero-secondary:hover,
+.verevon-hero-secondary:focus-visible {
+	border-top-color: color-mix(in srgb, var(--verevon-c-white) 72%, transparent);
+	color: var(--verevon-c-white);
+}
+
+.verevon-hero-secondary:hover span,
+.verevon-hero-secondary:focus-visible span {
+	transform: translateX(0.28rem);
+}
+
+.verevon-hero-secondary:focus-visible {
+	outline: 2px solid var(--verevon-c-white);
+	outline-offset: 5px;
+}
+
+@media (max-width: 760px) {
+	[data-hero-copy]::before {
+		display: none;
+	}
+}
+
+.verevon-hero-nav-shadow svg {
+	filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.08)) drop-shadow(0 5px 10px rgba(0, 0, 0, 0.04));
+}
+
+.verevon-hero-nav-shadow button span {
+	box-shadow: 0 1px 1px rgba(0, 0, 0, 0.08), 0 5px 10px rgba(0, 0, 0, 0.04);
+}
+
+.verevon-site-nav-surface {
+	position: relative;
+	isolation: isolate;
+	background-color: transparent;
+	border-color: transparent;
+	box-shadow: none;
+	transition-delay: 0s;
+}
+
+[data-site-nav] {
+	height: 50px;
+}
+
+[data-site-brand-target][data-intro-hidden] {
+	opacity: 0;
+	pointer-events: none;
+}
+
+/* Marketing CTAs share Tyde's quiet editorial treatment: a hairline rule,
+ * generous air around the label, and a deliberately long directional arrow.
+ * Colour remains contextual through the ArrowButton variant. */
+.verevon-cta {
+	display: inline-flex;
+	max-width: 100%;
+	min-width: min(100%, 11.5rem);
+	align-items: center;
+	justify-content: space-between;
+	gap: clamp(1.5rem, 2.4vw, 3.25rem);
+	border-top: 1px solid color-mix(in srgb, currentColor 24%, transparent);
+	padding: 0.8rem 0 0.2rem;
+	font-family: var(--font-geist), sans-serif;
+	font-size: clamp(0.78rem, 0.78vw, 0.9rem);
+	font-weight: 400;
+	line-height: 1.15;
+	letter-spacing: -0.01em;
+	text-align: left;
+	text-decoration: none;
+	transition: color 220ms ease;
+}
+
+.verevon-cta-label {
+	display: inline-flex;
+	min-width: 0;
+	align-items: center;
+	justify-content: space-between;
+	gap: clamp(1.5rem, 2.4vw, 3.25rem);
+	font-family: var(--font-geist), sans-serif;
+	font-size: clamp(0.78rem, 0.78vw, 0.9rem);
+	font-weight: 400;
+	line-height: 1.15;
+	letter-spacing: -0.01em;
+	white-space: nowrap;
+}
+
+.verevon-cta-arrow {
+	width: clamp(2.25rem, 3.15vw, 3rem);
+	height: auto;
+	flex: none;
+	stroke-width: 1;
+	transition: transform 320ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.verevon-cta:hover .verevon-cta-arrow,
+.verevon-cta:focus-visible .verevon-cta-arrow {
+	transform: translateX(0.38rem);
+}
+
+.verevon-cta:hover,
+.verevon-cta:focus-visible {
+	color: var(--verevon-coral-deep);
+}
+
+.verevon-cta:focus-visible {
+	outline: 2px solid var(--verevon-coral-deep);
+	outline-offset: 5px;
+}
+
+/* A whole feature card can itself be the link, so it cannot contain a nested
+ * ArrowButton. Its terminal label inherits the card's single CTA rail. */
+.verevon-cta-card .verevon-cta-label {
+	padding-top: 0;
+}
+
+.verevon-cta-card:hover .verevon-cta-arrow,
+.verevon-cta-card:focus-visible .verevon-cta-arrow {
+	transform: translateX(0.38rem);
+}
+
+.verevon-cta-card:hover .verevon-cta-label,
+.verevon-cta-card:focus-visible .verevon-cta-label {
+	color: var(--verevon-coral-deep);
+}
+
+.verevon-cta-card:focus-visible {
+	outline: 2px solid var(--verevon-coral-deep);
+	outline-offset: 5px;
+}
+
+/* The primary editorial CTAs pick up the navbar's light surface at their
+ * rail, then let it dissolve into the chapter beneath. */
+.verevon-cta-drop {
+	position: relative;
+	isolation: isolate;
+	padding-bottom: 0.85rem;
+}
+
+.verevon-cta-drop::before {
+	position: absolute;
+	z-index: 0;
+	top: 0;
+	left: -1rem;
+	right: -1rem;
+	bottom: calc(-1.1rem + 4px);
+	-webkit-backdrop-filter: blur(9px) saturate(112%);
+	backdrop-filter: blur(9px) saturate(112%);
+	background: linear-gradient(to bottom, rgb(255 255 255 / 78%) 0%, rgb(255 255 255 / 46%) 34%, transparent 100%);
+	content: "";
+	opacity: 0;
+	pointer-events: none;
+	transform: scaleY(0.9);
+	transform-origin: top;
+	transition: opacity 180ms ease;
+}
+
+.verevon-cta-drop > * {
+	position: relative;
+	z-index: 1;
+}
+
+.verevon-cta-drop:hover::before,
+.verevon-cta-drop:focus-visible::before {
+	opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.verevon-cta-arrow {
+		transition: none;
+	}
+
+	.verevon-cta:hover .verevon-cta-arrow,
+	.verevon-cta:focus-visible .verevon-cta-arrow,
+	.verevon-cta-card:hover .verevon-cta-arrow,
+	.verevon-cta-card:focus-visible .verevon-cta-arrow {
+		transform: none;
+	}
+}
+
+@media (max-width: 480px) {
+	.verevon-cta {
+		width: 100%;
+	}
+
+	.verevon-cta-label {
+		white-space: normal;
+	}
+}
+
+html[data-home-intro-session="seen"] [data-home-intro] {
+	display: none;
+}
+
+html[data-home-intro-session="seen"] [data-home-intro][data-home-intro-preview] {
+	display: grid;
+}
+
+html[data-home-intro-session="seen"] [data-site-brand-target][data-intro-hidden] {
+	opacity: 1;
+	pointer-events: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	[data-site-brand-target][data-intro-hidden] {
+		opacity: 1;
+		pointer-events: auto;
+	}
+}
+
+.verevon-site-nav-surface::before {
+	display: none;
+}
+
+.verevon-site-nav-surface[data-scrolled="true"] {
+	-webkit-backdrop-filter: blur(16px) saturate(112%);
+	backdrop-filter: blur(16px) saturate(112%);
+	background-color: rgb(255 255 255 / 64%);
+	border-bottom-color: transparent;
+	box-shadow: none;
+	transition-delay: 0s;
+}
+
+/* The bar stays visually absent over the hero, then uses the original scroll
+ * fade to reveal a quiet, brighter frosted surface. */
+.verevon-site-nav-surface[data-scrolled="false"] {
+	-webkit-backdrop-filter: none;
+	backdrop-filter: none;
+	background-color: transparent;
+}
+
+.verevon-menu-surface {
+	-webkit-backdrop-filter: blur(16px) saturate(112%);
+	backdrop-filter: blur(16px) saturate(112%);
+	background-color: rgb(255 255 255 / 64%);
+}
+
+.verevon-site-nav-surface[data-scrolled="true"]::before {
+	display: none;
+}
+
+.verevon-dashboard-link {
+	position: relative;
+	-webkit-backdrop-filter: blur(16px) saturate(112%);
+	backdrop-filter: blur(16px) saturate(112%);
+	background-color: rgb(255 255 255 / 64%);
+	color: var(--verevon-j-text);
+	transition: background-color 220ms ease, color 220ms ease, transform 260ms var(--verevon-ease-out);
+}
+
+.verevon-dashboard-link span {
+	display: inline-block;
+	transition: transform 260ms var(--verevon-ease-out);
+}
+
+.verevon-dashboard-link:hover,
+.verevon-dashboard-link:focus-visible {
+	background-color: var(--verevon-coral-deep);
+	color: white;
+	transform: translateY(-1px);
+}
+
+.verevon-dashboard-link:hover span,
+.verevon-dashboard-link:focus-visible span {
+	transform: translate(0.15rem, -0.15rem);
+}
+
+.verevon-dashboard-link[data-loading="true"] {
+	pointer-events: none;
+	color: transparent;
+}
+
+.verevon-dashboard-link[data-loading="true"]::after {
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	width: 0.86rem;
+	height: 0.86rem;
+	border: 1px solid rgb(255 255 255 / 36%);
+	border-top-color: var(--verevon-j-text);
+	border-radius: 999px;
+	content: "";
+	transform: translate(-50%, -50%);
+	animation: verevon-dashboard-load 620ms linear infinite;
+}
+
+@keyframes verevon-dashboard-load {
+	to { transform: translate(-50%, -50%) rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	html:not([data-motion="full"]) [data-site-nav],
+	html:not([data-motion="full"]) .verevon-site-nav-surface,
+	html:not([data-motion="full"]) .verevon-site-nav-surface::before {
+		transition-delay: 0s !important;
+		transition-duration: 0s !important;
+	}
+}
+
+@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+	.verevon-site-nav-surface[data-scrolled="true"],
+	.verevon-menu-surface {
+		background-color: rgb(255, 255, 255);
+	}
+}
+
+@media (prefers-reduced-transparency: reduce) {
+	.verevon-site-nav-surface[data-scrolled="true"],
+	.verevon-menu-surface {
+		-webkit-backdrop-filter: none;
+		backdrop-filter: none;
+		background-color: rgb(255, 255, 255);
+	}
+
+	.verevon-site-nav-surface[data-scrolled="true"]::before {
+		display: none;
+	}
+}
+
+@media (prefers-contrast: more) {
+	.verevon-site-nav-surface[data-scrolled="true"],
+	.verevon-menu-surface {
+		-webkit-backdrop-filter: none;
+		backdrop-filter: none;
+		background-color: var(--verevon-c-white);
+		border-color: var(--verevon-j-text);
+		box-shadow: none;
+		transition-delay: 0s;
+		transition-duration: 0s;
+	}
+
+	.verevon-site-nav-surface[data-scrolled="true"]::before {
+		display: none;
+	}
+}
+
+.verevon-hero-scroll-cue__line {
+	position: relative;
+	display: block;
+	width: 1px;
+	height: 42px;
+	overflow: hidden;
+	background: color-mix(in srgb, currentColor 24%, transparent);
+}
+
+.verevon-hero-scroll-cue__line::after {
+	position: absolute;
+	inset-inline: 0;
+	top: 0;
+	height: 38%;
+	content: "";
+	background: currentColor;
+	animation: verevon-hero-scroll-line 1.9s ease-in-out infinite;
+}
+
+@keyframes verevon-hero-scroll-line {
+	0% {
+		opacity: 0;
+		transform: translateY(-120%);
+	}
+	34% {
+		opacity: 0.8;
+	}
+	100% {
+		opacity: 0;
+		transform: translateY(290%);
+	}
+}
+
+body.verevon-menu-open {
+	overflow: hidden;
+}
+
+.verevon-page-shell {
+	min-height: 100%;
+}
+
+.verevon-route-transition {
+	position: fixed;
+	inset: 0;
+	z-index: 228;
+	overflow: hidden;
+	background: var(--verevon-c-off-white);
+	pointer-events: none;
+	transform: translate3d(0, 0, 0);
+	will-change: transform, opacity;
+}
+
+.verevon-route-transition__viewport {
+	position: absolute;
+	inset: 0;
+	overflow: hidden;
+}
+
+.verevon-route-transition__page {
+	position: absolute;
+	left: 0;
+	width: 100%;
+	min-height: 100%;
+}
+
+.verevon-route-transition__shade {
+	position: absolute;
+	inset: 0;
+	z-index: 50;
+	background: #000;
+	opacity: 0;
+	will-change: opacity;
+}
+
+/*
+ * Route transitions
+ *
+ * Coffee Tech's desktop transition is a two-page composition: the current
+ * page travels 300px upward under a 40% black shade while the incoming page
+ * rises 300px and expands from a clipped window. The DOM snapshot below is
+ * the fallback for browsers without the View Transition API.
+ */
+html[data-verevon-route-transition="pending"] .verevon-page-shell,
+html[data-verevon-route-transition="running"] .verevon-page-shell {
+	position: fixed;
+	inset: 0;
+	z-index: 230;
+	width: 100%;
+	height: 100dvh;
+	overflow: hidden;
+	background: var(--verevon-c-off-white);
+	pointer-events: none;
+	will-change: transform, opacity, clip-path;
+}
+
+html[data-verevon-route-transition-mode="desktop"][data-verevon-route-transition="pending"]
+	.verevon-page-shell {
+	opacity: 1;
+	transform: translate3d(0, 300px, 0);
+	clip-path: inset(90% 30% 15% 29%);
+	-webkit-clip-path: inset(90% 30% 15% 29%);
+}
+
+html[data-verevon-route-transition-mode="desktop"][data-verevon-route-transition="running"]
+	.verevon-page-shell {
+	opacity: 1;
+	transform: translate3d(0, 0, 0);
+	clip-path: inset(0% 0% 0% 0%);
+	-webkit-clip-path: inset(0% 0% 0% 0%);
+	transition:
+		transform 700ms cubic-bezier(0.6, 0.3, 0.01, 0.99),
+		clip-path 700ms cubic-bezier(0.6, 0.3, 0.01, 0.99),
+		-webkit-clip-path 700ms cubic-bezier(0.6, 0.3, 0.01, 0.99);
+}
+
+.verevon-route-transition--desktop {
+	transition: transform 700ms cubic-bezier(0.6, 0.3, 0.01, 0.99);
+}
+
+.verevon-route-transition--desktop .verevon-route-transition__shade {
+	transition: opacity 700ms cubic-bezier(0.6, 0.3, 0.01, 0.99);
+}
+
+.verevon-route-transition--desktop.is-running {
+	transform: translate3d(0, -300px, 0);
+}
+
+.verevon-route-transition--desktop.is-running
+	.verevon-route-transition__shade {
+	opacity: 0.4;
+}
+
+html[data-verevon-route-transition-mode="mobile"][data-verevon-route-transition="pending"]
+	.verevon-page-shell {
+	opacity: 0;
+}
+
+html[data-verevon-route-transition-mode="mobile"][data-verevon-route-transition="running"]
+	.verevon-page-shell {
+	opacity: 1;
+	transition: opacity 400ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.verevon-route-transition--mobile {
+	opacity: 1;
+	transition: opacity 400ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.verevon-route-transition--mobile.is-running {
+	opacity: 0;
+}
+
+::view-transition {
+	background: var(--verevon-c-off-white);
+}
+
+::view-transition-group(root) {
+	animation-duration: 700ms;
+	animation-timing-function: cubic-bezier(0.6, 0.3, 0.01, 0.99);
+}
+
+::view-transition-old(root) {
+	animation: verevon-route-page-out 700ms cubic-bezier(0.6, 0.3, 0.01, 0.99)
+		both;
+}
+
+::view-transition-new(root) {
+	animation: verevon-route-page-in 700ms cubic-bezier(0.6, 0.3, 0.01, 0.99)
+		both;
+}
+
+@keyframes verevon-route-page-out {
+	0% {
+		filter: brightness(1);
+		transform: translate3d(0, 0, 0);
+	}
+	100% {
+		filter: brightness(0.6);
+		transform: translate3d(0, -300px, 0);
+	}
+}
+
+@keyframes verevon-route-page-in {
+	0% {
+		opacity: 1;
+		transform: translate3d(0, 300px, 0);
+		clip-path: inset(90% 30% 15% 29%);
+	}
+	100% {
+		opacity: 1;
+		transform: translate3d(0, 0, 0);
+		clip-path: inset(0% 0% 0% 0%);
+	}
+}
+
+@keyframes verevon-route-mobile-out {
+	from {
+		opacity: 1;
+	}
+	to {
+		opacity: 0;
+	}
+}
+
+@keyframes verevon-route-mobile-in {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}
+
+@media (max-width: 767px), (pointer: coarse) {
+	::view-transition-group(root) {
+		animation-duration: 400ms;
+		animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+	}
+
+	::view-transition-old(root) {
+		animation: verevon-route-mobile-out 400ms
+			cubic-bezier(0.4, 0, 0.2, 1) both;
+	}
+
+	::view-transition-new(root) {
+		animation: verevon-route-mobile-in 400ms
+			cubic-bezier(0.4, 0, 0.2, 1) both;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	html:not([data-motion="full"]) .verevon-route-transition {
+		display: none;
+	}
+
+	html:not([data-motion="full"])::view-transition-group(root),
+	html:not([data-motion="full"])::view-transition-old(root),
+	html:not([data-motion="full"])::view-transition-new(root) {
+		animation-delay: 0s !important;
+		animation-duration: 0s !important;
+	}
+}
+
+button,
+input {
+	font: inherit;
+}
+
+a {
+	color: inherit;
+	text-decoration: none;
+}
+
+img,
+svg,
+video,
+canvas {
+	display: block;
+	max-width: 100%;
+}
+
+.fade-out-top {
+	mask-image: linear-gradient(transparent 0, #000 300px);
+	mask-position: 0 -300px;
+	mask-repeat: no-repeat;
+	mask-size: 100% 5000%;
+
+	-webkit-mask-image: linear-gradient(transparent 0, #000 300px);
+	-webkit-mask-position: 0 -300px;
+	-webkit-mask-repeat: no-repeat;
+	-webkit-mask-size: 100% 5000%;
+}
+
+@media (max-width: 640px) {
+	.fade-out-top {
+		mask-image: linear-gradient(transparent 0, #000 80px);
+		mask-position: 0 -80px;
+
+		-webkit-mask-image: linear-gradient(transparent 0, #000 80px);
+		-webkit-mask-position: 0 -80px;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	html:not([data-motion="full"]) .fade-out-top {
+		mask-image: none;
+		-webkit-mask-image: none;
+	}
+}
+
+::selection {
+	background: var(--verevon-coral);
+	color: #ffffff;
+}
+
+/* Cursor-style shimmer for "working…" microcopy inside feature demos. */
+.verevon-shimmer {
+	background: linear-gradient(
+		90deg,
+		color-mix(in srgb, var(--verevon-j-text) 32%, transparent) 25%,
+		color-mix(in srgb, var(--verevon-j-text) 88%, transparent) 50%,
+		color-mix(in srgb, var(--verevon-j-text) 32%, transparent) 75%
+	);
+	background-size: 200% 100%;
+	-webkit-background-clip: text;
+	background-clip: text;
+	-webkit-text-fill-color: transparent;
+	animation: verevon-shimmer 1.5s linear infinite;
+}
+
+@keyframes verevon-shimmer {
+	from {
+		background-position: 200% 0;
+	}
+	to {
+		background-position: -200% 0;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	html:not([data-motion="full"]) .verevon-shimmer {
+		animation: none;
+		background: none;
+		-webkit-text-fill-color: currentColor;
+	}
+}
+
+@keyframes verevon-menu-enter {
+	from {
+		opacity: 0;
+		transform: scale(1.02);
+	}
+}
+
+@keyframes verevon-menu-mark-enter {
+	from {
+		opacity: 0;
+		transform: scale(0.58) rotate(-14deg);
+	}
+	to {
+		opacity: 1;
+		transform: scale(1.7) rotate(0deg);
+	}
+}
+
+@keyframes verevon-menu-item-enter {
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+
+@keyframes verevon-detail-frame {
+	0%,
+	100% {
+		opacity: 0.46;
+		transform: translateY(0) scale(1);
+	}
+	50% {
+		opacity: 0.82;
+		transform: translateY(-10px) scale(1.015);
+	}
+}
+
+.verevon-hero-load__frame {
+	box-shadow: 0 34px 120px rgba(0, 0, 0, 0.18);
+	transform-origin: center center;
+	will-change: clip-path, opacity, transform;
+}
+
+.verevon-hero-load__intro {
+	filter: brightness(0.78) contrast(1.04) saturate(0.96);
+	transform-origin: center center;
+	will-change: opacity, transform;
+}
+
+.verevon-hero-load__ambient {
+	background:
+		linear-gradient(
+			90deg,
+			rgba(4, 5, 6, 0.92) 0%,
+			rgba(8, 9, 10, 0.72) 29%,
+			rgba(8, 9, 10, 0.18) 62%,
+			rgba(4, 5, 6, 0.34) 100%
+		),
+		linear-gradient(
+			180deg,
+			rgba(6, 7, 8, 0.34),
+			rgba(6, 7, 8, 0.16) 46%,
+			rgba(6, 7, 8, 0.74)
+		);
+}
+
+.verevon-hero-load__organic-shadows {
+	background:
+		radial-gradient(
+			78% 92% at -13% 58%,
+			rgba(4, 5, 6, 0.92) 0 43%,
+			rgba(4, 5, 6, 0.72) 50%,
+			transparent 51%
+		),
+		radial-gradient(
+			46% 76% at 79% -5%,
+			rgba(36, 31, 34, 0.68) 0 53%,
+			transparent 54%
+		),
+		radial-gradient(
+			47% 68% at 88% 76%,
+			rgba(8, 8, 8, 0.58) 0 48%,
+			transparent 49%
+		),
+		radial-gradient(
+			34% 44% at 49% 39%,
+			rgba(247, 244, 238, 0.08) 0 22%,
+			transparent 62%
+		);
+}
+
+.verevon-hero-load__fabric {
+	background-image:
+		repeating-linear-gradient(
+			86deg,
+			rgba(255, 255, 255, 0.05) 0 1px,
+			transparent 1px 4px
+		),
+		repeating-linear-gradient(
+			-6deg,
+			rgba(0, 0, 0, 0.12) 0 1px,
+			transparent 1px 5px
+		),
+		linear-gradient(
+			135deg,
+			rgba(247, 244, 238, 0.1),
+			transparent 32%,
+			rgba(238, 122, 80, 0.08) 64%,
+			transparent
+		);
+	background-size:
+		5px 100%,
+		100% 6px,
+		100% 100%;
+	mix-blend-mode: overlay;
+	opacity: 0.54;
+}
+
+@media (max-width: 760px) {
+	.verevon-hero-load__organic-shadows {
+		background:
+			radial-gradient(
+				110% 72% at -36% 60%,
+				rgba(4, 5, 6, 0.92) 0 48%,
+				rgba(4, 5, 6, 0.72) 56%,
+				transparent 57%
+			),
+			radial-gradient(
+				80% 58% at 94% 8%,
+				rgba(36, 31, 34, 0.62) 0 52%,
+				transparent 53%
+			),
+			linear-gradient(180deg, transparent 0%, rgba(4, 5, 6, 0.42) 100%);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	html:not([data-motion="full"]) .verevon-hero-load__frame,
+	html:not([data-motion="full"]) .verevon-hero-load__intro {
+		will-change: auto;
+	}
+
+	/* Safety net: neutralise decorative CSS keyframe loops for users who
+	 * ask for reduced motion (detail frames, ambient drift, etc.). */
+	html:not([data-motion="full"]) *,
+	html:not([data-motion="full"]) *::before,
+	html:not([data-motion="full"]) *::after {
+		animation-duration: 0.001ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.001ms !important;
+		scroll-behavior: auto !important;
+	}
+}
+
+/* ---------------------------------------------------------------------
+ * Design-system utility classes (see DESIGN.md)
+ * Semantic, token-backed type + surface helpers used by new sections
+ * (Trust Center, primitives) and available for opportunistic migration.
+ * ------------------------------------------------------------------- */
+
+.verevon-eyebrow {
+	font-family: var(--font-geist), sans-serif;
+	font-size: var(--text-eyebrow);
+	font-weight: 500;
+	line-height: 1;
+	text-transform: uppercase;
+	letter-spacing: var(--tracking-eyebrow);
+	color: color-mix(in srgb, var(--verevon-j-text) 42%, transparent);
+}
+
+.verevon-display {
+	font-family: var(--font-verevon), sans-serif;
+	font-size: var(--text-display);
+	font-weight: 300;
+	line-height: var(--text-display--line-height);
+	letter-spacing: -0.03em; /* Verevon Sans is already tightly spaced; Manrope-era tracking made letters touch */
+	color: var(--verevon-j-text);
+}
+
+.verevon-h2 {
+	font-family: var(--font-verevon), sans-serif;
+	font-size: var(--text-h2);
+	font-weight: 300;
+	line-height: var(--text-h2--line-height);
+	letter-spacing: -0.024em; /* Verevon Sans is already tightly spaced; Manrope-era tracking made letters touch */
+	color: var(--verevon-j-text);
+}
+
+.verevon-h3 {
+	font-family: var(--font-verevon), sans-serif;
+	font-size: var(--text-h3);
+	font-weight: 300;
+	line-height: var(--text-h3--line-height);
+	letter-spacing: -0.018em; /* Verevon Sans is already tightly spaced; Manrope-era tracking made letters touch */
+	color: var(--verevon-j-text);
+}
+
+/* Reserved for the VEREVON wordmark wherever it appears as a brand lockup. */
+.verevon-wordmark {
+	font-family: var(--font-verevon), sans-serif;
+	font-synthesis: none;
+}
+
+.verevon-body-lg {
+	font-family: var(--font-geist), sans-serif;
+	font-size: var(--text-body-lg);
+	font-weight: 300;
+	line-height: var(--text-body-lg--line-height);
+	color: var(--verevon-text-muted);
+}
+
+.verevon-body {
+	font-family: var(--font-geist), sans-serif;
+	font-size: var(--text-body);
+	font-weight: 300;
+	line-height: var(--text-body--line-height);
+	color: var(--verevon-text-muted);
+}
+
+/* Main headings match the prefooter reference before this layout pass.
+ * Content density is independent of display typography and control sizes. */
+.verevon-home-heading {
+	font-family: var(--font-manrope), sans-serif;
+	font-size: clamp(1.45rem, 3.6vw, 4.95rem);
+	font-weight: 300;
+	line-height: 0.88;
+	letter-spacing: -0.05em;
+	font-optical-sizing: auto;
+}
+
+.verevon-hero-heading {
+	font-size: clamp(1.38rem, 3.42vw, 4.7rem);
+}
+
+.verevon-home {
+	/* Homepage typography: a deliberately small set of repeated roles.
+	 * Large type belongs to the hero; editorial sections share a quieter cap. */
+	--verevon-home-display: clamp(2.5rem, 3.42vw, 4rem);
+	--verevon-home-section: clamp(2.35rem, 3.4vw, 3.5rem);
+	--verevon-home-card: clamp(1.5rem, 1.8vw, 1.875rem);
+	--verevon-home-body-lg: clamp(1rem, 1.05vw, 1.125rem);
+	--verevon-home-body: clamp(1rem, 0.95vw, 1.0625rem);
+	--verevon-home-meta: clamp(0.6875rem, 0.74vw, 0.75rem);
+	--verevon-home-meta-tracking: 0.08em;
+}
+
+/* Manrope carries editorial marketing content; Geist stays on navigation,
+ * compact metadata and product UI where its utilitarian character helps. */
+.verevon-home .verevon-home-heading {
+	font-size: var(--verevon-home-section);
+	line-height: 0.94;
+	letter-spacing: -0.045em;
+}
+
+.verevon-home .verevon-display,
+.verevon-home .verevon-h2,
+.verevon-home .verevon-h3 {
+	font-family: var(--font-manrope), sans-serif;
+	font-weight: 300;
+	letter-spacing: -0.045em;
+}
+
+.verevon-home .verevon-display {
+	font-size: var(--verevon-home-display);
+	line-height: 0.94;
+}
+
+.verevon-home .verevon-h2 {
+	font-size: var(--verevon-home-section);
+	line-height: 0.98;
+}
+
+.verevon-home .verevon-h3 {
+	font-size: var(--verevon-home-card);
+	line-height: 1.04;
+}
+
+.verevon-home .verevon-hero-heading {
+	/* The hero promise must stay as two calm lines within the left-side safe
+	 * area of the film, rather than crossing into the subject in the video. */
+	font-size: clamp(2.5rem, 2.9vw, 3.75rem);
+	line-height: 0.94;
+	letter-spacing: -0.047em;
+}
+
+.verevon-home .verevon-problem-heading {
+	/* Keep the deliberately authored two-line problem statement intact on
+	 * desktop instead of wrapping its first line into a third fragment. */
+	font-size: clamp(2.4rem, 2.85vw, 3.5rem);
+	line-height: 0.96;
+	letter-spacing: -0.047em;
+}
+
+.verevon-home .verevon-problem-body {
+	/* A small lift gives the central problem statement enough weight against
+	 * the moving source fragments without promoting it to a heading. */
+	font-size: clamp(1.03rem, 1.0815vw, 1.15875rem);
+}
+
+.verevon-home .verevon-body-lg {
+	font-family: var(--font-manrope), sans-serif;
+	font-size: var(--verevon-home-body-lg);
+	line-height: 1.5;
+}
+
+.verevon-home .verevon-body {
+	font-family: var(--font-manrope), sans-serif;
+	font-size: var(--verevon-home-body);
+	line-height: 1.5;
+}
+
+.verevon-home .verevon-eyebrow {
+	font-family: var(--font-geist), sans-serif;
+	font-size: var(--verevon-home-meta);
+	letter-spacing: var(--verevon-home-meta-tracking);
+}
+
+.verevon-problem-text-shadow {
+	text-shadow: 0 0 2px var(--background), 0 0 12px var(--background), 0 3px 24px var(--background);
+}
+
+/* Keep the moving knowledge fragments at the edges of the message, without
+ * turning the editorial copy into a solid card. */
+.verevon-problem-copy::before {
+	content: "";
+	position: absolute;
+	inset: -5rem -5vw;
+	z-index: -1;
+	pointer-events: none;
+	background: radial-gradient(ellipse at center, rgba(248, 248, 247, 0.88) 0%, rgba(248, 248, 247, 0.75) 38%, rgba(248, 248, 247, 0.45) 56%, transparent 78%);
+}
+
+/* The answer to the scattered-work problem stays on the same page ground as
+ * the preceding and following sections. The rail is deliberately independent
+ * so it can bridge the two without introducing a new coloured panel. */
+.verevon-solution-bridge {
+	background: var(--background);
+}
+
+.verevon-solution-bridge-rule {
+	width: min(100%, 42rem);
+	height: 1px;
+	margin: 0 auto clamp(2.1rem, 4vw, 3.5rem);
+	background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--verevon-j-text) 17%, transparent), transparent);
+}
+
+.verevon-platform-section {
+	background: var(--background);
+}
+
+.verevon-platform-stage::before {
+	position: absolute;
+	inset: -8% -10% -12%;
+	border: 1px solid color-mix(in srgb, var(--verevon-j-text) 8%, transparent);
+	border-radius: 50%;
+	box-shadow: 0 0 0 1.25rem rgb(255 255 255 / 17%);
+	content: "";
+	pointer-events: none;
+}
+
+.verevon-platform-section [data-layer-disclosure] {
+	transition: border-color 280ms var(--verevon-ease-out), background-color 280ms var(--verevon-ease-out);
+}
+
+.verevon-platform-section [data-layer-disclosure]:has(button[aria-expanded="true"]) {
+	border-color: color-mix(in srgb, var(--verevon-coral) 38%, transparent);
+	background: transparent;
+}
+
+.verevon-platform-section [data-layer-disclosure]:has(button[aria-expanded="true"]) [data-layer-title] {
+	color: var(--verevon-coral-deep);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.verevon-hero-secondary,
+	.verevon-hero-secondary span,
+	.verevon-dashboard-link,
+	.verevon-dashboard-link span,
+	[data-site-nav-surface] [data-navigation-style="stingray"] {
+		transition: none;
+	}
+
+	.verevon-hero-secondary:hover span,
+	.verevon-hero-secondary:focus-visible span,
+	.verevon-dashboard-link:hover,
+	.verevon-dashboard-link:focus-visible,
+	.verevon-dashboard-link:hover span,
+	.verevon-dashboard-link:focus-visible span {
+		transform: none;
+	}
+}
+
+.verevon-home .verevon-type-inverse .verevon-problem-card-body {
+	color: #f5f3ee;
+	font-weight: 300;
+	line-height: 1.5;
+	text-shadow: 0 1px 8px rgba(0,0,0,0.4);
+}
+
+@media (max-width: 760px) {
+	.verevon-home .verevon-home-heading {
+		font-size: clamp(1.875rem, 7.2vw, 2.5rem);
+		line-height: 0.98;
+		letter-spacing: -0.05em;
+	}
+
+	.verevon-home .verevon-hero-heading {
+		font-size: clamp(2rem, 7.1vw, 2.75rem);
+	}
+
+	.verevon-home .verevon-problem-heading {
+		font-size: clamp(1.875rem, 7.2vw, 2.5rem);
+		line-height: 0.98;
+	}
+}
+
+.verevon-type-inverse .verevon-eyebrow {
+	color: color-mix(in srgb, var(--verevon-c-white) 70%, transparent);
+}
+
+.verevon-type-inverse .verevon-display {
+	color: var(--verevon-c-white);
+}
+
+.verevon-type-inverse .verevon-body-lg,
+.verevon-type-inverse .verevon-body {
+	color: color-mix(in srgb, var(--verevon-c-white) 82%, transparent);
+}
+
+/* Reveal: token-backed scroll-in used by motion-light sections. JS adds
+ * `data-revealed` (or it shows immediately under reduced motion). */
+.verevon-reveal {
+	opacity: 0;
+	transform: translateY(24px);
+	transition:
+		opacity var(--verevon-dur-reveal) var(--verevon-ease-out),
+		transform var(--verevon-dur-reveal) var(--verevon-ease-out);
+}
+
+.verevon-reveal[data-revealed="true"] {
+	opacity: 1;
+	transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	html:not([data-motion="full"]) .verevon-reveal {
+		opacity: 1;
+		transform: none;
+	}
+}
+
+/* ---------------------------------------------------------------------
+ * Feature cards "fly into place" (trust-scroll-light) — cards converge from
+ * a horizontal spread + blur when the stage scrolls into view (one-shot,
+ * no pin/scrub). Per-card --fly-x (spread) and --fly-i (stagger).
+ * ------------------------------------------------------------------- */
+
+.verevon-fly-card {
+	opacity: 0;
+	transform: translateX(var(--fly-x, 0)) translateY(-14px) scale(1.08);
+	filter: blur(14px);
+	transition:
+		opacity 0.6s var(--verevon-ease-out),
+		transform 0.85s var(--verevon-ease-out),
+		filter 0.7s var(--verevon-ease-out);
+	transition-delay: calc(var(--fly-i, 0) * 90ms);
+	will-change: transform, opacity, filter;
+}
+
+.verevon-fly-stage[data-in="true"] .verevon-fly-card {
+	opacity: 1;
+	transform: none;
+	filter: blur(0);
+	will-change: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	html:not([data-motion="full"]) .verevon-fly-card {
+		opacity: 1;
+		transform: none;
+		filter: none;
+		transition: none;
+	}
+}
+
+/* ---------------------------------------------------------------------
+ * SensesSection guideline — continuous marching-dash + traveling-glow
+ * shimmer, matching titangatequity.com's .svg-guideline treatment.
+ * Position, length, and thickness all still come from the same Tailwind
+ * classes the original plain span used (passed in via className) — this
+ * CSS only adds the animated dashed rendering, nothing structural.
+ * ------------------------------------------------------------------- */
+
+@keyframes verevon-senses-guideline-stroke {
+	0% {
+		stroke-dashoffset: 0;
+	}
+	to {
+		stroke-dashoffset: 4px;
+	}
+}
+
+@keyframes verevon-senses-guideline-bg-x {
+	to {
+		background-position: var(--verevon-senses-guideline-bg-size) 0;
+	}
+}
+
+@keyframes verevon-senses-guideline-bg-y {
+	to {
+		background-position: 0 var(--verevon-senses-guideline-bg-size);
+	}
+}
+
+/* A concise, typed welcome for the product-loop composer. The Tailwind
+ * `motion-safe:` utility applies these only when the browser permits motion. */
+@keyframes verevon-composer-idle-prompt-in {
+	from {
+		opacity: 0;
+		transform: translateY(4px);
+	}
+
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+
+@keyframes verevon-composer-idle-caret {
+	0%,
+	46% {
+		opacity: 1;
+	}
+
+	47%,
+	100% {
+		opacity: 0;
+	}
+}
+
+@keyframes verevon-composer-idle-shell {
+	0%,
+	100% {
+		border-color: rgb(23 23 23 / 7%);
+		box-shadow: 0 20px 60px rgb(20 21 24 / 11%);
+	}
+
+	50% {
+		border-color: color-mix(in srgb, var(--verevon-coral) 28%, rgb(23 23 23 / 7%));
+		box-shadow:
+			0 24px 68px rgb(20 21 24 / 13%),
+			0 0 0 4px color-mix(in srgb, var(--verevon-coral) 6%, transparent);
+	}
+}
+
+@keyframes verevon-composer-idle-send {
+	0%,
+	42%,
+	100% {
+		opacity: 0;
+		transform: scale(0.88);
+	}
+
+	12% {
+		opacity: 0.85;
+	}
+
+	28% {
+		opacity: 0;
+		transform: scale(1.12);
+	}
+}
+
+@keyframes verevon-composer-search-pill {
+	0%,
+	9%,
+	100% {
+		width: 48px;
+	}
+
+	29%,
+	78% {
+		width: 100%;
+	}
+}
+
+@keyframes verevon-composer-search-content {
+	0%,
+	14%,
+	100% {
+		opacity: 0;
+		transform: translateX(-4px);
+	}
+
+	34%,
+	70% {
+		opacity: 1;
+		transform: translateX(0);
+	}
+}
+
+@keyframes verevon-composer-crawl-cursor {
+	0%,
+	10%,
+	100% {
+		opacity: 0;
+		transform: translate(58px, 24px) rotate(-12deg) scale(0.88);
+	}
+
+	28% {
+		opacity: 1;
+		transform: translate(16px, 6px) rotate(-12deg) scale(1);
+	}
+
+	42%,
+	58% {
+		opacity: 1;
+		transform: translate(-4px, -6px) rotate(-12deg) scale(1);
+	}
+
+	64% {
+		opacity: 1;
+		transform: translate(-4px, -6px) rotate(-12deg) scale(0.82);
+	}
+}
+
+@keyframes verevon-composer-crawl-link {
+	0%,
+	25%,
+	72%,
+	100% {
+		background-color: transparent;
+		color: #999;
+	}
+
+	38%,
+	62% {
+		background-color: color-mix(in srgb, var(--verevon-coral) 12%, transparent);
+		color: #5c4034;
+	}
+}
+
+.verevon-senses-guideline {
+	overflow: visible;
+}
+
+.verevon-senses-guideline__svg {
+	--verevon-senses-guideline-bg-size: 200%;
+	display: block;
+	width: 100%;
+	height: 100%;
+	color: color-mix(in srgb, var(--verevon-j-text) 12%, transparent);
+	animation: verevon-senses-guideline-stroke 0.45s linear infinite;
+	animation-delay: var(--verevon-senses-guideline-delay, 0s);
+}
+
+.verevon-senses-guideline--horizontal .verevon-senses-guideline__svg {
+	background: linear-gradient(
+				to right,
+				color-mix(in srgb, var(--verevon-j-text) 0%, transparent) 20%,
+				color-mix(in srgb, var(--verevon-j-text) 45%, transparent),
+				color-mix(in srgb, var(--verevon-j-text) 0%, transparent) 80%
+			)
+			0 0 / var(--verevon-senses-guideline-bg-size) 100% border-box;
+	animation-name: verevon-senses-guideline-stroke, verevon-senses-guideline-bg-x;
+	animation-duration: 0.45s, 2.25s;
+	animation-timing-function: linear, linear;
+	animation-iteration-count: infinite, infinite;
+}
+
+.verevon-senses-guideline--vertical .verevon-senses-guideline__svg {
+	background: linear-gradient(
+				to bottom,
+				color-mix(in srgb, var(--verevon-j-text) 0%, transparent) 20%,
+				color-mix(in srgb, var(--verevon-j-text) 45%, transparent),
+				color-mix(in srgb, var(--verevon-j-text) 0%, transparent) 80%
+			)
+			0 0 / 100% var(--verevon-senses-guideline-bg-size) border-box;
+	animation-name: verevon-senses-guideline-stroke, verevon-senses-guideline-bg-y;
+	animation-duration: 0.45s, 2.25s;
+	animation-timing-function: linear, linear;
+	animation-iteration-count: infinite, infinite;
+	/* Same fade as the original static line: transparent at both ends,
+	   fully visible from 15% to 85% — masks the animation too, not just
+	   the stroke, so the shimmer fades out at the tips instead of cutting
+	   off hard. */
+	mask-image: linear-gradient(
+		to bottom,
+		transparent 0%,
+		black 15%,
+		black 85%,
+		transparent 100%
+	);
+	-webkit-mask-image: linear-gradient(
+		to bottom,
+		transparent 0%,
+		black 15%,
+		black 85%,
+		transparent 100%
+	);
+}
+
+.verevon-senses-guideline__path {
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1;
+	stroke-dasharray: 2px 2px 4px;
+	vector-effect: non-scaling-stroke;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	html:not([data-motion="full"]) .verevon-senses-guideline__svg {
+		animation: none;
+	}
+}

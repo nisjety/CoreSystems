@@ -1,0 +1,48 @@
+# Cloud Functions needs root main.py and requirements.txt. Exclude every other
+# non-runtime root path explicitly so local credentials and application data
+# cannot enter the deployment archive.
+.gcloudignore
+.git/
+.claude/
+.codegraph/
+.coverage
+.dockerignore
+.env*
+.gitignore
+.ruff_cache/
+.pytest_cache/
+.venv/
+Cargo.lock
+Cargo.toml
+Dataform/
+Dockerfile*
+Makefile
+README.md
+__pycache__/
+app/
+contacts.json
+core/
+data/
+deploy/
+docker-compose*.yml
+docs/
+migrations/
+out/
+pyproject.toml
+rust-toolchain.toml
+target/
+tooling/
+uv.lock
+web/
+
+# The handler only imports the Cloud Function, common, and Xero modules.
+etl/tests/
+etl/sql/
+etl/visma/
+etl/__pycache__/
+etl/**/__pycache__/
+etl/**/*.pyc
+etl/backfill_gcs.py
+etl/backfill_manifests.py
+etl/validate_extended.py
+etl/cloud_function/requirements.txt

@@ -1,0 +1,43 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Xero Accounts Payable aged-report measures at atomic report-row and source-column grain. Values remain in the currency explicitly carried by Xero's header, if any.",
+  assertions: { nonNull: ["accounts_payable_aging_report_amount_key", "tenant_id", "contact_id", "source_measure_header"], uniqueKey: ["accounts_payable_aging_report_amount_key"] }
+}
+
+SELECT
+  FARM_FINGERPRINT(amount.contact_aging_report_amount_key) AS accounts_payable_aging_report_amount_key,
+  FARM_FINGERPRINT(amount.tenant_id) AS company_key,
+  FARM_FINGERPRINT(CONCAT(amount.tenant_id, '|', amount.contact_id)) AS supplier_key,
+  FARM_FINGERPRINT(CAST(amount.requested_report_date AS STRING)) AS requested_report_date_key,
+  IF(amount.source_document_date IS NULL, NULL, FARM_FINGERPRINT(CAST(amount.source_document_date AS STRING))) AS document_date_key,
+  IF(amount.source_document_due_date IS NULL, NULL, FARM_FINGERPRINT(CAST(amount.source_document_due_date AS STRING))) AS due_date_key,
+  amount.contact_aging_report_amount_key,
+  amount.contact_aging_report_line_key,
+  amount.report_snapshot_key,
+  amount.report_snapshot_id,
+  amount.tenant_id,
+  amount.report_run_id,
+  amount.contact_id,
+  amount.contact_id AS supplier_id,
+  amount.requested_report_date,
+  amount.source_document_date,
+  amount.source_document_due_date,
+  amount.source_document_reference,
+  amount.source_document_reference_kind,
+  amount.is_source_document_key_available,
+  amount.source_measure_header,
+  amount.source_measure_name,
+  amount.currency_code,
+  amount.is_currency_identified,
+  amount.source_amount_in_report_currency,
+  amount.is_amount_parse_valid,
+  amount.is_open_due_amount,
+  amount.days_past_due,
+  amount.age_bucket,
+  amount.is_contact_request_manifested,
+  amount.is_report_run_contact_set_complete,
+  amount.report_synced_at,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_contact_aging_report_amount")} AS amount
+WHERE amount.report = 'report_aged_payables_by_contact'

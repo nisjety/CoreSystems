@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "dw_staging_currency",
+  name: "HistoryratesPowerBI",
+  description: "Governed external currency-rate reference feed. It is shared infrastructure and contains no Visma business entities or mappings."
+}

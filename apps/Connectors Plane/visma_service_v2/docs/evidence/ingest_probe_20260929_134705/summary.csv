@@ -1,0 +1,15 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+earning_types,,1,0,succeeded,4,4,4,1,0,4,13891,420,
+earning_types,,2,0,succeeded,4,4,4,1,0,4,13890,326,
+landed_cost_codes,,1,0,succeeded,13,13,13,1,0,13,13889,557,
+landed_cost_codes,,2,0,succeeded,13,13,13,1,0,13,13888,446,
+sales_order_types,,1,0,succeeded,30,30,30,1,0,30,13887,473,
+sales_order_types,,2,0,succeeded,30,30,30,1,0,30,13886,509,
+attributes,,1,0,succeeded,48,48,48,1,0,48,13885,562,
+attributes,,2,0,succeeded,48,48,48,1,0,48,13884,747,
+payment_methods,,1,0,succeeded,8,8,8,1,0,8,13883,532,
+payment_methods,,2,0,succeeded,8,8,8,1,0,8,13882,799,
+employees,,1,0,succeeded,111,111,111,2,0,11,13880,567,2026-09-24 14:13:09.563+00
+employees,,2,0,succeeded,1,1,111,1,0,1,13879,529,2026-09-24 14:13:09.563+00
+stocktakes_v2,,1,0,succeeded,22,22,22,1,0,22,13878,8750,2026-02-06 11:01:48.66+00
+stocktakes_v2,,2,0,succeeded,1,1,22,1,0,1,13877,1295,2026-02-06 11:01:48.66+00

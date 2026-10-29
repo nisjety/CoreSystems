@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "dw_staging_xero",
+  name: "repeating_invoice_line_snapshots",
+  description: "Repeating-invoice template lines keyed by template, line position, and sync snapshot."
+}

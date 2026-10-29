@@ -1,0 +1,856 @@
+{
+  "source": "v2",
+  "date": "2026-10-09",
+  "generated_utc": "2026-10-09T21:33:39+00:00",
+  "max_age_hours": 26.0,
+  "subset": false,
+  "exit_code": 1,
+  "tenants": [
+    {
+      "tenant_id": "33f319b9-4d57-11ee-960c-025417856183",
+      "name": "Aquatiq AS (pilot)",
+      "kind": "active",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 951,
+            "balance": "61387472.26",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/023672"
+          },
+          "warehouse": {
+            "open": 917,
+            "balance": "54625188.84",
+            "last_sync": "2026-10-02T02:55:17+00:00",
+            "age_hours": 186.6,
+            "stale": true
+          },
+          "matched": 706,
+          "cent_drift": 0,
+          "pending": {
+            "balance_pending": 5,
+            "closed_at_visma_pending": 211,
+            "open_at_visma_pending": 245
+          },
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 211,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 255,
+            "balance": "23148511.36",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/Invoice/210507"
+          },
+          "warehouse": {
+            "open": 218,
+            "balance": "13806226.44",
+            "last_sync": "2026-10-01T12:22:41+00:00",
+            "age_hours": 201.2,
+            "stale": true
+          },
+          "matched": 113,
+          "cent_drift": 0,
+          "pending": {
+            "closed_at_visma_pending": 105,
+            "open_at_visma_pending": 142
+          },
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 105,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd",
+      "name": "Aqua Pharma AS",
+      "kind": "active",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 2,
+            "balance": "26797.03",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/100196"
+          },
+          "warehouse": {
+            "open": 2,
+            "balance": "26797.03",
+            "last_sync": "2026-10-01T14:11:43+00:00",
+            "age_hours": 199.4,
+            "stale": true
+          },
+          "matched": 2,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 7,
+            "balance": "161211.43",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/Invoice/201410"
+          },
+          "warehouse": {
+            "open": 9,
+            "balance": "1350560.32",
+            "last_sync": "2026-10-01T14:09:45+00:00",
+            "age_hours": 199.4,
+            "stale": true
+          },
+          "matched": 5,
+          "cent_drift": 0,
+          "pending": {
+            "closed_at_visma_pending": 4,
+            "open_at_visma_pending": 2
+          },
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 4,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "ffa4a061-8084-11e9-b307-0aa512338dd6",
+      "name": "Aqua Pharma Group AS",
+      "kind": "active",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 29,
+            "balance": "31005314.93",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/100258"
+          },
+          "warehouse": {
+            "open": 26,
+            "balance": "28474832.20",
+            "last_sync": "2026-10-01T14:03:43+00:00",
+            "age_hours": 199.5,
+            "stale": true
+          },
+          "matched": 26,
+          "cent_drift": 0,
+          "pending": {
+            "open_at_visma_pending": 3
+          },
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 19,
+            "balance": "5771556.13",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/Invoice/200973"
+          },
+          "warehouse": {
+            "open": 8,
+            "balance": "2704033.42",
+            "last_sync": "2026-10-01T14:01:37+00:00",
+            "age_hours": 199.5,
+            "stale": true
+          },
+          "matched": 5,
+          "cent_drift": 0,
+          "pending": {
+            "closed_at_visma_pending": 3,
+            "open_at_visma_pending": 14
+          },
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 3,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "2b6e5cd6-6ce0-11ee-970e-025417856183",
+      "name": "Aquatiq AB",
+      "kind": "active",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 3,
+            "balance": "90863.00",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/100527"
+          },
+          "warehouse": {
+            "open": 4,
+            "balance": "50886.00",
+            "last_sync": "2026-10-01T14:05:22+00:00",
+            "age_hours": 199.5,
+            "stale": true
+          },
+          "matched": 2,
+          "cent_drift": 0,
+          "pending": {
+            "closed_at_visma_pending": 2,
+            "open_at_visma_pending": 1
+          },
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 2,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 5,
+            "balance": "20044.00",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/DebitAdj/200089"
+          },
+          "warehouse": {
+            "open": 3,
+            "balance": "12332.58",
+            "last_sync": "2026-10-01T13:59:19+00:00",
+            "age_hours": 199.6,
+            "stale": true
+          },
+          "matched": 2,
+          "cent_drift": 0,
+          "pending": {
+            "closed_at_visma_pending": 1,
+            "open_at_visma_pending": 3
+          },
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 1,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "d1507c4a-7717-11ee-970e-025417856183",
+      "name": "Aquatiq Aps",
+      "kind": "active",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 8,
+            "balance": "529749.81",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/100045"
+          },
+          "warehouse": {
+            "open": 7,
+            "balance": "342598.49",
+            "last_sync": "2026-10-01T23:31:55+00:00",
+            "age_hours": 190.0,
+            "stale": true
+          },
+          "matched": 7,
+          "cent_drift": 0,
+          "pending": {
+            "open_at_visma_pending": 1
+          },
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 3,
+            "balance": "43550.70",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/Invoice/200147"
+          },
+          "warehouse": {
+            "open": 4,
+            "balance": "73234.66",
+            "last_sync": "2026-10-01T23:30:46+00:00",
+            "age_hours": 190.0,
+            "stale": true
+          },
+          "matched": 3,
+          "cent_drift": 0,
+          "pending": {
+            "closed_at_visma_pending": 1
+          },
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 1,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "bed46bb6-21cc-11e9-b307-0aa512338dd6",
+      "name": "Aquatiq Food Automation ApS",
+      "kind": "active",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 10,
+            "balance": "1556937.80",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/100250"
+          },
+          "warehouse": {
+            "open": 8,
+            "balance": "1921477.32",
+            "last_sync": "2026-10-01T23:30:18+00:00",
+            "age_hours": 190.1,
+            "stale": true
+          },
+          "matched": 5,
+          "cent_drift": 0,
+          "pending": {
+            "closed_at_visma_pending": 3,
+            "open_at_visma_pending": 5
+          },
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 3,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 3,
+            "balance": "79293.28",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/Invoice/200104"
+          },
+          "warehouse": {
+            "open": 2,
+            "balance": "19954.36",
+            "last_sync": "2026-10-01T23:28:30+00:00",
+            "age_hours": 190.1,
+            "stale": true
+          },
+          "matched": 1,
+          "cent_drift": 0,
+          "pending": {
+            "closed_at_visma_pending": 1,
+            "open_at_visma_pending": 2
+          },
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 1,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "7d2c489e-21cc-11e9-b307-0aa512338dd6",
+      "name": "Aquatiq Group AS",
+      "kind": "active",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 3,
+            "balance": "1090985.35",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/000196"
+          },
+          "warehouse": {
+            "open": 4,
+            "balance": "1091675.35",
+            "last_sync": "2026-10-01T13:27:02+00:00",
+            "age_hours": 200.1,
+            "stale": true
+          },
+          "matched": 3,
+          "cent_drift": 0,
+          "pending": {
+            "closed_at_visma_pending": 1
+          },
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 1,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 9,
+            "balance": "977840.01",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/Invoice/203639"
+          },
+          "warehouse": {
+            "open": 7,
+            "balance": "259031.05",
+            "last_sync": "2026-10-01T13:23:08+00:00",
+            "age_hours": 200.2,
+            "stale": true
+          },
+          "matched": 5,
+          "cent_drift": 0,
+          "pending": {
+            "closed_at_visma_pending": 2,
+            "open_at_visma_pending": 4
+          },
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 2,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd",
+      "name": "Sensilist AS",
+      "kind": "active",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 11,
+            "balance": "204491.04",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/100187"
+          },
+          "warehouse": {
+            "open": 11,
+            "balance": "223631.16",
+            "last_sync": "2026-10-01T13:56:20+00:00",
+            "age_hours": 199.6,
+            "stale": true
+          },
+          "matched": 8,
+          "cent_drift": 0,
+          "pending": {
+            "closed_at_visma_pending": 3,
+            "open_at_visma_pending": 3
+          },
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 3,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 18,
+            "balance": "638936.78",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/Invoice/200675"
+          },
+          "warehouse": {
+            "open": 17,
+            "balance": "641592.50",
+            "last_sync": "2026-10-01T13:54:27+00:00",
+            "age_hours": 199.7,
+            "stale": true
+          },
+          "matched": 15,
+          "cent_drift": 0,
+          "pending": {
+            "closed_at_visma_pending": 2,
+            "open_at_visma_pending": 3
+          },
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 2,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "9b1fa69b-5568-11ee-960c-025417856183",
+      "name": "Consult AS",
+      "kind": "historical",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 121,
+            "balance": "1443183.25",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/103992"
+          },
+          "warehouse": {
+            "open": 121,
+            "balance": "1443183.25",
+            "last_sync": "2026-10-02T12:59:26+00:00",
+            "age_hours": 176.6,
+            "stale": true
+          },
+          "matched": 121,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 0,
+            "balance": "0",
+            "pages": 0,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "not run: no open rows"
+          },
+          "warehouse": {
+            "open": 0,
+            "balance": "0",
+            "last_sync": "2026-10-01T11:33:58+00:00",
+            "age_hours": 202.0,
+            "stale": true
+          },
+          "matched": 0,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "f630d6b0-5566-11ee-960c-025417856183",
+      "name": "Aquatiq Food Factory AS",
+      "kind": "historical",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 11,
+            "balance": "10042998.90",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/100303"
+          },
+          "warehouse": {
+            "open": 11,
+            "balance": "10042998.90",
+            "last_sync": "2026-10-01T12:53:04+00:00",
+            "age_hours": 200.7,
+            "stale": true
+          },
+          "matched": 11,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 3,
+            "balance": "233.46",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/DebitAdj/200027"
+          },
+          "warehouse": {
+            "open": 3,
+            "balance": "233.46",
+            "last_sync": "2026-10-01T12:49:35+00:00",
+            "age_hours": 200.7,
+            "stale": true
+          },
+          "matched": 3,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "61320c0a-102d-11ee-a0e0-0693d8a7c3dd",
+      "name": "Aquatiq Hygiene Systems AS",
+      "kind": "historical",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 79,
+            "balance": "14439442.25",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/102198"
+          },
+          "warehouse": {
+            "open": 79,
+            "balance": "14439442.25",
+            "last_sync": "2026-10-02T01:22:34+00:00",
+            "age_hours": 188.2,
+            "stale": true
+          },
+          "matched": 79,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 0,
+            "balance": "0",
+            "pages": 0,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "not run: no open rows"
+          },
+          "warehouse": {
+            "open": 0,
+            "balance": "0",
+            "last_sync": "2026-10-01T11:36:11+00:00",
+            "age_hours": 202.0,
+            "stale": true
+          },
+          "matched": 0,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    },
+    {
+      "tenant_id": "bb6c024e-5567-11ee-960c-025417856183",
+      "name": "Aquatiq Sense AS",
+      "kind": "historical",
+      "endpoints": {
+        "customer_invoices": {
+          "visma": {
+            "open": 11,
+            "balance": "1847500.00",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/customerinvoice/101172"
+          },
+          "warehouse": {
+            "open": 11,
+            "balance": "1847500.00",
+            "last_sync": "2026-10-01T11:27:45+00:00",
+            "age_hours": 202.1,
+            "stale": true
+          },
+          "matched": 11,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        },
+        "supplier_invoices": {
+          "visma": {
+            "open": 1,
+            "balance": "8374.43",
+            "pages": 1,
+            "fields_checked": [
+              "referenceNumber",
+              "documentType",
+              "balance",
+              "status",
+              "lastModifiedDateTime"
+            ],
+            "by_key_check": "200 and status Open for /v1/supplierInvoice/DebitAdj/201152"
+          },
+          "warehouse": {
+            "open": 1,
+            "balance": "8374.43",
+            "last_sync": "2026-10-01T11:19:57+00:00",
+            "age_hours": 202.2,
+            "stale": true
+          },
+          "matched": 1,
+          "cent_drift": 0,
+          "pending": {},
+          "defects": {},
+          "defect_keys": [],
+          "lookups": 0,
+          "errors": []
+        }
+      },
+      "errors": [],
+      "verdict": "FAIL"
+    }
+  ]
+}

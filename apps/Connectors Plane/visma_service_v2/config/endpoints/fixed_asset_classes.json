@@ -1,0 +1,29 @@
+{
+  "endpoint_name": "fixed_asset_classes",
+  "bigquery_table": "visma_fixed_asset_classes",
+  "primary_key": "classID",
+  "source": "erp_rest",
+  "api_method": "get_fixed_asset_classes",
+  "api_endpoint": "/v1/fixedAssetClass",
+  "pagination_profile": "finance_page_number",
+  "modified_field": null,
+  "merge_type": "upsert",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": [
+    "classID"
+  ],
+  "datamart": {
+    "ready": false,
+    "type_name": "FixedAssetClass",
+    "query_file": "config/queries/fixed_asset_class.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_fixed_asset_class",
+    "fallback_source": "erp_rest",
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    }
+  },
+  "notes": "The API returns no lastModifiedDateTime on any row (measured), so there is no watermark and every sync is a full re-fetch."
+}

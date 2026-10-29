@@ -1,0 +1,59 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+accounts,,1,0,succeeded,614,614,614,1,0,614,13836,929,2026-09-29 13:38:25.65+00
+attributes,,1,0,succeeded,48,48,48,1,0,48,13835,1128,
+carriers,,1,0,succeeded,55,55,55,1,0,55,13834,598,2026-08-26 10:35:48.89+00
+cash_accounts,,1,0,succeeded,29,29,29,1,0,29,13833,1773,2026-09-03 10:32:17.217+00
+cash_transactions,,1,0,succeeded,490,490,490,5,0,90,13827,5971,2026-09-23 07:16:54.02+00
+contacts,,1,0,succeeded,11727,11727,11727,1,0,11727,13826,6110,2026-09-29 14:32:34.08+00
+credit_terms,,1,0,succeeded,22,22,22,1,0,22,13825,516,2026-09-01 09:31:16.673+00
+currencies,,1,0,succeeded,12,12,12,1,0,12,13824,615,
+currency_rates,,1,0,succeeded,7023,7023,7023,1,0,7023,13823,696,
+customer_classes,,1,0,succeeded,3,3,3,1,0,3,13821,548,
+customer_documents,,1,0,succeeded,23132,23132,23132,232,0,32,13583,4810,2026-09-30 00:16:40.427+00
+customer_locations@ERP-v1-location-REMOVED,,1,0,succeeded,14552,14552,14552,146,0,52,13411,47869,2026-09-29 21:09:58.85+00
+customer_payment_methods,,1,0,succeeded,2,2,2,1,0,2,13410,600,
+customer_payments,,1,0,succeeded,21392,21391,21391,214,0,92,13176,38508,2026-09-30 00:03:04.33+00
+customer_sales_prices,,1,0,succeeded,17088,17088,17088,171,0,88,13000,2490,2026-09-28 14:13:38.53+00
+deferral_codes,,1,0,succeeded,12,12,12,1,0,12,12998,508,
+departments,,1,0,succeeded,54,54,54,1,0,54,12997,520,2026-02-19 13:27:34.987+00
+dimensions,,1,0,succeeded,23,23,23,1,0,23,12996,453,
+discount_codes,,1,0,succeeded,7,7,7,1,0,7,12995,464,2026-05-06 14:28:41.93+00
+earning_types,,1,0,succeeded,4,4,4,1,0,4,12994,405,
+employees,,1,0,succeeded,111,111,111,2,0,11,12992,992,2026-09-24 14:13:09.563+00
+expense_claims,,1,0,succeeded,1558,1558,1558,16,0,58,12958,37865,2026-09-29 10:31:12.297+00
+expense_transactions,,1,0,succeeded,30580,30580,30580,153,0,180,,22869,2026-09-29 08:09:49.707+00
+financial_periods,,1,0,succeeded,72,72,72,1,0,72,14898,818,
+fixed_asset_classes,,1,0,succeeded,23,23,23,1,0,23,14897,861,
+fixed_asset_property_tax_groups,,1,0,succeeded,0,0,0,1,0,0,14894,551,
+fixed_asset_transactions,,1,0,succeeded,1061,1061,1061,11,0,61,14886,719,2026-09-04 07:41:36.473+00
+general_ledger_balances_v2,,1,1,failed,0,0,0,1,1,0,,0,
+inventory_adjustments,,1,0,succeeded,4689,4689,4689,47,0,89,14349,44555,2026-09-29 13:47:41.5+00
+inventory_issues,,1,0,succeeded,21587,21587,21587,216,0,87,13728,68352,2026-09-29 14:41:53.84+00
+inventory_receipts,,1,0,succeeded,2504,2504,2504,26,0,4,13689,58049,2026-09-29 11:30:05.043+00
+inventory_transfers,,1,0,succeeded,736,736,736,8,0,36,13681,616,2026-09-29 14:06:50.143+00
+journal_transactions,,1,1,failed,0,0,0,1,1,0,,0,
+kit_specifications,,1,0,succeeded,643,643,643,7,0,43,13673,1597,2026-09-22 09:04:35.25+00
+landed_cost_codes,,1,0,succeeded,13,13,13,1,0,13,13671,553,
+ledgers,,1,0,succeeded,4,4,4,1,0,4,13670,484,2012-04-14 16:33:00+00
+locations,,1,0,succeeded,14552,14552,14552,146,0,52,13510,49873,2026-09-29 21:09:58.85+00
+lot_serial_classes,,1,0,succeeded,1,1,1,1,0,1,14858,413,2014-08-26 09:30:26.797+00
+number_sequences,,1,0,succeeded,82,82,82,1,0,82,14834,2284,
+packaging_types,,1,0,succeeded,1,1,1,1,0,1,14833,419,2023-10-05 08:17:09.39+00
+payment_methods,,1,0,succeeded,8,8,8,1,0,8,14857,441,
+project_budgets,,1,0,succeeded,5245,5245,5245,53,0,45,14715,5585,
+project_transactions,,1,0,succeeded,481,481,481,5,0,81,14700,1276,
+purchase_orders,,1,0,succeeded,2305,2305,2305,24,0,5,14576,9119,2026-09-29 14:07:32.74+00
+sales_categories,,1,0,succeeded,0,0,0,1,0,0,14573,586,
+sales_order_types,,1,0,succeeded,30,30,30,1,0,30,14570,764,
+sales_persons,,1,0,succeeded,114,114,114,2,0,14,14567,4235,2026-09-25 11:08:53.157+00
+shipments,,1,0,succeeded,21556,21556,21556,216,0,56,14201,23496,2026-09-29 15:51:02.707+00
+stocktakes_v2,,1,0,succeeded,22,22,22,1,0,22,14189,5856,2026-02-06 11:01:48.66+00
+subaccounts,,1,0,succeeded,11802,11802,11802,119,0,2,14032,2893,2026-09-07 15:06:30.56+00
+supplier_classes,,1,0,succeeded,16,16,16,1,0,16,14024,693,
+supplier_locations,,1,1,failed,6891,0,0,69,0,91,13942,2289,
+supplier_payments,,1,0,succeeded,9132,9132,9132,92,0,32,13848,3342,2026-09-30 03:15:28.463+00
+unit_of_measures,,1,0,succeeded,43,43,43,1,0,43,13847,612,
+vat_categories,,1,0,succeeded,48,48,48,1,0,48,13846,1054,2026-09-29 18:59:40.39+00
+vat_zones,,1,0,succeeded,15,15,15,1,0,15,13845,563,
+vats,,1,0,succeeded,67,67,67,1,0,67,13844,2991,2026-08-03 09:00:00.627+00
+warehouses,,1,0,succeeded,15,15,15,1,0,15,13842,1303,

@@ -1,0 +1,214 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  description: "Xero Projects Gold safety checks. Projects operational data must retain tenant-scoped keys and must not be reported as project financial P&L."
+}
+
+SELECT 'dim_project_invalid_key' AS issue, tenant_id, project_id, CAST(NULL AS STRING) AS detail_id
+FROM ${ref("xero_gold_common", "dim_project")}
+WHERE project_key IS NULL OR company_key IS NULL
+
+UNION ALL
+
+SELECT 'dim_project_task_invalid_key' AS issue, tenant_id, project_id, task_id AS detail_id
+FROM ${ref("xero_gold_operations", "dim_project_task")}
+WHERE project_task_key IS NULL OR project_key IS NULL OR company_key IS NULL
+
+UNION ALL
+
+SELECT 'fact_project_time_entry_invalid_key' AS issue, tenant_id, project_id, time_entry_id AS detail_id
+FROM ${ref("xero_gold_operations", "fact_project_time_entry")}
+WHERE project_time_entry_key IS NULL OR project_key IS NULL OR company_key IS NULL
+
+UNION ALL
+
+SELECT 'project_contact_reference' AS issue, project.tenant_id, project.project_id,
+       project.contact_id AS detail_id
+FROM ${ref("xero_gold_common", "dim_project")} AS project
+LEFT JOIN ${ref("xero_gold_common", "dim_contact")} AS contact
+  ON project.contact_key = contact.contact_key
+WHERE project.contact_key IS NOT NULL
+  AND contact.contact_key IS NULL
+  AND project.is_contact_unresolved IS FALSE
+
+UNION ALL
+
+SELECT 'project_contact_resolution_flag' AS issue, project.tenant_id, project.project_id,
+       project.contact_id AS detail_id
+FROM ${ref("xero_gold_common", "dim_project")} AS project
+LEFT JOIN ${ref("xero_gold_common", "dim_contact")} AS contact
+  ON project.contact_key = contact.contact_key
+WHERE project.contact_key IS NOT NULL
+  AND contact.contact_key IS NOT NULL
+  AND project.is_contact_unresolved IS TRUE
+
+UNION ALL
+
+SELECT 'task_project_reference' AS issue, task.tenant_id, task.project_id, task.task_id AS detail_id
+FROM ${ref("xero_gold_operations", "dim_project_task")} AS task
+LEFT JOIN ${ref("xero_gold_common", "dim_project")} AS project
+  ON task.project_key = project.project_key
+WHERE project.project_key IS NULL
+
+UNION ALL
+
+SELECT 'time_entry_project_reference' AS issue, entry.tenant_id, entry.project_id,
+       entry.time_entry_id AS detail_id
+FROM ${ref("xero_gold_operations", "fact_project_time_entry")} AS entry
+LEFT JOIN ${ref("xero_gold_common", "dim_project")} AS project
+  ON entry.project_key = project.project_key
+WHERE project.project_key IS NULL
+
+UNION ALL
+
+SELECT 'time_entry_task_reference' AS issue, entry.tenant_id, entry.project_id,
+       entry.time_entry_id AS detail_id
+FROM ${ref("xero_gold_operations", "fact_project_time_entry")} AS entry
+LEFT JOIN ${ref("xero_gold_operations", "dim_project_task")} AS task
+  ON entry.project_task_key = task.project_task_key
+WHERE entry.project_task_key IS NOT NULL
+  AND task.project_task_key IS NULL
+
+UNION ALL
+
+SELECT 'time_entry_user_reference' AS issue, entry.tenant_id, entry.project_id,
+       entry.time_entry_id AS detail_id
+FROM ${ref("xero_gold_operations", "fact_project_time_entry")} AS entry
+LEFT JOIN ${ref("xero_gold_operations", "dim_project_user")} AS project_user
+  ON entry.project_user_key = project_user.project_user_key
+WHERE entry.project_user_key IS NOT NULL
+  AND project_user.project_user_key IS NULL
+
+UNION ALL
+
+SELECT 'fact_project_time_entry_negative_duration' AS issue, tenant_id, project_id, time_entry_id AS detail_id
+FROM ${ref("xero_gold_operations", "fact_project_time_entry")}
+WHERE duration_minutes < 0
+
+UNION ALL
+
+SELECT 'operational_snapshot_negative_logged_duration' AS issue, tenant_id, project_id,
+       CAST(NULL AS STRING) AS detail_id
+FROM ${ref("xero_gold_operations", "fact_project_operational_snapshot")}
+WHERE logged_duration_minutes < 0
+
+UNION ALL
+
+SELECT 'dim_project_invalid_lifecycle' AS issue, tenant_id, project_id,
+       CAST(NULL AS STRING) AS detail_id
+FROM ${ref("xero_gold_common", "dim_project")}
+WHERE is_current IS NULL OR is_removed IS NULL OR (is_current AND is_removed)
+
+UNION ALL
+
+SELECT 'dim_project_task_invalid_lifecycle' AS issue, tenant_id, project_id, task_id AS detail_id
+FROM ${ref("xero_gold_operations", "dim_project_task")}
+WHERE is_current IS NULL OR is_removed IS NULL OR (is_current AND is_removed)
+
+UNION ALL
+
+SELECT 'fact_project_time_entry_invalid_lifecycle' AS issue, tenant_id, project_id,
+       time_entry_id AS detail_id
+FROM ${ref("xero_gold_operations", "fact_project_time_entry")}
+WHERE is_current IS NULL OR is_removed IS NULL OR (is_current AND is_removed)
+
+UNION ALL
+
+SELECT 'operational_snapshot_invalid_lifecycle' AS issue, tenant_id, project_id,
+       CAST(NULL AS STRING) AS detail_id
+FROM ${ref("xero_gold_operations", "fact_project_operational_snapshot")}
+WHERE is_current IS NULL OR is_removed IS NULL OR (is_current AND is_removed)
+
+UNION ALL
+
+SELECT 'project_direct_detail_not_reconciled' AS issue, tenant_id, project_id,
+       direct_detail_source_run_id AS detail_id
+FROM ${ref("xero_gold_common", "dim_project")}
+WHERE has_direct_detail_evidence
+  AND is_direct_detail_reconciled IS NOT TRUE
+
+UNION ALL
+
+SELECT 'project_task_direct_detail_not_reconciled' AS issue, tenant_id, project_id,
+       task_id AS detail_id
+FROM ${ref("xero_gold_operations", "dim_project_task")}
+WHERE has_direct_detail_evidence
+  AND is_direct_detail_reconciled IS NOT TRUE
+
+UNION ALL
+
+SELECT 'project_time_entry_direct_detail_not_reconciled' AS issue, tenant_id, project_id,
+       time_entry_id AS detail_id
+FROM ${ref("xero_gold_operations", "fact_project_time_entry")}
+WHERE has_direct_detail_evidence
+  AND is_direct_detail_reconciled IS NOT TRUE
+
+UNION ALL
+
+SELECT 'dim_project_task_current_project_not_current' AS issue, task.tenant_id,
+       task.project_id, task.task_id AS detail_id
+FROM ${ref("xero_gold_operations", "dim_project_task")} AS task
+LEFT JOIN ${ref("xero_gold_common", "dim_project")} AS project
+  ON task.tenant_id = project.tenant_id
+ AND task.project_id = project.project_id
+WHERE task.is_current AND COALESCE(project.is_current, FALSE) = FALSE
+
+UNION ALL
+
+SELECT 'fact_project_time_entry_current_project_not_current' AS issue, entry.tenant_id,
+       entry.project_id, entry.time_entry_id AS detail_id
+FROM ${ref("xero_gold_operations", "fact_project_time_entry")} AS entry
+LEFT JOIN ${ref("xero_gold_common", "dim_project")} AS project
+  ON entry.tenant_id = project.tenant_id
+ AND entry.project_id = project.project_id
+WHERE entry.is_current AND COALESCE(project.is_current, FALSE) = FALSE
+
+UNION ALL
+
+SELECT 'dim_project_missing_currency_unit' AS issue, project.tenant_id, project.project_id,
+       money.field_name AS detail_id
+FROM ${ref("xero_gold_common", "dim_project")} AS project,
+UNNEST([
+  STRUCT(project.estimate_amount AS amount, project.estimate_currency_code AS currency_code,
+         'estimate_amount' AS field_name),
+  STRUCT(project.total_invoiced_amount AS amount, project.total_invoiced_currency_code AS currency_code,
+         'total_invoiced_amount' AS field_name),
+  STRUCT(project.total_to_be_invoiced_amount AS amount, project.total_to_be_invoiced_currency_code AS currency_code,
+         'total_to_be_invoiced_amount' AS field_name),
+  STRUCT(project.total_expense_amount AS amount, project.total_expense_currency_code AS currency_code,
+         'total_expense_amount' AS field_name),
+  STRUCT(project.expense_amount_invoiced AS amount, project.expense_amount_invoiced_currency_code AS currency_code,
+         'expense_amount_invoiced' AS field_name),
+  STRUCT(project.expense_amount_to_be_invoiced AS amount, project.expense_amount_to_be_invoiced_currency_code AS currency_code,
+         'expense_amount_to_be_invoiced' AS field_name),
+  STRUCT(project.total_task_amount AS amount, project.total_task_currency_code AS currency_code,
+         'total_task_amount' AS field_name),
+  STRUCT(project.task_amount_invoiced AS amount, project.task_amount_invoiced_currency_code AS currency_code,
+         'task_amount_invoiced' AS field_name),
+  STRUCT(project.task_amount_to_be_invoiced AS amount, project.task_amount_to_be_invoiced_currency_code AS currency_code,
+         'task_amount_to_be_invoiced' AS field_name),
+  STRUCT(project.project_amount_invoiced AS amount, project.project_amount_invoiced_currency_code AS currency_code,
+         'project_amount_invoiced' AS field_name),
+  STRUCT(project.credit_note_amount AS amount, project.credit_note_currency_code AS currency_code,
+         'credit_note_amount' AS field_name),
+  STRUCT(project.deposit_amount AS amount, project.deposit_currency_code AS currency_code,
+         'deposit_amount' AS field_name),
+  STRUCT(project.deposit_applied_amount AS amount, project.deposit_applied_currency_code AS currency_code,
+         'deposit_applied_amount' AS field_name)
+]) AS money
+WHERE money.amount IS NOT NULL AND money.currency_code IS NULL
+
+UNION ALL
+
+SELECT 'dim_project_task_missing_currency_unit' AS issue, tenant_id, project_id,
+       CONCAT(task_id, '|', money.field_name) AS detail_id
+FROM ${ref("xero_gold_operations", "dim_project_task")},
+UNNEST([
+  STRUCT(rate_amount AS amount, rate_currency_code AS currency_code, 'rate_amount' AS field_name),
+  STRUCT(total_amount AS amount, total_currency_code AS currency_code, 'total_amount' AS field_name),
+  STRUCT(amount_invoiced AS amount, amount_invoiced_currency_code AS currency_code,
+         'amount_invoiced' AS field_name),
+  STRUCT(amount_to_be_invoiced AS amount, amount_to_be_invoiced_currency_code AS currency_code,
+         'amount_to_be_invoiced' AS field_name)
+]) AS money
+WHERE money.amount IS NOT NULL AND money.currency_code IS NULL

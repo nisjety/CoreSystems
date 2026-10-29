@@ -1,0 +1,42 @@
+query ApPaymentLines(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  apPaymentLines(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    branchId
+    paymentRefNbr
+    paymentDocType
+    invoiceRefNbr
+    invoiceDocType
+    adjNbr
+    rgolAmt
+    currency
+    cashDiscountBalance
+    balance
+    amountPaid
+    batchNumber
+    applicationPeriod
+    date
+    withholdingTax
+    dueDate
+    cashDiscountDate
+    cashDiscountTaken
+    supplierRef
+    lastModifiedDateTime
+    deletedDatabaseRecord
+    supplierId
+    createdInDataMartDateTime
+  }
+}

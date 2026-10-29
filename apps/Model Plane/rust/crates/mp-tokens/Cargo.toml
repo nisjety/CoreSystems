@@ -1,0 +1,10 @@
+[package]
+name = "mp-tokens"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tiktoken-rs = "0.6"

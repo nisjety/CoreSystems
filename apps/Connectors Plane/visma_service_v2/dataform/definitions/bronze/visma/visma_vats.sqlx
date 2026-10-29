@@ -1,0 +1,48 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_vats",
+  description: "Bronze: VAT rate configuration with GL account mappings from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.str("calculateOn")} AS `calculateOn`,
+  ${bronze.str("cashDiscount")} AS `cashDiscount`,
+  ${bronze.str("categories")} AS `categories`,
+  ${bronze.bool("deductibleVat")} AS `deductibleVat`,
+  ${bronze.str("defaultNonStockItem")} AS `defaultNonStockItem`,
+  ${bronze.str("description")} AS `description`,
+  ${bronze.str("documentText")} AS `documentText`,
+  ${bronze.bool("enterFromVatInvoice")} AS `enterFromVatInvoice`,
+  ${bronze.str("glAccounts")} AS `glAccounts`,
+  ${bronze.bool("includeinVatExemptTotal")} AS `includeinVatExemptTotal`,
+  ${bronze.bool("includeinVatTotal")} AS `includeinVatTotal`,
+  ${bronze.str("lastModifiedDateTime")} AS `lastModifiedDateTime`,
+  ${bronze.str("notValidAfter")} AS `notValidAfter`,
+  ${bronze.bool("pendingVat")} AS `pendingVat`,
+  ${bronze.bool("reverseVat")} AS `reverseVat`,
+  ${bronze.str("schedules")} AS `schedules`,
+  ${bronze.bool("statisticalVat")} AS `statisticalVat`,
+  ${bronze.str("type")} AS `type`,
+  ${bronze.str("vatAgencyId")} AS `vatAgencyId`,
+  ${bronze.str("vatCategoryId")} AS `vatCategoryId`,
+  ${bronze.str("vatId")} AS `vatId`,
+  ${bronze.str("vismaXmlVatType")} AS `vismaXmlVatType`,
+  ${bronze.str("zones")} AS `zones`,
+  ${bronze.str("euReportCode")} AS `euReportCode`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`  -- v2 does not fetch this field
+FROM ${ref("dw_staging_visma", "vats")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

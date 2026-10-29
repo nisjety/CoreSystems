@@ -1,0 +1,23 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Xero chart of accounts with native classification plus any effective-dated finance-governed reporting mapping.",
+  assertions: { nonNull: ["tenant_id", "account_id", "account_key"], uniqueKey: ["account_key"] }
+}
+
+SELECT FARM_FINGERPRINT(account_classification_history_key) AS account_classification_history_key,
+       FARM_FINGERPRINT(CONCAT(tenant_id, '|', account_id)) AS account_key,
+       FARM_FINGERPRINT(tenant_id) AS company_key,
+       tenant_id, account_id, account_code, account_name, account_description,
+       account_type, account_class, source_bs_pl, source_fsli_1, source_fsli_2, source_fsli_3,
+       ebitda_flag, net_income_flag, cash_flow_1, cash_flow_2, cash_flow_3,
+       working_capital_flag, capex_flag, intercompany_flag,
+       account_mapping_id, account_mapping_source, account_mapping_version,
+       mapping_valid_from, mapping_valid_to, mapping_approved_at,
+       bs_pl, fsli_1, account_mapping_method, is_financial_statement_classification_complete,
+       reporting_code, reporting_name,
+       status, is_archived, is_active, tax_type, is_missing_from_staging,
+       has_direct_detail_evidence, is_direct_detail_reconciled,
+       direct_detail_observed_at, direct_detail_source_run_id,
+       'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_account")}

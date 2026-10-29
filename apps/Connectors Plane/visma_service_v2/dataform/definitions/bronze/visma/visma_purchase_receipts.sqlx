@@ -1,0 +1,52 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_purchase_receipts",
+  description: "Bronze: Goods receipt notes from purchase orders (v2) from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.str("branchNumber")} AS `branchNumber`,
+  ${bronze.float("controlQty")} AS `controlQty`,
+  ${bronze.float("controlTotal")} AS `controlTotal`,
+  ${bronze.bool("createBill")} AS `createBill`,
+  ${bronze.str("currency")} AS `currency`,
+  ${bronze.str("date")} AS `date`,
+  ${bronze.str("dueDate")} AS `dueDate`,
+  ${bronze.float("exchangeRate")} AS `exchangeRate`,
+  ${bronze.bool("hold")} AS `hold`,
+  ${bronze.str("landedCost")} AS `landedCost`,
+  ${bronze.str("lastModifiedDateTime")} AS `lastModifiedDateTime`,
+  ${bronze.str("lines")} AS `lines`,
+  ${bronze.str("location")} AS `location`,
+  ${bronze.str("metadata")} AS `metadata`,
+  ${bronze.str("postPeriod")} AS `postPeriod`,
+  ${bronze.str("receiptNbr")} AS `receiptNbr`,
+  ${bronze.str("receiptType")} AS `receiptType`,
+  ${bronze.str("status")} AS `status`,
+  ${bronze.str("supplier")} AS `supplier`,
+  ${bronze.str("supplierRef")} AS `supplierRef`,
+  ${bronze.str("timeStamp")} AS `timeStamp`,
+  ${bronze.float("totalAmt")} AS `totalAmt`,
+  ${bronze.float("totalQty")} AS `totalQty`,
+  ${bronze.float("vatExemptTotal")} AS `vatExemptTotal`,
+  ${bronze.float("vatTaxableTotal")} AS `vatTaxableTotal`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`,  -- v2 does not fetch this field
+
+  -- Fields v2 fetches that the v1 table never had
+  ${bronze.str("note")} AS `note`
+FROM ${ref("dw_staging_visma", "purchase_receipts")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

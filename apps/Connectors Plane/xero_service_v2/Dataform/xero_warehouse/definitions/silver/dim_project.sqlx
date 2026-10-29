@@ -1,0 +1,76 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Lifecycle-aware Xero Projects master data from fully certified collection runs. Historical entities are retained and explicitly marked current or removed.",
+  assertions: {
+    nonNull: ["tenant_id", "project_id", "project_key"],
+    uniqueKey: ["project_key"]
+  }
+}
+
+WITH source AS (
+  SELECT project.*, lifecycle.is_current, lifecycle.is_removed,
+         lifecycle.removed_in_run_id, lifecycle.removed_observed_at,
+         lifecycle.record_state, lifecycle.first_seen_at, lifecycle.last_seen_at
+  FROM ${ref("dw_bronze_xero", "xero_project_entity_lifecycle")} AS lifecycle
+  INNER JOIN ${ref("dw_bronze_xero", "xero_project_observations")} AS project
+    ON lifecycle.tenant_id = project.tenant_id
+   AND lifecycle.last_seen_source_run_id = project.source_run_id
+   AND lifecycle.project_id = project.project_id
+  WHERE lifecycle.entity_type = 'project'
+)
+SELECT
+  CONCAT(tenant_id, '|', project_id) AS project_key,
+  tenant_id,
+  project_id,
+  contact_id,
+  project_name,
+  project_status,
+  currency_code,
+  deadline_date,
+  estimate_amount,
+  estimate_currency_code,
+  total_invoiced_amount,
+  total_invoiced_currency_code,
+  total_to_be_invoiced_amount,
+  total_to_be_invoiced_currency_code,
+  total_expense_amount,
+  total_expense_currency_code,
+  expense_amount_invoiced,
+  expense_amount_invoiced_currency_code,
+  expense_amount_to_be_invoiced,
+  expense_amount_to_be_invoiced_currency_code,
+  total_task_amount,
+  total_task_currency_code,
+  task_amount_invoiced,
+  task_amount_invoiced_currency_code,
+  task_amount_to_be_invoiced,
+  task_amount_to_be_invoiced_currency_code,
+  project_amount_invoiced,
+  project_amount_invoiced_currency_code,
+  credit_note_amount,
+  credit_note_currency_code,
+  deposit_amount,
+  deposit_currency_code,
+  deposit_applied_amount,
+  deposit_applied_currency_code,
+  minutes_logged,
+  minutes_to_be_invoiced,
+  is_source_deleted,
+  project_observed_at,
+  source_record_id,
+  source_version_id,
+  source_receipt_id,
+  source_run_id,
+  is_current,
+  is_removed,
+  removed_in_run_id,
+  removed_observed_at,
+  record_state,
+  first_seen_at,
+  last_seen_at
+FROM source
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY tenant_id, project_id
+  ORDER BY project_observed_at DESC, source_receipt_id DESC, source_version_id DESC
+) = 1

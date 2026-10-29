@@ -1,0 +1,55 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Lifecycle-aware Xero Project time entries from fully certified parent-scoped time collection runs. Native duration is minutes, not a financial measure.",
+  assertions: {
+    nonNull: ["tenant_id", "project_id", "time_entry_id", "project_time_entry_key"],
+    uniqueKey: ["project_time_entry_key"]
+  }
+}
+
+WITH source AS (
+  SELECT entry.*, lifecycle.is_current, lifecycle.is_removed,
+         lifecycle.removed_in_run_id, lifecycle.removed_observed_at,
+         lifecycle.record_state, lifecycle.first_seen_at, lifecycle.last_seen_at
+  FROM ${ref("dw_bronze_xero", "xero_project_entity_lifecycle")} AS lifecycle
+  INNER JOIN ${ref("dw_bronze_xero", "xero_project_time_entry_observations")} AS entry
+    ON lifecycle.tenant_id = entry.tenant_id
+   AND lifecycle.last_seen_source_run_id = entry.source_run_id
+   AND lifecycle.project_id = entry.project_id
+   AND lifecycle.entity_id = entry.time_entry_id
+  WHERE lifecycle.entity_type = 'time_entry'
+)
+SELECT
+  CONCAT(tenant_id, '|', project_id, '|', time_entry_id) AS project_time_entry_key,
+  CONCAT(tenant_id, '|', project_id) AS project_key,
+  IF(task_id IS NULL, NULL, CONCAT(tenant_id, '|', project_id, '|', task_id)) AS project_task_key,
+  IF(user_id IS NULL, NULL, CONCAT(tenant_id, '|', user_id)) AS project_user_key,
+  tenant_id,
+  project_id,
+  task_id,
+  user_id,
+  time_entry_id,
+  time_entry_status,
+  entry_date,
+  entered_at,
+  duration_minutes,
+  duration_minutes IS NOT NULL AND duration_minutes >= 0 AS is_duration_valid,
+  project_observed_at,
+  source_record_id,
+  source_version_id,
+  source_receipt_id,
+  source_run_id,
+  is_current,
+  is_removed,
+  removed_in_run_id,
+  removed_observed_at,
+  record_state,
+  first_seen_at,
+  last_seen_at
+FROM source
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY tenant_id, project_id, time_entry_id
+  ORDER BY projection_schema_revision DESC, project_observed_at DESC,
+           source_receipt_id DESC, source_version_id DESC
+) = 1

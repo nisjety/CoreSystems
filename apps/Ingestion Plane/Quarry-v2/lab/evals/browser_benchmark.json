@@ -1,0 +1,65 @@
+{
+  "benchmark": "quarry_browser_live_frame_stream",
+  "quarryVersion": "0.1.0",
+  "config": {
+    "frames": 30,
+    "actions": 10,
+    "frameBytes": 98304
+  },
+  "scenarios": [
+    {
+      "scenario": "screenshot_artifact_refresh",
+      "frameLatencyMs": {
+        "min": 1.056292,
+        "mean": 1.1598542666666665,
+        "p50": 1.151791,
+        "p95": 1.268,
+        "max": 1.270792
+      },
+      "actionLatencyMs": {
+        "min": 1.442834,
+        "mean": 1.574096,
+        "p50": 1.56575,
+        "p95": 1.7266670000000002,
+        "max": 1.7266670000000002
+      },
+      "cpuMs": 50.08,
+      "artifactWriteCount": 40,
+      "artifactBytes": 3932160,
+      "artifactWritesByKind": {
+        "screenshot": 40
+      },
+      "persistedPreviewImagePayloads": 30
+    },
+    {
+      "scenario": "live_frame_stream",
+      "frameLatencyMs": {
+        "min": 0.55875,
+        "mean": 0.5904569000000001,
+        "p50": 0.581583,
+        "p95": 0.6334580000000001,
+        "max": 0.6351669999999999
+      },
+      "actionLatencyMs": {
+        "min": 1.451,
+        "mean": 1.5422374,
+        "p50": 1.53925,
+        "p95": 1.695166,
+        "max": 1.695166
+      },
+      "cpuMs": 32.972,
+      "artifactWriteCount": 10,
+      "artifactBytes": 983040,
+      "artifactWritesByKind": {
+        "screenshot": 10
+      },
+      "persistedPreviewImagePayloads": 0
+    }
+  ],
+  "comparison": {
+    "artifactWritesSaved": 30,
+    "artifactBytesSaved": 2949120,
+    "persistedPreviewImagePayloadsSaved": 30,
+    "frameP95DeltaMs": -0.6345419999999999
+  }
+}

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Local fresh-source launcher. Existing credentials are loaded without logging.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+set -a
+if [[ -f .env.bff ]]; then
+  source .env.bff
+fi
+source "${XERO_FRESH_ENV:-.env.fresh}"
+set +a
+: "${XERO_INGESTION_GENERATION:?fresh generation is required}"
+: "${XERO_FRESH_START_AT:?baseline activation timestamp is required}"
+export XERO_AUTH_MODE=pkce
+exec "${XERO_FRESH_BINARY:-$ROOT/target/debug/xero}" "$@"

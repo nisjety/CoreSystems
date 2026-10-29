@@ -1,0 +1,62 @@
+# Used by Rust service builds (build context = project root).
+# Excludes everything that would slow/break the build or leak secrets.
+
+# Build artifacts
+target/
+**/target/
+*.profraw
+
+# Tests / CI / development
+tests/
+.github/
+**/.venv/
+**/venv/
+**/.pytest_cache/
+**/__pycache__/
+**/node_modules/
+*.pyc
+*.pyo
+
+# Tooling that doesn't belong in the Rust workspace build
+tools/
+gen/*
+!gen/go/
+!gen/go/**
+bin/
+backups/
+.codegraph/
+
+# Non-Rust services and labs that are not needed by root-context builds. Most
+# Go services have their own build context; wiki-store-go intentionally stays in
+# the root context because its Dockerfile also copies gen/go.
+services/documents-api-go/
+services/data-orchestrator-go/
+services/data-quality-go/
+services/*-py/
+services/colqwen-reranker/
+
+# IDE / OS noise
+.idea/
+.vscode/
+.DS_Store
+
+# Secrets / local-only
+.env
+.env.*
+!.env.example
+.secrets/
+**/.secrets/
+**/*.pem
+**/*.key
+signin_output.txt
+
+# Docs (not needed at build time)
+docs/
+*.md
+!Cargo.toml
+docker-compose*.yml
+Makefile
+
+# Git
+.git/
+.gitignore

@@ -1,0 +1,78 @@
+# Immutable offline image override. The signed artifact archives every image
+# and records local content IDs; production Compose must never resolve tags or
+# contact a registry after `release-artifact.sh restore`.
+services:
+  postgres:
+    image: ${POSTGRES_RELEASE_IMAGE:?POSTGRES_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  nats:
+    image: ${NATS_RELEASE_IMAGE:?NATS_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  minio:
+    image: ${MINIO_RELEASE_IMAGE:?MINIO_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  dragonfly:
+    image: ${DRAGONFLY_RELEASE_IMAGE:?DRAGONFLY_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  temporal:
+    image: ${TEMPORAL_RELEASE_IMAGE:?TEMPORAL_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  temporal-postgres:
+    image: ${POSTGRES_RELEASE_IMAGE:?POSTGRES_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  temporal-ui:
+    image: ${TEMPORAL_UI_RELEASE_IMAGE:?TEMPORAL_UI_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  otel-collector:
+    image: ${OTEL_COLLECTOR_RELEASE_IMAGE:?OTEL_COLLECTOR_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  model-gateway:
+    build: !reset null
+    image: ${MODEL_GATEWAY_RELEASE_IMAGE:?MODEL_GATEWAY_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  session-core:
+    build: !reset null
+    image: ${SESSION_CORE_RELEASE_IMAGE:?SESSION_CORE_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  inference-core:
+    build: !reset null
+    image: ${INFERENCE_CORE_RELEASE_IMAGE:?INFERENCE_CORE_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  execution-core:
+    build: !reset null
+    image: ${EXECUTION_CORE_RELEASE_IMAGE:?EXECUTION_CORE_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  orchestrator-core:
+    build: !reset null
+    image: ${ORCHESTRATOR_CORE_RELEASE_IMAGE:?ORCHESTRATOR_CORE_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  capability-core:
+    build: !reset null
+    image: ${CAPABILITY_CORE_RELEASE_IMAGE:?CAPABILITY_CORE_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  sandbox-manager:
+    build: !reset null
+    image: ${SANDBOX_MANAGER_RELEASE_IMAGE:?SANDBOX_MANAGER_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  browser-broker:
+    build: !reset null
+    image: ${BROWSER_BROKER_RELEASE_IMAGE:?BROWSER_BROKER_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  letta-bridge:
+    build: !reset null
+    image: ${LETTA_BRIDGE_RELEASE_IMAGE:?LETTA_BRIDGE_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  agent-memory-redis:
+    image: ${AGENT_MEMORY_REDIS_RELEASE_IMAGE:?AGENT_MEMORY_REDIS_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  agent-memory-server:
+    image: ${AGENT_MEMORY_SERVER_RELEASE_IMAGE:?AGENT_MEMORY_SERVER_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  cost-core:
+    build: !reset null
+    image: ${COST_CORE_RELEASE_IMAGE:?COST_CORE_RELEASE_IMAGE digest is required}
+    pull_policy: never
+  bridge-core:
+    build: !reset null
+    image: ${BRIDGE_CORE_RELEASE_IMAGE:?BRIDGE_CORE_RELEASE_IMAGE digest is required}
+    pull_policy: never

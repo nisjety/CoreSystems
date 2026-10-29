@@ -1,0 +1,13 @@
+id: "10-multitool-loop-health"
+name: "Multi-tool research task within loop bounds"
+prompt: "Undersøk kort hva Brønnøysundregistrene er, og oppsummer i tre punkter."
+profile: deployed_agent
+features: [usage, tools, citations, agentic]
+loop:
+  max_tool_calls: 8
+  # Baseline tolerance: live web fetches flake; one retried tool error is
+  # within bounds, a second is a regression.
+  max_errors: 1
+checks:
+  regex: ["Br(ø|o)nn(ø|o)ysund"]
+tags: [loop, agentic]

@@ -1,0 +1,28 @@
+tenant,name,endpoint,source,status,records,written,seconds,min_remaining,error,finished
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,project_tasks,erp_rest,empty,0,0,1,14736,,2026-09-30T23:52:11Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,warehouses,erp_rest,ok,1,1,0,14735,,2026-09-30T23:52:12Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,project_tasks,erp_rest,empty,0,0,2,14739,,2026-09-30T23:52:12Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,warehouses,erp_rest,ok,1,1,0,14738,,2026-09-30T23:52:13Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,project_tasks,erp_rest,ok,260,260,17,14702,,2026-09-30T23:52:27Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,vat_zones,erp_rest,failed,5,0,0,14701,"Error: config error: sync validation failed: 3 rejected row(s), 0 exact duplicate row(s) dropped; rows per reason: missing validation field defaultTaxCategory: 3; first rejection: missing validation field defaultTaxCategory; first key: 2b6e5cd6-6ce0-11ee-970e-02541785618303; first record keys: _source,_synced_at,description,id,metadata,tenant_id",2026-09-30T23:52:28Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,warehouses,erp_rest,ok,1,1,0,14700,,2026-09-30T23:52:28Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,cash_transactions,erp_rest,ok,349,349,4,14696,,2026-09-30T23:52:32Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,journal_transactions,erp_rest,ok,3617,3617,39,14641,,2026-09-30T23:52:52Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,project_tasks,erp_rest,empty,0,0,1,14694,,2026-09-30T23:52:53Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,cash_transactions,erp_rest,ok,344,344,2,14690,,2026-09-30T23:52:55Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,journal_transactions,erp_rest,ok,4213,4213,46,14645,,2026-09-30T23:53:00Z
+ffa4a061-8084-11e9-b307-0aa512338dd6,Aqua Pharma Group AS,time_cards,erp_rest,empty,0,0,1,14644,,2026-09-30T23:53:01Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,project_tasks,erp_rest,ok,59,59,7,14776,,2026-09-30T23:53:09Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,warehouses,erp_rest,ok,1,1,0,14775,,2026-09-30T23:53:10Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,journal_transactions,erp_rest,ok,3575,3575,39,14603,,2026-09-30T23:53:12Z
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,project_budgets,erp_rest,ok,355,355,1,14599,,2026-09-30T23:53:14Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,cash_transactions,erp_rest,ok,657,657,4,14768,,2026-09-30T23:53:15Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,project_tasks,erp_rest,empty,0,0,0,14506,,2026-09-30T23:53:15Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,warehouses,erp_rest,ok,1,1,0,14505,,2026-09-30T23:53:15Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,cash_transactions,erp_rest,ok,728,728,3,14497,,2026-09-30T23:53:19Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,journal_transactions,erp_rest,ok,759,759,35,14597,,2026-09-30T23:53:31Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,project_tasks,erp_rest,ok,12,12,3,14619,,2026-09-30T23:53:35Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,cash_transactions,erp_rest,ok,196,196,1,14617,,2026-09-30T23:53:36Z
+eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd,Sensilist AS,inventory_adjustments,erp_rest,ok,55,55,3,14616,,2026-09-30T23:53:39Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,journal_transactions,erp_rest,ok,2187,2187,36,14675,,2026-09-30T23:53:51Z
+7d2c489e-21cc-11e9-b307-0aa512338dd6,Aquatiq Group AS,expense_transactions,expense_api,ok,17442,17442,46,,,2026-09-30T23:54:06Z

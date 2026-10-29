@@ -1,0 +1,4 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+budgets,1,1,0,succeeded,0,0,0,30,0,0,13844,187,2026-09-29 13:47:36+00
+general_ledger_transactions,1,1,0,succeeded,2418,2418,2418,25,0,18,13818,4969,2026-09-29 13:47:41+00
+time_cards,1,1,0,succeeded,0,0,0,111,0,0,13705,2895,2026-09-29 13:48:05+00

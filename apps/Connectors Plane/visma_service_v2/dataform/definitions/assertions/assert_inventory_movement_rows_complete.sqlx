@@ -1,0 +1,75 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_inventory_movement_rows_complete",
+  description: "Silver must hold every inventory movement header and line that bronze holds. The four endpoints (adjustments, issues, receipts, transfers) are unioned in visma_silver.fact_inventory_movement and fact_inventory_movement_line. Returns one row per tenant, movement type and kind (header, line) where the count in bronze (distinct referenceNumber, the staging key; lines unnested from adjusmentLines, issueLines, receiptLines, transferLines) differs from silver.",
+  tags: ["assertion", "silver", "inventory_movement"]
+}
+
+WITH bronze AS (
+  SELECT
+    'ADJUSTMENT' AS movement_type,
+    tenantId AS tenant_id,
+    COUNT(DISTINCT referenceNumber) AS headers,
+    SUM(ARRAY_LENGTH(JSON_QUERY_ARRAY(adjusmentLines))) AS lines
+  FROM ${ref("visma_bronze", "visma_inventory_adjustments")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT
+    'ISSUE' AS movement_type,
+    tenantId AS tenant_id,
+    COUNT(DISTINCT referenceNumber) AS headers,
+    SUM(ARRAY_LENGTH(JSON_QUERY_ARRAY(issueLines))) AS lines
+  FROM ${ref("visma_bronze", "visma_inventory_issues")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT
+    'RECEIPT' AS movement_type,
+    tenantId AS tenant_id,
+    COUNT(DISTINCT referenceNumber) AS headers,
+    SUM(ARRAY_LENGTH(JSON_QUERY_ARRAY(receiptLines))) AS lines
+  FROM ${ref("visma_bronze", "visma_inventory_receipts")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT
+    'TRANSFER' AS movement_type,
+    tenantId AS tenant_id,
+    COUNT(DISTINCT referenceNumber) AS headers,
+    SUM(ARRAY_LENGTH(JSON_QUERY_ARRAY(transferLines))) AS lines
+  FROM ${ref("visma_bronze", "visma_inventory_transfers")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+),
+
+silver_headers AS (
+  SELECT movement_type, tenant_id, COUNT(*) AS headers
+  FROM ${ref("visma_silver", "fact_inventory_movement")}
+  GROUP BY movement_type, tenant_id
+),
+
+silver_lines AS (
+  SELECT movement_type, tenant_id, COUNT(*) AS lines
+  FROM ${ref("visma_silver", "fact_inventory_movement_line")}
+  GROUP BY movement_type, tenant_id
+),
+
+compared AS (
+  SELECT
+    'header' AS kind, b.movement_type, b.tenant_id,
+    b.headers AS bronze_rows, COALESCE(h.headers, 0) AS silver_rows
+  FROM bronze AS b
+  LEFT JOIN silver_headers AS h ON b.movement_type = h.movement_type AND b.tenant_id = h.tenant_id
+  UNION ALL
+  SELECT
+    'line' AS kind, b.movement_type, b.tenant_id,
+    COALESCE(b.lines, 0) AS bronze_rows, COALESCE(l.lines, 0) AS silver_rows
+  FROM bronze AS b
+  LEFT JOIN silver_lines AS l ON b.movement_type = l.movement_type AND b.tenant_id = l.tenant_id
+)
+
+SELECT kind, movement_type, tenant_id, bronze_rows, silver_rows
+FROM compared
+WHERE bronze_rows != silver_rows

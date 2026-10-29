@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "xero_reference",
+  name: "xero_nok_conversion_policy",
+  description: "Finance-owned effective-dated policy authorizing Xero functional-currency conversion to NOK. A market rate alone never authorizes financial conversion."
+}

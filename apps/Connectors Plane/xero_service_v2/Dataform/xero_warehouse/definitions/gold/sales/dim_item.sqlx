@@ -1,0 +1,16 @@
+config {
+  type: "table",
+  schema: "xero_gold_sales",
+  description: "Xero item catalog; item prices and inventory are source values, not revenue or stock valuation.",
+  assertions: { nonNull: ["tenant_id", "item_id", "item_key"], uniqueKey: ["item_key"] }
+}
+
+SELECT FARM_FINGERPRINT(CONCAT(i.tenant_id, '|', i.item_id)) AS item_key,
+       FARM_FINGERPRINT(i.tenant_id) AS company_key,
+       i.tenant_id, i.item_id, i.item_code, i.item_name, i.description,
+       i.purchase_description, i.is_sold, i.is_purchased,
+       i.is_tracked_as_inventory, i.quantity_on_hand, i.total_cost_pool,
+       i.sales_unit_price, i.purchase_unit_price, i.sales_account_code,
+       i.cogs_account_code, i.sales_tax_type, i.purchase_tax_type,
+       i.updated_at, i.synced_at, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_item")} AS i

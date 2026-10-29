@@ -1,0 +1,16 @@
+# Application-Plane Prometheus scrape configuration (Phase 6 B13).
+#
+# The Application Plane services do not yet expose Prometheus-format endpoints.
+# Do not configure fictional :9091 targets: permanently DOWN targets obscure real
+# incidents. Add each service here only when its metrics endpoint ships and has a
+# readiness test.
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  external_labels:
+    plane: application
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

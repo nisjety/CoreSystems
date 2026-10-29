@@ -1,0 +1,31 @@
+{
+  "endpoint_name": "cash_accounts",
+  "bigquery_table": "visma_cash_accounts",
+  "primary_key": "number",
+  "source": "erp_rest",
+  "api_method": "get_cash_accounts",
+  "api_endpoint": "/v1/cashaccount",
+  "pagination_profile": "numbertoread_skip",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "number",
+    "description",
+    "currency",
+    "lastModifiedDateTime"
+  ],
+  "datamart": {
+    "ready": false,
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    },
+    "query_file": "config/queries/cash_account.graphql",
+    "type_name": "CashAccount",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_cash_account",
+    "fallback_source": "erp_rest"
+  }
+}

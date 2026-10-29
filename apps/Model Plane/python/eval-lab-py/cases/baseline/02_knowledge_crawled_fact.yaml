@@ -1,0 +1,11 @@
+id: "02-knowledge-crawled-fact"
+name: "knowledge_search groundedness: crawled-site fact"
+prompt: "Hva driver Aquatiq med? Bruk kunnskapsbasen og oppgi kilder."
+profile: deployed_agent
+features: [usage, tools, citations, agentic]
+groundedness:
+  enabled: true
+checks:
+  judge_rubric: "The answer must describe Aquatiq's business (hygiene/food-safety) based on retrieved sources, in Norwegian, without fabricated specifics."
+requires: [knowledge-fixtures]
+tags: [groundedness, knowledge]

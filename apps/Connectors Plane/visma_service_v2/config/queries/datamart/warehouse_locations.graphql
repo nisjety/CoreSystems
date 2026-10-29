@@ -1,0 +1,38 @@
+query WarehouseLocations(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  warehouseLocations(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    warehouseId
+    locationId
+    locationCd
+    locationDescription
+    active
+    inclQtyAvail
+    isCosted
+    salesValid
+    receiptsValid
+    transfersValid
+    assemblyValid
+    primaryItemValid
+    primaryItemId
+    primaryItemClassId
+    projectId
+    taskId
+    lastModifiedDateTime
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+  }
+}

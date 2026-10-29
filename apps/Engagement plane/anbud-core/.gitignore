@@ -1,0 +1,15 @@
+# Secrets. The repository root already ignores these (**/*.env, **/.env.*), but
+# this core keeps a real subscription key in .env, so the rule is repeated here
+# in case the root rule is ever loosened.
+/.env
+/.env.*
+!/.env.example
+
+# Raw captures written by cmd/doffin-probe. They are public notices, but their
+# redistribution licence has not been confirmed: promote individual files into
+# testdata/ deliberately, never by accident.
+**/testdata/captured/
+
+/bin/
+*.test
+coverage.out

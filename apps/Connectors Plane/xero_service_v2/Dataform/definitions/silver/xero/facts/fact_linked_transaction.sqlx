@@ -1,0 +1,34 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  name: "fact_linked_transaction",
+  description: "Silver: current Xero billable-expense links. Grain: one row per tenant and linked transaction.",
+  tags: ["silver", "xero", "fact"]
+}
+
+WITH current_links AS (
+  SELECT *
+  FROM ${ref("dw_staging_xero", "linked_transactions")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, record_id
+    ORDER BY synced_at DESC
+  ) = 1
+)
+
+SELECT
+  tenant_id,
+  synced_at,
+  first_seen_at,
+  linked_transaction_id,
+  record_id AS linked_transaction_internal_id,
+  source_transaction_id,
+  source_line_item_id,
+  source_transaction_type,
+  contact_id,
+  target_transaction_id,
+  target_line_item_id,
+  linked_transaction_type,
+  status,
+  updated_at,
+  'xero' AS _source
+FROM current_links

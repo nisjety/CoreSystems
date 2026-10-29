@@ -1,0 +1,39 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_fixed_asset_classes",
+  description: "Bronze: Fixed asset depreciation class configurations from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.bool("acceleratedDepreciation")} AS `acceleratedDepreciation`,
+  ${bronze.str("accounts")} AS `accounts`,
+  ${bronze.str("accumulatedDepreciationSubAccountMask")} AS `accumulatedDepreciationSubAccountMask`,
+  ${bronze.bool("active")} AS `active`,
+  ${bronze.str("assetTypeID")} AS `assetTypeID`,
+  ${bronze.str("bookSettings")} AS `bookSettings`,
+  ${bronze.str("classID")} AS `classID`,
+  ${bronze.bool("depreciable")} AS `depreciable`,
+  ${bronze.str("depreciatedExpenseSubAccountMask")} AS `depreciatedExpenseSubAccountMask`,
+  ${bronze.str("description")} AS `description`,
+  ${bronze.str("gainLossSubAccountMask")} AS `gainLossSubAccountMask`,
+  ${bronze.bool("isTangible")} AS `isTangible`,
+  ${bronze.str("metadata")} AS `metadata`,
+  ${bronze.str("proceedSubAccountMask")} AS `proceedSubAccountMask`,
+  ${bronze.str("recordType")} AS `recordType`,
+  ${bronze.str("subAccountMask")} AS `subAccountMask`,
+  ${bronze.float("usefulLife")} AS `usefulLife`
+FROM ${ref("dw_staging_visma", "fixed_asset_classes")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

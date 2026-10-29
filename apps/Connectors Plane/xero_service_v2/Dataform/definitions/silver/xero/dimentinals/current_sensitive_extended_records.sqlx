@@ -1,0 +1,63 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero_sensitive",
+  name: "current_sensitive_extended_records",
+  disabled: dataform.projectConfig.vars.enable_xero_sensitive !== "true",
+  description: "Bank Feeds/Identity records present in the latest complete family run; no Finance period snapshots.",
+  tags: ["silver", "xero", "current"]
+}
+
+WITH outcomes AS (
+  SELECT tenant_id, run_id,
+    REGEXP_EXTRACT(endpoint, r'^(bankfeeds|identity)_') AS api_family,
+    MAX(synced_at) AS completed_at,
+    COUNTIF(error_present OR termination IN ('error', 'hit_max_pages_cap')) AS failures,
+    COUNTIF(endpoint IN ('bankfeeds_feed_connections', 'bankfeeds_statements',
+      'identity_connections')) AS expected_lists,
+    COUNTIF(endpoint = 'bankfeeds_feed_connections') AS connections,
+    COUNTIF(endpoint = 'bankfeeds_statements') AS statements,
+    COUNTIF(endpoint = 'identity_connections') AS identity_connections
+  FROM ${ref("staging_xero_sensitive", "sync_run_entities")}
+  WHERE REGEXP_CONTAINS(endpoint, r'^(bankfeeds|identity)_')
+  GROUP BY tenant_id, run_id, api_family
+), snapshot_counts AS (
+  SELECT tenant_id, run_id, api_family, COUNT(*) AS observed_lists,
+    COUNT(DISTINCT TO_JSON_STRING(STRUCT(source_endpoint, request_key))) AS distinct_lists
+  FROM ${ref("staging_xero_sensitive", "extended_list_snapshots")}
+  GROUP BY tenant_id, run_id, api_family
+), complete_runs AS (
+  SELECT o.tenant_id, o.run_id, o.api_family
+  FROM outcomes AS o
+  JOIN snapshot_counts AS c USING (tenant_id, run_id, api_family)
+  WHERE o.failures = 0 AND o.expected_lists = c.observed_lists
+    AND c.observed_lists = c.distinct_lists
+    AND ((o.api_family = 'bankfeeds' AND o.connections = 1 AND o.statements = 1)
+      OR (o.api_family = 'identity' AND o.identity_connections = 1))
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY o.tenant_id, o.api_family ORDER BY o.completed_at DESC, o.run_id DESC
+  ) = 1
+), listed AS (
+  SELECT s.tenant_id, s.run_id, s.source_endpoint AS endpoint, s.request_key,
+    native_id AS record_id, native_id, s.synced_at AS listed_at
+  FROM ${ref("staging_xero_sensitive", "extended_list_snapshots")} AS s
+  JOIN complete_runs AS r USING (tenant_id, run_id, api_family)
+  CROSS JOIN UNNEST(s.record_ids) AS native_id
+)
+SELECT l.tenant_id, l.run_id, l.endpoint, l.request_key, l.record_id, l.native_id,
+  COALESCE(d.payload_json, h.payload_json) AS payload_json,
+  COALESCE(d.synced_at, h.synced_at) AS synced_at, l.listed_at
+FROM listed AS l
+JOIN ${ref("staging_xero_sensitive", "extended_records")} AS h
+  ON h.tenant_id = l.tenant_id AND h.endpoint = l.endpoint AND h.record_id = l.record_id
+  AND h.run_id = l.run_id
+LEFT JOIN ${ref("staging_xero_sensitive", "extended_records")} AS d
+  ON d.tenant_id = l.tenant_id AND d.record_id = l.record_id
+  AND d.endpoint = CASE l.endpoint
+    WHEN 'bankfeeds_feed_connections' THEN 'bankfeeds_feed_connection_details'
+    WHEN 'bankfeeds_statements' THEN 'bankfeeds_statement_details'
+    ELSE NULL
+  END
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY l.tenant_id, l.endpoint, l.record_id
+  ORDER BY l.listed_at DESC, l.request_key DESC
+) = 1

@@ -1,0 +1,10 @@
+config {
+  type: "view",
+  schema: "dw_1_silver_xero",
+  description: "Xero Payment records whose nested document is not a sales or purchase invoice; source lifecycle and currency-quality flags are preserved."
+}
+
+SELECT *
+FROM ${ref("fact_payment")}
+WHERE payment_type IS NULL
+   OR payment_type NOT IN ('ACCRECPAYMENT', 'ACCPAYPAYMENT')

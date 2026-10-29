@@ -1,0 +1,32 @@
+query GeneralLedgerBalanceById(
+  $id: String!
+) {
+  generalLedgerBalanceById(
+    id: $id
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    deletedDatabaseRecord
+    branchId
+    ledgerId
+    accountId
+    subaccountId
+    finPeriodId
+    accountType
+    baseCuryId
+    curyId
+    balanceType
+    periodToDateDebit
+    periodToDateCredit
+    periodToDateDebitInCurrency
+    periodToDateCreditInCurrency
+    yearClosed
+    lastModifiedDateTime
+    beginningBalance
+    beginningBalanceInCurrency
+    yearToDateBalance
+    yearToDateBalanceInCurrency
+    createdInDataMartDateTime
+  }
+}

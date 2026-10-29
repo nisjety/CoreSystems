@@ -1,0 +1,16 @@
+.marketing-pulse__selected-signals { scroll-margin-top: 72px; }
+.provider-overview__chart { position: relative; height: 260px; margin-top: 24px; border-bottom: 1px solid var(--pulse-line, #eee); }
+.provider-overview__bars { display: grid; align-items: end; height: 100%; gap: 4px; }
+.provider-overview__bars > span { display: block; min-width: 0; background: #e9a23b; border-radius: 3px 3px 0 0; }
+.provider-overview__bars > span:not([data-measured]) { background: transparent; }
+.provider-overview__dates { display: flex; justify-content: space-between; gap: 16px; margin-top: 12px; font-size: 10px; color: var(--pulse-muted, #777); }
+.provider-overview__measurements { display: grid; gap: 22px; margin-top: 30px; padding: 26px; background: #f8f8f5; border-radius: 14px; }
+.provider-overview__measurements > div > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 10px; }
+.provider-overview__measurements span, .provider-overview__note { font-size: 11px; color: var(--pulse-muted, #777); }
+.provider-overview__measurements strong { font-size: 20px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.provider-overview__meter { height: 5px; border-radius: 8px; overflow: hidden; background: #e9e9e3; }
+.provider-overview__meter > span { display: block; height: 100%; background: #8f75bf; border-radius: inherit; }
+.provider-overview[data-provider="website"] .provider-overview__meter > span { background: #488a72; }
+.provider-overview__note { margin-top: 18px; line-height: 1.7; }
+.provider-overview .marketing-pulse__metrics { margin-top: 24px; }
+@media (max-width: 640px) { .provider-overview__chart { height: 200px; } .provider-overview__measurements { padding: 18px; } }

@@ -1,0 +1,16 @@
+# Operator-confirmed project bindings and credential files stay in Integration.
+# This base overlay mounts the original export credential. Additional independently
+# authorized projects require their own opt-in overlays and explicit secret mounts.
+services:
+  integration-api:
+    environment:
+      CLARITY_BINDINGS_FILE: /run/secrets/clarity_bindings
+    secrets:
+      - clarity_bindings
+      - clarity_export_token
+
+secrets:
+  clarity_bindings:
+    file: ${INTEGRATION_LOCAL_CLARITY_BINDINGS_FILE:?set a protected Clarity binding manifest}
+  clarity_export_token:
+    file: ${INTEGRATION_LOCAL_CLARITY_TOKEN_FILE:?set a protected Clarity export token file}

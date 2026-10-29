@@ -1,0 +1,19 @@
+config {
+  type: "view",
+  schema: "xero_gold_finance",
+  description: "Document keys whose referenced contact is absent from the current copied contact snapshot."
+}
+
+SELECT 'customer_invoice' AS fact_name, f.tenant_id, f.invoice_id AS document_id,
+       f.customer_id AS contact_id, f.customer_name AS contact_name
+FROM ${ref("xero_gold_finance", "fact_customer_invoice")} AS f
+LEFT JOIN ${ref("xero_gold_finance", "dim_customer")} AS d
+  ON f.customer_key = d.customer_key
+WHERE f.customer_key IS NOT NULL AND d.customer_key IS NULL
+UNION ALL
+SELECT 'supplier_invoice', f.tenant_id, f.invoice_id,
+       f.supplier_id, f.supplier_name
+FROM ${ref("xero_gold_finance", "fact_supplier_invoice")} AS f
+LEFT JOIN ${ref("xero_gold_finance", "dim_supplier")} AS d
+  ON f.supplier_key = d.supplier_key
+WHERE f.supplier_key IS NOT NULL AND d.supplier_key IS NULL

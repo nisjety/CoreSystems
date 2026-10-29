@@ -1,0 +1,20 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_gold_invoice_reminder_configuration_safety"
+}
+
+SELECT
+  'missing_or_mismatched_gold_configuration' AS violation,
+  silver.tenant_id,
+  silver.source_receipt_id,
+  silver.reminder_position
+FROM ${ref("dw_1_silver_xero", "dim_invoice_reminder_configuration")} AS silver
+LEFT JOIN ${ref("xero_gold_finance", "dim_invoice_reminder_configuration")} AS gold
+  ON silver.tenant_id = gold.tenant_id
+ AND silver.source_receipt_id = gold.source_receipt_id
+ AND silver.reminder_position IS NOT DISTINCT FROM gold.reminder_position
+WHERE gold.invoice_reminder_configuration_key IS NULL
+   OR silver.is_enabled IS DISTINCT FROM gold.is_enabled
+   OR silver.is_explicitly_empty IS DISTINCT FROM gold.is_explicitly_empty
+   OR silver.is_source_configuration_missing IS DISTINCT FROM gold.is_source_configuration_missing

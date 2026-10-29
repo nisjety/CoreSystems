@@ -1,0 +1,19 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Xero budget metadata with the absence of balance detail explicitly surfaced instead of filled with invented values.",
+  assertions: { nonNull: ["tenant_id", "budget_id", "budget_key"], uniqueKey: ["budget_key"] }
+}
+
+SELECT FARM_FINGERPRINT(CONCAT(b.tenant_id, '|', b.budget_id)) AS budget_key,
+       FARM_FINGERPRINT(b.tenant_id) AS company_key,
+       IF(b.tracking_category_id IS NULL, NULL,
+          FARM_FINGERPRINT(CONCAT(b.tenant_id, '|', b.tracking_category_id))) AS tracking_category_key,
+       IF(b.tracking_option_id IS NULL, NULL,
+          FARM_FINGERPRINT(CONCAT(b.tenant_id, '|', b.tracking_option_id))) AS tracking_option_key,
+       b.tenant_id, b.budget_id, b.description, b.budget_type, b.status,
+       b.tracking_category_id, b.tracking_category_name,
+       b.tracking_option_id, b.tracking_option_name,
+       b.budget_line_count, b.is_detail_available,
+       b.updated_at, b.first_seen_at, b.synced_at, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_budget")} AS b

@@ -1,0 +1,75 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Native Xero GL-to-tracking-option bridge at journal-line and source-slot grain. It is a reporting relationship, not a business-unit allocation or additive financial fact.",
+  assertions: {
+    nonNull: ["general_ledger_tracking_option_key", "journal_line_key", "tenant_id", "tracking_position"],
+    uniqueKey: ["general_ledger_tracking_option_key"]
+  }
+}
+
+WITH source_slots AS (
+  SELECT
+    journal_line_key,
+    company_key,
+    date_key,
+    tenant_id,
+    1 AS tracking_position,
+    tracking_category_1_id AS source_tracking_category_id,
+    tracking_option_1_name AS source_tracking_option_name,
+    synced_at
+  FROM ${ref("xero_gold_finance", "fact_general_ledger")}
+  WHERE tracking_category_1_id IS NOT NULL
+     OR tracking_option_1_name IS NOT NULL
+
+  UNION ALL
+
+  SELECT
+    journal_line_key,
+    company_key,
+    date_key,
+    tenant_id,
+    2 AS tracking_position,
+    tracking_category_2_id AS source_tracking_category_id,
+    tracking_option_2_name AS source_tracking_option_name,
+    synced_at
+  FROM ${ref("xero_gold_finance", "fact_general_ledger")}
+  WHERE tracking_category_2_id IS NOT NULL
+     OR tracking_option_2_name IS NOT NULL
+), option_candidates AS (
+  SELECT
+    tenant_id,
+    tracking_category_id,
+    option_name,
+    COUNT(*) AS tracking_option_candidate_count,
+    IF(COUNT(*) = 1, ANY_VALUE(tracking_category_key), NULL) AS tracking_category_key,
+    IF(COUNT(*) = 1, ANY_VALUE(tracking_option_key), NULL) AS tracking_option_key,
+    IF(COUNT(*) = 1, ANY_VALUE(tracking_option_id), NULL) AS tracking_option_id
+  FROM ${ref("xero_gold_common", "dim_tracking_option")}
+  GROUP BY tenant_id, tracking_category_id, option_name
+)
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(source_slots.journal_line_key, '|', CAST(source_slots.tracking_position AS STRING)))
+    AS general_ledger_tracking_option_key,
+  source_slots.journal_line_key,
+  source_slots.company_key,
+  source_slots.date_key,
+  source_slots.tenant_id,
+  source_slots.tracking_position,
+  source_slots.source_tracking_category_id,
+  source_slots.source_tracking_option_name,
+  COALESCE(option_candidates.tracking_option_candidate_count, 0) AS tracking_option_candidate_count,
+  option_candidates.tracking_category_key,
+  option_candidates.tracking_option_key,
+  option_candidates.tracking_option_id,
+  COALESCE(option_candidates.tracking_option_candidate_count, 0) > 1 AS is_tracking_option_ambiguous,
+  COALESCE(option_candidates.tracking_option_candidate_count, 0) != 1 AS is_tracking_option_unresolved,
+  FALSE AS is_financial_measure_additive,
+  source_slots.synced_at,
+  'xero' AS source_system
+FROM source_slots
+LEFT JOIN option_candidates
+  ON source_slots.tenant_id = option_candidates.tenant_id
+ AND source_slots.source_tracking_category_id = option_candidates.tracking_category_id
+ AND source_slots.source_tracking_option_name = option_candidates.option_name

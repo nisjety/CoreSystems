@@ -1,0 +1,64 @@
+# Dev profile overrides — debug logging and relaxed limits.
+#
+# Legacy compatibility is intentionally disabled here as well as in the
+# release compose file. Enabling it needs a separately reviewed migration
+# profile with a scoped NATS principal; the default ACLs are canonical-v1 only.
+
+services:
+  model-gateway:
+    environment:
+      RUST_LOG: debug
+      RATE_LIMIT_RPM: "1000"
+      ALLOWED_MODELS: ""
+      # Wave 7 — dev profile enables fine-tuning routes; production keeps off.
+      FINETUNE_ENABLED: "1"
+      FINETUNE_ORG_BUDGET_USD: "50"
+      FINETUNE_PER_JOB_BUDGET_USD: "20"
+
+  session-core:
+    environment:
+      RUST_LOG: debug
+      COMPACTION_THRESHOLD: "200000"
+
+  inference-core:
+    environment:
+      RUST_LOG: debug
+      INFERENCE_CACHE_TTL_SECS: "60"
+
+  execution-core:
+    environment:
+      RUST_LOG: debug
+
+  orchestrator-core:
+    environment:
+      LOG_LEVEL: debug
+      ENABLE_COMPAT_ADAPTER: "false"
+      MP_COMPAT_MODE: v1_only
+
+  capability-core:
+    environment:
+      LOG_LEVEL: debug
+
+  sandbox-manager:
+    environment:
+      LOG_LEVEL: debug
+      # The service intentionally refuses its current in-memory stores outside
+      # an explicit local-development opt-in. The full-stack launcher layers
+      # this override only in dev; production never receives this setting.
+      SANDBOX_MANAGER_ALLOW_EPHEMERAL_DEVELOPMENT: "true"
+
+  browser-broker:
+    environment:
+      LOG_LEVEL: debug
+
+  letta-bridge:
+    environment:
+      LOG_LEVEL: debug
+
+  cost-core:
+    environment:
+      LOG_LEVEL: debug
+
+  bridge-core:
+    environment:
+      LOG_LEVEL: debug

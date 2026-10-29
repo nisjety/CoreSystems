@@ -1,0 +1,35 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_business_unit_mapping_no_overlaps",
+  description: "The business unit mapping (the seed that decides every business unit by tenant, segment 2 and date) must give one business unit per tenant, segment-2 value and day. Returns each pair of rows of the same tenant and segment 2 whose validity windows overlap. A tenant default (no segment 2) is its own series. Ported from v1's assert_bu_mapping_no_overlaps, which was written against an older column set and lived only in BigQuery.",
+  tags: ["assertion", "silver", "business_unit", "excel"]
+}
+
+WITH normalized AS (
+  SELECT
+    tenant_id,
+    COALESCE(source_segment_2_value, '__ANY__') AS segment_2_value,
+    valid_from,
+    COALESCE(valid_to, DATE '9999-12-31') AS valid_to,
+    business_unit_id
+  FROM ${ref("visma_silver_excel", "business_unit_mapping")}
+)
+
+SELECT
+  a.tenant_id,
+  a.segment_2_value,
+  a.valid_from AS left_valid_from,
+  a.valid_to AS left_valid_to,
+  b.valid_from AS right_valid_from,
+  b.valid_to AS right_valid_to,
+  a.business_unit_id AS left_business_unit_id,
+  b.business_unit_id AS right_business_unit_id
+FROM normalized AS a
+JOIN normalized AS b
+  ON a.tenant_id = b.tenant_id
+ AND a.segment_2_value = b.segment_2_value
+ AND (a.valid_from < b.valid_from
+      OR (a.valid_from = b.valid_from AND a.business_unit_id < b.business_unit_id))
+ AND a.valid_from <= b.valid_to
+ AND b.valid_from <= a.valid_to

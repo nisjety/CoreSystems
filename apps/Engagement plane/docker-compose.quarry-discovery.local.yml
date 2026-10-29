@@ -1,0 +1,39 @@
+# Ingestion-owned Quarry-v2 edge, isolated local fast path. No separate crawler
+# implementation, auth bypass, browser grants, database or workflow stack.
+name: studio-quarry-local
+services:
+  quarry-edge:
+    image: studio-quarry-edge:discovery
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    environment:
+      ENVIRONMENT: development
+      QUARRY_EDGE__PORT: '8082'
+      QUARRY_EDGE__ARTIFACT_BACKEND: memory
+      QUARRY_EDGE__FETCH_TIMEOUT_S: '10'
+      QUARRY_EDGE_AUTH_DEV_BYPASS: '0'
+      QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS: 'false'
+      AUTH_CORE_JWKS_URL: http://auth-core:3011/api/convex-auth/jwks
+      AUTH_CORE_ISSUER: http://localhost:3011/api/convex-auth
+      AUTH_CORE_AUDIENCE: quarry
+      AUTH_CORE_AUDIENCE_OPTIONAL: '0'
+      RUST_LOG: warn
+    ports: ['127.0.0.1:8082:8082']
+    networks: [inter-plane-bus]
+    healthcheck:
+      test: [CMD-SHELL, 'wget -qO- http://127.0.0.1:8082/ready >/dev/null']
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits: {memory: 512M, cpus: '1.0'}
+networks:
+  inter-plane-bus:
+    external: true
+    name: inter-plane-bus

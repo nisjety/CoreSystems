@@ -1,0 +1,32 @@
+config { type: "assertion", schema: "dw_1_silver_xero_assertions", name: "xero_gold_contact_reference_safety" }
+
+WITH grain AS (
+  SELECT 'contact_address' AS entity,
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "dim_contact_address")}) AS silver_count,
+         (SELECT COUNT(*) FROM ${ref("xero_gold_common", "dim_contact_address")}) AS gold_count
+  UNION ALL
+  SELECT 'contact_phone',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "dim_contact_phone")} ),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_common", "dim_contact_phone")})
+  UNION ALL
+  SELECT 'contact_group',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "dim_contact_group")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_common", "dim_contact_group")})
+  UNION ALL
+  SELECT 'contact_group_membership',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "bridge_contact_group_membership")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_common", "bridge_contact_group_membership")})
+), unresolved_groups AS (
+  SELECT 'contact_group_membership_group_reference' AS entity,
+         CAST(m.contact_group_membership_key AS STRING) AS record_id
+  FROM ${ref("xero_gold_common", "bridge_contact_group_membership")} AS m
+  LEFT JOIN ${ref("xero_gold_common", "dim_contact_group")} AS g
+    ON m.contact_group_key = g.contact_group_key
+  WHERE m.is_group_unresolved IS FALSE
+    AND g.contact_group_key IS NULL
+)
+SELECT entity, CAST(silver_count AS STRING) AS record_id
+FROM grain
+WHERE silver_count != gold_count
+UNION ALL
+SELECT entity, record_id FROM unresolved_groups

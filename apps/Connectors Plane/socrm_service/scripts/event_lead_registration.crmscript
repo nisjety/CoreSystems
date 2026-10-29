@@ -1,0 +1,1784 @@
+%EJSCRIPT_START%
+<%
+#setLanguageLevel 3;
+
+/*
+ * EVENT LEAD REGISTRATION - SuperOffice Customer Centre script.
+ * Executed through customer.fcgi?action=safeParse.
+ */
+
+String EVENT_NAME = "Nor-Fishing 2026";
+Integer SHARED_PROJECT_ID = 5604;
+String SHARED_PROJECT_NAME = "CO Messe Nor-Fishing 2026";
+Integer SALE_AMOUNT = 0;
+Integer SALE_CLOSE_DAYS = 30;
+Integer LEAD_SELECTION_ID = 0;
+String LEAD_SELECTION_NAME = "";
+String SCRIPT_KEY = "KyQ8bwBfzXOiwda8";
+
+Map headers;
+headers.insert("Content-Type", "text/html;charset=utf-8");
+
+String headerString = "";
+for (headers.first(); !headers.eof(); headers.next()) {
+  headerString += headers.getKey() + ": " + headers.getVal() + "\n";
+}
+setParserVariable("ej.headers", headerString);
+
+String scriptUrl = getParserVariable("AuthProgram") + "?action=safeParse&includeId=eventLeadRegistration&key=" + SCRIPT_KEY;
+
+Integer SEARCH_RESULT_LIMIT = 8;
+
+String ajaxAction = getCgiVariable("ajax");
+Bool isAjaxSearch = ajaxAction == "search";
+Bool isAjaxSubmit = ajaxAction == "submit";
+
+if (isAjaxSearch) {
+  // Lightweight same-script JSON search used by the company/contact typeahead in the form.
+  // Deliberately returns only id + a display label (already HTML-escaped) - no email/phone/etc.
+  setParserVariable("ej.headers", "Content-Type: application/json;charset=utf-8\n");
+  String searchType = getCgiVariable("type");
+  String searchQuery = getCgiVariable("q").stripLeadingAndTrailing(" ");
+  String jsonItems = "";
+  Integer resultCount = 0;
+
+  // String has no length()/getLength() in CRMScript (confirmed via live parser error) -
+  // isEmpty() is the proven check here; the client already requires 2+ characters before
+  // it ever sends a request, so this is still effectively minimum-length gated.
+  if (!searchQuery.isEmpty()) {
+    try {
+      if (searchType == "company") {
+        NSContactAgent searchContactAgent;
+        NSDuplicateEntry[] companyMatches = searchContactAgent.GetDuplicates(searchQuery);
+        for (Integer matchIndex = 0; matchIndex < companyMatches.length() && resultCount < SEARCH_RESULT_LIMIT; matchIndex++) {
+          NSDuplicateEntry match = companyMatches[matchIndex];
+          Integer matchId = match.GetSoPrimaryKey();
+          if (matchId > 0) {
+            String matchName = match.GetEntryName().htmlEncode();
+            if (resultCount > 0) { jsonItems += ","; }
+            jsonItems += "{\"id\":" + matchId.toString() + ",\"label\":\"" + matchName + "\"}";
+            resultCount++;
+          }
+        }
+      }
+      else if (searchType == "person") {
+        SearchEngine personLookupSearch;
+        personLookupSearch.addFields("person", "person_id,firstname,lastname");
+        personLookupSearch.addFields("contact", "name");
+        personLookupSearch.addCriteria("person.firstname", "OperatorLike", "%" + searchQuery + "%", "OperatorOr", 1);
+        personLookupSearch.addCriteria("person.lastname", "OperatorLike", "%" + searchQuery + "%", "OperatorOr", 1);
+        personLookupSearch.setLimit(SEARCH_RESULT_LIMIT);
+        if (personLookupSearch.select() > 0) {
+          for (personLookupSearch.first(); !personLookupSearch.eof(); personLookupSearch.next()) {
+            Integer matchId = personLookupSearch.getField("person.person_id").toInteger();
+            String firstName = personLookupSearch.getField("person.firstname").stripLeadingAndTrailing(" ");
+            String lastName = personLookupSearch.getField("person.lastname").stripLeadingAndTrailing(" ");
+            String companyLabel = personLookupSearch.getField("contact.name").stripLeadingAndTrailing(" ");
+            String fullName = firstName + " " + lastName;
+            fullName = fullName.stripLeadingAndTrailing(" ");
+            if (matchId > 0 && !fullName.isEmpty()) {
+              String matchLabel = fullName.htmlEncode();
+              if (!companyLabel.isEmpty()) {
+                matchLabel += " &mdash; " + companyLabel.htmlEncode();
+              }
+              if (resultCount > 0) { jsonItems += ","; }
+              jsonItems += "{\"id\":" + matchId.toString() + ",\"label\":\"" + matchLabel + "\"}";
+              resultCount++;
+            }
+          }
+        }
+      }
+    }
+    catch {
+    }
+  }
+
+  print("[" + jsonItems + "]");
+}
+else {
+
+Bool isPosted = cgiWasPost();
+Bool showSuccess = false;
+String formError = "";
+String pageTitle = EVENT_NAME + " - Lead Registration";
+String DEFAULT_PROSPECT_LABEL = "Prospect";
+String DEFAULT_STAGE_LABEL = "Lead";
+
+String leadName = getCgiVariable("leadName");
+String leadEmail = getCgiVariable("leadEmail");
+String leadPhone = getCgiVariable("leadPhone");
+String orderName = getCgiVariable("orderName");
+String companyName = getCgiVariable("companyName");
+String contactTitle = getCgiVariable("contactTitle");
+String contactPositionIdRaw = getCgiVariable("contactPositionId");
+String contactCountry = getCgiVariable("contactCountry");
+String businessCategoryIdRaw = getCgiVariable("businessCategoryId");
+Integer businessCategoryId = businessCategoryIdRaw.toInteger();
+Integer contactPositionId = contactPositionIdRaw.toInteger();
+String companyOwnerAssocIdRaw = getCgiVariable("companyOwnerAssocId");
+String leadOwnerAssocIdRaw = getCgiVariable("leadOwnerAssocId");
+String saleTypeIdRaw = getCgiVariable("saleTypeId");
+String customerCategoryIdRaw = getCgiVariable("customerCategoryId");
+String saleStageIdRaw = getCgiVariable("saleStageId");
+String whatLeadWants = getCgiVariable("whatLeadWants");
+String existingCompanyIdRaw = getCgiVariable("existingCompanyId");
+String existingPersonIdRaw = getCgiVariable("existingPersonId");
+Integer existingCompanyIdInput = existingCompanyIdRaw.toInteger();
+Integer existingPersonIdInput = existingPersonIdRaw.toInteger();
+
+Integer companyOwnerAssocId = companyOwnerAssocIdRaw.toInteger();
+Integer leadOwnerAssocId = leadOwnerAssocIdRaw.toInteger();
+Integer saleTypeId = saleTypeIdRaw.toInteger();
+Integer selectedCustomerCategoryId = customerCategoryIdRaw.toInteger();
+Integer selectedSaleStageId = saleStageIdRaw.toInteger();
+Integer newCompanyId = 0;
+Integer newPersonId = 0;
+Integer newProjectId = 0;
+Integer newSaleId = 0;
+Integer resolvedCompanyId = 0;
+Integer resolvedPersonId = 0;
+Integer resolvedLeadSelectionId = 0;
+Bool sharedProjectResolved = false;
+Bool leadSelectionResolved = false;
+Bool projectMemberAdded = false;
+Bool selectionMemberAdded = false;
+Bool createdCompany = false;
+Bool createdPerson = false;
+Bool createdSale = false;
+Bool reusedExistingCompany = false;
+Bool reusedExistingPerson = false;
+Bool reusedExistingSale = false;
+String normalizedCompanyName = companyName.stripLeadingAndTrailing(" ");
+String normalizedLeadName = leadName.stripLeadingAndTrailing(" ");
+String normalizedLeadEmail = leadEmail.stripLeadingAndTrailing(" ").toLower();
+String normalizedLeadPhone = leadPhone.stripLeadingAndTrailing(" ");
+String normalizedCountry = contactCountry.stripLeadingAndTrailing(" ");
+String normalizedWhatLeadWants = whatLeadWants.stripLeadingAndTrailing(" ");
+Integer resolvedCountryId = 0;
+String defaultProjectName = SHARED_PROJECT_NAME;
+String selectedProjectName = SHARED_PROJECT_NAME;
+String selectedSaleStageLabel = DEFAULT_STAGE_LABEL;
+String successLeadName = leadName.htmlEncode();
+String successCompanyName = companyName.htmlEncode();
+String successEmail = leadEmail.htmlEncode();
+String successProjectName = selectedProjectName.htmlEncode();
+String successSaleId = newSaleId.toString();
+String successContactId = newPersonId.toString();
+String successMessage = "Your lead has been created in SuperOffice CRM";
+
+if (isPosted) {
+  if (normalizedCompanyName.isEmpty()) formError = "Company name is required.";
+  else if (normalizedLeadName.isEmpty()) formError = "Name is required.";
+  else if (normalizedLeadEmail.isEmpty() || !normalizedLeadEmail.isValidEmail()) formError = "A valid email address is required.";
+  else if (leadOwnerAssocId <= 0) formError = "Please select a lead owner.";
+  else if (saleTypeId <= 0) formError = "Please select a sale type.";
+  else if (selectedCustomerCategoryId <= 0) formError = "Unable to determine the Prospect customer category. Please refresh the form and try again.";
+  else if (normalizedWhatLeadWants.isEmpty()) formError = "Please describe what the lead is interested in.";
+
+  if (formError.isEmpty() && !normalizedCountry.isEmpty()) {
+    try {
+      NSListAgent countryListAgent;
+      NSCountry[] countries = countryListAgent.GetCountries();
+      String normalizedCountryLower = normalizedCountry.toLower();
+      for (Integer countryIndex = 0; countryIndex < countries.length(); countryIndex++) {
+        NSCountry currentCountry = countries[countryIndex];
+        String currentCountryName = currentCountry.GetName().stripLeadingAndTrailing(" ");
+        String currentEnglishName = currentCountry.GetEnglishName().stripLeadingAndTrailing(" ");
+        String currentTwoLetterIso = currentCountry.GetTwoLetterISOCountry().stripLeadingAndTrailing(" ");
+        String currentThreeLetterIso = currentCountry.GetThreeLetterISOCountry().stripLeadingAndTrailing(" ");
+        if (
+          (!currentCountryName.isEmpty() && currentCountryName.toLower() == normalizedCountryLower) ||
+          (!currentEnglishName.isEmpty() && currentEnglishName.toLower() == normalizedCountryLower) ||
+          (!currentTwoLetterIso.isEmpty() && currentTwoLetterIso.toLower() == normalizedCountryLower) ||
+          (!currentThreeLetterIso.isEmpty() && currentThreeLetterIso.toLower() == normalizedCountryLower)
+        ) {
+          resolvedCountryId = currentCountry.GetCountryId();
+          break;
+        }
+      }
+    }
+    catch {
+      formError = "Unable to validate country right now. Please try again or contact support.";
+    }
+
+    if (formError.isEmpty() && resolvedCountryId <= 0) {
+      formError = "Country selection is not valid. Please select a country from the dropdown.";
+    }
+  }
+
+  if (formError.isEmpty()) {
+    try {
+      // Explicit selection from the form's search-and-select typeahead always wins.
+      if (existingPersonIdInput > 0) {
+        resolvedPersonId = existingPersonIdInput;
+      }
+      if (existingCompanyIdInput > 0) {
+        resolvedCompanyId = existingCompanyIdInput;
+      }
+
+      if (resolvedPersonId <= 0 && !normalizedLeadEmail.isEmpty()) {
+        Customer existingEmailCustomer;
+        if (existingEmailCustomer.findFromEmail(normalizedLeadEmail)) {
+          resolvedPersonId = existingEmailCustomer.getValue("id").toInteger();
+          resolvedCompanyId = existingEmailCustomer.getValue("company").toInteger();
+        }
+      }
+
+      if (resolvedPersonId <= 0 && !normalizedLeadPhone.isEmpty()) {
+        Customer existingPhoneCustomer;
+        if (existingPhoneCustomer.findFromCellphone(normalizedLeadPhone)) {
+          resolvedPersonId = existingPhoneCustomer.getValue("id").toInteger();
+          resolvedCompanyId = existingPhoneCustomer.getValue("company").toInteger();
+        }
+      }
+
+      if (resolvedCompanyId <= 0 && !normalizedCompanyName.isEmpty()) {
+        SearchEngine companySearch;
+        companySearch.addFields("contact", "contact_id,name");
+        companySearch.addCriteria("contact.name", "OperatorEquals", normalizedCompanyName, "OperatorAnd", 0);
+        companySearch.setLimit(1);
+        if (companySearch.select() > 0) {
+          resolvedCompanyId = companySearch.getField("contact.contact_id").toInteger();
+        }
+      }
+
+      // Fall back to SuperOffice's own configured duplicate-detection rules (fuzzy/near-name
+      // matches) so a near-duplicate company name reuses the existing record instead of
+      // creating a new one.
+      if (resolvedCompanyId <= 0 && !normalizedCompanyName.isEmpty()) {
+        try {
+          NSContactAgent duplicateCheckAgent;
+          NSDuplicateEntry[] possibleCompanyMatches = duplicateCheckAgent.GetDuplicates(normalizedCompanyName);
+          for (Integer duplicateIndex = 0; duplicateIndex < possibleCompanyMatches.length(); duplicateIndex++) {
+            Integer possibleMatchId = possibleCompanyMatches[duplicateIndex].GetSoPrimaryKey();
+            if (possibleMatchId > 0) {
+              resolvedCompanyId = possibleMatchId;
+              break;
+            }
+          }
+        }
+        catch {
+        }
+      }
+    }
+    catch {
+      formError = "Unable to check SuperOffice for existing customer data right now. Please try again.";
+    }
+  }
+
+  if (formError.isEmpty()) {
+    try {
+      NSContactAgent contactAgent;
+      NSPersonAgent personAgent;
+      NSListAgent companyListAgent;
+      NSCountry resolvedCountry;
+
+      if (resolvedPersonId > 0) {
+        NSPersonEntity existingPerson = personAgent.GetPersonEntity(resolvedPersonId);
+        newPersonId = existingPerson.GetPersonId();
+        NSContact existingPersonCompany = existingPerson.GetContact();
+        Integer existingPersonCompanyId = existingPersonCompany.GetContactId();
+        if (existingPersonCompanyId > 0) {
+          resolvedCompanyId = existingPersonCompanyId;
+        }
+        reusedExistingPerson = true;
+      }
+
+      NSContactEntity company;
+      if (resolvedCompanyId > 0) {
+        company = contactAgent.GetContactEntity(resolvedCompanyId);
+        newCompanyId = company.GetContactId();
+        reusedExistingCompany = true;
+      }
+      else {
+        company = contactAgent.CreateDefaultContactEntity();
+        company.SetName(normalizedCompanyName);
+
+        if (companyOwnerAssocId > 0) {
+          NSAssociate ownerAssoc;
+          ownerAssoc.SetAssociateId(companyOwnerAssocId);
+          company.SetAssociate(ownerAssoc);
+        }
+
+        if (businessCategoryId > 0) {
+          company.SetBusiness(companyListAgent.GetBusiness(businessCategoryId));
+        }
+
+        if (selectedCustomerCategoryId > 0) {
+          company.SetCategory(companyListAgent.GetCategory(selectedCustomerCategoryId));
+        }
+        if (resolvedCountryId > 0) {
+          resolvedCountry = companyListAgent.GetCountry(resolvedCountryId);
+          company.SetCountry(resolvedCountry);
+        }
+
+        company = contactAgent.SaveContactEntity(company);
+        newCompanyId = company.GetContactId();
+        createdCompany = true;
+      }
+
+      if (newPersonId <= 0) {
+        NSPersonEntity person = personAgent.CreateDefaultPersonEntity();
+        String leadFirstName = normalizedLeadName;
+        String leadLastName = "";
+        person.SetFirstname(leadFirstName);
+        person.SetLastname(leadLastName);
+
+        if (!contactTitle.isEmpty()) {
+          person.SetTitle(contactTitle);
+        }
+
+        if (contactPositionId > 0) {
+          NSListAgent personListAgent;
+          person.SetPosition(personListAgent.GetPosition(contactPositionId));
+        }
+
+        NSContact companyRef;
+        companyRef.SetContactId(newCompanyId);
+        person.SetContact(companyRef);
+
+        if (resolvedCountryId > 0) {
+          resolvedCountry = companyListAgent.GetCountry(resolvedCountryId);
+          person.SetCountry(resolvedCountry);
+        }
+
+        NSEntityElement[] emailArr;
+        NSEntityElement emailEntry;
+        emailEntry.SetValue(normalizedLeadEmail);
+        emailArr.pushFront(emailEntry);
+        person.SetEmails(emailArr);
+
+        if (!normalizedLeadPhone.isEmpty()) {
+          NSEntityElement[] mobilePhoneArr;
+          NSEntityElement mobilePhoneEntry;
+          mobilePhoneEntry.SetValue(normalizedLeadPhone);
+          mobilePhoneArr.pushFront(mobilePhoneEntry);
+          person.SetMobilePhones(mobilePhoneArr);
+
+          NSEntityElement[] officePhoneArr;
+          NSEntityElement officePhoneEntry;
+          officePhoneEntry.SetValue(normalizedLeadPhone);
+          officePhoneArr.pushFront(officePhoneEntry);
+          person.SetOfficePhones(officePhoneArr);
+        }
+
+        person = personAgent.SavePersonEntity(person);
+        newPersonId = person.GetPersonId();
+        createdPerson = true;
+      }
+
+      NSSaleAgent saleAgent;
+      NSSaleEntity sale = saleAgent.CreateDefaultSaleEntity();
+      if (selectedProjectName.isEmpty()) {
+        selectedProjectName = defaultProjectName;
+        successProjectName = selectedProjectName.htmlEncode();
+      }
+      String saleHeading = orderName.stripLeadingAndTrailing(" ");
+      if (saleHeading.isEmpty()) {
+        saleHeading = EVENT_NAME + " - " + normalizedCompanyName;
+      }
+      sale.SetHeading(saleHeading);
+
+      NSListAgent listAgent;
+      sale.SetSaleType(listAgent.GetSaleType(saleTypeId));
+
+      NSProjectAgent projectAgent;
+      newProjectId = SHARED_PROJECT_ID;
+      sharedProjectResolved = newProjectId > 0;
+
+      if (LEAD_SELECTION_ID > 0) {
+        resolvedLeadSelectionId = LEAD_SELECTION_ID;
+      }
+      else if (!LEAD_SELECTION_NAME.isEmpty()) {
+        SearchEngine selectionSearch;
+        selectionSearch.addFields("selection", "selection_id,name");
+        selectionSearch.addCriteria("selection.name", "OperatorEquals", LEAD_SELECTION_NAME, "OperatorAnd", 0);
+        selectionSearch.setLimit(1);
+        if (selectionSearch.select() > 0) {
+          resolvedLeadSelectionId = selectionSearch.getField("selection.selection_id").toInteger();
+        }
+      }
+      leadSelectionResolved = resolvedLeadSelectionId > 0;
+
+      successProjectName = selectedProjectName.htmlEncode();
+      if (sharedProjectResolved) {
+        sale.SetProject(projectAgent.GetProject(newProjectId));
+      }
+
+      if (sharedProjectResolved && newPersonId > 0 && !saleHeading.isEmpty()) {
+        SearchEngine existingSaleSearch;
+        existingSaleSearch.addFields("sale", "sale_id,heading");
+        existingSaleSearch.addCriteria("sale.project_id", "OperatorEquals", newProjectId.toString(), "OperatorAnd", 0);
+        existingSaleSearch.addCriteria("sale.person_id", "OperatorEquals", newPersonId.toString(), "OperatorAnd", 0);
+        existingSaleSearch.addCriteria("sale.heading", "OperatorEquals", saleHeading, "OperatorAnd", 0);
+        existingSaleSearch.setLimit(1);
+        if (existingSaleSearch.select() > 0) {
+          newSaleId = existingSaleSearch.getField("sale.sale_id").toInteger();
+          reusedExistingSale = newSaleId > 0;
+        }
+      }
+
+      // SuperOffice exposes sale stage on SaleEntity through the Rating carrier.
+      Bool selectedStageAssigned = false;
+      try {
+        NSSaleTypeEntity saleTypeEntity = listAgent.GetSaleTypeEntity(saleTypeId);
+        NSSelectableMDOListItem[] stageItems = saleTypeEntity.GetStages();
+        Integer fallbackStageId = 0;
+        String fallbackStageLabel = "";
+
+        for (Integer stageIdx = 0; stageIdx < stageItems.length(); stageIdx++) {
+          Integer currentStageId = stageItems[stageIdx].GetId();
+          String currentStageLabel = stageItems[stageIdx].GetName().stripLeadingAndTrailing(" ");
+
+          if (fallbackStageId <= 0 && currentStageId > 0) {
+            fallbackStageId = currentStageId;
+            fallbackStageLabel = currentStageLabel;
+          }
+
+          if (currentStageId == selectedSaleStageId) {
+            sale.SetRating(listAgent.GetRating(currentStageId));
+            selectedSaleStageLabel = currentStageLabel;
+            if (selectedSaleStageLabel.isEmpty()) {
+              selectedSaleStageLabel = DEFAULT_STAGE_LABEL;
+            }
+            selectedStageAssigned = true;
+            break;
+          }
+        }
+
+        if (!selectedStageAssigned && fallbackStageId > 0) {
+          sale.SetRating(listAgent.GetRating(fallbackStageId));
+          selectedSaleStageLabel = fallbackStageLabel;
+          if (selectedSaleStageLabel.isEmpty()) {
+            selectedSaleStageLabel = DEFAULT_STAGE_LABEL;
+          }
+          selectedStageAssigned = true;
+        }
+      }
+      catch {
+      }
+
+      if (!sharedProjectResolved) {
+        try {
+          if (createdPerson && newPersonId > 0) {
+            personAgent.DeletePersonEntity(newPersonId);
+            newPersonId = 0;
+          }
+          if (createdCompany && newCompanyId > 0) {
+            contactAgent.DeleteContactEntity(newCompanyId);
+            newCompanyId = 0;
+          }
+        }
+        catch {
+        }
+        formError = "Unable to find the shared event project in SuperOffice. Please contact Aquatiq.";
+        pageTitle = "Error";
+      }
+      else if (!selectedStageAssigned && !reusedExistingSale) {
+        try {
+          if (createdPerson && newPersonId > 0) {
+            personAgent.DeletePersonEntity(newPersonId);
+            newPersonId = 0;
+          }
+          if (createdCompany && newCompanyId > 0) {
+            contactAgent.DeleteContactEntity(newCompanyId);
+            newCompanyId = 0;
+          }
+        }
+        catch {
+        }
+        formError = "The selected sale stage is not valid for the selected sale type.";
+        pageTitle = "Error";
+      }
+      else {
+        if (!reusedExistingSale) {
+          sale.SetSaleText(normalizedWhatLeadWants);
+
+          NSContact saleCompany;
+          saleCompany.SetContactId(newCompanyId);
+          sale.SetContact(saleCompany);
+
+          NSPerson salePerson;
+          salePerson.SetPersonId(newPersonId);
+          sale.SetPerson(salePerson);
+
+          NSAssociate saleOwner;
+          saleOwner.SetAssociateId(leadOwnerAssocId);
+          sale.SetAssociate(saleOwner);
+
+          sale.SetAmount(Float(SALE_AMOUNT.toString()));
+
+          DateTime closeDate = getCurrentDateTime();
+          closeDate.addDay(SALE_CLOSE_DAYS);
+          sale.SetSaledate(closeDate);
+
+          sale = saleAgent.SaveSaleEntity(sale);
+          newSaleId = sale.GetSaleId();
+          createdSale = true;
+        }
+
+        Bool existingProjectMemberFound = false;
+        NSProjectMember[] existingProjectMembers = projectAgent.GetProjectMembers(newProjectId);
+        for (Integer existingProjectMemberIndex = 0; existingProjectMemberIndex < existingProjectMembers.length(); existingProjectMemberIndex++) {
+          if (existingProjectMembers[existingProjectMemberIndex].GetPersonId() == newPersonId) {
+            existingProjectMemberFound = true;
+            break;
+          }
+        }
+
+        if (!existingProjectMemberFound) {
+          NSProjectMember projectMember;
+          projectMember.SetPersonId(newPersonId);
+          projectMember.SetContactId(newCompanyId);
+          projectMember.SetProjectId(newProjectId);
+          NSProjectMember[] projectMembers;
+          projectMembers.pushFront(projectMember);
+          projectAgent.AddProjectMembers(newProjectId, projectMembers);
+          projectMemberAdded = true;
+        }
+
+        NSSelectionAgent selectionAgent;
+        if (leadSelectionResolved) {
+          Bool existingSelectionMemberFound = false;
+          SearchEngine existingSelectionMemberSearch;
+          existingSelectionMemberSearch.addFields("selectionmember", "person_id");
+          existingSelectionMemberSearch.addCriteria("selectionmember.selection_id", "OperatorEquals", resolvedLeadSelectionId.toString(), "OperatorAnd", 0);
+          existingSelectionMemberSearch.addCriteria("selectionmember.person_id", "OperatorEquals", newPersonId.toString(), "OperatorAnd", 0);
+          existingSelectionMemberSearch.setLimit(1);
+          existingSelectionMemberFound = existingSelectionMemberSearch.select() > 0;
+
+          if (!existingSelectionMemberFound) {
+            NSContactPersonId[] selectionMemberIds;
+            NSContactPersonId selectionMemberId;
+            selectionMemberId.SetPersonId(newPersonId);
+            selectionMemberIds.pushFront(selectionMemberId);
+            selectionAgent.AddContactSelectionMembers(resolvedLeadSelectionId, selectionMemberIds);
+            selectionMemberAdded = true;
+          }
+        }
+
+        // Best-effort: flag other near-duplicate companies (SuperOffice's own duplicate rules)
+        // for manual review. Soft-hides them (Deleted=1) and leaves a note - never deletes data,
+        // never touches the record we actually used, and never blocks lead creation on failure.
+        try {
+          if (newCompanyId > 0 && !normalizedCompanyName.isEmpty()) {
+            NSContactAgent duplicateFlagAgent;
+            NSDuplicateEntry[] otherCompanyMatches = duplicateFlagAgent.GetDuplicates(normalizedCompanyName);
+            for (Integer flagIndex = 0; flagIndex < otherCompanyMatches.length(); flagIndex++) {
+              Integer candidateId = otherCompanyMatches[flagIndex].GetSoPrimaryKey();
+              if (candidateId > 0 && candidateId != newCompanyId) {
+                try {
+                  NSContactEntity duplicateCandidate = duplicateFlagAgent.GetContactEntity(candidateId);
+                  if (duplicateCandidate.GetDeleted() == 0) {
+                    String flagNote = "Possible duplicate of contact #" + newCompanyId.toString() + " (" + normalizedCompanyName + "). Flagged automatically by the " + EVENT_NAME + " lead form on " + getCurrentDateTime().toString() + ". Needs manual review before merging.";
+                    String existingDescription = duplicateCandidate.GetDescription();
+                    if (existingDescription.findCase(flagNote) < 0) {
+                      String updatedDescription = existingDescription;
+                      if (!updatedDescription.isEmpty()) {
+                        updatedDescription += "\n";
+                      }
+                      updatedDescription += flagNote;
+                      duplicateCandidate.SetDescription(updatedDescription);
+                      duplicateCandidate.SetDeleted(1);
+                      duplicateFlagAgent.SaveContactEntity(duplicateCandidate);
+                    }
+                  }
+                }
+                catch {
+                }
+              }
+            }
+          }
+        }
+        catch {
+        }
+
+        successSaleId = newSaleId.toString();
+        successContactId = newPersonId.toString();
+        if (reusedExistingSale) {
+          successMessage = "A matching lead already existed in SuperOffice, so no duplicate sale was created.";
+        }
+        else if (reusedExistingPerson || reusedExistingCompany) {
+          successMessage = "Lead registered and linked to existing SuperOffice customer data.";
+        }
+
+        showSuccess = true;
+        pageTitle = "Lead Registered";
+      }
+    }
+    catch {
+      try {
+        if (selectionMemberAdded && resolvedLeadSelectionId > 0 && newPersonId > 0) {
+          NSSelectionAgent cleanupSelectionAgent;
+          NSContactPersonId[] cleanupSelectionMemberIds;
+          NSContactPersonId cleanupSelectionMemberId;
+          cleanupSelectionMemberId.SetPersonId(newPersonId);
+          cleanupSelectionMemberIds.pushFront(cleanupSelectionMemberId);
+          cleanupSelectionAgent.RemoveContactSelectionMembers(resolvedLeadSelectionId, cleanupSelectionMemberIds);
+          selectionMemberAdded = false;
+        }
+        if (projectMemberAdded && newProjectId > 0 && newPersonId > 0) {
+          NSProjectAgent cleanupProjectAgent;
+          NSProjectMember[] cleanupProjectMembers = cleanupProjectAgent.GetProjectMembers(newProjectId);
+          for (Integer cleanupIndex = 0; cleanupIndex < cleanupProjectMembers.length(); cleanupIndex++) {
+            NSProjectMember cleanupProjectMember = cleanupProjectMembers[cleanupIndex];
+            if (cleanupProjectMember.GetPersonId() == newPersonId) {
+              cleanupProjectAgent.DeleteProjectMember(cleanupProjectMember.GetProjectmemberId());
+              break;
+            }
+          }
+          projectMemberAdded = false;
+        }
+        if (createdSale && newSaleId > 0) {
+          NSSaleAgent cleanupSaleAgent;
+          cleanupSaleAgent.DeleteSaleEntity(newSaleId);
+          newSaleId = 0;
+        }
+        if (createdPerson && newPersonId > 0) {
+          NSPersonAgent cleanupPersonAgent;
+          cleanupPersonAgent.DeletePersonEntity(newPersonId);
+          newPersonId = 0;
+        }
+        if (createdCompany && newCompanyId > 0) {
+          NSContactAgent cleanupContactAgent;
+          cleanupContactAgent.DeleteContactEntity(newCompanyId);
+          newCompanyId = 0;
+        }
+      }
+      catch {
+      }
+      formError = "Unable to create the lead in SuperOffice. Please try again or contact support.";
+      pageTitle = "Error";
+    }
+  }
+  else {
+    pageTitle = "Error";
+  }
+}
+
+if (isAjaxSubmit) {
+  setParserVariable("ej.headers", "Content-Type: application/json;charset=utf-8\n");
+  String ajaxStatus = "error";
+  if (showSuccess) {
+    if (reusedExistingSale) { ajaxStatus = "duplicate_sale"; }
+    else if (reusedExistingPerson || reusedExistingCompany) { ajaxStatus = "linked_existing"; }
+    else { ajaxStatus = "created"; }
+  }
+  String ajaxMessage = successMessage;
+  if (!formError.isEmpty()) {
+    ajaxMessage = formError;
+  }
+  print("{\"status\":\"" + ajaxStatus + "\",\"message\":\"" + ajaxMessage.htmlEncode() + "\",\"saleId\":\"" + successSaleId + "\",\"personId\":\"" + successContactId + "\",\"companyName\":\"" + successCompanyName + "\"}");
+}
+else {
+
+String ownerOptions = "<option value=''>Owners unavailable</option>";
+String saleTypeOptions = "<option value=''>Sale types unavailable</option>";
+String customerCategoryOptions = "<option value=''>Customer categories unavailable</option>";
+String saleStageOptions = "<option value=''>Sale stages unavailable</option>";
+String countryOptions = "<option value=''>-- Select country --</option>";
+String businessOptions = "<option value=''>Business unavailable</option>";
+String positionOptions = "<option value=''>Contact position unavailable</option>";
+String loadWarning = "";
+Bool lookupReady = false;
+Bool sharedProjectAvailable = false;
+Bool leadSelectionAvailable = false;
+
+try {
+  Map ownerLabels;
+  Map ownerSortKeys;
+  Bool ownerSourceLoaded = false;
+  Integer ownerCount = 0;
+  Integer saleTypeCount = 0;
+  Integer customerCategoryCount = 0;
+  Integer saleStageCount = 0;
+
+  try {
+    NSMDOAgent mdoAgent;
+    NSMDOListItem[] ownerItems = mdoAgent.GetSimpleList("associate");
+    for (Integer ownerIndex = 0; ownerIndex < ownerItems.length(); ownerIndex++) {
+      NSMDOListItem currentOwnerItem = ownerItems[ownerIndex];
+      Integer currentAssociateId = currentOwnerItem.GetId();
+      String currentAssociateIdRaw = currentAssociateId.toString();
+      String ownerLabel = currentOwnerItem.GetFullName().stripLeadingAndTrailing(" ");
+      if (ownerLabel.isEmpty()) {
+        ownerLabel = currentOwnerItem.GetName().stripLeadingAndTrailing(" ");
+      }
+
+      if (currentAssociateId > 0 && !ownerLabel.isEmpty() && !currentOwnerItem.GetDeleted() && !ownerLabels.exists(currentAssociateIdRaw)) {
+        ownerLabels.insert(currentAssociateIdRaw, ownerLabel);
+        ownerSortKeys.insert(ownerLabel.toLower() + "|" + currentAssociateIdRaw, currentAssociateIdRaw);
+      }
+    }
+
+    ownerSourceLoaded = ownerLabels.size() > 0;
+  }
+  catch {
+  }
+
+  if (!ownerSourceLoaded) {
+    SearchEngine ownerSearch;
+    ownerSearch.addFields("user", "associateId,firstname,middlename,lastname");
+    ownerSearch.addCriteria("user.status", "OperatorEquals", "1", "OperatorAnd", 0);
+    ownerSearch.addCriteria("user.associateId", "OperatorGt", "0", "OperatorAnd", 0);
+    ownerSearch.select();
+
+    for (ownerSearch.first(); !ownerSearch.eof(); ownerSearch.next()) {
+      String currentAssociateIdRaw = ownerSearch.getField("user.associateId").stripLeadingAndTrailing(" ");
+      if (!currentAssociateIdRaw.isEmpty() && !ownerLabels.exists(currentAssociateIdRaw)) {
+        String ownerLabel = ownerSearch.getField("user.firstname").stripLeadingAndTrailing(" ");
+        String middleName = ownerSearch.getField("user.middlename").stripLeadingAndTrailing(" ");
+        String lastName = ownerSearch.getField("user.lastname").stripLeadingAndTrailing(" ");
+
+        if (!middleName.isEmpty()) {
+          if (!ownerLabel.isEmpty()) ownerLabel += " ";
+          ownerLabel += middleName;
+        }
+        if (!lastName.isEmpty()) {
+          if (!ownerLabel.isEmpty()) ownerLabel += " ";
+          ownerLabel += lastName;
+        }
+
+        ownerLabel = ownerLabel.stripLeadingAndTrailing(" ");
+        if (ownerLabel.isEmpty()) {
+          ownerLabel = currentAssociateIdRaw;
+        }
+
+        ownerLabels.insert(currentAssociateIdRaw, ownerLabel);
+        ownerSortKeys.insert(ownerLabel.toLower() + "|" + currentAssociateIdRaw, currentAssociateIdRaw);
+      }
+    }
+  }
+
+  String builtOwnerOptions = "<option value=''>-- Select owner --</option>";
+  for (ownerSortKeys.first(); !ownerSortKeys.eof(); ownerSortKeys.next()) {
+    String currentAssociateIdRaw = ownerSortKeys.getVal();
+    String ownerLabel = ownerLabels.getWithFallback(currentAssociateIdRaw, currentAssociateIdRaw);
+
+    builtOwnerOptions += "<option value='" + currentAssociateIdRaw.htmlEncode() + "'";
+    if (leadOwnerAssocIdRaw.equals(currentAssociateIdRaw)) {
+      builtOwnerOptions += " selected='selected'";
+    }
+    builtOwnerOptions += ">" + ownerLabel.htmlEncode() + "</option>";
+    ownerCount = ownerCount + 1;
+  }
+
+  Map saleTypeLabels;
+  Map saleTypeSortKeys;
+  NSListAgent lookupListAgent;
+  NSSaleType[] saleTypes = lookupListAgent.GetAllSaleType();
+  for (Integer index = 0; index < saleTypes.length(); index++) {
+    NSSaleType currentSaleType = saleTypes[index];
+    Integer currentSaleTypeId = currentSaleType.GetId();
+    String currentSaleTypeIdRaw = currentSaleTypeId.toString();
+    String currentSaleTypeLabel = currentSaleType.GetValue().stripLeadingAndTrailing(" ");
+
+    if (currentSaleTypeId > 0 && !currentSaleTypeLabel.isEmpty() && !saleTypeLabels.exists(currentSaleTypeIdRaw)) {
+      saleTypeLabels.insert(currentSaleTypeIdRaw, currentSaleTypeLabel);
+      saleTypeSortKeys.insert(currentSaleTypeLabel.toLower() + "|" + currentSaleTypeIdRaw, currentSaleTypeIdRaw);
+    }
+  }
+
+  String builtSaleTypeOptions = "<option value=''>-- Select type --</option>";
+  for (saleTypeSortKeys.first(); !saleTypeSortKeys.eof(); saleTypeSortKeys.next()) {
+    String currentSaleTypeIdRaw = saleTypeSortKeys.getVal();
+    String currentSaleTypeLabel = saleTypeLabels.getWithFallback(currentSaleTypeIdRaw, currentSaleTypeIdRaw);
+
+    builtSaleTypeOptions += "<option value='" + currentSaleTypeIdRaw.htmlEncode() + "'";
+    if (saleTypeIdRaw.equals(currentSaleTypeIdRaw)) {
+      builtSaleTypeOptions += " selected='selected'";
+    }
+    builtSaleTypeOptions += ">" + currentSaleTypeLabel.htmlEncode() + "</option>";
+    saleTypeCount = saleTypeCount + 1;
+  }
+
+  ownerOptions = builtOwnerOptions;
+  saleTypeOptions = builtSaleTypeOptions;
+
+  try {
+    SearchEngine sharedProjectSearch;
+    sharedProjectSearch.addFields("project", "project_id,name");
+    sharedProjectSearch.addCriteria("project.project_id", "OperatorEquals", SHARED_PROJECT_ID.toString(), "OperatorAnd", 0);
+    sharedProjectSearch.setLimit(1);
+    sharedProjectAvailable = sharedProjectSearch.select() > 0;
+  }
+  catch {
+    sharedProjectAvailable = false;
+  }
+
+  if (LEAD_SELECTION_ID > 0) {
+    leadSelectionAvailable = true;
+  }
+  else if (!LEAD_SELECTION_NAME.isEmpty()) {
+    try {
+      SearchEngine leadSelectionSearch;
+      leadSelectionSearch.addFields("selection", "selection_id,name");
+      leadSelectionSearch.addCriteria("selection.name", "OperatorEquals", LEAD_SELECTION_NAME, "OperatorAnd", 0);
+      leadSelectionSearch.setLimit(1);
+      leadSelectionAvailable = leadSelectionSearch.select() > 0;
+    }
+    catch {
+      leadSelectionAvailable = false;
+    }
+  }
+  else {
+    leadSelectionAvailable = true;
+  }
+
+  try {
+    Map customerCategoryLabels;
+    Map customerCategorySortKeys;
+    NSMDOAgent customerCategoryMdoAgent;
+    NSMDOListItem[] customerCategories = customerCategoryMdoAgent.GetSimpleList("category");
+    for (Integer index = 0; index < customerCategories.length(); index++) {
+      NSMDOListItem currentCustomerCategory = customerCategories[index];
+      Integer currentCustomerCategoryId = currentCustomerCategory.GetId();
+      String currentCustomerCategoryIdRaw = currentCustomerCategoryId.toString();
+      String currentCustomerCategoryLabel = currentCustomerCategory.GetName().stripLeadingAndTrailing(" ");
+
+      if (currentCustomerCategoryId > 0 && !currentCustomerCategoryLabel.isEmpty() && !currentCustomerCategory.GetDeleted() && !customerCategoryLabels.exists(currentCustomerCategoryIdRaw)) {
+        customerCategoryLabels.insert(currentCustomerCategoryIdRaw, currentCustomerCategoryLabel);
+        customerCategorySortKeys.insert(currentCustomerCategoryLabel.toLower() + "|" + currentCustomerCategoryIdRaw, currentCustomerCategoryIdRaw);
+      }
+    }
+
+    String builtCustomerCategoryOptions = "<option value=''>-- Select customer category --</option>";
+    for (customerCategorySortKeys.first(); !customerCategorySortKeys.eof(); customerCategorySortKeys.next()) {
+      String currentCustomerCategoryIdRaw = customerCategorySortKeys.getVal();
+      String currentCustomerCategoryLabel = customerCategoryLabels.getWithFallback(currentCustomerCategoryIdRaw, currentCustomerCategoryIdRaw);
+      Bool currentCustomerCategorySelected = customerCategoryIdRaw.equals(currentCustomerCategoryIdRaw) || (customerCategoryIdRaw.isEmpty() && currentCustomerCategoryLabel.toLower() == DEFAULT_PROSPECT_LABEL.toLower());
+
+      builtCustomerCategoryOptions += "<option value='" + currentCustomerCategoryIdRaw.htmlEncode() + "'";
+      if (currentCustomerCategorySelected) {
+        builtCustomerCategoryOptions += " selected='selected'";
+      }
+      builtCustomerCategoryOptions += ">" + currentCustomerCategoryLabel.htmlEncode() + "</option>";
+      customerCategoryCount = customerCategoryCount + 1;
+    }
+
+    customerCategoryOptions = builtCustomerCategoryOptions;
+  }
+  catch {
+  }
+
+  try {
+    Map saleStageLabels;
+    Map saleStageSortKeys;
+    NSMDOAgent saleStageMdoAgent;
+    NSMDOListItem[] saleStages = saleStageMdoAgent.GetSimpleList("salestage");
+    for (Integer index = 0; index < saleStages.length(); index++) {
+      NSMDOListItem currentSaleStage = saleStages[index];
+      Integer currentSaleStageId = currentSaleStage.GetId();
+      String currentSaleStageIdRaw = currentSaleStageId.toString();
+      String currentSaleStageLabel = currentSaleStage.GetName().stripLeadingAndTrailing(" ");
+
+      if (currentSaleStageId > 0 && !currentSaleStageLabel.isEmpty() && !currentSaleStage.GetDeleted() && !saleStageLabels.exists(currentSaleStageIdRaw)) {
+        saleStageLabels.insert(currentSaleStageIdRaw, currentSaleStageLabel);
+        saleStageSortKeys.insert(currentSaleStageLabel.toLower() + "|" + currentSaleStageIdRaw, currentSaleStageIdRaw);
+      }
+    }
+
+    String builtSaleStageOptions = "<option value=''>-- Select sale stage --</option>";
+    for (saleStageSortKeys.first(); !saleStageSortKeys.eof(); saleStageSortKeys.next()) {
+      String currentSaleStageIdRaw = saleStageSortKeys.getVal();
+      String currentSaleStageLabel = saleStageLabels.getWithFallback(currentSaleStageIdRaw, currentSaleStageIdRaw);
+      Bool currentSaleStageSelected = saleStageIdRaw.equals(currentSaleStageIdRaw) || (saleStageIdRaw.isEmpty() && currentSaleStageLabel.toLower() == DEFAULT_STAGE_LABEL.toLower());
+
+      builtSaleStageOptions += "<option value='" + currentSaleStageIdRaw.htmlEncode() + "'";
+      if (currentSaleStageSelected) {
+        builtSaleStageOptions += " selected='selected'";
+        selectedSaleStageLabel = currentSaleStageLabel;
+      }
+      builtSaleStageOptions += ">" + currentSaleStageLabel.htmlEncode() + "</option>";
+      saleStageCount = saleStageCount + 1;
+    }
+
+    saleStageOptions = builtSaleStageOptions;
+  }
+  catch {
+  }
+
+  try {
+    Map countryLabels;
+    Map countryValues;
+    Map countrySortKeys;
+    NSListAgent countryOptionListAgent;
+    NSCountry[] availableCountries = countryOptionListAgent.GetCountries();
+    String normalizedSelectedCountry = contactCountry.stripLeadingAndTrailing(" ").toLower();
+    for (Integer index = 0; index < availableCountries.length(); index++) {
+      NSCountry currentCountry = availableCountries[index];
+      Integer currentCountryId = currentCountry.GetCountryId();
+      String currentCountryIdRaw = currentCountryId.toString();
+      String currentCountryName = currentCountry.GetName().stripLeadingAndTrailing(" ");
+      String currentEnglishName = currentCountry.GetEnglishName().stripLeadingAndTrailing(" ");
+      String currentTwoLetterIso = currentCountry.GetTwoLetterISOCountry().stripLeadingAndTrailing(" ");
+      String currentCountryLabel = currentCountryName;
+      String currentCountryValue = currentTwoLetterIso;
+
+      if (currentCountryLabel.isEmpty()) {
+        currentCountryLabel = currentEnglishName;
+      }
+      if (currentCountryValue.isEmpty()) {
+        currentCountryValue = currentCountryLabel;
+      }
+
+      if (currentCountryId > 0 && !currentCountryLabel.isEmpty() && !countryLabels.exists(currentCountryIdRaw)) {
+        countryLabels.insert(currentCountryIdRaw, currentCountryLabel);
+        countryValues.insert(currentCountryIdRaw, currentCountryValue);
+        countrySortKeys.insert(currentCountryLabel.toLower() + "|" + currentCountryIdRaw, currentCountryIdRaw);
+      }
+    }
+
+    String builtCountryOptions = "<option value=''>-- Select country --</option>";
+    for (countrySortKeys.first(); !countrySortKeys.eof(); countrySortKeys.next()) {
+      String currentCountryIdRaw = countrySortKeys.getVal();
+      String currentCountryLabel = countryLabels.getWithFallback(currentCountryIdRaw, currentCountryIdRaw);
+      String currentCountryValue = countryValues.getWithFallback(currentCountryIdRaw, currentCountryLabel);
+      Bool currentCountrySelected = !normalizedSelectedCountry.isEmpty() && currentCountryValue.toLower() == normalizedSelectedCountry;
+
+      builtCountryOptions += "<option value='" + currentCountryValue.htmlEncode() + "'";
+      if (currentCountrySelected) {
+        builtCountryOptions += " selected='selected'";
+      }
+      builtCountryOptions += ">" + currentCountryLabel.htmlEncode() + "</option>";
+    }
+
+    countryOptions = builtCountryOptions;
+  }
+  catch {
+  }
+
+  try {
+    Map businessLabels;
+    Map businessSortKeys;
+    NSMDOAgent businessMdoAgent;
+    NSMDOListItem[] categories = businessMdoAgent.GetSimpleList("business");
+    for (Integer index = 0; index < categories.length(); index++) {
+      NSMDOListItem currentCategory = categories[index];
+      Integer currentCategoryId = currentCategory.GetId();
+      String currentCategoryIdRaw = currentCategoryId.toString();
+      String currentCategoryLabel = currentCategory.GetName().stripLeadingAndTrailing(" ");
+
+      Bool isBlockedBusinessOption =
+        currentCategoryLabel.findCase("***--velg--") >= 0 ||
+        currentCategoryLabel.findCase("***---utgått--") >= 0;
+
+      if (currentCategoryId > 0 && !currentCategoryLabel.isEmpty() && !isBlockedBusinessOption && !businessLabels.exists(currentCategoryIdRaw)) {
+        businessLabels.insert(currentCategoryIdRaw, currentCategoryLabel);
+        businessSortKeys.insert(currentCategoryLabel.toLower() + "|" + currentCategoryIdRaw, currentCategoryIdRaw);
+      }
+    }
+
+    String builtBusinessOptions = "<option value=''>-- Select company business --</option>";
+    for (businessSortKeys.first(); !businessSortKeys.eof(); businessSortKeys.next()) {
+      String currentCategoryIdRaw = businessSortKeys.getVal();
+      String currentCategoryLabel = businessLabels.getWithFallback(currentCategoryIdRaw, currentCategoryIdRaw);
+
+      builtBusinessOptions += "<option value='" + currentCategoryIdRaw.htmlEncode() + "'";
+      if (businessCategoryIdRaw.equals(currentCategoryIdRaw)) {
+        builtBusinessOptions += " selected='selected'";
+      }
+      builtBusinessOptions += ">" + currentCategoryLabel.htmlEncode() + "</option>";
+    }
+
+    businessOptions = builtBusinessOptions;
+  }
+  catch {
+  }
+
+  try {
+    Map positionLabels;
+    Map positionSortKeys;
+    NSListAgent positionListAgent;
+    NSPosition[] positions = positionListAgent.GetPositions();
+    for (Integer index = 0; index < positions.length(); index++) {
+      NSPosition currentPosition = positions[index];
+      Integer currentPositionId = currentPosition.GetId();
+      String currentPositionIdRaw = currentPositionId.toString();
+      String currentPositionLabel = currentPosition.GetValue().stripLeadingAndTrailing(" ");
+
+      if (currentPositionId > 0 && !currentPositionLabel.isEmpty() && !positionLabels.exists(currentPositionIdRaw)) {
+        positionLabels.insert(currentPositionIdRaw, currentPositionLabel);
+        positionSortKeys.insert(currentPositionLabel.toLower() + "|" + currentPositionIdRaw, currentPositionIdRaw);
+      }
+    }
+
+    String builtPositionOptions = "<option value=''>-- Select contact position --</option>";
+    for (positionSortKeys.first(); !positionSortKeys.eof(); positionSortKeys.next()) {
+      String currentPositionIdRaw = positionSortKeys.getVal();
+      String currentPositionLabel = positionLabels.getWithFallback(currentPositionIdRaw, currentPositionIdRaw);
+
+      builtPositionOptions += "<option value='" + currentPositionIdRaw.htmlEncode() + "'";
+      if (contactPositionIdRaw.equals(currentPositionIdRaw)) {
+        builtPositionOptions += " selected='selected'";
+      }
+      builtPositionOptions += ">" + currentPositionLabel.htmlEncode() + "</option>";
+    }
+
+    positionOptions = builtPositionOptions;
+  }
+  catch {
+  }
+
+  lookupReady = ownerCount > 0 && saleTypeCount > 0 && customerCategoryCount > 0 && sharedProjectAvailable;
+
+  if (!sharedProjectAvailable) {
+    loadWarning = "Unable to find the shared event project in SuperOffice. Please contact Aquatiq.";
+  }
+  else if (!lookupReady) {
+    loadWarning = "Unable to load the lead owners, sale types, or customer categories required for this form. Please contact Aquatiq.";
+  }
+}
+catch {
+  loadWarning = "Unable to load the lead owners, sale types, or customer categories required for this form. Please contact Aquatiq.";
+}
+%>
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title><% print(pageTitle); %></title>
+<style>
+html,body{margin:0;padding:0}
+body{padding:10px;color:#000;font-family:'Arial',Helvetica,Verdana,sans-serif;font-size:18px;background:#fff}
+.SuperForm{display:flex;align-items:center;justify-content:center;min-height:calc(100vh - 20px)}
+.form-background{font-family:Arial;font-size:18px;color:#000;margin:auto;border:1px solid #808080;border-radius:10px;max-width:1000px;width:100%;overflow:auto;background:rgb(227, 235, 242)}
+.form-form{background:rgb(227, 235, 242);margin:0;padding:0}
+.form-table{font-family:Arial;font-size:18px;padding:20px;color:#000}
+.outerTable{width:100%;border-collapse:collapse}
+.outerTable td{padding:0;vertical-align:top}
+.componentTd{padding:4px 0}
+.labelTd{font-family:Arial;font-size:18px;color:#000;padding:10px 0 4px 0}
+.form-label{display:block;font-family:Arial;font-size:18px;color:#000}
+.req{color:#cc0000;margin-left:2px}
+.justifyContentCenter{display:flex;justify-content:center}
+.form-image img{max-width:100%;height:auto}
+.form-textblock{white-space:pre-wrap;text-align:center}
+.form-help{font-size:14px;color:#555;margin-top:6px}
+.form-textblock .title{font-size:24px;font-weight:700;display:block;margin:10px 0}
+.form-textblock .subtitle{font-size:16px;display:block;margin-bottom:10px}
+.form-input{font-family:Arial;font-size:18px;width:100%;border:1px solid #808080;padding:6px;background:#fff;color:#000;box-sizing:border-box;outline:none}
+.form-input.rounded{border-radius:4px}
+.form-input:focus{border-color:#232458}
+.form-textarea{min-height:120px;resize:vertical}
+select.form-input{height:40px;padding:6px;-webkit-appearance:menulist;appearance:menulist}
+.form-consent{font-family:Arial;font-size:18px;color:#000;width:100%;border-collapse:collapse}
+.form-consent td{padding:4px 6px 4px 0;vertical-align:top}
+.form-consent input[type='checkbox']{width:18px;height:18px;margin:0}
+.form-consent label{font-family:Arial;font-size:18px;color:#000}
+.form-consent a{font-family:Arial;font-size:18px;color:#000}
+.form-button{font-family:Arial;font-size:18px;border:0;color:#fff;background:#232458;width:100%;height:auto;padding:12px 20px;cursor:pointer;border-radius:4px}
+.form-button:hover{background:#1b1c45}
+.form-button:disabled{background:#999;cursor:not-allowed}
+.error-box{background:#fee;border:1px solid #fcc;padding:12px 15px;color:#c00;font-size:16px;margin:10px 0;border-radius:4px}
+.warning-box{background:#fff7d6;border:1px solid #e6c200;padding:12px 15px;color:#664400;font-size:16px;margin:10px 0;border-radius:4px}
+.status-box{background:#eef3ff;border:1px solid #b7c6ef;padding:12px 15px;color:#232458;font-size:16px;margin:10px 0;border-radius:4px}
+.spinner{display:inline-block;width:16px;height:16px;margin-right:8px;border:2px solid rgba(255,255,255,.45);border-top-color:#fff;border-radius:50%;vertical-align:-3px;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.success-icon{font-size:48px;color:#232458;text-align:center;margin-bottom:10px}
+.success-title{font-size:24px;font-weight:700;text-align:center;margin:0 0 10px 0}
+.success-sub{text-align:center;font-size:16px;color:#555;margin-bottom:20px}
+.detail-table{width:100%;border-collapse:collapse;font-size:16px;margin:10px 0 20px 0}
+.detail-table td{padding:8px 0;border-bottom:1px solid #ccc}
+.detail-table td:first-child{font-weight:700;width:140px}
+.section-heading{font-size:18px;font-weight:700;color:#232458;margin:15px 0 10px 0;padding:8px 0;border-bottom:2px solid #232458}
+.search-field{position:relative}
+.suggestion-list{position:absolute;left:0;right:0;top:100%;background:#fff;border:1px solid #808080;border-top:none;max-height:220px;overflow-y:auto;z-index:20;box-shadow:0 4px 8px rgba(0,0,0,.15)}
+.suggestion-item{padding:8px 10px;cursor:pointer;font-size:16px;border-bottom:1px solid #eee}
+.suggestion-item:hover{background:#eef3ff}
+.selected-badge{margin-top:6px;font-size:14px;background:#eef7ee;border:1px solid #b7dfb7;color:#256029;padding:6px 10px;border-radius:4px}
+.clear-selection{margin-left:8px;border:0;background:none;color:#232458;text-decoration:underline;cursor:pointer;font-size:14px;padding:0}
+.sync-history{margin:10px 0;border:1px solid #b7c6ef;border-radius:4px;background:#eef3ff;font-size:14px}
+.sync-history-summary{padding:8px 10px;cursor:pointer;font-weight:700;color:#232458}
+.sync-history-detail{max-height:220px;overflow-y:auto;border-top:1px solid #b7c6ef}
+.sync-history-row{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;border-bottom:1px solid #dfe6f5}
+.sync-history-row:last-child{border-bottom:none}
+.sync-status{font-size:12px;padding:2px 8px;border-radius:10px;color:#fff}
+.sync-status.pending{background:#e6a700}
+.sync-status.failed{background:#c00}
+.sync-status.synced{background:#2e7d32}
+.sync-retry{border:0;background:#232458;color:#fff;font-size:12px;padding:3px 8px;border-radius:3px;cursor:pointer}
+</style>
+</head>
+<%
+if (showSuccess) {
+%>
+<body>
+<div class='SuperForm'>
+  <div class='form-background'>
+    <div class='form-form'>
+      <div class='form-table'>
+        <table class='outerTable'>
+          <tr><td class='componentTd'>
+            <div class='justifyContentCenter'>
+              <div class='form-image'>
+                <img src='https://online3.superoffice.com/Cust29215/CS/scripts/customer.fcgi?_sf=0&amp;action=getAttachment&amp;id=125&amp;key=WH8lLSqGnnmA5bkUcaKe5cH5D6fuhjbkbpWRLmWEp0KuYetoBcj7TC8ifuCXcHkK' alt='Aquatiq' />
+              </div>
+            </div>
+          </td></tr>
+          <tr><td class='componentTd'>
+            <div class='form-textblock'>
+              <span class='title'><% print(EVENT_NAME.htmlEncode()); %></span>
+              <span class='subtitle'>Lead registration</span>
+            </div>
+          </td></tr>
+          <tr><td class='componentTd'>
+            <div class='success-icon'>&#10003;</div>
+            <div class='success-title'>Lead Registered Successfully</div>
+            <div class='success-sub'><% print(successMessage.htmlEncode()); %></div>
+            <table class='detail-table'>
+              <tr><td>Lead Name</td><td><% print(successLeadName); %></td></tr>
+              <tr><td>Company</td><td><% print(successCompanyName); %></td></tr>
+              <tr><td>Email</td><td><% print(successEmail); %></td></tr>
+              <tr><td>Project</td><td><% print(successProjectName); %></td></tr>
+              <tr><td>Sale ID</td><td>#<% print(successSaleId); %></td></tr>
+              <tr><td>Contact ID</td><td>#<% print(successContactId); %></td></tr>
+            </table>
+            <a href='<% print(scriptUrl); %>' style='display:block'><button type='button' class='form-button'>Register another lead</button></a>
+          </td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+<%
+}
+else {
+%>
+<body>
+<div class='SuperForm'>
+  <div class='form-background'>
+    <div class='form-form'>
+      <div class='form-table'>
+        <form id='leadRegistrationForm' method='post' action='<% print(scriptUrl); %>' onsubmit='return handleSubmit()'>
+          <table class='outerTable'>
+
+            <tr><td class='componentTd' colspan='2'>
+              <div class='justifyContentCenter'>
+                <div class='form-image'>
+                  <img src='https://online3.superoffice.com/Cust29215/CS/scripts/customer.fcgi?_sf=0&amp;action=getAttachment&amp;id=125&amp;key=WH8lLSqGnnmA5bkUcaKe5cH5D6fuhjbkbpWRLmWEp0KuYetoBcj7TC8ifuCXcHkK' alt='Aquatiq' />
+                </div>
+              </div>
+            </td></tr>
+
+            <tr><td class='componentTd' colspan='2'>
+              <div class='form-textblock'>
+                <span class='title'><% print(EVENT_NAME.htmlEncode()); %></span>
+                <span class='subtitle'>Lead registration</span>
+              </div>
+            </td></tr>
+
+            <tr><td class='componentTd' colspan='2'>
+              <div id='syncHistoryPanel' class='sync-history' style='display:none'>
+                <div id='syncHistorySummary' class='sync-history-summary'></div>
+                <div id='syncHistoryDetail' class='sync-history-detail' style='display:none'></div>
+              </div>
+            </td></tr>
+
+            <% if (!formError.isEmpty()) { %>
+            <tr><td class='componentTd' colspan='2'>
+              <div class='error-box'><% print(formError.htmlEncode()); %></div>
+            </td></tr>
+            <% } %>
+
+            <% if (!loadWarning.isEmpty()) { %>
+            <tr><td class='componentTd' colspan='2'>
+              <div class='<% if (lookupReady) { print("warning-box"); } else { print("error-box"); } %>'><% print(loadWarning.htmlEncode()); %></div>
+            </td></tr>
+            <% } %>
+
+            <tr id='setupErrorRow' style='display:none'><td class='componentTd' colspan='2'>
+              <div id='setupErrorBox' class='error-box'></div>
+            </td></tr>
+
+            <tr id='submitStatusRow' style='display:none'><td class='componentTd' colspan='2'>
+              <div id='submitStatusBox' class='status-box' aria-live='polite'>Checking SuperOffice and registering the lead. Please wait.</div>
+            </td></tr>
+
+            <!-- COMPANY INFO SECTION -->
+            <tr><td class='labelTd' colspan='2'><div class='section-heading'>Company Info</div></td></tr>
+
+            <tr><td class='labelTd' colspan='2'><label class='form-label' for='companyName'>Company name <span class='req'>*</span></label></td></tr>
+            <tr><td class='componentTd' colspan='2'>
+              <div class='search-field'>
+                <input type='text' class='form-input rounded' id='companyName' name='companyName' placeholder='(Enter company name, or search existing customers)' value='<% print(companyName.htmlEncode()); %>' required='required' autocomplete='off' />
+                <input type='hidden' id='existingCompanyId' name='existingCompanyId' value='' />
+                <div id='companySuggestions' class='suggestion-list' style='display:none'></div>
+              </div>
+              <div id='companySelectedBadge' class='selected-badge' style='display:none'>Linked to existing customer <span id='companySelectedName'></span> <button type='button' class='clear-selection' id='clearCompanySelection'>Clear</button></div>
+              <div class='form-help'>All submissions are linked to the shared project: <% print(SHARED_PROJECT_NAME.htmlEncode()); %></div>
+            </td></tr>
+
+            <tr><td class='labelTd' colspan='2'><label class='form-label' for='contactCountry'>Country (optional)</label></td></tr>
+            <tr><td class='componentTd' colspan='2'><select class='form-input rounded' id='contactCountry' name='contactCountry'><% print(countryOptions); %></select></td></tr>
+
+            <tr><td class='labelTd' colspan='2'><label class='form-label' for='businessCategoryId'>Company business</label></td></tr>
+            <tr><td class='componentTd' colspan='2'><select class='form-input rounded' id='businessCategoryId' name='businessCategoryId' <% if (!lookupReady) { print("disabled='disabled'"); } %>><% print(businessOptions); %></select></td></tr>
+
+            <tr><td class='labelTd' colspan='2'><label class='form-label' for='companyOwnerAssocId'>Company owner (Aquatiq, optional)</label></td></tr>
+            <tr><td class='componentTd' colspan='2'><select class='form-input rounded' id='companyOwnerAssocId' name='companyOwnerAssocId' <% if (!lookupReady) { print("disabled='disabled'"); } %>><option value=''>-- Select contact --</option><% print(ownerOptions); %></select></td></tr>
+
+            <!-- CUSTOMER INFO SECTION -->
+            <tr><td class='labelTd' colspan='2'><div class='section-heading'>Customer Info</div></td></tr>
+
+            <tr><td class='labelTd' colspan='2'><label class='form-label' for='leadName'>Full name <span class='req'>*</span></label></td></tr>
+            <tr><td class='componentTd' colspan='2'>
+              <div class='search-field'>
+                <input type='text' class='form-input rounded' id='leadName' name='leadName' placeholder='(Enter full name, or search existing contacts)' value='<% print(leadName.htmlEncode()); %>' required='required' autocomplete='off' />
+                <input type='hidden' id='existingPersonId' name='existingPersonId' value='' />
+                <div id='personSuggestions' class='suggestion-list' style='display:none'></div>
+              </div>
+              <div id='personSelectedBadge' class='selected-badge' style='display:none'>Linked to existing contact <span id='personSelectedName'></span> <button type='button' class='clear-selection' id='clearPersonSelection'>Clear</button></div>
+            </td></tr>
+
+            <tr><td class='labelTd' colspan='2'><label class='form-label' for='contactTitle'>Title (optional)</label></td></tr>
+            <tr><td class='componentTd' colspan='2'><input type='text' class='form-input rounded' id='contactTitle' name='contactTitle' placeholder='(e.g., Purchasing Manager, Sales Director)' value='<% print(contactTitle.htmlEncode()); %>' /></td></tr>
+            <tr><td class='labelTd' colspan='2'><label class='form-label' for='contactPositionId'>Position</label></td></tr>
+            <tr><td class='componentTd' colspan='2'><select class='form-input rounded' id='contactPositionId' name='contactPositionId' <% if (!lookupReady) { print("disabled='disabled'"); } %>><% print(positionOptions); %></select></td></tr>
+            <tr><td class='labelTd' colspan='2'><label class='form-label' for='leadEmail'>Email <span class='req'>*</span></label></td></tr>
+            <tr><td class='componentTd' colspan='2'><input type='email' class='form-input rounded' id='leadEmail' name='leadEmail' placeholder='(Enter email address)' value='<% print(leadEmail.htmlEncode()); %>' required='required' autocomplete='email' /></td></tr>
+
+            <tr><td class='labelTd' colspan='2'><label class='form-label' for='leadPhone'>Phone (optional)</label></td></tr>
+            <tr><td class='componentTd' colspan='2'><input type='tel' class='form-input rounded' id='leadPhone' name='leadPhone' placeholder='(Include country code)' value='<% print(leadPhone.htmlEncode()); %>' autocomplete='tel' /></td></tr>
+
+            <!-- LEAD/ORDER INFO SECTION -->
+            <tr><td class='labelTd' colspan='2'><div class='section-heading'>Lead / Order Info</div></td></tr>
+
+            <tr><td class='labelTd' colspan='2'><label class='form-label' for='orderName'>Sale heading (optional override)</label></td></tr>
+            <tr><td class='componentTd' colspan='2'><input type='text' class='form-input rounded' id='orderName' name='orderName' placeholder='(Defaults to the project name)' value='<% print(orderName.htmlEncode()); %>' /></td></tr>
+
+            <tr><td class='labelTd' colspan='2'><label class='form-label' for='leadOwnerAssocId'>Lead owner <span class='req'>*</span></label></td></tr>
+            <tr><td class='componentTd' colspan='2'><select class='form-input rounded' id='leadOwnerAssocId' name='leadOwnerAssocId' required='required' <% if (!lookupReady) { print("disabled='disabled'"); } %>><% print(ownerOptions); %></select></td></tr>
+
+            <tr><td class='labelTd' colspan='2'><label class='form-label' for='saleTypeId'>Sale type <span class='req'>*</span></label></td></tr>
+            <tr><td class='componentTd' colspan='2'><select class='form-input rounded' id='saleTypeId' name='saleTypeId' required='required' <% if (!lookupReady) { print("disabled='disabled'"); } %>><% print(saleTypeOptions); %></select></td></tr>
+
+            <tr style='display:none'><td colspan='2'>
+              <select id='customerCategoryId' name='customerCategoryId'><% print(customerCategoryOptions); %></select>
+              <select id='saleStageId' name='saleStageId'><% print(saleStageOptions); %></select>
+            </td></tr>
+
+            <tr><td class='labelTd' colspan='2'><label class='form-label' for='whatLeadWants'>What the lead is interested in <span class='req'>*</span></label></td></tr>
+            <tr><td class='componentTd' colspan='2'><textarea class='form-input form-textarea rounded' rows='5' id='whatLeadWants' name='whatLeadWants' placeholder='(Describe what the lead is interested in, pain points, products of interest)' required='required'><% print(whatLeadWants.htmlEncode()); %></textarea></td></tr>
+
+            <tr><td class='componentTd' colspan='2'>
+              <table class='form-consent'>
+                <tr>
+                  <td><input type='checkbox' id='termsAccept' name='termsAccept' value='1' /></td>
+                  <td><label for='termsAccept'>Yes, sign me up for news and updates</label></td>
+                </tr>
+                <tr>
+                  <td></td>
+                  <td><a href='https://www.aquatiq.com/en/glb/privacy-policy' target='_blank'>Privacy statement</a></td>
+                </tr>
+              </table>
+            </td></tr>
+
+            <tr><td class='componentTd' colspan='2'>
+              <button type='submit' id='submitButton' class='form-button' <% if (!lookupReady) { print("disabled='disabled'"); } %>><span><% if (lookupReady) { print("Submit form"); } else { print("Form setup required"); } %></span></button>
+            </td></tr>
+
+          </table>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+var DEFAULT_PROSPECT='<% print(DEFAULT_PROSPECT_LABEL.htmlEncode()); %>';
+var DEFAULT_STAGE='<% print(DEFAULT_STAGE_LABEL.htmlEncode()); %>';
+
+function extractLocalizedLabel(label){
+  if(!label){return '';}
+  var usMatch=label.match(/(?:^|;)\s*US\s*:\s*"([^"]+)"/);
+  if(usMatch&&usMatch[1]&&usMatch[1].trim()){
+    return usMatch[1].trim();
+  }
+  var noMatch=label.match(/(?:^|;)\s*NO\s*:\s*"([^"]+)"/);
+  if(noMatch&&noMatch[1]&&noMatch[1].trim()){
+    return noMatch[1].trim();
+  }
+  return label;
+}
+
+function setFormSetupError(message){
+  var setupErrorRow=document.getElementById('setupErrorRow');
+  var setupErrorBox=document.getElementById('setupErrorBox');
+  var submitButton=document.getElementById('submitButton');
+  if(setupErrorBox){
+    setupErrorBox.textContent=message;
+  }
+  if(setupErrorRow){
+    setupErrorRow.style.display='';
+  }
+  if(submitButton){
+    submitButton.disabled=true;
+    submitButton.innerHTML='<span>Form setup required</span>';
+  }
+}
+
+function hasLocalizedLabel(label){
+  if(!label){return false;}
+  return /(?:^|;)\s*(US|NO)\s*:\s*"([^"]+)"/.test(label);
+}
+
+var BLOCKED_SALE_TYPE_LABELS={
+  'revisjon_gammel':true,
+  'sale to excistingcuystomer':true,
+  'salg til ny kunde - aqs':true,
+  'sale to new customer':true,
+  'flow':true,
+  'inorder':true
+};
+
+function isBlockedSaleTypeLabel(label){
+  if(!label){return false;}
+  var normalizedLabel=label.trim().toLowerCase();
+  return BLOCKED_SALE_TYPE_LABELS[normalizedLabel]===true;
+}
+
+function removeUnlocalizedSaleTypes(select){
+  if(!select){return;}
+  for(var i=select.options.length-1;i>=0;i--){
+    var option=select.options[i];
+    var originalLabel=(option.text||'').trim();
+    var localizedLabel=extractLocalizedLabel(originalLabel);
+    if(option.value&&(
+      !hasLocalizedLabel(originalLabel)||
+      isBlockedSaleTypeLabel(originalLabel)||
+      isBlockedSaleTypeLabel(localizedLabel)
+    )){
+      select.remove(i);
+    }
+  }
+}
+
+function removeBusinessSystemOptions(select){
+  if(!select){return;}
+  for(var i=select.options.length-1;i>=0;i--){
+    var option=select.options[i];
+    var optionText=(option.text||'').trim();
+    var localizedText=extractLocalizedLabel(optionText).trim();
+    var normalizedText=(localizedText||optionText).toLowerCase();
+    if(option.value&&(
+      normalizedText.indexOf('***--velg--')>=0||
+      normalizedText.indexOf('***---utgått--')>=0||
+      optionText.toLowerCase().indexOf('***--velg--')>=0||
+      optionText.toLowerCase().indexOf('***---utgått--')>=0
+    )){
+      select.remove(i);
+    }
+  }
+}
+
+function normalizeSelectOptions(select){
+  if(!select){return;}
+  for(var i=0;i<select.options.length;i++){
+    var option=select.options[i];
+    if(option.value){
+      option.text=extractLocalizedLabel(option.text);
+    }
+  }
+}
+
+function selectOptionByLabel(select,targetLabel){
+  if(!select){return false;}
+  var normalizedTarget=targetLabel.toLowerCase();
+  for(var i=0;i<select.options.length;i++){
+    var option=select.options[i];
+    if(option.value&&extractLocalizedLabel(option.text).toLowerCase()===normalizedTarget){
+      select.value=option.value;
+      return true;
+    }
+  }
+  return false;
+}
+
+function validate(){
+  var company=document.getElementById('companyName').value.trim();
+  var name=document.getElementById('leadName').value.trim();
+  var email=document.getElementById('leadEmail').value.trim();
+  var owner=document.getElementById('leadOwnerAssocId').value;
+  var saleType=document.getElementById('saleTypeId').value;
+  var customerCategory=document.getElementById('customerCategoryId').value;
+  var saleStage=document.getElementById('saleStageId').value;
+  var wants=document.getElementById('whatLeadWants').value.trim();
+  if(!company){alert('Please enter the company name.');return false;}
+  if(!name){alert('Please enter your name.');return false;}
+  if(!email||email.indexOf('@')<0){alert('Please enter a valid email.');return false;}
+  if(!owner){alert('Please select a lead owner.');return false;}
+  if(!saleType){alert('Please select a sale type.');return false;}
+  if(!customerCategory){alert('Unable to determine the Prospect customer category. Please refresh the form and try again.');return false;}
+  if(!wants){alert('Please describe what the lead is interested in.');return false;}
+  return true;
+}
+
+var isSubmitting=false;
+
+function collectFormPayload(){
+  var form=document.getElementById('leadRegistrationForm');
+  var payload={};
+  if(!form){return payload;}
+  var elements=form.elements;
+  for(var i=0;i<elements.length;i++){
+    var el=elements[i];
+    if(!el.name){continue;}
+    if(el.type==='checkbox'){
+      payload[el.name]=el.checked?el.value:'';
+    }
+    else{
+      payload[el.name]=el.value;
+    }
+  }
+  return payload;
+}
+
+function resetFormForNextLead(){
+  var form=document.getElementById('leadRegistrationForm');
+  if(form){form.reset();}
+  var existingCompanyIdField=document.getElementById('existingCompanyId');
+  var existingPersonIdField=document.getElementById('existingPersonId');
+  if(existingCompanyIdField){existingCompanyIdField.value='';}
+  if(existingPersonIdField){existingPersonIdField.value='';}
+  var companyBadge=document.getElementById('companySelectedBadge');
+  var personBadge=document.getElementById('personSelectedBadge');
+  if(companyBadge){companyBadge.style.display='none';}
+  if(personBadge){personBadge.style.display='none';}
+}
+
+function handleSubmit(){
+  if(isSubmitting){
+    return false;
+  }
+
+  var form=document.getElementById('leadRegistrationForm');
+  if(form&&form.checkValidity&&!form.checkValidity()){
+    if(form.reportValidity){
+      form.reportValidity();
+    }
+    return false;
+  }
+
+  if(!validate()){
+    return false;
+  }
+
+  isSubmitting=true;
+  var submitButton=document.getElementById('submitButton');
+  var submitStatusRow=document.getElementById('submitStatusRow');
+  var submitStatusBox=document.getElementById('submitStatusBox');
+
+  if(submitStatusBox){
+    submitStatusBox.textContent='Saved locally and syncing to SuperOffice in the background. You can start the next lead right away - this one keeps retrying automatically if the connection is bad.';
+  }
+  if(submitStatusRow){
+    submitStatusRow.style.display='';
+  }
+
+  var payload=collectFormPayload();
+  queueLeadSubmission(payload);
+  resetFormForNextLead();
+
+  isSubmitting=false;
+  if(submitButton){
+    submitButton.disabled=false;
+    submitButton.innerHTML='<span>Submit form</span>';
+  }
+
+  // The real request goes out via fetch() from queueLeadSubmission(), so never let the
+  // browser do a native full-page POST here.
+  return false;
+}
+
+/* ---------- Search-and-select (existing customer/contact) ---------- */
+
+function debounce(fn,delay){
+  var timer=null;
+  return function(){
+    var args=arguments;
+    var context=this;
+    clearTimeout(timer);
+    timer=setTimeout(function(){fn.apply(context,args);},delay);
+  };
+}
+
+function fetchSuggestions(type,query,callback){
+  if(!query||query.length<2){
+    callback([]);
+    return;
+  }
+  fetch('<% print(scriptUrl); %>&ajax=search&type='+encodeURIComponent(type)+'&q='+encodeURIComponent(query))
+    .then(function(response){
+      if(!response.ok){throw new Error('HTTP '+response.status);}
+      return response.json();
+    })
+    .then(function(data){
+      callback(Object.prototype.toString.call(data)==='[object Array]'?data:[]);
+    })
+    .catch(function(){callback([]);});
+}
+
+function setupSearchField(inputId,hiddenId,suggestionsId,badgeId,badgeNameId,clearId,searchType){
+  var input=document.getElementById(inputId);
+  var hidden=document.getElementById(hiddenId);
+  var suggestions=document.getElementById(suggestionsId);
+  var badge=document.getElementById(badgeId);
+  var badgeName=document.getElementById(badgeNameId);
+  var clearBtn=document.getElementById(clearId);
+  if(!input||!hidden||!suggestions){return;}
+
+  function renderSuggestions(items){
+    if(!items||items.length===0){
+      suggestions.style.display='none';
+      suggestions.innerHTML='';
+      return;
+    }
+    var html='';
+    for(var i=0;i<items.length;i++){
+      html+='<div class="suggestion-item" data-index="'+i+'">'+items[i].label+'</div>';
+    }
+    suggestions.innerHTML=html;
+    suggestions.style.display='';
+
+    var rows=suggestions.querySelectorAll('.suggestion-item');
+    for(var r=0;r<rows.length;r++){
+      (function(item){
+        rows[r].addEventListener('click',function(){
+          hidden.value=item.id;
+          suggestions.style.display='none';
+          suggestions.innerHTML='';
+          if(badge&&badgeName){
+            badgeName.innerHTML=item.label;
+            badge.style.display='';
+          }
+        });
+      })(items[r]);
+    }
+  }
+
+  var doSearch=debounce(function(){
+    if(hidden.value){return;}
+    fetchSuggestions(searchType,input.value.trim(),renderSuggestions);
+  },300);
+
+  input.addEventListener('input',function(){
+    hidden.value='';
+    if(badge){badge.style.display='none';}
+    doSearch();
+  });
+
+  document.addEventListener('click',function(evt){
+    if(evt.target!==input&&!suggestions.contains(evt.target)){
+      suggestions.style.display='none';
+    }
+  });
+
+  if(clearBtn){
+    clearBtn.addEventListener('click',function(){
+      hidden.value='';
+      if(badge){badge.style.display='none';}
+      input.focus();
+    });
+  }
+}
+
+setupSearchField('companyName','existingCompanyId','companySuggestions','companySelectedBadge','companySelectedName','clearCompanySelection','company');
+setupSearchField('leadName','existingPersonId','personSuggestions','personSelectedBadge','personSelectedName','clearPersonSelection','person');
+
+/* ---------- LocalStorage sync queue + history panel ---------- */
+
+var SYNC_STORAGE_KEY='aq_lead_sync_history_v1';
+
+function loadSyncHistory(){
+  try{
+    var raw=localStorage.getItem(SYNC_STORAGE_KEY);
+    if(!raw){return [];}
+    var parsed=JSON.parse(raw);
+    return Object.prototype.toString.call(parsed)==='[object Array]'?parsed:[];
+  }catch(e){return [];}
+}
+
+function saveSyncHistory(entries){
+  try{localStorage.setItem(SYNC_STORAGE_KEY,JSON.stringify(entries));}catch(e){}
+}
+
+function makeClientId(){
+  return 'lead-'+Date.now()+'-'+Math.random().toString(36).slice(2,10);
+}
+
+function findSyncEntry(id){
+  var entries=loadSyncHistory();
+  for(var i=0;i<entries.length;i++){
+    if(entries[i].id===id){return entries[i];}
+  }
+  return null;
+}
+
+function updateSyncEntry(id,changes){
+  var entries=loadSyncHistory();
+  for(var i=0;i<entries.length;i++){
+    if(entries[i].id===id){
+      for(var key in changes){
+        if(changes.hasOwnProperty(key)){entries[i][key]=changes[key];}
+      }
+      break;
+    }
+  }
+  saveSyncHistory(entries);
+  renderSyncHistory();
+}
+
+function escapeHtml(value){
+  var div=document.createElement('div');
+  div.textContent=value==null?'':String(value);
+  return div.innerHTML;
+}
+
+function renderSyncHistory(){
+  var entries=loadSyncHistory();
+  var panel=document.getElementById('syncHistoryPanel');
+  var summary=document.getElementById('syncHistorySummary');
+  var detail=document.getElementById('syncHistoryDetail');
+  if(!panel||!summary||!detail){return;}
+
+  if(entries.length===0){
+    panel.style.display='none';
+    return;
+  }
+  panel.style.display='';
+
+  var pending=0,failed=0,synced=0,rowsHtml='';
+  for(var i=entries.length-1;i>=0;i--){
+    var entry=entries[i];
+    if(entry.status==='pending'){pending++;}
+    else if(entry.status==='failed'){failed++;}
+    else{synced++;}
+
+    var label=(entry.payload&&entry.payload.companyName)?entry.payload.companyName:'Lead';
+    var contactLabel=(entry.payload&&entry.payload.leadName)?(' - '+entry.payload.leadName):'';
+    var statusClass=entry.status==='pending'?'pending':(entry.status==='failed'?'failed':'synced');
+    var statusLabel=entry.status==='pending'?'Pending':(entry.status==='failed'?'Failed':'Synced');
+    var retryButton=(entry.status==='pending'||entry.status==='failed')?('<button type="button" class="sync-retry" data-retry-id="'+entry.id+'">Retry now</button>'):'';
+
+    rowsHtml+='<div class="sync-history-row"><span>'+escapeHtml(label+contactLabel)+'</span><span><span class="sync-status '+statusClass+'">'+statusLabel+'</span> '+retryButton+'</span></div>';
+  }
+
+  summary.textContent=pending+' pending, '+failed+' failed, '+synced+' synced (click to expand)';
+  detail.innerHTML=rowsHtml;
+
+  var retryButtons=detail.querySelectorAll('[data-retry-id]');
+  for(var r=0;r<retryButtons.length;r++){
+    (function(id){
+      retryButtons[r].addEventListener('click',function(){attemptSyncEntry(id);});
+    })(retryButtons[r].getAttribute('data-retry-id'));
+  }
+}
+
+function buildUrlEncodedBody(payload){
+  var parts=[];
+  for(var key in payload){
+    if(payload.hasOwnProperty(key)){
+      parts.push(encodeURIComponent(key)+'='+encodeURIComponent(payload[key]==null?'':payload[key]));
+    }
+  }
+  return parts.join('&');
+}
+
+function attemptSyncEntry(id){
+  var entry=findSyncEntry(id);
+  if(!entry||entry.status==='synced'){return;}
+
+  updateSyncEntry(id,{status:'pending',attempts:(entry.attempts||0)+1});
+
+  fetch('<% print(scriptUrl); %>&ajax=submit',{
+    method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:buildUrlEncodedBody(entry.payload)
+  })
+    .then(function(response){
+      if(!response.ok){throw new Error('HTTP '+response.status);}
+      return response.json();
+    })
+    .then(function(data){
+      if(data&&data.status&&data.status!=='error'){
+        updateSyncEntry(id,{status:'synced',resultMessage:data.message||'',saleId:data.saleId||''});
+      }
+      else{
+        updateSyncEntry(id,{status:'failed',lastError:(data&&data.message)?data.message:'Unable to register the lead.'});
+      }
+    })
+    .catch(function(){
+      updateSyncEntry(id,{status:'failed',lastError:'Network error - will retry automatically when back online.'});
+    });
+}
+
+function queueLeadSubmission(payload){
+  var entries=loadSyncHistory();
+  var id=makeClientId();
+  entries.push({id:id,payload:payload,status:'pending',createdAt:Date.now(),attempts:0,lastError:null});
+  saveSyncHistory(entries);
+  renderSyncHistory();
+  attemptSyncEntry(id);
+}
+
+function retryAllPending(){
+  var entries=loadSyncHistory();
+  for(var i=0;i<entries.length;i++){
+    if(entries[i].status==='pending'||entries[i].status==='failed'){
+      attemptSyncEntry(entries[i].id);
+    }
+  }
+}
+
+window.addEventListener('online',retryAllPending);
+renderSyncHistory();
+retryAllPending();
+
+var syncHistorySummaryEl=document.getElementById('syncHistorySummary');
+if(syncHistorySummaryEl){
+  syncHistorySummaryEl.addEventListener('click',function(){
+    var detail=document.getElementById('syncHistoryDetail');
+    if(detail){detail.style.display=(detail.style.display==='none')?'':'none';}
+  });
+}
+
+var businessCategoryField=document.getElementById('businessCategoryId');
+var contactPositionField=document.getElementById('contactPositionId');
+var saleTypeField=document.getElementById('saleTypeId');
+var customerCategoryField=document.getElementById('customerCategoryId');
+var saleStageField=document.getElementById('saleStageId');
+
+removeBusinessSystemOptions(businessCategoryField);
+removeUnlocalizedSaleTypes(saleTypeField);
+
+normalizeSelectOptions(businessCategoryField);
+normalizeSelectOptions(contactPositionField);
+normalizeSelectOptions(saleTypeField);
+normalizeSelectOptions(customerCategoryField);
+normalizeSelectOptions(saleStageField);
+
+if(!customerCategoryField){
+  setFormSetupError('Form setup error: Unable to load the hidden customer category default. Please contact Aquatiq.');
+}
+else {
+  if(!selectOptionByLabel(customerCategoryField,DEFAULT_PROSPECT)){
+    setFormSetupError('Form setup error: Unable to determine the Prospect customer category. Please contact Aquatiq.');
+  }
+  if(saleStageField&&saleStageField.value===''){
+    selectOptionByLabel(saleStageField,DEFAULT_STAGE);
+  }
+}
+</script>
+</body>
+<%
+}
+%>
+</html>
+<%
+}
+}
+%>
+%EJSCRIPT_END%

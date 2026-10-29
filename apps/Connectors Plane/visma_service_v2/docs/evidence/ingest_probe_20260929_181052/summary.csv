@@ -1,0 +1,9 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+vat_zones,,1,0,succeeded,15,15,15,1,0,15,14754,559,
+vat_zones,,2,0,succeeded,15,15,15,1,0,15,14753,369,
+vat_categories,,1,0,succeeded,48,48,48,1,0,48,14751,1560,2026-09-29 18:59:40.39+00
+vat_categories,,2,0,succeeded,47,47,48,1,0,47,14750,2092,2026-09-29 18:59:40.39+00
+suppliers,,1,0,succeeded,1273,1273,1273,13,0,73,14729,3221,2026-09-29 13:44:20.21+00
+suppliers,,2,0,succeeded,4,4,1273,1,0,4,14727,887,2026-09-29 13:44:20.21+00
+supplier_payments,,1,0,succeeded,9132,9132,9132,92,0,32,14611,3558,2026-09-29 15:23:22.057+00
+supplier_payments,,2,0,succeeded,1,1,9132,1,0,1,14608,699,2026-09-29 15:23:22.057+00

@@ -1,0 +1,14 @@
+[
+  {
+    "server_id": "fs",
+    "transport": "stdio",
+    "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/data"],
+    "tool_allowlist": ["read_file", "write_file", "list_dir"]
+  },
+  {
+    "server_id": "git",
+    "transport": "stdio",
+    "command": ["npx", "-y", "@modelcontextprotocol/server-git", "--repository", "/repo"],
+    "tool_allowlist": []
+  }
+]

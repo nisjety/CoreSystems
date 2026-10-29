@@ -1,0 +1,36 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_aged_report_safety"
+}
+
+SELECT 'complete_run_without_manifested_contact_request' AS issue,
+       contact_aging_report_amount_key AS evidence_key
+FROM ${ref("dw_1_silver_xero", "fact_contact_aging_report_amount")}
+WHERE is_report_run_contact_set_complete
+  AND NOT is_contact_request_manifested
+
+UNION ALL
+
+SELECT 'identified_currency_without_iso_code', contact_aging_report_amount_key
+FROM ${ref("dw_1_silver_xero", "fact_contact_aging_report_amount")}
+WHERE is_currency_identified
+  AND (currency_code IS NULL OR NOT REGEXP_CONTAINS(currency_code, r'^[A-Z]{3}$'))
+
+UNION ALL
+
+SELECT 'summary_row_modelled_as_document_amount', amount.contact_aging_report_amount_key
+FROM ${ref("dw_1_silver_xero", "fact_contact_aging_report_amount")}
+  AS amount
+INNER JOIN ${ref("dw_1_silver_xero", "fact_financial_report_cell")} AS cell
+  ON amount.source_report_cell_key = cell.report_cell_key
+WHERE cell.row_type = 'SummaryRow'
+
+UNION ALL
+
+SELECT 'amount_without_source_report_cell', amount.contact_aging_report_amount_key
+FROM ${ref("dw_1_silver_xero", "fact_contact_aging_report_amount")}
+  AS amount
+LEFT JOIN ${ref("dw_1_silver_xero", "fact_financial_report_cell")} AS cell
+  ON amount.source_report_cell_key = cell.report_cell_key
+WHERE cell.report_cell_key IS NULL

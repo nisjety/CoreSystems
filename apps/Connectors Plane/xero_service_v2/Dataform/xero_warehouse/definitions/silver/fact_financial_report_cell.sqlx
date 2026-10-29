@@ -1,0 +1,41 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Atomic Xero financial-report cells. Numeric and percentage reporting values remain source values, not additive accounting facts.",
+  assertions: { nonNull: ["tenant_id", "report_snapshot_id", "report_index", "section_index", "row_index", "cell_index", "report_cell_key"], uniqueKey: ["report_cell_key"] }
+}
+
+WITH cells AS (
+  SELECT r.*, s.report_snapshot_key, s.report_type, s.report_name, s.report_titles,
+         s.report_from, s.report_to, s.report_date, s.run_id,
+         s.contact_id AS snapshot_contact_id,
+         s.report_params AS snapshot_report_params,
+         s.report_parameter_hash AS snapshot_report_parameter_hash,
+         s.synced_at AS report_synced_at,
+         SAFE_CAST(REPLACE(REPLACE(r.cell_value, ',', ''), '%', '') AS NUMERIC) AS parsed_numeric_value,
+         ENDS_WITH(TRIM(r.cell_value), '%') AS is_percentage_value
+  FROM ${ref("dw_bronze_xero", "xero_report_rows")} AS r
+  LEFT JOIN ${ref("dw_1_silver_xero", "fact_financial_report_snapshot")} AS s
+    ON r.tenant_id = s.tenant_id AND r.record_id = s.report_snapshot_id
+)
+SELECT CONCAT(tenant_id, '|', record_id, '|', CAST(report_index AS STRING), '|',
+              CAST(section_index AS STRING), '|',
+              CAST(row_index AS STRING), '|', CAST(cell_index AS STRING)) AS report_cell_key,
+       tenant_id, record_id AS report_snapshot_id, report_snapshot_key, report,
+       report_type, report_name, report_titles, report_from, report_to, report_date,
+       run_id,
+       COALESCE(contact_id, snapshot_contact_id) AS contact_id,
+       COALESCE(report_params, snapshot_report_params) AS report_params,
+       COALESCE(report_parameter_hash, snapshot_report_parameter_hash) AS report_parameter_hash,
+       report_index, section_index, section_title, row_index, row_type,
+       row_label, cell_index, column_header, cell_value,
+       attribute_id, attribute_value, attributes_json,
+       row_type = 'SummaryRow' AS is_summary_row,
+       cell_index > 0 AND parsed_numeric_value IS NOT NULL AS is_numeric_value,
+       cell_index > 0 AND is_percentage_value AND parsed_numeric_value IS NOT NULL AS is_percentage_value,
+       IF(cell_index > 0 AND parsed_numeric_value IS NOT NULL,
+          IF(is_percentage_value, 'percentage', 'number'), NULL) AS numeric_value_kind,
+       IF(cell_index > 0, parsed_numeric_value, NULL) AS source_numeric_value,
+       report_snapshot_key IS NULL AS is_orphan_snapshot,
+       report_synced_at
+FROM cells

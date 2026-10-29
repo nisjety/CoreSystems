@@ -1,0 +1,63 @@
+config {
+  type: "table",
+  schema: "visma_silver_excel",
+  name: "seed_project_history_rule",
+  description: "Rules that mark a project transaction line as carried-over history (opening balances migrated into Visma, and the 2025-12-31 move of projects into Aquatiq AS) instead of activity of the period. Read by fact_project_transaction_line; Power BI shows the history separately (BI_ProjectPortfolioPnL *_excluding_historical_*).",
+  tags: ["seed", "silver", "excel", "reference"]
+}
+
+-- A line is history when any rule matches it. A rule matches on the debit account, the module and a
+-- description pattern (all that are set must hold; at least one of account and pattern must be set).
+-- include_batch_companions: the other lines of the same journal batch (tenant, module, batch number)
+-- are history too. Opening balances were booked and then corrected or reversed in sibling lines of the
+-- same batch, and a rule that took only the first half would leave the other half in the activity.
+--
+-- Where the rules come from (the finance workbooks and the warehouse itself, checked 2026-10-12):
+--
+-- 1. Accounts 3999 and 4999 are named "Historisk inntekt prosjekt" and "Historisk utgift prosjekt" /
+--    "Historisk prosjektkostnad" in the charts of accounts of Aquatiq AS, AFF and Consult (and are
+--    mapped to 3120 and 4010 in seed_company_account_mapping). They hold project history that was
+--    migrated: AFF 65.7 M income / 43.3 M cost and Consult 13.3 M / 9.8 M on 2023-09-30 (the day before
+--    the move to Visma.net, lines "Inntekt/Kostnad før systembytte"), and Aquatiq AS 40.4 M / 36.5 M on
+--    2025-12-31 (the AFF projects moved in at the merger, "Inntekt/Kostnad AFF klient Prosjekt").
+--
+-- 2. Aquatiq Hygiene Systems booked the same kind of balance on ordinary accounts, so rule 1 misses it:
+--    "Inngående saldo prosjekt AHS" (2023-09-30, 43.5 M income / 35.5 M cost net, batches 000915 and the
+--    corrections 001054-001056), and at the merger "IB prosjektsaldo AHS pr 31.12.25" (2025-12-31,
+--    Aquatiq AS, 24.9 M income / 24.8 M cost on 195 lines; the GL batches net to zero per account, they
+--    only move the amounts onto the project). AFF's "Korreksjon IB prosjektsaldo" and "Periodisert ...
+--    før systembytte" belong to the same opening. IB is "inngående balanse", an opening balance, so by
+--    definition not activity. Only journal entries (ModuleGL) are matched.
+--
+-- Left out on purpose: "Periodisert inntekt/kostnad AFF klient Prosjekt" on 2025-12-31 (4.84 M income,
+-- -0.60 M cost). They share a journal batch with rule-1 lines but are year-end accruals that Aquatiq AS
+-- reverses in 2026 on the same project (net exactly 0 on all ten projects), so they are activity of
+-- their period. A batch companion rule on rule 1 would have taken them; only rule 2 has companions.
+-- Likewise Hygiene Systems' "Prosjektvurdering" (project valuation) entries are activity.
+
+SELECT * FROM UNNEST([
+  STRUCT(
+    'historical_account' AS rule_code,
+    '3999' AS account_cd,
+    CAST(NULL AS STRING) AS module,
+    CAST(NULL AS STRING) AS description_regex,
+    FALSE AS include_batch_companions,
+    'Account 3999 "Historisk inntekt prosjekt": project income migrated from before Visma or before the merger' AS reason
+  ),
+  STRUCT(
+    'historical_account',
+    '4999',
+    CAST(NULL AS STRING),
+    CAST(NULL AS STRING),
+    FALSE,
+    'Account 4999 "Historisk utgift prosjekt": project cost migrated from before Visma or before the merger'
+  ),
+  STRUCT(
+    'opening_balance_wording',
+    CAST(NULL AS STRING),
+    'ModuleGL',
+    '(?i)(^|[^a-z])IB[ -]?prosjektsaldo|inng[aå]ende saldo|f[øo]r systembytte',
+    TRUE,
+    'Journal entry worded as an opening balance ("IB prosjektsaldo", "Inngående saldo prosjekt", "før systembytte"): the project balance carried over at the move to Visma.net (2023-09-30) or at the merger (2025-12-31)'
+  )
+])

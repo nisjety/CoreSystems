@@ -1,0 +1,21 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Latest observed Xero batch-payment detail. It is non-additive because the same payment can exist in the payment fact.",
+  assertions: { nonNull: ["tenant_id", "payment_id", "batch_payment_line_key"], uniqueKey: ["batch_payment_line_key"] }
+}
+
+SELECT FARM_FINGERPRINT(l.tenant_id) AS company_key,
+       FARM_FINGERPRINT(CAST(DATE(l.payment_date) AS STRING)) AS date_key,
+       IF(l.invoice_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.invoice_id))) AS invoice_key,
+       l.batch_payment_line_key, l.batch_payment_key, l.tenant_id,
+       l.batch_payment_id, l.payment_id, l.invoice_id, l.line_index,
+       l.batch_payment_type, l.status, l.is_deleted, l.is_line_snapshot_stale,
+       l.is_observed_with_batch, l.is_line_set_ambiguous,
+       TRUE AS is_payment_aggregate, TRUE AS is_non_additive,
+       l.invoice_currency_code, l.account_currency_code,
+       l.source_amount AS source_amount_in_currency,
+       l.source_bank_amount AS source_bank_amount,
+       l.invoice_is_discounted, l.invoice_has_errors, l.details,
+       l.line_snapshot_at, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_batch_payment_line")} AS l

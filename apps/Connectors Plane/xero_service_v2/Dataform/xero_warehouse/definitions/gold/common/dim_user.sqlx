@@ -1,0 +1,28 @@
+config {
+  type: "table",
+  schema: "xero_gold_common",
+  description: "Conformed Xero organisation user directory. Company is represented by Xero tenant, without fabricating a Visma business unit or employee relationship.",
+  assertions: {
+    nonNull: ["tenant_id", "user_id", "user_key", "company_key"],
+    uniqueKey: ["user_key"]
+  }
+}
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(tenant_id, '|', user_id)) AS user_key,
+  FARM_FINGERPRINT(tenant_id) AS company_key,
+  tenant_id,
+  user_id,
+  global_user_id,
+  user_internal_id,
+  user_name,
+  first_name,
+  last_name,
+  email_address,
+  organisation_role,
+  is_subscriber,
+  updated_at,
+  first_seen_at,
+  synced_at,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_user")}

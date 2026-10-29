@@ -1,0 +1,43 @@
+{
+  "endpoint_name": "customer_locations",
+  "bigquery_table": "visma_customer_locations",
+  "primary_key": [
+    "customerId",
+    "locationId"
+  ],
+  "source": "erp_rest",
+  "enabled": true,
+  "api_method": "get_customer_locations",
+  "api_endpoint": "https://salesorder.visma.net/api/v3/Customers/{customerId}/locations",
+  "pagination_profile": "none",
+  "page_size": 100,
+  "modified_field": null,
+  "merge_type": "upsert",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": [
+    "customerId",
+    "locationId",
+    "id"
+  ],
+  "partitioning": {
+    "mode": "cartesian",
+    "max_partitions": 20000,
+    "dimensions": [
+      {
+        "query_param": "customerId",
+        "in_path": true,
+        "source_endpoint": "https://salesorder.visma.net/api/v3/Customers",
+        "source_pagination_profile": "salesorder_page_index",
+        "source_path": "id",
+        "carry": {
+          "defaultLocationId": "defaultLocation.id"
+        }
+      }
+    ],
+    "row_copies": {
+      "locationId": "id"
+    }
+  },
+  "notes": "Sales Order API v3 locations of each customer, one request per customer (GET /api/v3/Customers/{customerId}/locations returns a plain unpaged list). Same table v1 calls visma_customer_locations: v1 adds customerId, locationId (= id) and the customer's defaultLocation.id as defaultLocationId to every row, and this config does the same (partitioning.dimensions[].carry / row_copies). The list of customers comes from /api/v3/Customers. The location carries priceClassId, which the customer object itself lacks; v1 uses it to resolve the customer's price class through defaultLocationId. NOT the ERP /v1/location list (that is `locations`, keyed differently and 14,552 rows). One request per customer, so a full refresh is ~6,400 calls on the Sales Order API scope. RATE LIMIT: the local limiter defaults to 60 requests/minute and 5,000/day for the whole ERP source, which this endpoint (6,360 requests) would exceed and then crawl at one request per 17 seconds; run it with VSV2_RATELIMIT_ERP_REST_RPM=1200 and VSV2_RATELIMIT_ERP_REST_RPD=100000 (measured 2026-09-30: 0.1 s per request, whole run about 10 minutes, 12,837 rows). Compared with v1's visma_customer_locations on the pilot tenant: 12,533 shared keys with name and defaultLocationId equal on all and priceClassId equal on 12,520; 36 keys only in v1 and 304 only in v2, consistent with v1's sync being older. priceClassId is set on 5,459 of 12,837 rows, so it is not a validation field.",
+  "tier": 4
+}

@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "dw_staging_xero",
+  name: "budget_balance_snapshots",
+  description: "Per-account, per-period balances from Xero budget details, keyed by budget and sync snapshot."
+}

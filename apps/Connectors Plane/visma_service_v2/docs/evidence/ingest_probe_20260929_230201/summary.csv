@@ -1,0 +1,2 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+dm_warehouses,,1,0,succeeded,15,15,15,1,0,15,,501,2026-09-25 10:17:07.098+00

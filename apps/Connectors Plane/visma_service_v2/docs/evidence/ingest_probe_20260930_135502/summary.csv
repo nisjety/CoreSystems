@@ -1,0 +1,2 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+customer_payments,,1,0,succeeded,21403,21403,21403,215,0,3,14266,42860,2026-09-30 13:03:06.61+00

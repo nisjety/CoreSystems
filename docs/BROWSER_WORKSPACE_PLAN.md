@@ -1,0 +1,506 @@
+# Verevon Browser Workspace — Program Plan
+
+> **Goal:** a Codex-like in-app browser inside Verevon v3 (reference: https://developers.openai.com/codex/app/browser), built on the existing Quarry-v2 + Model Plane + Verevon gateway architecture. A user or agent can visit pages, preserve cookies through scoped browser profiles, see live/near-live page state, execute browser actions, inspect deterministic evidence, replay steps, and let Model Plane suggest or run bounded browser actions.
+>
+> **Division of authority (non-negotiable):** Quarry-v2 **executes and captures evidence**. Model Plane **reasons** (VLM / action planning). Verevon v3 **displays and controls**.
+
+## Program status: COMPLETE (2026-07-09)
+
+All 6 phases are **done** and live-verified against the real dockerized dev stack. This section is a short, honest index for a future reader — the Phase 6 row below carries the full final-verification pass; each phase's own row carries its build/verification history.
+
+**Most severe finding of the whole program:** a cross-session cookie/storage leak in Quarry-v2's `ChromiumoxideDriver` — one shared Chromium browsing context for every session, process-wide, meaning every session (including `zdr: true` sessions) landed in the same global cookie/storage jar. This is a direct violation of this doc's own hard constraint ("never persist ZDR visual artifacts/screenshots/cookies/profile state"). Found and fixed during Phase 6 (`1a0c1f69`/`26c30908`: each session now gets its own CDP browser context, created lazily on first tab and disposed on release). Independently re-verified a second time in this closing pass with a fresh, differently-targeted cookie probe (see the Phase 6 row's final addendum) — confirmed still fixed.
+
+**Genuinely still-open items across the whole program** (tracked here so nobody has to reconstruct the history from six phases of commits):
+1. Downloads/uploads risk classification (target capability #8's file-transfer half) is correctly **un-built** — no `ActionType`/capability represents a file transfer anywhere in the stack (Phase 5 audit finding; not fabricated, not silently dropped).
+2. Interactive SPA click-testing of the approve/reject HITL card and a live-frame-specific ZDR badge was never done with a real screenshot-verified Chrome session in this environment (Phase 5/6 gap). The Playwright specs added in Phase 6 do exercise the real UI's DOM/network behavior end-to-end, which is strong evidence, but no pass in this program visually confirmed pixel-level rendering of those two elements.
+3. quarry-edge's legacy implicit-attach profile path still reports `scope: "ephemeral"` by default for a metadata-less profile (Phase 3 finding) — cosmetic, not reachable via the SPA's own profile-manager UI (which always calls `create_profile` explicitly), left un-fixed as originally flagged.
+4. model-gateway's `cargo clippy --all-targets -- -D warnings` gate has 6 pre-existing, unrelated failures in `/v1/browser/suggest-action`'s JSON helper functions (`http_routes.rs`, action-kind/visual-summary parsing) — confirmed pre-existing on bare `main` via `git stash` isolation during the security-fastfollow stage, and reconfirmed present, unchanged, in this closing pass's own clippy run. Out of scope for this program; tracked as a separate follow-up.
+5. The OpenCV vision sidecar (`quarry-vision-sidecar`) is a real, compliant, opt-in capability deliberately **not** wired into the live `ingestion-plane` compose stack (Phase 6 finding) — confirmed intentional and hard-constraint-compliant, not a wiring bug.
+
+## Hard constraints
+
+- Do **not** move VLM reasoning into Quarry.
+- Do **not** use OpenCV for anti-bot bypass.
+- Do **not** replace Model Plane vision providers.
+- Do **not** persist ZDR visual artifacts, screenshots, cookies, or profile state.
+- Keep Go control/orchestrator services free of OpenCV.
+- Quarry executes and captures; Model Plane reasons; Verevon displays and controls.
+- All outputs deterministic and artifact-backed where possible.
+
+## Key locations
+
+| Layer | Files |
+|---|---|
+| Quarry-v2 evidence/executor | `apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/{observation.rs,page_renderer.rs,page_image.rs,vision.rs}`, `crates/quarry-core/src/{contracts.rs,artifact.rs}`, `services/quarry-vision-sidecar`, `deploy/compose/docker-compose.yml` |
+| Verevon gateway browser facade | `apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs` (proxies sessions/actions/artifacts to Quarry; suggestions to Model Plane) |
+| Verevon v3 browser UI | `src/features/dashboard/home/{KnowledgeComposer,KnowledgeScrapePreview}.tsx`, `src/features/dashboard/home/browser-session.ts(+.test.ts)`, `src/shared/api/browser-client.ts`, `src/styles/global.css` |
+| Model Plane reasoning | `apps/Model Plane/rust/services/model-gateway/src/http_routes.rs` (`/v1/browser/suggest-action`), `services/execution-core/src/{browser_agent.rs,llm_planner.rs}` |
+
+## Verified current state (recon 2026-07-07)
+
+- Quarry runs Chromium browser sessions and returns observations; captures screenshots, DOM summaries, console/network summaries, visual artifacts, OpenCV visual observations, visual diffs, thumbnails, tiles, OCR-preconditioned images, palette/logo candidates.
+- Gateway `browser.rs` exposes: `POST /api/v1/browser/sessions`, per-session action/artifact/close routes, `GET /api/v1/browser/profiles` (+ probe/delete). Suggestion proxy to Model Plane wired.
+- Model-gateway `/v1/browser/suggest-action` is live (committed via Stream 1 "cost-aware browser planner"): planner prompt + JSON-schema single-action output; Quarry captures evidence, Model Plane only decides the next action.
+- SPA `browser-client.ts` has the full typed surface (sessions, actions, suggestions, profiles incl. `probeBrowserProfile`/`deleteBrowserProfile`, `BrowserProfileScope = ephemeral|user_private|org_shared|run_scoped`, `BrowserTimelineEntry`, `BrowserVisualEvidence`, `BrowserFrame`, render modes `chromium|dom_snapshot|readability_fallback`).
+- SPA UI (KnowledgeScrapePreview + browser-session view-model): manual browser actions, one AI-suggested step, a capped AI loop, timeline/replay display.
+- Cookie/profile persistence exists through Quarry browser profiles — needs better UI/management.
+- **Working-tree status:** the current browser surface is uncommitted WIP (+353/−22 across the 7 UI/gateway files) on top of `d91f74e5`+ — Phase 1 verifies and commits this as its baseline.
+
+## Target capabilities (definition of done for the program)
+
+1. Live or near-live browser frame updates.
+2. Manual controls: navigate, back, forward, reload, click, type, press, scroll, wait, select, screenshot.
+3. Model Plane action suggestions and bounded autonomous multi-step runs.
+4. Pause, resume, stop, and user interrupt for running browser loops.
+5. Browser step timeline with before/after screenshots, visual diffs, DOM deltas, console logs, network logs, policy denials, and model rationale.
+6. First-class artifact viewer: screenshots, annotated screenshots, `visual_change.json`, `visual_observation.json`, `tiles.json`, thumbnails, OCR-preconditioned images, palettes, logo candidates.
+7. Cookie/profile UX: create, name, reuse, inspect, delete, isolate, persist per user/org/run.
+8. Permission/approval gates for risky actions: login, checkout, posting forms, destructive actions, downloads, uploads, cross-domain navigation, persistent cookie use.
+9. ZDR mode that disables persistence and clearly marks ephemeral evidence.
+10. File upload/download handling where policy permits.
+11. Dialog/popup handling.
+12. Viewport/device controls.
+13. Session replay and debugging export.
+14. E2E tests: session creation, cookie persistence, action execution, AI loop, visual evidence, replay timeline, ZDR no-persistence.
+
+## Phases
+
+| Phase | Scope | Status |
+|---|---|---|
+| **1 — Strengthen existing dashboard browser** | Expand `BrowserSessionSurface` into a richer browser workspace; timeline detail viewer + artifact preview panels; pause/stop state for the AI loop; clear profile/cookie status. *(Baseline: verify + commit the existing browser WIP first.)* | **done** — WIP foundation verified (gateway fmt/clippy/tests, SPA tsc/lint/249 vitest, live smoke 10/10) and landed via `0300f009c` (global.css/plan.rs checkpoint) + `333a6494` (gateway facade: timeline, visual-obs to Model Plane, per-step evidence, zdr) + `e03494e2` (view-model: timeline detail, artifact descriptors, rationale, pausable loop controller) + `39f56820` (workspace UI: status/profile strips, loop controls, timeline detail + typed artifact viewer); gate fixes `394d6c44`. Live-verified in-app (Playwright): real AI loop step with pause/resume/stop, before/after + DOM delta, verbatim model rationale. Addendum: unified single-chrome refinement via `3d328284` — one browser-tab strip + one toolbar (nested panel/status bands killed), profile popover from the padlock, collapsible DevTools + evidence drawer, dismissible AI bubble, ZDR chip stays always-visible; live-verified. |
+| **2 — Durable browser-agent run** | Connect the Model Plane browser-agent loop to the Verevon run UI; stream events from Model Plane/Quarry into Verevon; record action, observation, suggestion, rationale, and artifacts per step. | **done** (2026-07-08) — the deferred SPA wiring below landed via `de09584e`: `KnowledgeComposer.tsx`'s AI-loop Play button now calls `beginBrowserAiRun` (durable server-stream path: `startBrowserAiRun` + `streamRunEvents`), replacing the old client-side `performBrowserAutoRun` loop; `BrowserChrome.tsx`/`KnowledgeScrapePreview.tsx` thread the new `browserLoopRationale` prop into the AI bubble. `performBrowserSuggestedAction` (single-shot suggestion) untouched, as specified. Verified: `pnpm typecheck` / `pnpm lint` / `pnpm test` (55 files, 271 tests) all green with this change applied. Backend transport re-verified live via direct gateway calls as `local@verevon.dev` (session create against `https://example.com`, single-frame + 3-frame bounded SSE stream, clean close). Interactive Playwright click-through of the exact Play button was attempted but inconclusive: the shared dev session had concurrent live traffic (browser tabs/timeline entries changing independent of the test's own actions — most likely the `browser-live.spec.ts` E2E suite or another concurrent session against the same long-lived dev stack), which made deterministic UI-only verification unreliable; this is an environment/concurrency artifact of the shared dev stack, not a defect in the change. Backend original landed via `548f7e25` (event schema: `reason`/`screenshot_ref`/`dom_snapshot_ref` fields, `BrowserRunPaused`/`BrowserRunResumed` events, `profile_id` passthrough, `StateStore::Paused` + `PauseRun` RPC, in-loop pause/cancel gate) + `73df7991` (model-gateway `POST /v1/browser/runs` + `.../control`, fire-and-forget `ExecuteStep(tool_name="browser_agent")`) + `ae024a94` (Verevon gateway `POST /api/v1/browser/sessions/:id/ai-runs` + `.../runs/:id/control` proxies, `run_events_stream` last-event-id fix) + `d8f1cdd0` (fix: explicit-null `allowed_domains` 422) + `087703c3` (fix: `start_url` so a freshly leased Quarry session navigates before its first action instead of failing "no current page") + `f0753507` (fix: `QuarryAgentClient` always sends a bearer so `QUARRY_EDGE_AUTH_DEV_BYPASS` has a header to accept) + `4463fc90` (SPA client layer: `run-console-client.ts` event extensions, new `browser-run-client.ts`, additive server-event-driven mode in `browser-loop.ts`). Also required two local deployment-config fixes (not code, not committed — gitignored `.env` / compose): `QUARRY_BROWSER_AGENT_ENABLED=1` on execution-core (`apps/Model Plane/deploy/docker-compose.yml`, committed) and `QUARRY_EDGE_AUTH_DEV_BYPASS=1` on quarry-edge (`apps/Ingestion Plane/.env`, gitignored, matches `.env.example`'s own recommendation — no real signed JWT has ever been issued for `QUARRY_EDGE_TOKEN` anywhere in this stack). Live-verified end to end (real chromiumoxide session against `https://example.com`, signed in as `local@verevon.dev`): `POST .../ai-runs` → real durable `run_id` → `GET /api/v1/runs/:run_id/events` SSE streamed real `browser_action_dispatched` (`goto` with `reason:"navigate to the run's starting page"`, then repeated `observe`) / `browser_observation_received` (`status:"success"`, real `screenshot_ref` artifact ids) / derived `step_update` events; pause-before-first-action → real `browser_run_paused` event with zero actions dispatched → resume → real `browser_run_resumed` event → 90+ subsequent actions streamed → stop → `CancelRun` accepted. `PauseRun`/`ResumeRun`/`CancelRun` also confirmed directly via `grpcurl` against execution-core's gRPC port. All sessions closed and DB left as `local@verevon.dev` + `org_1782152609927` only after testing. The `KnowledgeComposer.tsx` fast-follow wiring landed 2026-07-08 (see above, `de09584e`), closing out this row. |
+| **3 — Profile/cookie management** | UI for Quarry profiles; persistent vs ephemeral selection; enforce ZDR no-persistence. | **done, with one explicitly-flagged exception** (2026-07-08 continuation, closing out the row above). Delivered across 4 sub-stages plus this closing live-verification pass, all on `main`: **(a) backends** — real `name: Option<String>` + `scope: ephemeral\|user_private\|org_shared\|run_scoped` metadata added to the `ProfileStore` trait and all 4 implementations (`InMemoryProfileStore` in `quarry-browser/src/session.rs`, plus `s3_profile_store.rs`/`cached_profile_store.rs`/`postgres_profile_store.rs` in `quarry-runtime`), backed by a real versioned migration `quarry-runtime/migrations/0005_profile_metadata.sql` (`ALTER TABLE quarry_profiles ADD COLUMN name`, `ADD COLUMN scope ... DEFAULT 'user_private' CHECK (scope IN (...))` — confirmed applied against the live `ingestion-postgres`/`quarry_edge` database, schema verified via `\d quarry_profiles`) — commits `e0dba28e` + `4282a778` (413+ tests incl. live Postgres+Redis integration passes, `cargo clippy -D warnings` clean); **(b) quarry-edge HTTP surface** — `POST /v1/profiles/create`, `PATCH /v1/profiles/:id`, and `list`/`restore_probe` extended to carry name+scope, plus a fix for a real update-merge bug where a bare rename could silently persist `scope: "ephemeral"` onto a real stored profile — commit `6006e5e0` (125/125 tests); **(c) gateway ZDR-guard fix** — closed a real bypass where `{zdr: true, profileId: "<real>", scope: "ephemeral"}` could pass the Phase-3-baseline guard (`9307af55`) by claiming an explicit `scope` that contradicted the real `profileId`/`persistentProfile` facts; `effective_profile_scope` now takes the more restrictive of "what the raw facts imply" vs "what the caller claims" — commit `21d740cf` (190/190 gateway tests, +12 new); **(d) SPA UI** — full create/name/scope-pick/list/inspect/rename/delete profile-manager popover wired into the existing unified `BrowserChrome`, plus a ZDR checkbox in the pre-session composer that force-resets/disables the profile picker (client-side UX mirror only — the server-side guard in (c) is the actual enforcement) — commits `f8cbc083` + `c138757f` (`pnpm typecheck`/`lint`/`test`: 0 errors, 55 files/271 tests green). **Final live end-to-end verification** (this pass, `local@verevon.dev`, dev-bypass off, via `python3 urllib`+cookiejar against the rebuilt gateway + quarry-edge containers): created a named `user_private` profile (200, correct id/name/scope) → creating with `scope: "ephemeral"` correctly rejected (400 `invalid_profile_scope`) → **the exact ZDR-bypass payload from (c)** (`{zdr:true, profileId:<real>, scope:"ephemeral"}`) → **400 `zdr_persistent_profile_forbidden`, confirmed live** → plain `{zdr:true, persistentProfile:true}` → 400 (original `9307af55` guard, still intact) → `{zdr:true}` alone (no profile) → 200, real chromiumoxide session against `https://example.com` → opened a session with the named profile, navigated to `https://httpbin.org/cookies/set/verevon_test/livecheck123` (real cookie set by the real remote server, confirmed via the returned `dom_summary.text_snippet` echoing `{"cookies":{"verevon_test":"livecheck123"}}`) → closed the session → `restore-probe` against the profile **before** close showed `cookies_count: 0` (correct — not yet snapshotted) and **after** close showed `cookies_count: 1, restorable: true` (genuine server-side proof the cookie was captured into the profile store, not an assumption) → renamed the profile (name-only PATCH) and confirmed `scope` was untouched → deleted the profile and confirmed it was gone from a subsequent list. **The one thing this pass could not close start-to-finish:** attempting the full loop — a *second* session reusing the *same* `profile_id` to prove the cookie is auto-resent — hit a genuine, previously-undiscovered production bug: `quarry-browser/src/chromiumoxide.rs::open_tab_page` hydrated cookies onto the freshly-opened page immediately after `new_page("about:blank")`, before the first real navigation; chromiumoxide's `Page::set_cookies` unconditionally rejects a non-http(s) current page URL (confirmed against chromiumoxide 0.9's own source: `validate_cookie_url` runs against `page.url()` before any per-cookie field is even inspected), so **every profile carrying real cookies has been unusable for a second session since this code path was introduced** — a regression nobody had actually exercised end-to-end until this stage's own live test forced it. Root-caused, fixed (hydrate cookies/storage *after* the initial `goto`, then reload so the already-completed navigation replays with the restored state — mirrors the pre-existing storage-only reload path), and covered by a new real-Chrome integration test (`reopening_a_session_with_a_saved_profile_restores_cookies_without_erroring`, gated on `CHROMIUMOXIDE_TEST=1`) that pre-seeds a profile's cookies and asserts a fresh session's `goto` now succeeds — verified on this host against a real, locally-installed Chrome (not mocked): quarry-browser's full suite passes 61/61 serially (one test flakes only under full-suite *parallel* execution due to a chromium `SingletonLock` collision on a shared temp profile dir — a pre-existing test-isolation issue unrelated to this change, confirmed by re-running serially), `cargo fmt --check` and `cargo clippy --all-targets -D warnings` both clean. Commit `8ac80c92`. `quarry-edge` was rebuilt from a clean cache (the previous cache-mount state had become unusable — see below) and redeployed; the rebuild itself took ~35 minutes end-to-end due to severe, independently-diagnosed VM-level resource contention in this shared sandbox (confirmed via `/proc/loadavg` reaching 10-22 and per-process CPU-time sampling showing genuine, if very slow, forward progress rather than a hang; ruled out network, which resolved in ~1s in an isolated test container) but it did complete successfully and `docker compose up -d --no-deps quarry-edge` picked it up. **Honest gap, stated plainly — this is now a real, separate, urgent finding, not just a slow-infra footnote:** re-running the cross-session cookie-reuse check against the freshly rebuilt container failed, but not because of the cookie-hydration fix — `quarry-edge`'s browser capability itself is currently broken in this environment. Escaping the earlier stuck build required a full `docker buildx prune --all`, which also wiped the apt-package cache mount; the resulting fresh `apt-get install chromium` pulled the current Debian bookworm-security package (**150.0.7871.46-1~deb12u1**), and that specific build crashes **deterministically** with `SIGTRAP` ("Trace/breakpoint trap", exit 133) on every headless launch attempt on this Docker Desktop/Apple Silicon host — reproduced directly (`docker exec quarry-edge /usr/lib/chromium/chromium --headless --no-sandbox --disable-gpu --dump-dom https://example.com` → exit 133, zero output, every time) and through the real `/v1/agent/runs` API, at both high and low host load (ruling out resource contention as the cause of *this* specific failure). Tried and failed: `--headless=old`, `--single-process`, `--disable-seccomp-filter-sandbox`, `--js-flags=--jitless`, `--disable-features=PartitionAllocMemoryTagging,MemoryTaggingExtension`. This matches a known class of Chromium arm64/kernel-hypervisor `SIGTRAP` bug (chromium issue tracker 40257452 and similar reports across multiple distros). **This means quarry-edge's entire browser capability — Phases 1/2/3/4 alike, not just this fix — is currently non-functional in this dev environment**, a genuine regression exposed (not caused by any code in this repo) by the cache-clear this session needed to perform. The prior working image was already garbage-collected by the time this was discovered, so it could not be restored; leaving the container running as-is (with the correct, host-verified code but a broken chromium binary) was judged safer than further ad hoc changes to the shared stack under time pressure. Flagged as a dedicated follow-up task (pin an explicit, known-good chromium version — e.g. `149.0.7827.53-1~deb12u1` or older, available via `snapshot.debian.org` — in `Quarry-v2/deploy/compose/Dockerfile.edge`'s stage-3, then rebuild and confirm the exec test above exits 0 before trusting any browser session again); this is unrelated to and does not implicate the correctness of `8ac80c92`, which is proven independently via the real-Chrome host test. A related, smaller, deliberately-*not*-fixed-in-this-pass inconsistency was also found and is worth a fast-follow: `InMemoryProfileStore`/`S3ProfileStore`/`CachedProfileStore` still default a metadata-less-but-snapshot-saved profile's reported `scope` to `"ephemeral"` (the Rust-level `ProfileScope::default()`, exercised by the *actually-deployed* backend — quarry-edge runs `InMemoryProfileStore` today, `QUARRY_EDGE__PROFILE_STORE_KIND` is unset in compose) whereas the Postgres backend's column default was corrected to `"user_private"` during sub-stage (a); the (c)-stage `update_profile` merge-gap fix already prevents this from being durably *written* back via a rename, but a profile that only ever goes through the legacy implicit-attach path (never through the new explicit `create_profile`) will still *list* as `scope: "ephemeral"` — cosmetic today (SPA's UI-created profiles are unaffected, since they always call `create_profile` explicitly) but worth aligning in Phase 5/6. DB hygiene confirmed after every step across all sub-stages: control-plane DBs hold exactly `local@verevon.dev` + `org_1782152609927`; `quarry_profiles` in `ingestion-postgres` has 0 rows. **Follow-up (2026-07-08, same day): chromium SIGTRAP regression fixed and confirmed.** Pinned `chromium=149.0.7827.102-1~deb12u1` (+ matching `chromium-common`/`chromium-sandbox`) in `Quarry-v2/deploy/compose/Dockerfile.edge`'s stage-3 via a `snapshot.debian.org` apt source (`deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260610T215132Z/ bookworm-security main`, `ARG CHROMIUM_VERSION`/`CHROMIUM_SNAPSHOT`) — the pin is permanent in the Dockerfile, not a one-off workaround, so a future forced `docker buildx prune` can no longer silently regress to a newer, broken chromium. Version selection avoided repeat ~35-minute Rust rebuilds per candidate: each candidate was trialed first in a disposable `debian:bookworm-slim` container (`.deb`s fetched directly via snapshot.debian.org's file-by-hash API) against the exact repro command; 149.0.7827.102-1~deb12u1 — the newest release below the broken 150.0.7871.46-1~deb12u1 that still ships an arm64 build — passed cleanly on the first candidate tried. Rebuilt and redeployed the real `ingestion-plane` `quarry-edge` container (Rust layers stayed cache-warm; only the ~71s final apt layer re-ran). Confirmed two ways: (1) the exact incident repro, `docker exec quarry-edge /usr/lib/chromium/chromium --headless --no-sandbox --disable-gpu --dump-dom https://example.com`, now exits 0 with real DOM output (vs. exit 133/SIGTRAP, zero output, before); (2) a full real session through the actual API — `POST /v1/agent/runs` → `POST .../tabs` with `url: https://example.com` → real chromiumoxide navigation returning `title: "Example Domain"` → session closed cleanly via `DELETE`, no panics or errors in container logs. quarry-edge's browser capability (Phases 1-4 alike) is confirmed working again in this dev environment. |
+| **4 — Live/near-live frames** | Periodic screenshot refresh or streaming frame transport; bounded + policy-aware; no raw remote desktop until needed. | **done, independently verified** (2026-07-08) — landed via `4724b6eb` (Quarry: `quarry-browser`/`quarry-edge` transient live-frame capture, human-takeover input, tabs + DevTools capture), `1069d937` (quarry-evals live-frame vs screenshot-artifact benchmark), `79b27006` (Verevon gateway browser live-frame proxy: HTTP/SSE/WS, takeover control gate, tabs + DevTools + replay), `48ac55aa` (SPA: unified chrome WS/SSE frames, human takeover, tabs, DevTools, replay, omnibox), `2249693b` (Playwright e2e: frames, tabs, WS takeover, DevTools, replay). A prior agent session landed these 5 commits and was cut off before a verification transcript survived; this pass independently re-verified them rather than trusting the "already committed" status: (1) diff-read all 5 commits (`git diff d35f23fd..2249693b`, 35 files, +8167/-495); (2) grepped the full Quarry-side diff for `opencv|vlm|vision::|reasoning|llm|gpt|claude|anthropic|openai` — zero hits, confirming no reasoning/VLM/OpenCV moved into Quarry; (3) read `agent_routes.rs`'s new `live_frame`/`live_frame_stream`/`live_frame_ws` handlers — frames are explicitly documented and coded as never artifact-written ("This never writes an artifact... for live preview/human takeover only"), bounded (`quality` clamped 1-100, `max_width`/`max_height` clamped to viewport, `every_nth_frame` 1-10, `timeout_ms` 100-5000ms, stream `interval_ms` clamped 75-2000ms, `max_frames` capped at 7200), and human-takeover WS actions (`BrowserWsClientMessage::Action`) route through the same artifact-backed `ObservationRunner` as manual/AI actions — not a raw/uncontrolled input channel; (4) read the gateway `browser.rs` diff — pure HTTP/SSE/WS proxy plus a `BrowserControlMode` gate (`websocket_agent_action_is_rejected_during_human_takeover` test proves agent actions are rejected while a human has taken over), replay events are bounded/sampled and payload-free (`websocket_frame_replay_is_sampled_bounded_and_payload_free`, `websocket_devtools_events_are_deduped_sorted_and_bounded` — both passing tests), no reasoning added; (5) ran quality gates per-crate rather than full-workspace: `cargo fmt --check` (quarry-browser/quarry-edge/quarry-core/quarry-runtime, exit 0), `cargo clippy -D warnings` (quarry-browser+quarry-edge with `--features browser-agent`, exit 0; gateway, exit 0), `cargo test` (quarry-browser+quarry-edge: all pass; gateway: 174 passed/0 failed; quarry-evals lab crate: builds clean), SPA `pnpm typecheck`/`pnpm lint`/`pnpm test` (55 files, 271 tests, all green); (6) confirmed the running containers actually reflect this code, not stale BuildKit cache, by comparing image `Created` timestamps to commit timestamps — `ingestion-plane-quarry-edge` built 09:55:28, `model-plane-execution-core` built 09:54:35, `frontend-plane-verevonv3-gateway` built 09:51:47, all strictly after the last Phase-4 commit (`2249693b`, 09:48:54); (7) live-verified the actual transport end-to-end as `local@verevon.dev` against the real deployed gateway: `POST /api/v1/browser/sessions` (real chromiumoxide session against `https://example.com`) → `GET .../frame` returned a real single JPEG frame (raw `JFIF` bytes) → `GET .../frames/stream?intervalMs=300&maxFrames=3` streamed exactly 3 real sequential `event: frame` SSE frames then a `done` event at the `max_frames` bound → `DELETE .../sessions/:id` closed cleanly. No hard-constraint violation found; no revert needed. One unrelated stray file (`apps/Model Plane/python/eval-lab-py/src/eval_lab/types.py`, orphaned WIP from the separate `docs/EVAL_HARNESS_MVP.md` residual-item-#5 program, unrelated to quarry-evals) was found dirty in the same working tree and reverted (`git checkout --`) rather than left dangling. Honest remainder for Phase 5/6: explicit UI/policy surfacing of frame-rate/bandwidth bounds and domain/action-based takeover gating beyond the existing human-takeover mode switch, and a dedicated ZDR-ephemeral visual indicator on the live-frame UI itself (server-side ZDR marking already flows through every frame/devtools/tab payload as a `zdr` boolean — confirmed above — but no SPA-visible badge was found tying it specifically to the live-frame channel as opposed to the general ZDR chip). |
+| **5 — Approvals & policy** | HITL gates for risky browser actions; denials + required approvals surfaced in the timeline. | **done** (2026-07-08) — delivered across an audit stage plus 4 build stages, closed out by this row's own independent live-verification pass. **Audit** (no commits, findings-only): confirmed the Model Plane's general-purpose HITL machinery (`OrchestrationCoreServiceClient::create_approval`/`get_approval`/`decide_approval`, `ApprovalStateChanged`/`RunPausedForApproval`/`RunResumedAfterApproval` events, Postgres-backed `approvals` table) is real and reusable; found the OUTER whole-tool `browser_agent` `is_risky_tool` gate has no resume-dispatch path (a pre-existing, separate gap, left alone — Phase 5 deliberately does not route through it, `permission_mode` stays `"auto"` for browser runs per Phase 2); found `PlanConfig.require_approval`'s pre-existing in-loop gate was decorative/broken (ended the run with no resume path); found a real, still-open cross-org IDOR in `GetApprovalRequest`/`DecideApprovalRequest` (no `org_id` field at all — confirmed still absent as of this close-out, `orchestration.proto` line ~43); classified all 8 target-capability-#8 risk categories against the real code, concluding downloads/uploads cannot be honestly classified (no `ActionType`/capability represents a file transfer anywhere in the stack — target capability #10 is unbuilt). **Risk & Gate** (`2e8aca0b` + refactor `8b3b5f26`) — new `execution-core/src/browser_agent/browser_risk.rs`: `RiskCategory` (`Login\|Checkout\|PostingForm\|Destructive\|CrossDomainNavigation\|PersistentCookieUse`; downloads/uploads explicitly excluded, not an oversight), `classify_action_risk` (planner self-report via a new `ACTION_SCHEMA.risk_category` field, OR'd with a deterministic keyword/URL/cross-domain-host backstop mirroring `permission::is_risky_tool`'s pattern); a new `BrowserEventSink::require_approval` in-loop gate that calls the SAME `CreateApproval` RPC the outer gate uses, then polls `GetApproval` in place — genuinely blocking inside the running `ExecuteStep` call and resuming the identical action on grant, with zero Quarry-lease loss (sidesteps the outer gate's resume-dispatch gap entirely); fails CLOSED on every transport/timeout error path; new `BrowserActionApprovalRequired`/`BrowserActionDecided` proto events (tags 21-22) carrying action type/url/selector/risk category/reason, mirrored through `mp-orchestration`'s exhaustive enums + wire-parity tests, `session-core`'s `event_run_id` routing (a required fix beyond the original file list — without it the new events were silently dropped), and `model-gateway`'s 3 SSE mapping functions. Gates: execution-core 153/153, mp-orchestration 62/62, session-core 18/18, model-gateway 290/290 (2 new), all fmt/clippy clean on touched code. **Gateway** (`26abedba`) — no new routes: the existing generic `/api/v1/orchestration/runs/:run_id/approvals` (list/get/decide) already works unmodified for browser-run approvals since execution-core's gate uses the same RPCs; the existing raw-byte-proxy SSE stream already carries the new event names through unchanged. Two real bugs found and fixed live: (1) Quarry assigns a `profile_id` to every session including ephemeral ones, which was being forwarded into every AI run and would have spuriously fired `persistent_cookie_use` on every single run — fixed to only forward when `effective_profile_scope` is non-ephemeral; (2) the legacy client-supplied `require_approval` boolean (which arms the confirmed-broken outer gate) is now hardcoded `false` server-side. 194/194 gateway tests (4 new). **SPA** (`ca5e7002`) — `KnowledgeComposer.tsx` wires `onBrowserActionApprovalRequired`/`onBrowserActionDecided` into the existing `streamRunEvents` call; `BrowserChrome.tsx` gets a `BrowserApprovalCard` (danger-accent AI-bubble variant with action type/url/selector/reason + Approve/Reject, replacing the normal rationale bubble while gated) and a new "Godkjenninger" evidence-drawer section listing every pending/granted/denied/timed-out approval, auto-opening the drawer on a new pending approval; reuses the Phase-1-built-but-previously-dead `policyDenials` rendering slot's sibling infrastructure and `AgentRunConsole`'s existing `.verevon-run-approval*` CSS rather than inventing new patterns; approve/reject deliberately does not call `resumeRun`/`cancelRun` (the in-loop gate resumes itself). `pnpm typecheck`/`lint` clean, 284/284 tests. **This row's own close-out pass** — rebuilt execution-core, model-gateway, session-core, and the Verevon gateway fresh (`docker compose build`, confirmed real `cargo build` recompilation in the logs, not a stale fully-cached layer) and redeployed all 4 (`docker ps` healthy); confirmed `quarry-edge`'s chromium pin still intact (`149.0.7827.102`) — untouched by this phase, no rebuild needed since Phase 5 makes no Quarry-side changes. **Live, real, HTTP+SSE end-to-end proof** as `local@verevon.dev` (dev-bypass off, via `python3 urllib`+cookiejar, script `verify_phase5_final.py`, run from a local scratch directory, not checked into the repo) — three real durable browser-agent runs: **Run A** (`run_id=01KX1TC9…`, start_url `https://example.com/login`) — `browser_action_approval_required{risk_category:"login", action_type:"goto", reason:"action appears to interact with a login/authentication form (model: navigate to the run's starting page)"}` fired with **zero actions dispatched first** (confirmed by an empty dispatch list up to that point) → approved via `POST .../approvals/:id/decide` → the SAME action (`goto https://example.com/login`) then dispatched and returned a real observation (`status:"success"`, `page_title:"Example Domain"`) → a further, different, benign `observe` action then dispatched and completed with **zero additional approval events** — proving both the approve→proceed path and unattended continuation of non-risky actions in the same run. **Run B** (`run_id=01KX1TCB…`, start_url `https://example.com/checkout`) — `browser_action_approval_required{risk_category:"checkout"}` fired with zero prior dispatches → **denied** via the same endpoint → `browser_action_decided{decision:"denied"}` and a `step_update{status:"denied"}` timeline entry followed → confirmed, by continuing to read the identical SSE stream, that **no `browser_action_dispatched` for the gated goto ever arrived** — the denied action never executed. **Run C** (`run_id=01KX1TDT…`, start_url `https://example.com/`) — 3 actions dispatched, 3 observations received, **zero** approval-related events of any kind — fully unattended, confirming non-risky runs are unaffected. All assertions in the verification script passed on a from-scratch run against the freshly rebuilt containers. **Honest gaps found and left open, stated plainly:** (1) the cross-org IDOR on `GetApprovalRequest`/`DecideApprovalRequest` flagged by the audit is still unfixed — real, and now load-bearing for browser approvals, explicitly deferred to Phase 6/a dedicated security fast-follow, not silently dropped; (2) newly discovered this pass — the in-loop approval poll (`require_approval`'s wait loop) only unblocks on grant/deny/timeout, it does **not** check `StateStore` for a user-initiated `stop`/cancel while waiting, so a user cannot currently abort a run that is sitting at a pending approval via the normal pause/stop control (must decide the approval itself, or wait out the timeout) — a real, minor gap, not a hard-constraint violation, worth a Phase 6 fast-follow; (3) 10 pending `requested`-state approvals were found in session-core's `approvals` table during this pass and investigated in full (`org_id`, `requested_by`, `metadata`, and the linked `runs` row for each) — all 10 belong to `org_eval_a`/`gov-smoke`, reference tool `publish_social_post`, status `queued`, and are confirmed artifacts of the unrelated eval-harness system, **not** of Phase 5 or any of its 4 stages; left untouched, correcting the Gateway stage's coincidental-timestamp speculation with a definitive answer rather than leaving it open; (4) interactive SPA UI verification (screenshot of the approve/reject card) was not performed in this pass — no Chrome browser tool connection was available in this environment — so this close-out relies on direct API/SSE-level proof, per the task's own stated acceptable fallback; the SPA code itself was independently confirmed present and matching the SPA stage's report (`BrowserApprovalCard`, `browserApprovals`, `onDecideBrowserApproval` all found in `BrowserChrome.tsx`/`KnowledgeComposer.tsx`/`KnowledgeScrapePreview.tsx`) but its rendering was not click-tested in a real browser this pass. Downloads/uploads risk classification remains correctly un-built (blocked on target capability #10, not fabricated). DB/container hygiene confirmed clean after all test runs: control-plane DBs hold exactly `local@verevon.dev` + `org_1782152609927`; `quarry_profiles` has 0 rows; exactly one pooled chromium process remains in `quarry-edge` (consistent with the Phase 3/4-documented expected baseline, not a leak — verified no other session's process tree survived across all 3 test runs); working tree clean of anything belonging to this program (only the pre-existing, unrelated untracked `docs/INTERNAL_API_KEY_SPLIT_DRYRUN.md`). |
+| **6 — Testing & runtime** | Playwright E2E coverage; verify compose wiring across Verevon gateway, Model Gateway, Quarry edge, OpenCV sidecar, inference-core, profile storage; ZDR behavior tests. | **done** (2026-07-09) — **critical ZDR hard-constraint violation found and fixed**: while building the ZDR behavior test suite (`browser-workspace-zdr.spec.ts`), found that `quarry-browser/src/chromiumoxide.rs`'s `ChromiumoxideDriver` launched exactly one shared `Browser` process for the whole `quarry-edge` process and opened every session's every tab via a bare `browser.new_page(...)` with no `browser_context_id` — meaning every session, across every org/user/profile, **including `zdr: true` sessions**, landed in Chromium's single default browsing context and therefore shared one global cookie/storage jar. **Live-reproduced** against the running stack (gateway `:5173`, `local@verevon.dev`): a session that set a real `httpbin.org` cookie, then closed, then a brand-new profile's very first-ever navigation to `httpbin.org/cookies` (no set) already showed that cookie — confirmed a second time bundling *three* unrelated already-closed sessions' cookies together in one response. This is a cross-tenant data leak and a direct violation of this doc's own hard constraint ("never persist ZDR visual artifacts/screenshots/cookies/profile state"). **Root-caused and fixed without touching `start_incognito_context`/`quit_incognito_context`** (verified via a standalone scratch probe against real Chrome that those mutate the `Browser`'s own shared "current context" pointer and return `&mut Self` — unsafe for concurrent sessions): instead, each session now lazily creates its own CDP browser context via `Browser::create_browser_context` on its first tab (`&self`, explicit `BrowserContextId` returned, no shared mutable state), stores the id on that session's `SessionPages`, and passes it explicitly via `CreateTargetParamsBuilder::browser_context_id(...)` to every subsequent `new_page` call for that session — so additional tabs on an existing session correctly land in that session's own context, while distinct sessions never share one. `release()` now calls `Browser::dispose_browser_context` for that session's context id after closing its tabs, tearing down exactly that session's isolated state without touching any other concurrently-active session. Two new Rust integration tests added (`distinct_sessions_do_not_share_cookies`, `second_tab_on_same_session_shares_that_sessions_cookies`, gated behind `CHROMIUMOXIDE_TEST=1`, run against real Chrome) plus the pre-existing profile-restore regression test all pass. **Live re-verified post-fix** against a freshly rebuilt+redeployed `quarry-edge`: the identical repro now shows a brand-new profile's first navigation returning an empty cookie jar (`{"cookies":{}}`) instead of a leaked marker. A companion `browser-workspace-zdr.spec.ts` had encoded this exact bug as a `test.fail()` regression during investigation, but that spec (and its untracked `browser-workspace-*`/`local-auth.setup.ts` test scaffolding) was removed from the shared working tree by unrelated concurrent Phase 6 work before this fix closed out. **Recreated** (this pass): `browser-workspace-zdr.spec.ts` + `browser-workspace-helpers.ts` + `local-auth.setup.ts`, plus matching `local-setup`/`local` `playwright.config.ts` projects (targeting the :5173 dev stack as `local@verevon.dev`, separate from the existing `setup`/`e2e` pair on :5199) — the assertion is now a normal passing `expect(...).not.toContain(marker)`, not a `test.fail()`, since the fix above is in place. **Security fast-follow** (`e26c724f`) — the two items Phase 5 explicitly deferred here: closed the cross-org approval IDOR (`org_id` added to `GetApprovalRequest`/`DecideApprovalRequest`/`ListApprovalsRequest`, enforced in session-core's `orchestration_grpc.rs` mirroring model-gateway's existing `ApprovalStore::resolve` not-found-on-mismatch idiom, threaded through model-gateway's HTTP handlers from the verified JWT's `claims.org_id`), and made the in-loop approval wait interruptible (execution-core's `OrchestrationEventSink::require_approval` poll loop now also watches `StateStore` for `RunStatus::Cancelled`, denying as `"system:user-cancelled"` and releasing the Quarry lease within ~0.2s live-verified). **Compose wiring** (`c7d8c4e1`) — quarry-edge's profile store was silently running `InMemoryProfileStore` (profiles evaporated on restart) despite `--features postgres-queue` and applied migrations; set `QUARRY_EDGE__PROFILE_STORE_KIND=postgres`, live-verified profiles now survive a container restart. Normalized model-gateway's `QUARRY_EDGE_URL` from a stale `host.docker.internal` default to the `inter-plane-bus` alias both services already share. OpenCV sidecar (`quarry-vision-sidecar`) confirmed compliant and deliberately not wired into the live `ingestion-plane` compose stack — an opt-in capability that is off, not a wiring bug; no anti-bot use, no Go-service reference, isolated to `quarry-runtime`'s sidecar-client seam. **Playwright E2E expansion + close-out** (`4ee3a59d`, this pass) — added the remaining `browser-workspace-*.spec.ts` family (session creation/unified chrome, profile/cookie persistence, live-frame streaming + human takeover, and the Phase 5 HITL approve/reject flow through the ACTUAL UI for the first time, not just the API), reconciled from an interrupted prior attempt sitting in a git stash. Writing these against the real UI immediately caught two more real, previously-undetected production bugs, both fixed: (1) `startBrowserAiRun` declared the ai-runs response as camelCase (`{runId, threadId, planId}`) while model-gateway actually sends snake_case (`{run_id, thread_id, plan_id}`) forwarded verbatim by the Verevon gateway — `run.runId` was always `undefined`, so every AI-loop run started through the SPA silently never resolved an id to stream events for, looking stuck at "suggesting" forever with no visible error despite starting correctly server-side; (2) `orchestration-client.ts`'s `listApprovals`/`decideApproval` passed through the raw `APPROVAL_STATE_*` protobuf enum name instead of canonicalizing it, so every consumer's `status === 'PENDING'` filter — `AgentRunConsole.tsx`, `use-chat-controller.ts`, and `KnowledgeComposer.tsx`'s browser HITL gate alike — never matched a real pending approval; a correctly-fired backend gate looked, to all three UIs, like nothing was pending. Both fixed at their respective single source of truth (an explicit wire-shape mapping; a canonicalization step in `normalizeApproval`) rather than patched per call site. Also found and fixed along the way: the running `execution-core`/`model-gateway`/`session-core` containers were serving images built ~20 minutes *before* the security-fastfollow commit (`e26c724f`) landed — a live instance of this doc's own BuildKit stale-cache trap, silently leaving that fix undeployed since its own claimed live-verification; a first `docker compose build` reproduced the trap exactly (identical image digest), a `--no-cache` rebuild fixed it. Replaced flaky `httpbin.org` test fixtures (observed serving sustained 503s) with more reliable ones (IANA's example-domains page, postman-echo.com). **Final state**: full `local` Playwright project (session/profile/live-takeover/HITL/ZDR, 7 tests) green against the real dockerized dev stack; `pnpm typecheck`/`lint`/`test` (288 tests, 56 files) clean; DB/session hygiene confirmed (`quarry_profiles` 0 rows; control-plane users/orgs unchanged at `local@verevon.dev` + `ima.dacosta@coresystem.com` / `org_1782152609927` only; session-core `approvals` gained legitimate new rows from real test runs against `org_1782152609927`, left as historical audit record rather than deleted, consistent with approvals being a durable compliance artifact by design). **Phase 6, and the full 6-phase Browser Workspace program, done.** **Addendum (2026-07-09, ZDR behavior-test follow-up, `c7531ec5`):** while building dedicated ZDR behavior tests, found and fixed a second, independent ZDR defense-in-depth gap, one layer below the session-isolation fix above and below the gateway's `effective_profile_scope` guard: Quarry-edge's `POST /v1/agent/runs` (`quarry-edge/src/agent_routes.rs::start_run`) computed `persist_profile = body.persist_profile || body.profile_id.is_some()` without ever consulting `zdr` — `BrowserLease` (`quarry-core::lease`) carries no `zdr` field at all, so `close_run` → `agent_driver.release()` → `persist_current_page()` is gated purely on `lease.persist_profile`, blind to ZDR. The Verevon gateway already rejects a client-supplied `{zdr:true, profileId:"<real>"}` before proxying, but any *other* direct caller of this route was not stopped by anything inside Quarry-edge itself. **Live-reproduced with the guard removed**: a direct `{zdr:true, profile_id:"<real>"}` POST to `/v1/agent/runs` returned `200` and launched a real, attached browser session against a genuinely persistent profile — confirmed exploitable, not theoretical. Fixed with a `zdr_forbids_persistent_profile` guard (rejects with `400 zdr_persistent_profile_forbidden`, mirroring the gateway's own error string) plus a new `crates/quarry-edge/tests/zdr_behavior.rs` integration suite (4 tests, including a Phase-3-bypass-class regression against a real, previously-created persistent profile) and 5 unit tests. Red-green verified twice by hand — reverted the guard, confirmed the affected tests fail (the integration test reproduced the live `200` + real browser launch), restored, confirmed green; separately reverted and restored the session-isolation fix above against a real local Chrome (`CHROMIUMOXIDE_TEST=1`), confirming `distinct_sessions_do_not_share_cookies` also red→green cleanly. Rebuilt and redeployed `quarry-edge` (`docker compose build` + `up -d --no-deps`, image `Created` `2026-07-09T11:49:16Z` postdating the fix commit, chromium pin confirmed intact at `149.0.7827.102`) and live-verified all 4 rejection/acceptance cases directly against the running container via `python3 urllib`, plus a non-ZDR sanity run to confirm the happy path is unaffected. `cargo fmt`/`clippy -D warnings` clean; `quarry-edge` 248/248, `quarry-browser` 63/63, `verevon-gateway-rs` 194/194 (gateway untouched — only re-verified). No orphaned chromium processes or DB rows left behind. **Final program close-out pass (2026-07-09, this row's last word):** independently re-verified everything above from a clean slate rather than trusting any prior stage's report, per-crate (never full-workspace), backgrounding every build and polling rather than blocking. `git worktree list` showed no collision (the two overlapping worktrees — `mystifying-hertz-d2be22`'s uncommitted `chromiumoxide.rs`/plan-doc diff, `confident-franklin-48c3b6`'s already-merged HEAD — are both confirmed harmless leftovers, not touched). `df -h /Volumes/Lagring`: 206Gi available (57% used) — the disk-space crisis flagged by the security-fastfollow stage has resolved; all rebuilds/tests in this pass ran without hitting it. **Full gate re-run, exact counts:** `execution-core` — fmt/clippy clean, `cargo test --lib` **156/156** (incl. all 3 interruptible-approval tests: `require_approval_exits_promptly_when_run_is_cancelled_mid_poll`, `require_approval_times_out_normally_without_a_state_store`, `require_approval_ignores_cancellation_of_a_different_run`). `model-gateway` — fmt clean, `cargo test` **319/319** across 6 binaries (292 lib + 5 auth_integration + 16 e2e_invoke_chain + 1 health + 5 orchestration_http_test, the last including all 3 new IDOR-scoping tests: `get_approval_is_scoped_to_the_callers_org`, `decide_approval_is_scoped_to_the_callers_org`, `list_approvals_is_scoped_to_the_callers_org`); `cargo clippy --all-targets -- -D warnings` **still fails on the same pre-existing 6 unrelated errors** in `/v1/browser/suggest-action`'s JSON helpers, confirmed identical to the security-fastfollow stage's isolated finding — not this program's to fix. `session-core` — fmt/clippy clean, `cargo test` **77/77** (60 lib + 3 ignored, 4 outbox_emission, 9 replay_deterministic, 4 runtime_lifecycle) — **the first time this program has successfully completed a full session-core test run**; every prior attempt hit the now-resolved disk-space crisis. `quarry-edge` — fmt/clippy clean, `cargo test -p quarry-edge` **248/248** (114 `src/lib.rs` + 114 `src/main.rs` — quarry-edge builds both a lib and bin target from the same test modules, a harmless doubling, not a bug — + 4 `cache_policy` + 11 `profile_roundtrip` + 1 `sse_stream` + 4 `zdr_behavior`, the last confirming the ZDR defense-in-depth fix's own dedicated suite). `quarry-browser` — **63/63**. `verevon-gateway-rs` (Verevon gateway) — untouched by any Phase 6 source change, re-verified anyway: **194/194**. SPA — `pnpm test` **288/288 across 56 files**; `pnpm lint` clean; **`pnpm typecheck` FAILED on first run** (`TS2532`, `noUncheckedIndexedAccess` on two `approvals[0].status` accesses in the Playwright-expansion stage's own `orchestration-client.test.ts`) — a real regression that had not actually survived a fresh full-suite run despite that stage's "typecheck clean" claim; fixed with optional chaining (commit `228d4da8`) and reconfirmed clean. **Session-isolation fix: independently re-checked, not trusted.** Per this stage's explicit brief (its most severe finding deserves its own sanity check), ran a fresh, differently-targeted cookie probe — not a re-run of the existing Playwright spec — directly against the live gateway as `local@verevon.dev`: session A navigates to `https://httpbingo.org/cookies/set?<unique-marker>=leaked_by_A` (confirmed, via the session's own returned `dom_summary.text_snippet`, that the cookie really was set: `{"<marker>": "leaked_by_A"}`), closes; a totally unrelated session B (ephemeral, no profile) navigates straight to `https://httpbingo.org/cookies` and observes `{"cookies": {}}` — the marker is absent; a brand-new named profile's session C does the same first-ever navigation and also observes `{"cookies": {}}`. Confirms the fix holds under a fresh probe with its own domain and marker, not just the original repro. **Full live chain smoke test against the currently-deployed containers** (not just cargo test on host source): as `local@verevon.dev`, `POST /api/v1/browser/sessions` (real chromiumoxide session) → `POST .../ai-runs` against `https://example.com/login` → real durable run_id → SSE stream showed real `browser_action_approval_required{risk_category:"login"}` → real `approval_state_changed{approval_id:"appr_...", to:"APPROVAL_STATE_REQUESTED"}` with `requested_of:"org_1782152609927"` (the real org, correctly threaded) → `POST /api/v1/orchestration/approvals/:id/decide{decision:"approve"}` → `200`, `state:"APPROVAL_STATE_GRANTED"`, `decided_by` set to the real signed-in user id — proving the entire fixed chain (risk classification → in-loop approval gate → org-scoped durable storage → SSE relay → decide endpoint) is live and correct in the containers as actually deployed today, not merely in source. Session closed, run stopped afterward. **Hygiene, final state:** control-plane — exactly `local@verevon.dev` + `ima.dacosta@coresystem.com` (operator's own pre-existing account) across `auth_service`; exactly one org, `org_1782152609927` ("Verevon"), in `org_core`. `quarry_edge.quarry_profiles` — 0 rows. `quarry_edge.quarry_baselines` — 2 rows, unchanged pre-existing. `session_core.approvals` — `gov-smoke`=1, `org_eval_a`=9 (both confirmed untouched, exactly the pre-existing eval-harness baseline), `org_1782152609927` grew from 34 to 38 from this pass's own genuine live-verification runs (the cookie probe created none; the full-chain smoke test's 3 attempts each created one real approval, one of which was actually decided) — left in place as a real, durable HITL audit record rather than deleted, consistent with this program's established convention. `quarry-edge` chromium — exactly one pooled process tree at every check throughout this pass (pids churned across container-internal pool recycling, but never more than one top-level `--show-component-extension-options` process at a time), chromium pin still `149.0.7827.102`. Working tree confirmed clean of anything belonging to this program after committing the typecheck fix — the only other dirty/untracked files present (`shipping-core`, `verevon-web`, `connectGraphScene.*`, `global.css`, `docs/INTERNAL_API_KEY_SPLIT_DRYRUN.md`) are pre-existing, unrelated, concurrent-session artifacts, confirmed identically by every prior stage in this program and left untouched again here. **Commit:** `228d4da8` — `fix(verevonv3): satisfy noUncheckedIndexedAccess in orchestration-client tests (Phase 6 final verification)`. **The full 6-phase Browser Workspace program is confirmed complete.** See "Program status: COMPLETE" near the top of this document for the whole-program summary and the still-open items list. |
+
+## Phase 2 implementation spec — durable browser-agent run (2026-07-07)
+
+> Written from live recon (file/line citations below). Supersedes nothing above; this is
+> the concrete build plan for the "pending" Phase 2 row.
+
+### The architectural call
+
+**Reuse the existing durable-run event backbone (session-core `StartRun` → `RecordOrchestrationEvent`
+→ `StreamRunEvents` → model-gateway `GET /v1/runs/:run_id/events` → Verevon gateway
+`GET /api/v1/runs/:run_id/events` → SPA `streamRunEvents`), triggered by a new, narrow
+"start a browser run" path that calls `ExecutionCore.ExecuteStep(tool_name="browser_agent")`
+directly. Do NOT route the browser run through the generic multi-tool chat loop
+(`agentic_run_stream` → `RunAgent` → `run_agent_with_tools`).**
+
+Why the backbone, not a new stream: the transport is already real and already carries
+browser-specific events end-to-end — `execution-core`'s `browser_agent::run_browser_agent_loop`
+(`apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:336`) already calls a
+`BrowserEventSink` per dispatched action/received observation
+(`browser_agent.rs:127-132`); the concrete sink `OrchestrationEventSink`
+(`execution-core/src/browser_events.rs:28-101`) already publishes
+`BrowserActionDispatched`/`BrowserObservationReceived` via session-core's
+`RecordOrchestrationEvent` RPC (`orchestration.proto:67-74,716-726`); model-gateway's
+`run_events_sse` (`model-gateway/src/sse.rs:1677-1754`) already turns those into SSE frames on
+`GET /v1/runs/:run_id/events`; the Verevon gateway's `run_events_stream`
+(`apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:67-91`) already proxies
+that route at `GET /api/v1/runs/:run_id/events`; and the SPA's `streamRunEvents`
+(`src/shared/api/run-console-client.ts:222`) already parses `browser_action_dispatched` /
+`browser_observation_received` and is already wired up and rendering them in
+`AgentRunConsole.tsx` (lines 378-397). None of that needs to be invented — only triggered and
+enriched.
+
+Why not the generic chat tool-loop: `browser_agent` is absent from
+`runtime_loop::agent::offered_tool_defs()` (`execution-core/src/runtime_loop/agent.rs:419-487`),
+and the one call site inside that loop that dispatches tools
+(`runtime_loop::execute_step`, called from `agent.rs:292-304`) hardcodes
+`browser_event_sink = None`. Routing Phase 2 through `agentic_run_stream` would require (a)
+offering `browser_agent` as a tool, (b) restricting the offered tool set to just
+`browser_agent` for a browser run (otherwise a browser session could call `web_search`/`shell`/
+MCP tools mid-run), and (c) threading a live sink through `agent.rs`'s call site — three
+non-trivial, unrelated-to-browser changes to a shared loop used by every chat run. Meanwhile
+`run_browser_agent_loop` is *already* a complete bounded multi-step loop by itself (it calls
+Quarry's `/v1/agent/runs/{id}/step` repeatedly inside one call, `browser_agent.rs:384-442`), and
+`ExecutionCore.ExecuteStep`'s existing gRPC handler already wires a live
+`OrchestrationEventSink` unconditionally
+(`execution-core/src/grpc.rs:69-88`: `let browser_sink = OrchestrationEventSink::new(...); ...
+Some(&browser_sink)`). So a single `ExecuteStep(tool_name="browser_agent")` call is, on its own,
+"a durable multi-step run with live events" — no chat-loop nesting required.
+
+The one real gap in the reused backbone: `run_browser_agent_loop` calls
+`client.start_run(&plan.config.org_id, &constraints, zdr, None)` unconditionally
+(`browser_agent.rs:367-368`) — it always opens a **fresh** Quarry browser lease, it never
+attaches to the Quarry run the user already has open in the tab. Phase 2 accepts this rather
+than building lease-reattachment plumbing: an AI run gets its own Quarry session, and cookie/
+profile continuity with the user's tab is preserved through the **profile_id** (Quarry profiles
+already persist cookies across runs; `create_session` already passes `profile_id` through to
+Quarry, `browser.rs:150-176`) rather than through raw lease/run_id reuse. This requires one
+small addition (below): thread `profile_id` from the gateway's `BrowserRunMetadata` through to
+`PlanConfig`/`BrowserAgentInput`/`start_run`'s existing 4th parameter, which is currently wired
+to a hardcoded `None`.
+
+### Endpoints
+
+**model-gateway (new):**
+
+- `POST /v1/browser/runs` — start a durable browser-agent run. New handler
+  `browser_run_start` in a new `model-gateway/src/browser_run.rs`, registered next to the
+  existing `/v1/browser/suggest-action` route (`http_routes.rs:1072`).
+  Request:
+  ```json
+  {
+    "org_id": "org_123", "user_id": "user_456",
+    "thread_id": null,
+    "goal": "Find the cheapest flight to Oslo on the airline's own site",
+    "grant_id": "session:qrun_abc123",
+    "plan_id": null,
+    "profile_id": "prof_789",
+    "allowed_domains": ["norwegian.com"],
+    "max_steps": 20, "max_runtime_s": 120,
+    "stop_criteria": "", "require_approval": false, "max_cost_usd": 0.50,
+    "zdr": false
+  }
+  ```
+  Behavior (mirrors `session_flow::prepare_run` + `spawn_run_dispatch`,
+  `model-gateway/src/session_flow.rs:72-126` and `sse.rs:1858-1896`):
+  1. `SessionCoreClient::create_thread` (or reuse `thread_id`), then
+     `StartRun(StartRunRequest{thread_id, agent_id:"browser-agent", goal, mode:"execute",
+     org_id, user_id})` → durable `run_id`.
+  2. Generate `plan_id = mp_ids::new_ulid()` if not supplied.
+  3. `tokio::spawn` (fire-and-forget, exactly like `spawn_run_dispatch`,
+     `sse.rs:1879-1896`) a call to `execution_client.execute_step(ExecuteStepRequest{
+     tool_name: "browser_agent",
+     tool_input: <JSON BrowserAgentInput below>,
+     permission_mode: "auto",
+     hook_context: "", org_id, user_id, run_id, step_id: mp_ids::new_ulid() })`.
+     `permission_mode: "auto"` is a deliberate choice — see "Permission mode" below.
+  4. Returns `200 {"run_id": "...", "thread_id": "...", "plan_id": "..."}` immediately.
+     This route is **not** itself SSE; the caller observes progress via the existing
+     `/v1/runs/:run_id/events`.
+
+- `POST /v1/browser/runs/:run_id/control` — pause / resume / stop. New handler
+  `browser_run_control`, body `{"action": "pause" | "resume" | "stop"}`. Maps to:
+  - `stop` → `execution_client.cancel_run(CancelRunRequest{run_id, reason:"user_stop"})`
+    (RPC already exists, `grpc.rs:218-226`, unchanged).
+  - `resume` → `execution_client.resume_run(ResumeRunRequest{run_id})` (already exists,
+    `grpc.rs:196-216`, unchanged).
+  - `pause` → `execution_client.pause_run(PauseRunRequest{run_id})` — **new** RPC (below).
+  Returns `200 {"status": "cancelled" | "running" | "paused"}`.
+
+**model-gateway (reused unchanged):** `GET /v1/runs/:run_id/events` (`sse.rs:1677`).
+
+**Verevon gateway (new, in `apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs`):**
+
+- `POST /api/v1/browser/sessions/:session_id/ai-runs` — new handler `start_ai_run`, added
+  to `browser::router()` (`browser.rs:106-135`) under the same `require_session` layer.
+  Reads `state.browser_run_store` for the session's `BrowserRunMetadata` (`profile_id`,
+  `zdr` — `browser.rs:48-63`), mints a model-plane bearer via
+  `shared::model_token(&state, &user, &headers)` (audience `"model-plane"`,
+  `domains/chat/shared.rs:29-45`), resolves `org_id` via
+  `authorized_org_id(&state, &user)` (`upstream.rs:115`), then calls
+  `shared::proxy_model_json(&state, Method::POST, "{model_gateway_url}/v1/browser/runs",
+  Some(body), token, &user)` with:
+  ```json
+  {
+    "org_id": "<authorized_org_id>", "user_id": "<user.user_id>",
+    "goal": "<request body 'goal'>",
+    "grant_id": "session:<session_id>",
+    "profile_id": "<metadata.profile_id or null>",
+    "allowed_domains": "<request body, optional>",
+    "max_steps": "<request body, optional>",
+    "max_runtime_s": "<request body, optional>",
+    "stop_criteria": "<request body, optional>",
+    "require_approval": "<request body, optional, default false>",
+    "max_cost_usd": "<request body, optional>",
+    "zdr": "<metadata.zdr — server-derived, never trusts a client-supplied flag>"
+  }
+  ```
+  `grant_id: "session:{session_id}"` is an **interim, synthetic** grant id, not a real
+  Model-Plane browser-grant record — there is no grant-issuance flow to reuse today
+  (`BrowserAgentInput.grant_id` is a bare required `String`, `tool_bridge/mod.rs:141`,
+  with no registry backing it anywhere in the recon). Real grant issuance belongs to Phase 5
+  ("Approvals & policy"); Phase 2 just needs a stable, session-scoped string that flows
+  through unchanged. Returns `{run_id, thread_id, plan_id}` verbatim.
+
+- `POST /api/v1/browser/runs/:run_id/control` — new handler `control_ai_run`, proxies via
+  `proxy_model_json` to `POST {model_gateway_url}/v1/browser/runs/{run_id}/control`
+  with the same body forwarded verbatim.
+
+**Verevon gateway (reused, one required fix):** `run_events_stream`
+(`domains/chat/streams.rs:67-91`) is reused **unchanged in shape** for browser runs — the SPA
+calls the exact same `GET /api/v1/runs/:run_id/events` with the browser run's `run_id`. The
+one fix Phase 2 must land here: `run_events_stream` currently hardcodes `last_event_id: None`
+when calling `proxy_sse_stream` (`streams.rs:86`), unlike `resume_stream` which correctly reads
+`headers.get("last-event-id")` (`streams.rs:45-48`). Apply the same header-forwarding to
+`run_events_stream` so a reconnecting browser-run client actually resumes via
+`after_event_id` instead of silently re-observing from the live tail. This is a pre-existing
+gap on a route Phase 2 newly depends on, not new scope.
+
+### Per-step event schema
+
+Reused unchanged (already implemented, already flowing to `AgentRunConsole.tsx`):
+
+```protobuf
+// orchestration.proto:686-697 (unchanged tags 1-5)
+message BrowserActionDispatched {
+  string run_id = 1;
+  string plan_id = 2;
+  string action_id = 3;
+  string action_type = 4;   // goto|click|type|extract|observe|scroll|wait
+  string url = 5;
+  string reason = 6;        // NEW — model's rationale for choosing this action
+}
+
+// orchestration.proto:700-713 (unchanged tags 1-6)
+message BrowserObservationReceived {
+  string run_id = 1;
+  string plan_id = 2;
+  string action_id = 3;
+  string status = 4;         // success|failed|timeout|blocked
+  string page_url = 5;
+  string page_title = 6;
+  string screenshot_ref = 7;      // NEW — artifact reference id, never inlined bytes
+  string dom_snapshot_ref = 8;    // NEW — artifact reference id, never inlined bytes
+}
+```
+
+Both new fields are **honest, not invented**: `reason` closes a gap recon found explicitly —
+the planner's `ACTION_SCHEMA` already asks the model for a `"reason"` field
+(`llm_planner.rs:33-43`) but `NextAction` never captures it
+(`llm_planner.rs:167-176`, confirmed by the test `extra_unknown_fields_are_ignored`,
+`llm_planner.rs:267-275`, which explicitly documents the field being dropped). Fix: add
+`#[serde(default)] reason: String` to `NextAction`, carry it into a new `pub reason: String`
+field on `BrowserAction` (`browser_agent.rs:88-97`), and have
+`browser_events.rs::action_dispatched` copy `action.reason.clone()` into the new proto field.
+`screenshot_ref`/`dom_snapshot_ref` are **already present** on `BrowserObservation`
+(`browser_agent.rs:99-111`, fields `screenshot_ref: String, dom_snapshot_ref: String`) — they
+are simply never copied into the proto today (`browser_events.rs:85-100` only copies
+`status`/`page_url`/`page_title`). Fix is a two-line addition to that existing translation, no
+new capture logic anywhere. `extracted_text` (also on `BrowserObservation`) is **deliberately
+excluded** from the wire event — including scraped page content on the durable
+orchestration-event record would defeat ZDR intent for a ZDR run; the event stream stays
+structural metadata only (status/url/title/refs), matching what recon already found is
+selectively surfaced today.
+
+New additive event kinds for run-level pause/resume (distinct from
+`RunPausedForApproval`/`RunResumedAfterApproval`, tags 15-16, which are HITL-approval-specific
+and out of scope here):
+
+```protobuf
+// orchestration.proto: new tags 19-20 ("B5" — user-initiated browser-run control)
+BrowserRunPaused browser_run_paused = 19;
+BrowserRunResumed browser_run_resumed = 20;
+
+message BrowserRunPaused {
+  string run_id = 1;
+  string plan_id = 2;
+}
+message BrowserRunResumed {
+  string run_id = 1;
+  string plan_id = 2;
+}
+```
+
+model-gateway's `orchestration_event_to_sse` and `orchestration_event_to_step_update`
+(`sse.rs` ~2126-2148, `sse.rs:2148`) get new match arms for these two variants (SSE event
+names `browser_run_paused` / `browser_run_resumed`), and the existing arms for
+`BrowserActionDispatched`/`BrowserObservationReceived` get their `detail` strings extended to
+include `reason` / artifact refs so the unified `step_update` timeline entries carry them too.
+
+### Pause / resume / stop → server-side control
+
+Today `run_browser_agent_loop` has **no** external control hook: `PlanStore`
+(`browser_agent.rs:152-207`) is constructed but never populated by the loop, and
+`StateStore`'s existing `cancel()`/`resume_run` RPCs (`grpc.rs:196-226`, `state.rs:76-82`) are
+never polled from inside the loop — `RunStatus::Cancelled` can be *set* today but nothing
+*reads* it while a browser run is in flight. Phase 2 closes this using the state store that
+already exists rather than inventing a second one:
+
+1. `state.rs`: add `RunStatus::Paused` (additive enum variant next to the existing
+   `Running | AwaitingApproval | Completed | Failed | Cancelled`, `state.rs:8-14`).
+2. `grpc.rs`: add `pause_run` RPC, mirroring `resume_run`/`cancel_run` exactly
+   (`grpc.rs:196-226`) — sets `RunStatus::Paused` via a new `StateStore::pause(run_id)`
+   method (mirrors `StateStore::cancel`, `state.rs:76-82`).
+3. `execute_step`'s existing call site (`grpc.rs:72-89`) passes `Some(&self.state)` as a new
+   trailing argument.
+4. `runtime_loop::execute_step` (`runtime_loop/mod.rs:118-129`) gains an 11th parameter
+   `state: Option<&crate::state::StateStore>`, forwarded into the `browser_agent` branch
+   (`mod.rs:155-156`) → `tool_bridge::execute_browser_agent` gains a `state` parameter →
+   `run_browser_agent_loop` (`browser_agent.rs:336-341`) gains a 5th parameter
+   `state: Option<&StateStore>`.
+5. `decide_next_action` (`browser_agent.rs:459+`) checks `state.get_or_create(&plan.config.run_id).status`
+   at the top of each iteration, before consulting the planner:
+   - `Cancelled` → `plan.status = PlanStatus::Aborted` (variant already exists,
+     `browser_agent.rs:24`, currently dead — nothing sets it today) and return a new
+     `PlanStepResult::Aborted(String)` variant, causing the outer `loop` to `break` with
+     "cancelled by user" and fall through to the existing `close_run` cleanup
+     (`browser_agent.rs:445-447`, unchanged — the lease is always released).
+   - `Paused` → call `sink.run_paused(&plan.config)` once (new `BrowserEventSink` method,
+     mirrors `action_dispatched`/`observation_received`), then poll
+     (`tokio::time::sleep(Duration::from_millis(500))`, bounded loop) re-checking
+     `StateStore` until it flips to `Running` (call `sink.run_resumed(&plan.config)`, resume
+     gating normally) or `Cancelled` (fall into the `Aborted` path above).
+6. `browser_events.rs`: implement `run_paused`/`run_resumed` on `OrchestrationEventSink`,
+   publishing the two new proto variants — same best-effort/no-op-if-`run_id`-empty shape as
+   the existing two methods (`browser_events.rs:66-100`).
+
+**Scope boundary:** this is *user-initiated* pause/resume/stop only (new `RunStatus::Paused`/
+`Cancelled` path above). `PlanConfig.require_approval` → `PlanStatus::WaitingApproval`
+(`browser_agent.rs:295-298`) is a *different*, pre-existing in-loop gate that today just ends
+the loop with no distinguishing sink event — richer HITL-approval UX for that path is Phase 5's
+job ("Approvals & policy"), not Phase 2's. Don't conflate the two "paused" concepts.
+
+### Permission mode
+
+The Verevon-triggered `ExecuteStepRequest.permission_mode` is `"auto"`, not `"ask"`. Under
+`"ask"`, `permission::evaluate_call` (`permission/mod.rs:41-55`) unconditionally routes
+`browser_agent` (it's in `is_risky_tool`'s list, `permission/mod.rs:143`) to
+`AwaitApproval` — `execute_step` would return `"awaiting_approval"` and create a durable
+`Approval` (`grpc.rs:96-120`) **before `run_browser_agent_loop` ever starts**, which would mean
+every AI-loop click pauses immediately with no loop to pause/resume/stop at all. Since starting
+the AI loop is itself an explicit, supervised user action (the user is looking at the live tab)
+and the loop's own `PlanConfig` fields (`allowed_domains`, `max_steps`, `max_runtime_s`,
+`stop_criteria`, `max_cost_usd`, `require_approval`) are the actual risk-containment
+mechanism — already implemented and tested (domain-allowlist subdomain-attack tests,
+`browser_agent.rs:655-708`) — Phase 2 treats the outer `ExecuteStep`-level HITL gate as
+inapplicable here, matching how `"auto"` already works for ordinary chat tool use. A richer,
+purpose-built approval surface for specific risky in-loop actions (checkout, login, posting)
+is Phase 5's job, per the plan's own phase table (capability #8).
+
+### ZDR propagation
+
+- Client can never set `zdr` for an AI run — the Verevon gateway's `start_ai_run` reads
+  `zdr` from the server-held `BrowserRunMetadata.zdr` (`browser.rs:48-63`, already
+  server-derived at session-create time, `browser.rs:161`, unchanged), never from the request
+  body. This mirrors how `create_session` already refuses to trust a client-supplied flag today.
+- `zdr` flows: Verevon gateway → model-gateway `POST /v1/browser/runs` body → `ExecuteStepRequest.tool_input`
+  (`BrowserAgentInput.zdr`, `tool_bridge/mod.rs:110`, unchanged) → `PlanConfig.zdr`
+  (`browser_agent.rs:149`, unchanged) → `QuarryAgentClient::start_run`'s `zdr: bool` param and
+  every `.step(...)` call (`quarry_agent.rs:317,353`, unchanged). Quarry is, as today, the only
+  enforcement point that actually withholds persisted visual/DOM/cookie state — Phase 2 does
+  not touch that contract.
+- The **new** persistence surface Phase 2 introduces is session-core's durable run/thread
+  record and the orchestration-event replay buffer. This is metadata only — action types,
+  URLs, status strings, rationale text, and artifact **references** — never inlined
+  screenshot/DOM bytes and never `extracted_text` (excluded from the wire schema, see above).
+  When `zdr=true`, `screenshot_ref`/`dom_snapshot_ref` are whatever (possibly empty or
+  short-TTL) reference Quarry already hands back for a ZDR observation today — Phase 2 forwards
+  it as an opaque string, it does not change what Quarry decides to persist or expire.
+
+### Cookie/profile continuity fix required for the reused loop
+
+`run_browser_agent_loop` calls `client.start_run(&plan.config.org_id, &constraints, zdr, None)`
+(`browser_agent.rs:367-368`) — the 4th argument (`profile_id: Option<String>`) is hardcoded
+`None`, so an AI run today can never reuse the cookie state of a persistent profile. Fix:
+add `profile_id: Option<String>` to `PlanConfig` (`browser_agent.rs:134-150`) and to
+`BrowserAgentInput` (`tool_bridge/mod.rs:139-153`), thread it through
+`execute_browser_agent` into `PlanConfig`, and change the `start_run` call to
+`client.start_run(&plan.config.org_id, &constraints, zdr, plan.config.profile_id.clone())`.
+The Verevon gateway's `start_ai_run` populates this from `BrowserRunMetadata.profile_id`
+(above), so an AI run launched from a tab that already has a persistent profile attached
+inherits its cookies; a run launched from an ephemeral tab gets `None`, exactly as manual
+`create_session` already behaves.
+
+### Build sequencing (and why)
+
+1. **execution-core first** (`browser_agent.rs`, `browser_events.rs`, `llm_planner.rs`,
+   `tool_bridge/mod.rs`, `grpc.rs`, `state.rs`, plus the two proto edits): `profile_id`
+   threading, `reason`/`screenshot_ref`/`dom_snapshot_ref` surfacing, the
+   `StateStore`-aware pause/cancel gate, the new `pause_run` RPC. This is the layer recon
+   proved is real and independently testable (existing unit tests cover the domain-allowlist
+   and planner-mapping logic); extending it is lower-risk than building anything on top of an
+   unverified base, and every other layer is a thin proxy over it.
+2. **model-gateway second** (`browser_run.rs` new module, `sse.rs` mapping additions):
+   `POST /v1/browser/runs`, `POST /v1/browser/runs/:run_id/control`. Thin — mostly wiring
+   calls into layer 1 plus reusing the already-working `run_events_sse` unchanged — and can be
+   smoke-tested standalone with `grpcurl`/`curl` against a running execution-core before
+   touching Verevon.
+3. **Verevon gateway third** (`browser.rs` new routes, `chat/streams.rs` last-event-id fix):
+   mechanical, mirrors `proxy_model_json`/`proxy_sse_stream` patterns already used
+   throughout this file and `orchestration.rs`. Lowest-risk layer; can be curl-verified
+   against a live model-gateway before any SPA change lands.
+4. **SPA last** (`run-console-client.ts` type/handler extensions, new
+   `browser-run-client.ts`, `browser-loop.ts` controller rework, `KnowledgeComposer.tsx`
+   wiring change): every dependency is already live and independently verifiable by the time
+   this layer starts, so UI issues are isolated to the UI. This also matches how Phase 1 was
+   actually executed (gateway facade → view-model → workspace UI, per this doc's Phase 1 row).
+
+### SPA changes (files and functions)
+
+- `src/shared/api/run-console-client.ts`:
+  - Extend `BrowserActionDispatchedEvent` with `reason?: string`.
+  - Extend `BrowserObservationReceivedEvent` with `screenshotRef?: string`, `domSnapshotRef?: string`.
+  - Add `BrowserRunPausedEvent = { runId?: string; planId?: string; at?: string }` and
+    `BrowserRunResumedEvent` (same shape); add `onBrowserRunPaused?`/`onBrowserRunResumed?` to
+    `RunEventHandlers`, dispatched on SSE event names `browser_run_paused`/`browser_run_resumed`
+    inside `streamRunEvents` (`run-console-client.ts:222`, same dispatch pattern already used
+    for the other named events).
+
+- New `src/shared/api/browser-run-client.ts` (mirrors the shape of `run-console-client.ts`,
+  kept separate from `browser-client.ts` the same way `run-console-client.ts` is already kept
+  separate from `chat-client.ts`):
+  ```ts
+  export async function startBrowserAiRun(
+    orgId: string,
+    sessionId: string,
+    params: {
+      goal: string;
+      allowedDomains?: string[];
+      maxSteps?: number;
+      maxRuntimeSeconds?: number;
+      stopCriteria?: string;
+      requireApproval?: boolean;
+      maxCostUsd?: number;
+    },
+    signal?: AbortSignal,
+  ): Promise<{ runId: string; threadId: string; planId: string }>;
+
+  export async function controlBrowserAiRun(
+    runId: string,
+    action: 'pause' | 'resume' | 'stop',
+    signal?: AbortSignal,
+  ): Promise<void>;
+  ```
+  `startBrowserAiRun` POSTs `/api/v1/browser/sessions/{sessionId}/ai-runs`;
+  `controlBrowserAiRun` POSTs `/api/v1/browser/runs/{runId}/control`.
+
+- `src/features/dashboard/home/browser-loop.ts`: keep `BrowserLoopStatus`/`BrowserLoopState`
+  (BrowserChrome's rendering contract is unchanged) but make `createBrowserLoopController`'s
+  internals **server-event-driven** instead of locally-flagged:
+  - Remove the local `pauseRequested`/`stopRequested`/`resumeWaiters` promise machinery and
+    the `gate()` checkpoint (`browser-loop.ts:12-48` region) — there is no client-side loop
+    left to gate.
+  - `requestPause()`/`requestResume()`/`requestStop()` now call
+    `controlBrowserAiRun(runId, 'pause' | 'resume' | 'stop')` (network) instead of mutating
+    local booleans; they do not themselves flip `state().status` — that happens when the
+    corresponding SSE event arrives.
+  - Add reducer-style handlers the caller feeds from the SSE stream:
+    `onActionDispatched()` → `markActing()`dispatched-not-yet-observed sets status
+    `'acting'`; `onObservationReceived()` → `markStepDone()`; `onRunPaused()` → sets status
+    `'paused'`; `onRunResumed()` → sets status `'acting'`/`'suggesting'` (whichever the loop
+    was in before pause); `onDone()`/`onError()` → `finish('done' | 'stopped', error?)`.
+
+- `src/features/dashboard/home/KnowledgeComposer.tsx`:
+  - Delete `performBrowserAutoRun` (the client-side `for` loop, ~lines 648-691) — this is the
+    exact function Phase 2 replaces.
+  - Add `async function beginBrowserAiRun(goal: string): Promise<void>` that: calls
+    `startBrowserAiRun(orgId, sessionId, { goal, ...loopOptions })`, stores `runId`/`planId` in
+    a new signal, then calls the **existing** `streamRunEvents(runId, { onBrowserAction,
+    onBrowserObservation, onBrowserRunPaused, onBrowserRunResumed, onDone, onError },
+    controller.signal)` from `run-console-client.ts` (no new SSE client needed) — each handler
+    both feeds the `browser-loop.ts` reducer above and calls the existing
+    `recordBrowserRationale`/`withStepRationale` (`browser-session.ts`, unchanged) using the
+    event's `reason`/`screenshotRef`/`domSnapshotRef`, and `setPreview(attachBrowserSession(...))`
+    to keep the timeline/evidence drawer populated from streamed events instead of synchronous
+    REST responses.
+  - Rewire the AI-loop Play button from `onBrowserAutoRun={performBrowserAutoRun}` to
+    `onBrowserAutoRun={beginBrowserAiRun}`.
+  - Leave `performBrowserSuggestedAction` (the single-shot suggest+act button,
+    ~lines 621-646) **untouched** — Phase 2 targets the multi-step loop specifically; the
+    plan's capability #3 lists "action suggestions" and "bounded autonomous multi-step runs"
+    as two separate things, and the one-shot suggestion still legitimately uses the unary
+    `POST /v1/browser/suggest-action` (`http_routes.rs:1072`, unchanged).
+
+- `src/shared/api/browser-client.ts`: no changes. Its session/action/one-shot-suggestion/
+  profile calls remain the manual-browsing and single-suggestion surface, untouched by this
+  phase.
+
+## Success criteria
+
+- A user can open a URL inside Verevon, interact manually, let AI run bounded browser steps, replay every step, inspect evidence artifacts, and persist/reuse cookies only when explicitly using a persistent profile.
+- Quarry never reasons over vision. Model Plane never executes browser actions directly. ZDR sessions leave no persisted visual/cookie/profile artifacts.

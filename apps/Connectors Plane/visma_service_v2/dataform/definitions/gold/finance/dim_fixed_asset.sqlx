@@ -1,0 +1,33 @@
+config {
+  type: "table",
+  schema: "visma_gold_finance",
+  name: "dim_fixed_asset",
+  description: "Fixed asset register dimension. Maps to Power BI dimFixedAsset.",
+  tags: ["gold", "finance", "dimension"]
+}
+
+SELECT
+    -- An asset is identified by tenant + asset_id. business_unit_id is not part
+    -- of the key: the fact maps it by transaction date, this table holds the
+    -- tenant's current one, so they differ once the unit changed.
+    FARM_FINGERPRINT(CONCAT(
+        CAST(tenant_id AS STRING), '|',
+        CAST(asset_id AS STRING)
+    ))                                              AS fixed_asset_key,
+    tenant_id,
+    business_unit_id,
+    asset_id,
+    asset_description,
+    class_id,
+    asset_type,
+    record_type,
+    is_depreciable,
+    is_tangible,
+    location,
+    quantity,
+    useful_life,
+    book_balance,
+    last_modified_at,
+    'visma' AS source_system
+
+FROM ${ref("visma_silver", "dim_fixed_asset")}

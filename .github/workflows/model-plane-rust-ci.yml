@@ -1,0 +1,118 @@
+name: Model Plane Rust CI
+
+# CI gate for the Model Plane Rust workspace (apps/Model Plane/rust — 15
+# members: 10 mp-* crates, 4 services, 1 client). Before this file, NOTHING
+# built or tested this workspace: the only `apps/Model Plane/**` triggers in
+# the repo were buf.yml (proto/**) and eval-lab.yml (python/eval-lab-py/**),
+# and the three cargo workflows (dataplane-v2-ci, quarry-v2-ci, verevonv3-ci)
+# are each path-filtered to a different plane. Verified empirically: commits
+# a9fc70ca and e7a0ed6e touched only apps/Model Plane/rust/** and triggered
+# secret-scan alone.
+#
+# That gap hid three real defects at once, all invisible to a non-test build:
+#   * model-gateway: two `impl RunService` test doubles missing
+#     resolve_thread_owner (lib test target) — fixed in a9fc70ca.
+#   * execution-core: an AgentSkill initializer missing migration 0031's
+#     three ownership fields, E0063 (lib test target) — fixed in a9fc70ca.
+#   * execution-core: owner_action_descriptor_cannot_preserve_auto_permission,
+#     a security-posture test that never once ran because the E0063 above kept
+#     its target from building — fixed in e7a0ed6e.
+# `cargo check --workspace` stayed green through all three, which is exactly
+# why this gate checks test TARGETS and RUNS the lib tests, not just the
+# production build.
+#
+# proto/** is in the path filter because crates/mp-contracts/build.rs
+# generates from ../../../proto — a proto-only change can break this build.
+
+on:
+  pull_request:
+    paths:
+      - "apps/Model Plane/rust/**"
+      - "apps/Model Plane/proto/**"
+      - ".github/workflows/model-plane-rust-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/Model Plane/rust/**"
+      - "apps/Model Plane/proto/**"
+      - ".github/workflows/model-plane-rust-ci.yml"
+
+defaults:
+  run:
+    working-directory: "apps/Model Plane/rust"
+
+env:
+  CARGO_TERM_COLOR: always
+
+# A cold build of this workspace is ~10 minutes, so don't let superseded
+# pushes pile up.
+concurrency:
+  group: model-plane-rust-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Format + Check + Lib Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/Model Plane/rust -> target"
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "27.x"
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      # Split from the --all-targets check below on purpose: this is the
+      # signal that says "production code is fine, only test code broke" —
+      # the precise distinction that let the three defects above hide.
+      - name: Check workspace (non-test)
+        run: cargo check --workspace
+
+      # The build-side gate. --all-targets (not just --tests) also covers the
+      # 7 integration-test targets under services/*/tests and crates/*/tests;
+      # one of them, model-gateway's orchestration_http_test, carried a third
+      # copy of the missing-resolve_thread_owner bug that --lib never reached.
+      - name: Check every target compiles (tests, benches, examples)
+        run: cargo check --workspace --all-targets
+
+      # The run-side gate. Compiling a test proves nothing about whether its
+      # assertions hold — or even execute. Covers every unit AND integration
+      # target; the one live-stack test (execution-core's browser_agent_e2e)
+      # is correctly #[ignore]d and stays skipped here.
+      - name: Run tests
+        run: cargo test --workspace --no-fail-fast
+
+# Deliberately NOT in this workflow, so nobody mistakes its green for
+# coverage it does not provide:
+#
+#   * clippy. The workspace sets `pedantic = warn` in [workspace.lints.clippy],
+#     which yields 304 pre-existing warnings, so `-D warnings` would be red on
+#     day one. `cargo clippy --workspace --all-targets` does exit 0 today (no
+#     hard errors), but a non-denying clippy step costs a full build for
+#     almost no signal over `cargo check`. Burning down the 304 is its own
+#     task; add the denying step when it lands.
+#
+#   * RUSTFLAGS: "-D warnings" (which dataplane-v2-ci.yml sets). Same reason
+#     at the rustc level: this workspace has live dead_code warnings
+#     (execution-core's verification_result_for and ExecutionService::new /
+#     new_with_scheduled_step_verifier, model-gateway's parse_mcp_tool_name).
+#
+# Non-lib test execution WAS excluded here when this workflow landed, because
+# model-gateway's e2e_invoke_chain_test ::
+# invoke_stream_agentic_reuses_the_prepared_session_run was red on main. That
+# test asserted `agent_dispatch_rejected` for a setup that actually produces a
+# transport-level `Unavailable`, so it has since been re-pointed at the
+# contract that holds and the `rejected` half given its own test with a mock
+# Execution Core. The full suite is green (2070 passed, 24 ignored), so the
+# run step above is no longer restricted to --lib.

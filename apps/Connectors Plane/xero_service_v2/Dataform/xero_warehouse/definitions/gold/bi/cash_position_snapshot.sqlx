@@ -1,0 +1,42 @@
+config {
+  type: "table",
+  schema: "xero_datamart",
+  description: "Xero Bank Summary position snapshots at exact source report-cell grain. Values are non-additive across metrics and report snapshots and must not be combined with daily cash movement.",
+  assertions: {
+    nonNull: ["cash_position_snapshot_key", "tenant_id", "report_snapshot_key", "report_metric"],
+    uniqueKey: ["cash_position_snapshot_key"]
+  }
+}
+
+SELECT
+  FARM_FINGERPRINT(bank_balance_snapshot_key) AS cash_position_snapshot_key,
+  company_key,
+  date_key,
+  account_key,
+  bank_balance_snapshot_key,
+  report_snapshot_key,
+  tenant_id,
+  report_snapshot_id,
+  report_name,
+  report_from,
+  report_to,
+  report_date,
+  snapshot_as_of_date,
+  report_index,
+  section_index,
+  section_title,
+  row_index,
+  row_type,
+  row_label,
+  cell_index,
+  report_metric,
+  bank_account_id,
+  is_summary_row,
+  is_orphan_snapshot,
+  source_bank_amount,
+  is_report_snapshot,
+  is_non_additive,
+  is_non_additive_within_snapshot,
+  report_synced_at,
+  'xero' AS source_system
+FROM ${ref("xero_gold_finance", "fact_bank_balance_snapshot")}

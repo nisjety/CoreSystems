@@ -1,0 +1,130 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_gold_dimension_rows_complete",
+  description: "Every row of a silver dimension must reach its gold dimension. Gold may add rows (customers, suppliers and items that documents reference but the master list lacks, one supplier row per business unit) but it may not lose one. Returns one row per gold dimension and tenant with the number of silver rows that have no gold row.",
+  tags: ["assertion", "gold", "dimension"]
+}
+
+WITH missing AS (
+  SELECT 'visma_gold_finance.dim_account' AS gold_model, s.tenant_id, COUNT(*) AS missing_rows
+  FROM ${ref("visma_silver", "dim_account")} AS s
+  LEFT JOIN ${ref("visma_gold_finance", "dim_account")} AS g
+    ON g.tenant_id = s.tenant_id
+    AND g.account_cd = s.account_cd
+  WHERE g.tenant_id IS NULL
+  GROUP BY s.tenant_id
+  UNION ALL
+  SELECT 'visma_gold_finance.dim_customer' AS gold_model, s.tenant_id, COUNT(*) AS missing_rows
+  FROM ${ref("visma_silver", "dim_customer")} AS s
+  LEFT JOIN ${ref("visma_gold_finance", "dim_customer")} AS g
+    ON g.tenant_id = s.tenant_id
+    AND g.customer_id = s.customer_id
+  WHERE g.tenant_id IS NULL
+  GROUP BY s.tenant_id
+  UNION ALL
+  SELECT 'visma_gold_finance.dim_fixed_asset' AS gold_model, s.tenant_id, COUNT(*) AS missing_rows
+  FROM ${ref("visma_silver", "dim_fixed_asset")} AS s
+  LEFT JOIN ${ref("visma_gold_finance", "dim_fixed_asset")} AS g
+    ON g.tenant_id = s.tenant_id
+    AND g.asset_id = s.asset_id
+  WHERE g.tenant_id IS NULL
+  GROUP BY s.tenant_id
+  UNION ALL
+  SELECT 'visma_gold_finance.dim_supplier' AS gold_model, s.tenant_id, COUNT(*) AS missing_rows
+  FROM ${ref("visma_silver", "dim_supplier")} AS s
+  LEFT JOIN ${ref("visma_gold_finance", "dim_supplier")} AS g
+    ON g.tenant_id = s.tenant_id
+    AND g.supplier_id = s.supplier_id
+  WHERE g.tenant_id IS NULL
+  GROUP BY s.tenant_id
+  UNION ALL
+  SELECT 'visma_gold_common.dim_department' AS gold_model, s.tenant_id, COUNT(*) AS missing_rows
+  FROM ${ref("visma_silver", "dim_department")} AS s
+  LEFT JOIN ${ref("visma_gold_common", "dim_department")} AS g
+    ON g.tenant_id = s.tenant_id
+    AND g.department_id = s.department_id
+  WHERE g.tenant_id IS NULL
+  GROUP BY s.tenant_id
+  UNION ALL
+  SELECT 'visma_gold_common.dim_employee' AS gold_model, s.tenant_id, COUNT(*) AS missing_rows
+  FROM ${ref("visma_silver", "dim_employee")} AS s
+  LEFT JOIN ${ref("visma_gold_common", "dim_employee")} AS g
+    ON g.tenant_id = s.tenant_id
+    AND g.employee_id = s.employee_id
+  WHERE g.tenant_id IS NULL
+  GROUP BY s.tenant_id
+  UNION ALL
+  SELECT 'visma_gold_common.dim_financial_period' AS gold_model, s.tenant_id, COUNT(*) AS missing_rows
+  FROM ${ref("visma_silver", "dim_financial_period")} AS s
+  LEFT JOIN ${ref("visma_gold_common", "dim_financial_period")} AS g
+    ON g.tenant_id = s.tenant_id
+    AND g.financial_period_id = s.financial_period_id
+  WHERE g.tenant_id IS NULL
+  GROUP BY s.tenant_id
+  UNION ALL
+  SELECT 'visma_gold_common.dim_inventory_item' AS gold_model, s.tenant_id, COUNT(*) AS missing_rows
+  FROM ${ref("visma_silver", "dim_inventory_item")} AS s
+  LEFT JOIN ${ref("visma_gold_common", "dim_inventory_item")} AS g
+    ON g.tenant_id = s.tenant_id
+    AND g.inventory_id = s.inventory_id
+  WHERE g.tenant_id IS NULL
+  GROUP BY s.tenant_id
+  UNION ALL
+  SELECT 'visma_gold_common.dim_location' AS gold_model, s.tenant_id, COUNT(*) AS missing_rows
+  FROM ${ref("visma_silver", "dim_location")} AS s
+  LEFT JOIN ${ref("visma_gold_common", "dim_location")} AS g
+    ON g.tenant_id = s.tenant_id
+    AND g.location_id = s.location_id
+  WHERE g.tenant_id IS NULL
+  GROUP BY s.tenant_id
+  UNION ALL
+  SELECT 'visma_gold_common.dim_project' AS gold_model, s.tenant_id, COUNT(*) AS missing_rows
+  FROM ${ref("visma_silver", "dim_project")} AS s
+  LEFT JOIN ${ref("visma_gold_common", "dim_project")} AS g
+    ON g.tenant_id = s.tenant_id
+    AND g.project_id = s.project_id
+  WHERE g.tenant_id IS NULL
+  GROUP BY s.tenant_id
+  UNION ALL
+  SELECT 'visma_gold_common.dim_sales_person' AS gold_model, s.tenant_id, COUNT(*) AS missing_rows
+  FROM ${ref("visma_silver", "dim_sales_person")} AS s
+  LEFT JOIN ${ref("visma_gold_common", "dim_sales_person")} AS g
+    ON g.tenant_id = s.tenant_id
+    AND g.sales_person_id = s.sales_person_id
+  WHERE g.tenant_id IS NULL
+  GROUP BY s.tenant_id
+  UNION ALL
+  SELECT 'visma_gold_common.dim_subaccount' AS gold_model, s.tenant_id, COUNT(*) AS missing_rows
+  FROM ${ref("visma_silver", "dim_subaccount")} AS s
+  LEFT JOIN ${ref("visma_gold_common", "dim_subaccount")} AS g
+    ON g.tenant_id = s.tenant_id
+    AND g.subaccount_id = s.subaccount_id
+  WHERE g.tenant_id IS NULL
+  GROUP BY s.tenant_id
+  UNION ALL
+  SELECT 'visma_gold_common.dim_warehouse' AS gold_model, s.tenant_id, COUNT(*) AS missing_rows
+  FROM ${ref("visma_silver", "dim_warehouse")} AS s
+  LEFT JOIN ${ref("visma_gold_common", "dim_warehouse")} AS g
+    ON g.tenant_id = s.tenant_id
+    AND g.warehouse_id = s.warehouse_id
+  WHERE g.tenant_id IS NULL
+  GROUP BY s.tenant_id
+  UNION ALL
+  SELECT 'visma_gold_common.dim_business_unit' AS gold_model, s.tenant_id, COUNT(*) AS missing_rows
+  FROM (SELECT DISTINCT tenant_id, business_unit_id FROM ${ref("visma_silver", "dim_business_unit")}) AS s
+  LEFT JOIN ${ref("visma_gold_common", "dim_business_unit")} AS g
+    ON g.tenant_id = s.tenant_id
+    AND g.business_unit_id = s.business_unit_id
+  WHERE g.tenant_id IS NULL
+  GROUP BY s.tenant_id
+  UNION ALL
+  SELECT 'visma_gold_common.dim_company' AS gold_model, s.tenant_id, COUNT(*) AS missing_rows
+  FROM (SELECT DISTINCT tenant_id FROM ${ref("visma_silver", "dim_branch")}) AS s
+  LEFT JOIN ${ref("visma_gold_common", "dim_company")} AS g ON g.tenant_id = s.tenant_id
+  WHERE g.tenant_id IS NULL
+  GROUP BY s.tenant_id
+)
+
+SELECT gold_model, tenant_id, missing_rows
+FROM missing

@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "xero_reference",
+  name: "xero_account_reporting_mapping",
+  description: "Finance-owned effective-dated Xero account reporting mappings. Rows are keyed by tenant and account; no Visma account range or business-unit interpretation is reused."
+}

@@ -1,0 +1,11 @@
+.git
+.env
+.env.*
+!.env.example
+bin
+coverage
+tmp
+*.test
+*.out
+*.log
+Dockerfile*

@@ -1,0 +1,32 @@
+[package]
+name    = "xero-bff"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "xero-bff"
+path = "src/main.rs"
+
+[dependencies]
+xero-common = { workspace = true }
+xero-auth   = { workspace = true }
+xero-store  = { workspace = true }
+tokio       = { workspace = true }
+reqwest     = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+chrono      = { workspace = true }
+anyhow      = { workspace = true }
+tracing     = { workspace = true }
+tracing-subscriber = { workspace = true }
+dotenvy     = { workspace = true }
+base64      = { workspace = true }
+async-trait = { workspace = true }
+
+# HTTP server (BFF-only deps — kept out of the workspace dep set)
+axum        = "0.7"
+axum-extra  = { version = "0.9", features = ["cookie-private"] }
+tower-http  = { version = "0.6", features = ["trace", "fs", "cors"] }
+time        = "0.3"

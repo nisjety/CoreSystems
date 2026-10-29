@@ -1,0 +1,29 @@
+{
+  "endpoint_name": "packaging_types",
+  "bigquery_table": "visma_packaging_types",
+  "primary_key": "boxId",
+  "source": "erp_rest",
+  "api_method": "get_packaging_types",
+  "api_endpoint": "/v1/packagingType",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "boxId",
+    "boxWeight",
+    "maxWeight",
+    "lastModifiedDateTime"
+  ],
+  "datamart": {
+    "ready": false,
+    "query_file": "config/queries/packaging_type.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "erp_rest",
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    }
+  }
+}

@@ -1,0 +1,47 @@
+[package]
+name = "graph-index-rs"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "graph-index"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+sqlx.workspace = true
+axum = { version = "0.8", features = ["json"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+envy = "0.4"
+async-nats.workspace = true
+nats-connection-rs = { path = "../nats-connection-rs" }
+futures = "0.3"
+reqwest = { version = "0.12", features = ["json"] }
+jsonwebtoken.workspace = true
+# v5 (SHA-1, name-based) gives deterministic graph identifiers so re-extracting
+# the same content resolves onto the same entity instead of minting a new one.
+uuid = { version = "1", features = ["v4", "v5"] }
+chrono.workspace = true
+thiserror.workspace = true
+event-envelope-rs = { path = "../event-envelope-rs" }
+pg-org-scope-rs = { path = "../pg-org-scope-rs" }
+# Neo4j Bolt driver for the rebuildable, org-scoped graph read-model
+# (native multi-hop Cypher traversal). Postgres stays canonical.
+neo4rs = "0.8"
+# gRPC server (graph_v1.proto)
+tonic.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
+
+[dev-dependencies]
+rand = "0.8"
+rsa = { version = "0.9", features = ["pem"] }
+tower = { workspace = true, features = ["util"] }

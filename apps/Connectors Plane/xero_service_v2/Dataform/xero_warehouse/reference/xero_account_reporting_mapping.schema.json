@@ -1,0 +1,23 @@
+[
+  {"name":"mapping_id","type":"STRING","mode":"NULLABLE","description":"Stable unique finance mapping identifier; the Dataform validity assertion requires it for every row."},
+  {"name":"tenant_id","type":"STRING","mode":"REQUIRED","description":"Xero tenant/organisation UUID."},
+  {"name":"account_id","type":"STRING","mode":"REQUIRED","description":"Xero AccountID UUID."},
+  {"name":"valid_from","type":"DATE","mode":"REQUIRED","description":"Inclusive finance-policy effective date."},
+  {"name":"valid_to","type":"DATE","mode":"NULLABLE","description":"Exclusive finance-policy effective date; NULL means open-ended."},
+  {"name":"mapping_source","type":"STRING","mode":"REQUIRED","description":"Finance-approved mapping source or policy identifier."},
+  {"name":"mapping_version","type":"STRING","mode":"REQUIRED","description":"Immutable mapping-version identifier."},
+  {"name":"bs_pl","type":"STRING","mode":"REQUIRED","description":"Approved balance-sheet or profit-and-loss classification."},
+  {"name":"fsli_1","type":"STRING","mode":"REQUIRED","description":"Approved first-level financial-statement line item."},
+  {"name":"fsli_2","type":"STRING","mode":"NULLABLE","description":"Optional approved second-level financial-statement line item."},
+  {"name":"fsli_3","type":"STRING","mode":"NULLABLE","description":"Optional approved third-level financial-statement line item."},
+  {"name":"ebitda_flag","type":"BOOLEAN","mode":"NULLABLE","description":"Optional approved EBITDA classification."},
+  {"name":"net_income_flag","type":"BOOLEAN","mode":"NULLABLE","description":"Optional approved net-income classification."},
+  {"name":"cash_flow_1","type":"STRING","mode":"NULLABLE","description":"Optional approved cash-flow level one."},
+  {"name":"cash_flow_2","type":"STRING","mode":"NULLABLE","description":"Optional approved cash-flow level two."},
+  {"name":"cash_flow_3","type":"STRING","mode":"NULLABLE","description":"Optional approved cash-flow level three."},
+  {"name":"working_capital_flag","type":"BOOLEAN","mode":"NULLABLE","description":"Optional approved working-capital classification."},
+  {"name":"capex_flag","type":"BOOLEAN","mode":"NULLABLE","description":"Optional approved capex classification."},
+  {"name":"intercompany_flag","type":"BOOLEAN","mode":"NULLABLE","description":"Optional approved intercompany classification."},
+  {"name":"approved_at","type":"TIMESTAMP","mode":"REQUIRED","description":"Timestamp of finance approval."},
+  {"name":"is_active","type":"BOOLEAN","mode":"REQUIRED","description":"Whether this policy row may be applied."}
+]

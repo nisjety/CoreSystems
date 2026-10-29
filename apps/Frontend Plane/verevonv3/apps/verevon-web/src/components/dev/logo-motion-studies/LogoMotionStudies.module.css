@@ -1,0 +1,168 @@
+.page {
+	min-height: 100svh;
+	padding: clamp(28px, 5vw, 80px) clamp(20px, 5vw, 72px) 72px;
+	background: var(--verevon-bg);
+	color: var(--verevon-text);
+}
+
+.intro {
+	max-width: 720px;
+	margin: 0 auto clamp(28px, 4vw, 48px);
+	text-align: center;
+}
+
+.kicker {
+	margin: 0 0 18px;
+	font: 600 0.67rem/1 var(--font-geist), Geist, sans-serif;
+	letter-spacing: 0.15em;
+	text-transform: uppercase;
+	color: var(--verevon-text-muted);
+}
+
+.intro h1 {
+	margin: 0;
+	font: 500 clamp(2.6rem, 5vw, 5.1rem) / 0.96 Manrope, Arial, sans-serif;
+	letter-spacing: -0.07em;
+}
+
+.intro > p:not(.kicker) {
+	max-width: 570px;
+	margin: 24px auto 0;
+	font: 400 clamp(1rem, 1.25vw, 1.15rem) / 1.55 Manrope, Arial, sans-serif;
+	letter-spacing: -0.02em;
+	color: var(--verevon-text-muted);
+}
+
+.speedControl {
+	margin-top: 20px;
+	padding: 8px 14px;
+	border: 1px solid var(--verevon-border);
+	border-radius: 999px;
+	background: transparent;
+	color: var(--verevon-text-muted);
+	font: 500 12px/1.4 Geist, sans-serif;
+	cursor: pointer;
+}
+
+.speedControl[aria-pressed="true"] { background: var(--verevon-text); color: var(--verevon-bg); }
+.speedControl:focus-visible { outline: 2px solid var(--verevon-coral); outline-offset: 4px; }
+
+.studies {
+	display: grid;
+	max-width: 1180px;
+	margin: 0 auto;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: clamp(18px, 2.2vw, 34px);
+}
+
+.study {
+	display: grid;
+	gap: 20px;
+}
+
+.stage {
+	position: relative;
+	display: grid;
+	min-height: clamp(285px, 29vw, 382px);
+	place-items: center;
+	overflow: hidden;
+	border: 1px solid color-mix(in srgb, var(--verevon-border) 74%, transparent);
+	border-radius: 28px;
+	background:
+		radial-gradient(circle at 50% 49%, rgb(255 255 255 / 78%), transparent 45%),
+		linear-gradient(140deg, #f4f1eb 0%, #f8f8f7 58%, #ecebea 100%);
+}
+
+.mark {
+	--flag-motion: full;
+	width: min(72%, 310px);
+	height: auto;
+	overflow: visible;
+	color: var(--verevon-primary);
+}
+
+.staticMark, .reducedNote { display: none; }
+.ribbonCanvas { display: block; width: 100%; height: 100%; }
+.compareReveal { max-width: 1120px; margin: 0 auto; }
+.comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+.comparisonStage { min-height: 380px; }
+.comparisonStage .mark { width: min(78%, 355px); }
+.variantDetail { margin: 14px 2px 0; color: var(--verevon-text-muted); font: 400 13px/1.5 Manrope, Arial, sans-serif; }
+.lockupViewport { position: relative; width: min(78%, 355px); aspect-ratio: 82 / 68; container-type: inline-size; color: var(--verevon-primary); }
+.lockupMark { position: absolute; inset: 0; transform-origin: 50% 50%; }
+.comparisonStage .lockupMark .mark { display: block; width: 100%; height: 100%; }
+.wordmark { position: absolute; top: 50%; left: 30%; display: flex; gap: 0.18em; transform: translateY(-50%); font: 400 12cqw/1.2 var(--font-verevon); font-synthesis: none; white-space: nowrap; }
+.letterWindow { display: block; overflow: hidden; perspective: 400px; padding: 0.05em 0; }
+.letterWindow > span { display: block; transform-origin: 50% 100%; transform: translateY(1.12em) rotateX(-90deg); opacity: 0; backface-visibility: hidden; }
+@media (max-width: 700px) { .comparison { grid-template-columns: 1fr; gap: 28px; } .comparisonStage { min-height: 330px; } }
+.reveal { max-width: 900px; margin: 0 auto; }
+.revealStage { min-height: clamp(340px, 37vw, 470px); }
+.revealStage .mark { width: min(65%, 355px); }
+.stageCaption { position: absolute; bottom: 22px; font: 400 11px/1.4 Geist, sans-serif; color: #8b8780; }
+.revealControls { display: flex; justify-content: center; gap: 12px; margin: 22px 0 30px; flex-wrap: wrap; }
+.revealControls button { padding: 10px 17px; border: 1px solid var(--verevon-border); border-radius: 999px; background: transparent; font: 500 12px/1.4 Geist, sans-serif; cursor: pointer; }
+.revealControls button:first-child, .revealControls button[aria-pressed="true"] { background: var(--verevon-text); color: var(--verevon-bg); }
+.poses { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; }
+.poses button { padding: 16px 0; text-align: left; border: 0; border-top: 1px solid var(--verevon-border); background: transparent; color: inherit; cursor: pointer; }
+.poses button[aria-pressed="true"] { border-color: var(--verevon-primary); }
+.poses strong { display: block; font: 600 14px/1.5 Manrope, Arial, sans-serif; }
+.poses span { display: block; margin-top: 7px; color: var(--verevon-text-muted); font: 400 13px/1.5 Manrope, Arial, sans-serif; }
+.revealControls button:focus-visible, .poses button:focus-visible { outline: 2px solid var(--verevon-coral); outline-offset: 4px; }
+@media (max-width: 550px) { .poses { grid-template-columns: 1fr; gap: 0; } }
+.studyNumber { position: absolute; top: 20px; left: 22px; font: 400 11px/1 Geist, sans-serif; color: #8b8780; }
+.controls { display: flex; gap: 22px; align-items: center; }
+.footnote { margin: 38px auto 0; text-align: center; font: 400 12px/1.5 Geist, sans-serif; color: var(--verevon-text-muted); }
+
+.copy {
+	display: grid;
+	gap: 10px;
+	padding: 0 4px;
+}
+
+.copy h2 {
+	margin: 0;
+	font: 600 clamp(1.2rem, 1.6vw, 1.42rem) / 1.1 Manrope, Arial, sans-serif;
+	letter-spacing: -0.05em;
+}
+
+.copy p {
+	min-height: 4.65em;
+	margin: 0;
+	font: 400 0.94rem/1.55 Manrope, Arial, sans-serif;
+	letter-spacing: -0.017em;
+	color: var(--verevon-text-muted);
+}
+
+.copy button {
+	justify-self: start;
+	margin-top: 3px;
+	padding: 0;
+	border: 0;
+	border-bottom: 1px solid currentColor;
+	border-radius: 0;
+	background: transparent;
+	color: var(--verevon-text);
+	font: 600 0.75rem/1.6 var(--font-geist), Geist, sans-serif;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	cursor: pointer;
+	transition: color 180ms ease, transform 180ms ease;
+}
+
+.copy button:hover { color: var(--verevon-coral-deep); transform: translateX(3px); }
+.copy button:focus-visible { outline: 2px solid var(--verevon-coral); outline-offset: 5px; }
+
+@media (max-width: 900px) {
+	.studies { grid-template-columns: 1fr; max-width: 560px; }
+	.stage { min-height: 340px; }
+	.copy p { min-height: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.mark { --flag-motion: reduce; }
+	.animatedMark, .controls, .footnote, .speedControl, .revealControls, .poses, .stageCaption { display: none; }
+	.staticMark { display: inline; }
+	.lockupMark { transform: translateX(-36.5%) scale(0.27) !important; }
+	.letterWindow > span { transform: none !important; opacity: 1 !important; }
+	.reducedNote { display: block; font: 400 12px/1.5 Geist, sans-serif; color: var(--verevon-text-muted); }
+}

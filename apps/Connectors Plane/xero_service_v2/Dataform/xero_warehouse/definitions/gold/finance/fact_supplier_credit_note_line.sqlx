@@ -1,0 +1,30 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "ACCPAYCREDIT lines with source amounts retained and ambiguous child sets excluded from additive measures.",
+  assertions: { nonNull: ["tenant_id", "line_item_id", "credit_note_line_key"], uniqueKey: ["credit_note_line_key"] }
+}
+
+SELECT FARM_FINGERPRINT(l.tenant_id) AS company_key,
+       FARM_FINGERPRINT(CAST(l.credit_note_date_local AS STRING)) AS date_key,
+       FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.currency_code)) AS currency_key,
+       IF(l.account_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.account_id))) AS account_key,
+       l.credit_note_line_key, l.credit_note_key, l.tenant_id, l.credit_note_id,
+       l.line_item_id, l.credit_note_type AS document_type, l.status,
+       l.is_deleted, l.is_voided, l.is_line_set_ambiguous,
+       l.account_id, l.account_code, l.description, l.quantity, l.unit_amount,
+       l.status IN ('AUTHORISED', 'PAID') AND NOT l.is_line_set_ambiguous AS is_reportable,
+       l.net_amount_in_currency AS source_net_amount_in_currency,
+       IF(l.status IN ('AUTHORISED', 'PAID') AND NOT l.is_line_set_ambiguous,
+          l.net_amount_in_currency, NULL) AS amount_in_currency,
+       IF(l.status IN ('AUTHORISED', 'PAID') AND NOT l.is_line_set_ambiguous,
+          l.tax_amount, NULL) AS vat_total_in_currency,
+       l.line_amount_raw, l.currency_code,
+       IF(l.tracking_category_1_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.tracking_category_1_id))) AS tracking_category_1_key,
+       IF(l.tracking_option_1_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.tracking_option_1_id))) AS tracking_option_1_key,
+       IF(l.tracking_category_2_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.tracking_category_2_id))) AS tracking_category_2_key,
+       IF(l.tracking_option_2_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.tracking_option_2_id))) AS tracking_option_2_key,
+       l.tracking_category_1_id, l.tracking_option_1_id,
+       l.tracking_category_2_id, l.tracking_option_2_id, l.synced_at, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_credit_note_line")} AS l
+WHERE l.credit_note_type = 'ACCPAYCREDIT'

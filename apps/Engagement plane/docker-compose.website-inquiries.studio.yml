@@ -1,0 +1,35 @@
+# First-party inquiry delivery, separate from provider OAuth and company exports.
+services:
+  website-inquiries-init:
+    image: alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
+    command: ["sh", "-ec", "cp /source/bindings.json /leads/bindings.json; cp /source/triodelab_write_token /leads/triodelab_write_token; cp /source/triodelab_read_token /leads/triodelab_read_token; cp /source/triodelab_read_token /marketing/read_token; chown -R 10001:10001 /leads; chown -R 100:101 /marketing; chmod 0700 /leads /marketing; chmod 0600 /leads/* /marketing/*"]
+    volumes:
+      - ${STUDIO_WEBSITE_INQUIRIES_DIR:?protected website installation directory required}:/source:ro
+      - website-inquiries-installations:/leads
+      - marketing-outcomes-reader:/marketing
+  leads-core:
+    environment:
+      WEBSITE_INQUIRY_BINDINGS_FILE: /run/site-inquiries/bindings.json
+    volumes:
+      - website-inquiries-installations:/run/site-inquiries:ro
+    depends_on:
+      website-inquiries-init:
+        condition: service_completed_successfully
+  marketing-core:
+    environment:
+      LEADS_OUTCOMES_URL: http://leads-core:3164
+      LEADS_OUTCOMES_READ_TOKEN_FILE: /run/outcomes/read_token
+    volumes:
+      - marketing-outcomes-reader:/run/outcomes:ro
+    depends_on:
+      website-inquiries-init:
+        condition: service_completed_successfully
+volumes:
+  website-inquiries-installations:
+  marketing-outcomes-reader:

@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+// Vendored from /Volumes/Lagring/Triodelab/CoreSystem/apps/Model Plane/proto/model_plane/v1/browser.proto
+// Quarry only consumes the BrowserBrokerService — we vendor the wire schema to keep Quarry buildable
+// in isolation. Update with `tools/sync-protos.sh` if the upstream contract changes.
+
+package model_plane.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service BrowserBrokerService {
+  rpc AcquireGrant(AcquireGrantRequest) returns (AcquireGrantResponse);
+  rpc RevokeGrant(RevokeGrantRequest) returns (RevokeGrantResponse);
+  rpc ValidateGrant(ValidateGrantRequest) returns (ValidateGrantResponse);
+  rpc Health(BrowserHealthRequest) returns (BrowserHealthResponse);
+}
+
+message AcquireGrantRequest {
+  string session_key = 1;
+  string mode = 2;
+  string org_id = 3;
+}
+
+message AcquireGrantResponse {
+  string grant_id = 1;
+  string endpoint = 2;
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+message RevokeGrantRequest {
+  string grant_id = 1;
+  string reason = 2;
+}
+
+message RevokeGrantResponse {
+  bool revoked = 1;
+}
+
+message BrowserHealthRequest {}
+
+message BrowserHealthResponse {
+  string status = 1;
+}
+
+message ValidateGrantRequest {
+  string grant_id = 1;
+}
+
+message ValidateGrantResponse {
+  string grant_id = 1;
+  bool active = 2;
+  google.protobuf.Timestamp expires_at = 3;
+}

@@ -1,0 +1,1025 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+// AutonomyRung — the shared autonomy ladder a plan approval grants.
+import "model_plane/v1/runs.proto";
+import "model_plane/v1/events.proto";
+
+// SessionCore — authoritative state for thread timeline, run metadata,
+// checkpoints, instruction loading, compaction summaries, and auto-memory index.
+// Single writer for threads, messages, runs, and checkpoints.
+service SessionCore {
+  // Create a new conversation thread within a session.
+  rpc CreateThread(CreateThreadRequest) returns (CreateThreadResponse);
+
+  // Append a message (user, assistant, or system) to a thread.
+  rpc AppendMessage(AppendMessageRequest) returns (AppendMessageResponse);
+
+  // Start a new run within a thread.
+  rpc StartRun(StartRunRequest) returns (StartRunResponse);
+
+  // Start one prepared, deterministic service-owned scheduled run. This is
+  // intentionally distinct from StartRun: only orchestrator-core may use a
+  // thread that Capability Core prepared for a freshly authorized cron fire.
+  rpc StartScheduledRun(StartScheduledRunRequest) returns (StartRunResponse);
+
+  // Prepare the deterministic service-owned thread for one freshly
+  // Control-authorized schedule fire. The decision bearer is consumed only by
+  // this RPC and is never persisted or forwarded to Temporal.
+  rpc PrepareScheduledRunThread(PrepareScheduledRunThreadRequest) returns (PrepareScheduledRunThreadResponse);
+
+  // Record completion of a single step within a run.
+  rpc CompleteStep(CompleteStepRequest) returns (CompleteStepResponse);
+
+  // Durably reserve an inline tool-action audit intent before the tool runs.
+  // This does not advance or terminate the run/plan.
+  rpc ReserveToolAction(ReserveToolActionRequest) returns (ReserveToolActionResponse);
+
+  // Finalize a previously reserved inline tool action after execution.
+  // This persists the final audit event without changing run/plan lifecycle.
+  rpc FinalizeToolAction(FinalizeToolActionRequest) returns (FinalizeToolActionResponse);
+
+  // Persist a checkpoint snapshot for a run.
+  rpc SaveCheckpoint(SaveCheckpointRequest) returns (SaveCheckpointResponse);
+
+  // Replay the thread event log as a stream of Events.
+  // Ordering: (ts, event_id) with event_id as deterministic tiebreaker.
+  rpc ReplayThread(ReplayThreadRequest) returns (stream Event);
+
+  // Assemble the full context window for a model call.
+  // Order: policy -> workspace -> agent -> user -> thread recent -> episodic
+  //        -> skill index -> skill expansion -> retrieval snippets -> current prompt/tool output.
+  rpc GetContextAssembly(GetContextAssemblyRequest) returns (GetContextAssemblyResponse);
+
+  // Trigger on-demand checkpoint compaction for all runs with pending events.
+  rpc CompactNow(CompactNowRequest) returns (CompactNowResponse);
+
+  // Upsert a learned/edited agent skill body (closed learning loop, G7).
+  // session-core owns the `agent_skills` table (skill bodies); capability-core's
+  // registry is the catalog over these rows. Provenance-protected: a
+  // `background_review` upsert never overwrites a `user`-authored skill.
+  rpc UpsertAgentSkill(UpsertAgentSkillRequest) returns (UpsertAgentSkillResponse);
+
+  // List an org's agent skills (the read path for the gateway's MatchSkills
+  // cache, G7's "last mile"): learned skills persisted via UpsertAgentSkill are
+  // read back here so they become usable in inference, not just stored.
+  // Org-scoped — only the caller's org's skills are returned.
+  rpc ListAgentSkills(ListAgentSkillsRequest) returns (ListAgentSkillsResponse);
+
+  // SetAgentSkillEnabled — flip one skill's injection switch by id.
+  //
+  // UpsertAgentSkill cannot do this: it is keyed by (org_id, name) and upserts
+  // the WHOLE skill, so calling it with only `enabled` would blank the content,
+  // triggers and restrictions of the skill it was meant to pause. The quality
+  // policy needs to stop injecting a skill without destroying it, which is
+  // precisely what that would do.
+  rpc SetAgentSkillEnabled(SetAgentSkillEnabledRequest) returns (SetAgentSkillEnabledResponse);
+
+  // List a thread's conversation messages in order (the durable transcript
+  // source for the G7 learning review). Distinct from the gateway's in-memory
+  // ListThreadMessages cache — this reads the session-core system-of-record.
+  // Org-scoped via the owning thread, so a caller reads only its own org's
+  // conversation.
+  rpc ListConversation(ListConversationRequest) returns (ListConversationResponse);
+
+  // List an authenticated user's durable conversation threads for cross-device
+  // chat history. Timestamps are based on creation/message writes, never reads.
+  rpc ListThreads(ListThreadsRequest) returns (ListThreadsResponse);
+
+  // Set user-facing presentation attributes for a thread. Session Core remains
+  // the single writer; edge gateways may normalize the request but must not
+  // keep a competing history index or presentation cache.
+  rpc UpdateThreadPresentation(UpdateThreadPresentationRequest) returns (UpdateThreadPresentationResponse);
+
+  // Hide one thread from the user's ordinary history without erasing its
+  // append-only model/audit evidence. Data-subject erasure is a separate,
+  // explicitly authorized Control-Plane workflow.
+  rpc ArchiveThread(ArchiveThreadRequest) returns (ArchiveThreadResponse);
+
+  // Archive every currently visible thread for one authenticated user. This is
+  // the durable equivalent of "clear chat history" in a client sidebar.
+  rpc ArchiveThreads(ArchiveThreadsRequest) returns (ArchiveThreadsResponse);
+
+  // Permanently erase one thread and its thread-owned durable evidence. This is
+  // owner-bound: Session Core checks the verified caller against the thread's
+  // user (or exact system owner) before deleting any row.
+  rpc DeleteThread(DeleteThreadRequest) returns (DeleteThreadResponse);
+
+  // Permanently erase every thread owned by one authenticated user. This is
+  // the durable equivalent of a destructive "clear chat history" action.
+  rpc DeleteThreads(DeleteThreadsRequest) returns (DeleteThreadsResponse);
+
+  // Permanently erase the threads explicitly bound to a Space for its owner.
+  // This is a Control-authorized data-subject deletion operation, available
+  // only to the exact deletion coordinator service; it is not a general
+  // service-user impersonation API.
+  rpc DeleteSpaceThreads(DeleteSpaceThreadsRequest) returns (DeleteSpaceThreadsResponse);
+
+  // Set a run's mode (execute | plan | reactive | research) durably on the
+  // run record (ROADMAP P3). The gateway's in-memory plan-mode cache
+  // write-throughs here so plan mode survives restart — auditability/resume
+  // (GOAL.md §7). The in-memory cache stays authoritative for the request.
+  rpc SetRunMode(SetRunModeRequest) returns (SetRunModeResponse);
+
+  // Claim one service-owned scheduled step before Execution Core dispatches
+  // it. The request is content-free and must match the deterministic run
+  // bindings persisted by StartScheduledRun. A duplicate claim returns the
+  // original receipt and never opens a second effect attempt.
+  rpc ClaimScheduledStep(ClaimScheduledStepRequest) returns (ClaimScheduledStepResponse);
+
+  // Record the metadata-only outcome for a previously claimed scheduled step.
+  // `unknown_outcome` is explicit: a lost transport response is not converted
+  // into success or an immediate blind retry.
+  rpc RecordScheduledStepReceipt(RecordScheduledStepReceiptRequest) returns (RecordScheduledStepReceiptResponse);
+}
+
+// ManagedRunLifecycle owns the additive, durable terminalization protocol for
+// runs whose producers can lose a terminal RPC response. It intentionally
+// lives beside, rather than inside, SessionCore so legacy SessionCore clients
+// and mocks remain source-compatible.
+service ManagedRunLifecycle {
+  // Start a run and its single terminalization obligation atomically.
+  rpc StartManagedRun(StartManagedRunRequest) returns (StartManagedRunResponse);
+
+  // Record one immutable, metadata-only terminal outcome from an authenticated
+  // workload identity. The response is a durable terminal receipt.
+  rpc RecordTerminalOutcome(RecordTerminalOutcomeRequest) returns (RecordTerminalOutcomeResponse);
+
+  // Renew the server-owned recovery deadline while an accepted producer is
+  // still working. This request cannot carry content or choose a deadline.
+  rpc HeartbeatManagedRun(HeartbeatManagedRunRequest) returns (HeartbeatManagedRunResponse);
+
+  // Persist a completed run's final answer, so a caller that restarts can still
+  // read what the run concluded.
+  //
+  // Deliberately SEPARATE from RecordTerminalOutcome, which is metadata-only by
+  // design: that receipt must stay content-free so it is safe on every run,
+  // including a zero-retention one. This call is the explicit, separately
+  // authorized, separately auditable act of writing content — and it is refused
+  // outright for a zero-retention caller, which was promised no durable trace.
+  rpc RecordRunOutput(RecordRunOutputRequest) returns (RecordRunOutputResponse);
+}
+
+// --- CreateThread ---
+
+message CreateThreadRequest {
+  // Session this thread belongs to.
+  string session_key = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+
+  // User who initiated the thread.
+  string user_id = 3;
+
+  // Optional metadata.
+  google.protobuf.Struct metadata = 4;
+
+  // Canonical Control-registered Space reference. This is distinct from a
+  // workspace/content-selection ID and is accepted only with the complete
+  // authority envelope below.
+  string space_id = 5;
+
+  // Opaque, short-lived Control decision reference that authorized creation.
+  string space_decision_ref = 6;
+
+  // Server-owned recipient audience reference for the conversation/case.
+  string recipient_audience_ref = 7;
+
+  // Versioned privacy policy reference resolved by Control.
+  string privacy_policy_ref = 8;
+
+  // Aggregate Control authority revision observed for this request.
+  uint64 authority_revision = 9;
+
+  // Exact owner-plane resource authorization bound to this thread. Space
+  // membership may narrow a resource decision but may never replace it.
+  string resource_authorization_ref = 10;
+
+  // Complete Ed25519-signed Control decision envelope. Empty only when every
+  // Space-context field above is empty (legacy/unscoped thread).
+  string space_decision_token = 11;
+
+  // Exact operation binding copied from the signed Control decision. Session
+  // Core rechecks these against the token before it persists a Space thread.
+  string action_schema_hash = 12;
+  string payload_digest = 13;
+  string idempotency_key = 14;
+
+  // Revision of the server-owned recipient audience captured for this thread.
+  // This is distinct from the aggregate authority revision so replay, share,
+  // and fork paths can detect a participant-set change directly.
+  uint64 recipient_audience_revision = 15;
+
+  // Opaque commitment to the exact server-resolved recipient set for the
+  // revision above. It prevents a reference/revision from being reused for a
+  // different participant set during share, replay, or fork.
+  string recipient_audience_hash = 16;
+
+  // Which surface created this thread: "chat" | "space" | "agent_run" |
+  // "support" | "system". Declared by the invoking surface at creation and
+  // never changes afterward -- a thread does not become "chat" because a user
+  // later opens it from the chat page. Empty defaults to "chat" for callers
+  // that predate this field; a non-empty value is validated against the
+  // allowed set and MUST agree with space_id (origin="space" iff space_id is
+  // set) or the request is rejected. This is what lets the chat listing filter
+  // on a declared fact instead of inferring scope from space_id emptiness,
+  // which is how the Agent Run Console and Support-assist threads used to leak
+  // into the chat sidebar: both invoke with no thread/session key, so the
+  // created thread looked identical to an ordinary new chat.
+  string origin = 17;
+}
+
+message CreateThreadResponse {
+  // Newly created thread identifier (ULID).
+  string thread_id = 1;
+
+  // Creation timestamp.
+  google.protobuf.Timestamp created_at = 2;
+}
+
+// --- AppendMessage ---
+
+message AppendMessageRequest {
+  // Thread to append to.
+  string thread_id = 1;
+
+  // Message role: "user", "assistant", "system", "tool".
+  string role = 2;
+
+  // Message content.
+  string content = 3;
+
+  // Optional metadata (tool call results, citations, etc.).
+  google.protobuf.Struct metadata = 4;
+
+  // Complete Control-issued authority for an existing scoped thread append.
+  // It is required by Session Core for subsequent messages in a Space-bound
+  // thread and is never persisted as a bearer.
+  string space_id = 5;
+  string space_decision_ref = 6;
+  string recipient_audience_ref = 7;
+  uint64 recipient_audience_revision = 8;
+  string recipient_audience_hash = 9;
+  string privacy_policy_ref = 10;
+  uint64 authority_revision = 11;
+  string resource_authorization_ref = 12;
+  string space_decision_token = 13;
+  string action_schema_hash = 14;
+  string payload_digest = 15;
+  string idempotency_key = 16;
+
+  // Display name of the agent persona this assistant message answered as, at
+  // the time of the turn. Presentation history only — never an authority
+  // claim: the invocation itself was authorized upstream (Control membership
+  // ∩ binding), and a later rename must not rewrite what the room saw. Empty
+  // for user/system/tool messages and for un-personified assistant turns.
+  string agent_name = 17;
+}
+
+message AppendMessageResponse {
+  // Assigned message sequence number within the thread.
+  uint64 sequence = 1;
+}
+
+// --- StartRun ---
+
+message StartRunRequest {
+  // Thread this run executes within.
+  string thread_id = 1;
+
+  // Parent run (empty for top-level runs).
+  string parent_run_id = 2;
+
+  // Agent definition to use.
+  string agent_id = 3;
+
+  // The user's goal for this run.
+  string goal = 4;
+
+  // Run mode: "execute", "plan", "reactive".
+  string mode = 5;
+
+  // Tenant and user context.
+  string org_id = 6;
+  string user_id = 7;
+}
+
+message StartRunResponse {
+  // Newly created run identifier (ULID).
+  string run_id = 1;
+
+  // Creation timestamp.
+  google.protobuf.Timestamp created_at = 2;
+
+  // The owner session-core actually persisted, which is ALWAYS the verified
+  // caller's own identity and never the requested `user_id`. For a human it is
+  // their actor id; for a durable workflow with no human it is that workload's
+  // service principal.
+  //
+  // Echoed so the caller can stamp the same actor on the run's lifecycle
+  // envelopes. Without it a system-initiated run carries one actor string in
+  // `runs.user_id` and a different, locally-invented one on its NATS events,
+  // and nothing downstream can join the two.
+  string owner_id = 3;
+}
+
+// StartScheduledRunRequest contains the non-secret preparation outcome plus a
+// fresh direct-hop Control decision Orchestrator Core obtains immediately
+// before Session Core creates/reuses the deterministic scheduled run. That
+// execution bearer is never persisted in Temporal/task/event payloads.
+message StartScheduledRunRequest {
+  // Exact service-owned thread returned by PrepareScheduledRunThread.
+  string thread_id = 1;
+
+  // Deterministic task-backed Model run identifier. Retries of the same fire
+  // return the existing exact run; it must never name a human-owned run.
+  string run_id = 2;
+
+  // Tenant and immutable schedule-fire identity.
+  string org_id = 3;
+  string schedule_id = 4;
+  string fire_key = 5;
+
+  // The run's non-secret execution details. Provider/effect authorization is
+  // still rechecked by its owning plane before any effect.
+  string goal = 6;
+  string mode = 7;
+  string agent_id = 8;
+
+  // Fresh, Session-targeted decision for exactly this thread/run/fire. It is
+  // carried only on the Orchestrator Core -> Session Core RPC and must never
+  // be copied into durable workflow input or event data.
+  string control_execution_decision_token = 9;
+
+  // Non-secret bindings used only to verify the direct-hop execution decision.
+  // They are intentionally absent from Temporal history and durable events.
+  string human_subject_id = 10;
+  string template_digest = 11;
+  string idempotency_key = 12;
+  // Canonical digest of the Control policy snapshot used for each scheduled
+  // step. The policy body never enters this request or durable workflow input.
+  string policy_digest = 13;
+}
+
+message PrepareScheduledRunThreadRequest {
+  string org_id = 1;
+  string human_subject_id = 2;
+  string space_id = 3;
+  string schedule_id = 4;
+  string fire_key = 5;
+  string run_id = 6;
+  string system_thread_key = 7;
+  string template_digest = 8;
+  string idempotency_key = 9;
+  string space_decision_ref = 10;
+  string recipient_audience_ref = 11;
+  uint64 recipient_audience_revision = 12;
+  string recipient_audience_hash = 13;
+  string privacy_policy_ref = 14;
+  string resource_authorization_ref = 15;
+  uint64 authority_revision = 16;
+  string action_schema_hash = 17;
+  string payload_digest = 18;
+  string control_decision_token = 19;
+}
+
+message PrepareScheduledRunThreadResponse {
+  string thread_id = 1;
+  string run_id = 2;
+  string owner_id = 3;
+}
+
+// --- Managed run terminalization ---
+
+// The producer that is allowed to submit a run's terminal outcome. The server
+// chooses the terminal step identifier from this source; callers never supply
+// arbitrary step identifiers.
+enum ManagedRunSource {
+  MANAGED_RUN_SOURCE_UNSPECIFIED = 0;
+  // Gateway-owned direct inference, including unary Invoke and streaming SSE.
+  MANAGED_RUN_SOURCE_GATEWAY_DIRECT = 1;
+  // Execution Core owns a governed multi-step agent loop.
+  MANAGED_RUN_SOURCE_EXECUTION_AGENT = 2;
+  // Execution Core owns a standalone governed browser run.
+  MANAGED_RUN_SOURCE_EXECUTION_BROWSER = 3;
+  // Gateway may use this only for a confirmed pre-dispatch rejection of an
+  // execution-agent run; it can never claim an accepted agent completion.
+  MANAGED_RUN_SOURCE_GATEWAY_AGENT_DISPATCH_REJECTED = 4;
+  // Gateway owns the current standalone browser terminal projection only after
+  // it receives a confirmed Execution Core response. This is distinct from a
+  // future Execution Core-owned browser terminalizer.
+  MANAGED_RUN_SOURCE_GATEWAY_BROWSER = 5;
+}
+
+// The only producer-supplied terminal outcomes. A lost producer is represented
+// internally as an observable reconciliation-required failure, never success.
+enum TerminalOutcome {
+  TERMINAL_OUTCOME_UNSPECIFIED = 0;
+  TERMINAL_OUTCOME_COMPLETED = 1;
+  TERMINAL_OUTCOME_FAILED = 2;
+}
+
+// Starts a run and its durable terminalization obligation in one transaction.
+// This is additive; StartRun keeps its existing behavior for legacy clients.
+message StartManagedRunRequest {
+  // Required for ordinary durable runs. A ZDR-authorized caller leaves this
+  // empty and Session Core creates a fresh metadata-only thread atomically.
+  string thread_id = 1;
+  string parent_run_id = 2;
+  string agent_id = 3;
+  string goal = 4;
+  string mode = 5;
+  // Caller-provided identity fields are verified and pinned by Session Core.
+  string org_id = 6;
+  string user_id = 7;
+  // Opaque client operation key. Reuse exactly on an ambiguous start response.
+  // It must not be derived from prompt or tool content.
+  string start_key = 8;
+  // The server validates this source and stores the matching canonical step.
+  ManagedRunSource terminal_source = 9;
+}
+
+message StartManagedRunResponse {
+  string run_id = 1;
+  google.protobuf.Timestamp created_at = 2;
+  // Server-selected canonical terminal step for the configured source.
+  string terminal_step_id = 3;
+  // True only when an exact retry returned the original managed run.
+  bool already_started = 4;
+  // The durable thread selected for this run. For a ZDR-managed run this is a
+  // server-created metadata-only thread; no prompt or message is persisted.
+  string thread_id = 5;
+}
+
+// Records an immutable, metadata-only terminal outcome. There are deliberately
+// no output, error-detail, principal, tenant, tool, prompt, or metadata fields.
+message RecordTerminalOutcomeRequest {
+  string run_id = 1;
+  ManagedRunSource source = 2;
+  TerminalOutcome outcome = 3;
+  // Required only for FAILED and restricted server-side to a fixed allowlist.
+  string failure_code = 4;
+}
+
+// A durable terminal receipt. Clients must not expose a terminal result until
+// this response (or an idempotent replay of it) has been received.
+message RecordTerminalOutcomeResponse {
+  string run_id = 1;
+  ManagedRunSource source = 2;
+  string terminal_step_id = 3;
+  uint32 step_index = 4;
+  // Stable Session Core terminal event/receipt identifier.
+  string receipt_id = 5;
+  google.protobuf.Timestamp applied_at = 6;
+  bool already_applied = 7;
+  // True only when recovery recorded the fixed unknown-outcome failure.
+  bool reconciliation_required = 8;
+}
+
+// Writes a completed run's final answer to that run's own record.
+//
+// The one content-carrying call on this service. It exists because a subagent's
+// conclusion has to survive the process that produced it: the parent run's
+// transcript is deliberately NOT where it goes (the parent learns *that* its
+// child finished; it learns *what* it concluded only through an explicitly
+// permitted read), and the terminal receipt cannot carry it.
+message RecordRunOutputRequest {
+  // Run whose answer this is. Must belong to the caller's org.
+  string run_id = 1;
+
+  // The run's final answer. Server-bounded — a run's conclusion, not its
+  // transcript.
+  string output = 2;
+}
+
+message RecordRunOutputResponse {
+  string run_id = 1;
+
+  // Characters actually stored. Lower than the request when the server bounded
+  // it, so a caller can report truncation rather than assume none.
+  uint32 stored_chars = 2;
+}
+
+// Renews a managed run's server-owned liveness deadline. No caller can set a
+// deadline or attach payload content.
+message HeartbeatManagedRunRequest {
+  string run_id = 1;
+  ManagedRunSource source = 2;
+}
+
+message HeartbeatManagedRunResponse {
+  google.protobuf.Timestamp renewed_until = 1;
+  // True when the run is already terminal; the heartbeat made no mutation.
+  bool already_terminal = 2;
+}
+
+// --- CompleteStep ---
+
+// CompleteStepRequest records one immutable execution step and optionally the
+// single terminal transition for its run.
+message CompleteStepRequest {
+  // Run this step belongs to.
+  string run_id = 1;
+
+  // Step identifier.
+  string step_id = 2;
+
+  // Step status: "completed", "failed", "skipped".
+  string status = 3;
+
+  // Step output (may be empty for failed steps).
+  string output = 4;
+
+  // Error message if status is "failed".
+  string error = 5;
+
+  // True only for the single final step that closes the run and its plan.
+  // Per-tool and ordinary execution steps must leave this false.
+  bool terminal = 6;
+}
+
+// CompleteStepResponse returns the stable ordinal assigned to the step.
+message CompleteStepResponse {
+  // Acknowledged step sequence within the run.
+  uint32 step_index = 1;
+}
+
+// --- Inline tool audit lifecycle ---
+
+// ReserveToolActionRequest durably binds an inline tool action before execution.
+message ReserveToolActionRequest {
+  // Run that owns the tool action.
+  string run_id = 1;
+  // Stable opaque identifier derived from the original tool call identity.
+  string action_id = 2;
+  // Gateway request that produced the tool action.
+  string request_id = 3;
+  // Canonical tool name selected by the model.
+  string tool = 4;
+  // Data-governance category attached to the action.
+  string data_category = 5;
+  // Effective Zero Data Retention posture for the action.
+  bool zdr = 6;
+}
+
+// ReserveToolActionResponse reports whether a new reservation was created.
+message ReserveToolActionResponse {
+  // False means an exact prior reservation was replayed idempotently.
+  bool created = 1;
+}
+
+// FinalizeToolActionRequest assigns the single immutable result of a reservation.
+message FinalizeToolActionRequest {
+  // Run that owns the reserved action.
+  string run_id = 1;
+  // Stable action identifier supplied during reservation.
+  string action_id = 2;
+  // "completed" or "failed".
+  string outcome = 3;
+}
+
+// FinalizeToolActionResponse reports whether the reservation changed state.
+message FinalizeToolActionResponse {
+  // False means an exact prior finalization was replayed idempotently.
+  bool updated = 1;
+}
+
+// --- SaveCheckpoint ---
+
+message SaveCheckpointRequest {
+  // Run this checkpoint belongs to.
+  string run_id = 1;
+
+  // Checkpoint identifier (ULID).
+  string checkpoint_id = 2;
+
+  // Serialized checkpoint state (JSON bytes).
+  bytes state = 3;
+}
+
+message SaveCheckpointResponse {
+  // Acknowledged checkpoint index within the run.
+  uint32 checkpoint_index = 1;
+
+  // Persistence timestamp.
+  google.protobuf.Timestamp saved_at = 2;
+}
+
+// --- ReplayThread ---
+
+message ReplayThreadRequest {
+  // Thread to replay.
+  string thread_id = 1;
+
+  // Optional: replay from this event_id (exclusive). Empty = from beginning.
+  string after_event_id = 2;
+
+  // Optional: maximum number of events to return. 0 = unlimited.
+  uint32 limit = 3;
+}
+
+// --- GetContextAssembly ---
+
+message GetContextAssemblyRequest {
+  // Thread to assemble context for.
+  string thread_id = 1;
+
+  // Run requesting context (for checkpoint and policy resolution).
+  string run_id = 2;
+
+  // Maximum context window size in tokens.
+  uint32 max_tokens = 3;
+
+  // Policy identifier; empty skips policy segment.
+  string policy_id = 4;
+
+  // Workspace identifier; empty skips workspace segment.
+  string workspace_id = 5;
+
+  // Agent identifier override; empty falls back to runs.agent_id lookup via run_id.
+  string agent_id = 6;
+}
+
+message GetContextAssemblyResponse {
+  // Ordered context segments ready for model submission.
+  repeated ContextSegment segments = 1;
+
+  // Estimated total token count of the assembled context.
+  uint32 estimated_tokens = 2;
+}
+
+// A single segment of the assembled context window.
+message ContextSegment {
+  // Segment kind: "policy", "workspace", "agent", "user", "thread",
+  // "episodic", "skill_index", "skill_expansion", "retrieval", "prompt".
+  string kind = 1;
+
+  // Segment content.
+  string content = 2;
+
+  // Token estimate for this segment.
+  uint32 estimated_tokens = 3;
+}
+
+// --- CompactNow ---
+
+message CompactNowRequest {
+  // If true, return a terse single-line summary instead of full details.
+  bool toon = 1;
+}
+
+message CompactNowResponse {
+  // Number of checkpoint rows inserted during this compaction cycle.
+  int64 compacted_count = 1;
+
+  // Human-readable summary of the compaction result.
+  string summary = 2;
+}
+
+// --- UpsertAgentSkill (G7 learning loop) ---
+
+message SetAgentSkillEnabledRequest {
+  // Tenant. Must equal the verified caller's organization.
+  string org_id = 1;
+
+  // Skill to flip, by id — not by name. A quarantine decision is made about a
+  // specific row, and names are only unique per org, so an id keeps the sweep
+  // and the mutation talking about the same thing.
+  string skill_id = 2;
+
+  // False pauses injection; true resumes it. Nothing else about the skill
+  // changes, which is the whole point of this RPC existing.
+  bool enabled = 3;
+
+  // Why, for the audit trail. The quality sweep records the bound that drove the
+  // decision so an operator can see it without re-deriving the evidence.
+  string reason = 4;
+}
+
+message SetAgentSkillEnabledResponse {
+  // False when no such skill exists in this org — reported rather than raised so
+  // a sweep over slightly stale candidates is not a hard failure.
+  bool updated = 1;
+
+  // The skill's enabled state after the call.
+  bool enabled = 2;
+}
+
+message UpsertAgentSkillRequest {
+  string org_id = 1;
+  string name = 2;
+  string description = 3;
+  string content = 4;
+  repeated string trigger_keywords = 5;
+  repeated string trigger_file_patterns = 6;
+  repeated string tool_restrictions = 7;
+  bool enabled = 8;
+  // Provenance: "user" or "background_review". A background_review upsert
+  // must never overwrite a user-authored skill (enforced server-side).
+  string origin = 9;
+}
+
+message UpsertAgentSkillResponse {
+  // The skill row id (ULID for inserts; existing id on update).
+  string id = 1;
+  // True if a new row was inserted; false if an existing skill was updated.
+  bool created = 2;
+  // True if the write was suppressed because the target is a protected
+  // user-authored skill (no error — the loop simply yields to the human).
+  bool skipped_protected = 3;
+}
+
+// --- ListAgentSkills (G7 read path: learned skills -> gateway MatchSkills) ---
+
+message ListAgentSkillsRequest {
+  // Required. Only this org's skills are returned (per-org isolation).
+  string org_id = 1;
+  // When true, only enabled skills are returned (the gateway match-cache wants
+  // active skills only); when false, all of the org's skills are returned.
+  bool enabled_only = 2;
+}
+
+message AgentSkill {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  string content = 4;
+  repeated string trigger_keywords = 5;
+  repeated string trigger_file_patterns = 6;
+  repeated string tool_restrictions = 7;
+  bool enabled = 8;
+  // Provenance: "user" or "background_review".
+  string origin = 9;
+  // Ownership/sharing (SKILL-1): mirrors mcp_servers' scope + owner +
+  // explicit-share shape. "org" (default) or "user"; owner_user_id and
+  // shared_with are meaningful only when scope == "user".
+  string scope = 10;
+  string owner_user_id = 11;
+  repeated string shared_with = 12;
+}
+
+message ListAgentSkillsResponse {
+  repeated AgentSkill skills = 1;
+}
+
+// --- ListConversation (G7 transcript source) ---
+
+message ListConversationRequest {
+  // Required. The owning org (per-org isolation — enforced via the thread).
+  string org_id = 1;
+  // Required. The thread whose conversation to return.
+  string thread_id = 2;
+}
+
+// One conversation turn. Named SessionMessage (not ThreadMessage, which the
+// gateway proto already defines in this package) to avoid a name collision.
+message SessionMessage {
+  // "user" | "assistant" | "system" | "tool".
+  string role = 1;
+  string content = 2;
+  // The persona name this turn answered as (see AppendMessageRequest
+  // .agent_name). Empty when the turn had no persona.
+  string agent_name = 3;
+}
+
+message ListConversationResponse {
+  // Messages in conversation order (by sequence).
+  repeated SessionMessage messages = 1;
+}
+
+// --- ListThreads (durable cross-device chat history) ---
+
+message ListThreadsRequest {
+  // Required. Only this org's threads are returned.
+  string org_id = 1;
+  // Required. Only this user's threads are returned.
+  string user_id = 2;
+  // Optional. 0 means server default.
+  uint32 limit = 3;
+
+  // Optional canonical Space filter. Session Core applies it inside the same
+  // owner-bound query as org_id/user_id; callers never filter a broader
+  // thread result in another plane.
+  string space_id = 4;
+
+  // Optional origin filter (see CreateThreadRequest.origin). The chat page's
+  // own listing passes "chat" so a thread created by another surface -- the
+  // Agent Run Console, Support-assist -- is excluded by a declared fact
+  // rather than an inferred one. Empty means no filter.
+  string origin = 5;
+}
+
+message ThreadSummary {
+  string thread_id = 1;
+  string session_key = 2;
+  string title = 3;
+  string preview = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+
+  // Whether the user has pinned this thread in the cross-device chat list.
+  bool pinned = 7;
+
+  // Canonical Space persisted on the thread. This is presentation metadata,
+  // not authority; scoped callers use it to reject a mismatched upstream list.
+  string space_id = 8;
+
+  // Latest durable Model run for this owner-bound thread. Empty when the
+  // thread has not run an agent. These are receipts for the Space Activity
+  // shell, not a substitute for the complete run-event stream.
+  string latest_run_id = 9;
+  string latest_run_status = 10;
+  google.protobuf.Timestamp latest_run_updated_at = 11;
+
+  // See CreateThreadRequest.origin.
+  string origin = 12;
+}
+
+message ListThreadsResponse {
+  repeated ThreadSummary threads = 1;
+}
+
+// User-facing presentation state for a thread, written only by Session Core.
+message UpdateThreadPresentationRequest {
+  // Server-authoritative tenant scope from verified gateway claims.
+  string org_id = 1;
+  // Required canonical thread identifier.
+  string thread_id = 2;
+
+  // Optional title override. Omission leaves it unchanged; an empty value
+  // clears it and restores the canonical message-derived title.
+  optional string title = 3;
+  // Optional preview override. Omission leaves it unchanged; an empty value
+  // clears it and restores the canonical message-derived preview.
+  optional string preview = 4;
+  // Optional pin state. Omission leaves the existing state unchanged.
+  optional bool pinned = 5;
+}
+
+// Receipt for a durable presentation update.
+message UpdateThreadPresentationResponse {
+  // Canonical thread identifier whose presentation changed.
+  string thread_id = 1;
+}
+
+// Request to archive one thread from ordinary history.
+message ArchiveThreadRequest {
+  // Server-authoritative tenant scope from verified gateway claims.
+  string org_id = 1;
+  // Required canonical thread identifier.
+  string thread_id = 2;
+}
+
+// Durable archive receipt for one thread.
+message ArchiveThreadResponse {
+  // Canonical archived thread identifier.
+  string thread_id = 1;
+  // Server timestamp at which the thread was first archived.
+  google.protobuf.Timestamp archived_at = 2;
+}
+
+// Request to archive every visible thread belonging to one user.
+message ArchiveThreadsRequest {
+  // Server-authoritative tenant scope from verified gateway claims.
+  string org_id = 1;
+  // Required owner. Session Core checks it against the verified caller.
+  string user_id = 2;
+}
+
+// Receipt for a bulk archive operation.
+message ArchiveThreadsResponse {
+  // Number of threads newly archived by this request.
+  uint32 archived_count = 1;
+}
+
+// Request to permanently erase one thread.
+message DeleteThreadRequest {
+  // Server-authoritative tenant scope from verified gateway claims.
+  string org_id = 1;
+  // Required canonical thread identifier.
+  string thread_id = 2;
+}
+
+// Receipt for a durable thread erasure.
+message DeleteThreadResponse {
+  string thread_id = 1;
+  bool deleted = 2;
+}
+
+// Request to permanently erase all threads for one authenticated user.
+message DeleteThreadsRequest {
+  // Server-authoritative tenant scope from verified gateway claims.
+  string org_id = 1;
+  // Required owner. Session Core checks it against the verified caller.
+  string user_id = 2;
+}
+
+// Receipt for a bulk durable thread erasure.
+message DeleteThreadsResponse {
+  uint32 deleted_count = 1;
+}
+
+// Request to erase one owner's threads bound to one canonical Space. All
+// identity fields are independently checked against the authenticated
+// workload credential; callers cannot broaden the query by supplying another
+// owner or tenant.
+message DeleteSpaceThreadsRequest {
+  string org_id = 1;
+  string space_id = 2;
+  string owner_principal_id = 3;
+  // Durable Application/Control deletion request reference retained in logs
+  // and owner receipts, never used as an authorization substitute.
+  string deletion_request_id = 4;
+}
+
+// Receipt for the local Session Core portion of a Space deletion.
+message DeleteSpaceThreadsResponse {
+  uint32 deleted_count = 1;
+  // Exact correlated semantic-memory IDs observed before the canonical local
+  // erase. This is a receipt fact, not an authorization claim.
+  uint32 semantic_memory_attempted_count = 2;
+  // Remote semantic deletes that could not be confirmed. A nonzero value
+  // keeps the owning Model receipt partial and requires reconciliation.
+  uint32 semantic_memory_unconfirmed_count = 3;
+}
+
+// --- SetRunMode (ROADMAP P3 run modes) ---
+
+message SetRunModeRequest {
+  string run_id = 1;
+  // One of: execute | plan | reactive | research.
+  string mode = 2;
+  // Server-authoritative org scope, forwarded from the gateway's authenticated
+  // claims. The update is constrained to runs owned by this org so a caller can
+  // never flip the mode of another org's run (per-org isolation invariant).
+  string org_id = 3;
+
+  // The autonomy rung this transition GRANTS, and why.
+  //
+  // Persisted onto the run so the grant outlives the request that made it: the
+  // next RunAgentRequest reads it back and execution-core enforces it per call.
+  // Carried here rather than on a separate RPC because leaving plan mode IS the
+  // grant — splitting them would allow a mode change with no recorded authority,
+  // which is the state this pair exists to remove.
+  //
+  // Unset leaves whatever the run already had, so an ordinary mode change is
+  // not a silent revocation.
+  AutonomyRung granted_rung = 4;
+
+  // Required whenever `granted_rung` is set. An approval with no reason, or a
+  // reason granting nothing, is a malformed ask and is refused.
+  string justification = 5;
+}
+
+message SetRunModeResponse {
+  string run_id = 1;
+  string mode = 2;
+
+  // The rung the run now carries, after this call. Echoed so a caller can see
+  // the grant took effect rather than assuming it did.
+  AutonomyRung granted_rung = 3;
+}
+
+message ClaimScheduledStepRequest {
+  string run_id = 1;
+  string thread_id = 2;
+  string org_id = 3;
+  string space_id = 4;
+  string schedule_id = 5;
+  string fire_key = 6;
+  string template_digest = 7;
+  string step_id = 8;
+  uint32 step_index = 9;
+  string policy_digest = 10;
+  string idempotency_key = 11;
+}
+
+message ClaimScheduledStepResponse {
+  bool claimed = 1;
+  string receipt_id = 2;
+  string status = 3;
+}
+
+message RecordScheduledStepReceiptRequest {
+  string run_id = 1;
+  string step_id = 2;
+  string org_id = 3;
+  string idempotency_key = 4;
+  string receipt_id = 5;
+  string status = 6;
+  string output_digest = 7;
+  string error_code = 8;
+  bool unknown_outcome = 9;
+}
+
+message RecordScheduledStepReceiptResponse {
+  string receipt_id = 1;
+  string status = 2;
+  bool recorded = 3;
+}

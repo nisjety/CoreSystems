@@ -1,0 +1,39 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Latest observed line snapshot for each Xero batch payment; stale child snapshots are explicitly marked.",
+  assertions: { nonNull: ["tenant_id", "batch_payment_id", "payment_id", "batch_payment_line_key"], uniqueKey: ["batch_payment_line_key"] }
+}
+
+WITH latest_child_snapshot AS (
+  SELECT tenant_id, batch_payment_id, MAX(synced_at) AS line_snapshot_at
+  FROM ${ref("dw_bronze_xero", "xero_batch_payment_line_snapshots")}
+  GROUP BY tenant_id, batch_payment_id
+), lines AS (
+  SELECT l.*, h.batch_payment_key, h.batch_payment_type, h.status, h.is_deleted,
+         h.payment_count, h.total_amount, h.payment_date,
+         h.account_currency_code AS header_account_currency_code,
+         h.synced_at AS batch_synced_at,
+         l.synced_at AS line_snapshot_at,
+         COUNT(*) OVER (PARTITION BY l.tenant_id, l.batch_payment_id) AS observed_line_count,
+         COUNTIF(l.payment_id IS NULL) OVER (PARTITION BY l.tenant_id, l.batch_payment_id) AS missing_payment_count
+  FROM ${ref("dw_bronze_xero", "xero_batch_payment_line_snapshots")} AS l
+  JOIN latest_child_snapshot AS latest
+    ON l.tenant_id = latest.tenant_id AND l.batch_payment_id = latest.batch_payment_id
+   AND l.synced_at = latest.line_snapshot_at
+  LEFT JOIN ${ref("dw_1_silver_xero", "fact_batch_payment")} AS h
+    ON l.tenant_id = h.tenant_id AND l.batch_payment_id = h.batch_payment_id
+)
+SELECT CONCAT(tenant_id, '|', batch_payment_id, '|', payment_id) AS batch_payment_line_key,
+       tenant_id, batch_payment_id, batch_payment_key, payment_id, invoice_id,
+       record_id AS batch_payment_line_internal_id, line_index, batch_payment_type,
+       status, is_deleted, payment_date, account_currency_code,
+       invoice_currency_code, amount AS source_amount, bank_amount AS source_bank_amount,
+       invoice_is_discounted, invoice_has_errors, details, payment_count,
+       observed_line_count, missing_payment_count, total_amount AS header_total_amount,
+       line_snapshot_at,
+       line_snapshot_at IS DISTINCT FROM batch_synced_at AS is_line_snapshot_stale,
+       batch_payment_key IS NOT NULL AND line_snapshot_at = batch_synced_at AS is_observed_with_batch,
+       (batch_payment_key IS NULL OR payment_count IS DISTINCT FROM observed_line_count
+        OR missing_payment_count > 0) AS is_line_set_ambiguous
+FROM lines

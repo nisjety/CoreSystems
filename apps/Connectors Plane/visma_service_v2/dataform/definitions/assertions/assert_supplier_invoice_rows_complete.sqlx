@@ -1,0 +1,43 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_supplier_invoice_rows_complete",
+  description: "Silver must hold every supplier invoice and invoice line that bronze holds. Returns one row per tenant and kind (header, line) where the count in visma_bronze.visma_supplier_invoices (distinct documentType plus referenceNumber, the staging key; lines unnested from invoiceLines) differs from visma_silver.fact_supplier_invoice or fact_supplier_invoice_line. Documents of different types (Invoice, DebitAdj, CreditAdj) can share a referenceNumber, so a key without the type silently drops them (3 documents and 60 lines in 2026-10).",
+  tags: ["assertion", "silver", "supplier_invoice"]
+}
+
+WITH bronze AS (
+  SELECT
+    tenantId AS tenant_id,
+    COUNT(DISTINCT FORMAT('%t|%t', documentType, referenceNumber)) AS headers,
+    SUM(ARRAY_LENGTH(JSON_QUERY_ARRAY(invoiceLines))) AS lines
+  FROM ${ref("visma_bronze", "visma_supplier_invoices")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+),
+
+silver_headers AS (
+  SELECT tenant_id, COUNT(*) AS headers
+  FROM ${ref("visma_silver", "fact_supplier_invoice")}
+  GROUP BY tenant_id
+),
+
+silver_lines AS (
+  SELECT tenant_id, COUNT(*) AS lines
+  FROM ${ref("visma_silver", "fact_supplier_invoice_line")}
+  GROUP BY tenant_id
+),
+
+compared AS (
+  SELECT 'header' AS kind, b.tenant_id, b.headers AS bronze_rows, COALESCE(h.headers, 0) AS silver_rows
+  FROM bronze AS b
+  LEFT JOIN silver_headers AS h ON b.tenant_id = h.tenant_id
+  UNION ALL
+  SELECT 'line' AS kind, b.tenant_id, COALESCE(b.lines, 0) AS bronze_rows, COALESCE(l.lines, 0) AS silver_rows
+  FROM bronze AS b
+  LEFT JOIN silver_lines AS l ON b.tenant_id = l.tenant_id
+)
+
+SELECT kind, tenant_id, bronze_rows, silver_rows
+FROM compared
+WHERE bronze_rows != silver_rows

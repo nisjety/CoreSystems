@@ -1,0 +1,3 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+project_transactions,,1,0,succeeded,4967,4967,4967,91,0,1,14468,10954,
+project_transactions,,2,0,succeeded,4967,4967,4967,91,0,1,14377,3659,

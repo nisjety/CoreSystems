@@ -253,7 +253,16 @@ class ConvexNatsSubscriber {
 
 // Main execution
 async function main() {
-  const subscriber = new ConvexNatsSubscriber();
+  const mode = process.env.NATS_SUBSCRIBER_MODE || "dev";
+  if (!["dev", "control-projection"].includes(mode)) {
+    throw new Error(`Unknown NATS_SUBSCRIBER_MODE: ${mode}`);
+  }
+  // Keep dev's event/webhook contract as the default. The restored contract
+  // requires its matching Convex schema and scoped NATS credentials.
+  const Subscriber = mode === "control-projection"
+    ? require("./nats-subscriber.control-projection.cjs").ConvexNatsSubscriber
+    : ConvexNatsSubscriber;
+  const subscriber = new Subscriber();
 
   try {
     await subscriber.connect();

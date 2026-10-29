@@ -1,0 +1,20 @@
+{
+  "endpoint_name": "purchase_receipt_transfers",
+  "bigquery_table": "visma_purchase_receipt_transfers",
+  "primary_key": "orderNbr",
+  "source": "erp_rest",
+  "enabled": true,
+  "api_method": "get_purchase_receipt_transfers",
+  "api_endpoint": "/v2/PurchaseReceipt/transfers",
+  "pagination_profile": "finance_page_number",
+  "modified_field": null,
+  "merge_type": "upsert",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": [
+    "orderNbr"
+  ],
+  "notes": "Found 5 row(s) via discover_erp_endpoints.py. Key chosen from a sample of 5 row(s); the full ingest run is what proves it. Stored raw for later Dataform mapping.",
+  "default_query": {
+    "expandLines": "true"
+  }
+}

@@ -1,0 +1,27 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Xero invoice attachment metadata and latest observed presence. No attachment file bytes are stored.",
+  assertions: {
+    nonNull: ["invoice_attachment_key", "company_key", "invoice_id", "attachment_id"],
+    uniqueKey: ["invoice_attachment_key"]
+  }
+}
+
+SELECT
+  FARM_FINGERPRINT(invoice_attachment_key) AS invoice_attachment_key,
+  FARM_FINGERPRINT(tenant_id) AS company_key,
+  tenant_id,
+  invoice_id,
+  attachment_id,
+  mime_type,
+  content_length_bytes,
+  observed_at,
+  list_observed_at,
+  is_current,
+  is_removed_from_source,
+  source_version_id,
+  source_receipt_id,
+  source_run_id,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_invoice_attachment")}

@@ -1,0 +1,214 @@
+name: Build & Deploy to VPS (Continuous Deployment)
+
+on:
+  push:
+    branches:
+      - main
+    # Trigger on ANY change to main (including docker-compose, code, config, etc.)
+    # Remove paths filter to build on every push
+    # paths:
+    #   - 'docker-compose.yml'
+    #   - 'coresystem-gateway/**'
+    #   - '.github/workflows/build-and-deploy.yml'
+
+# This workflow automatically deploys code changes to the existing VPS installation
+# For fresh installations on a new VPS, use: fresh-install.yml (manual trigger)
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/coresystem-gateway
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./coresystem-gateway
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            
+            DEPLOY_DIR="/opt/coresystem"
+            REPO_URL="https://github.com/${{ github.repository }}.git"
+            GITHUB_ACTOR="${{ github.actor }}"
+            GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+            
+            # Initialize directory if it doesn't exist
+            if [ ! -d "$DEPLOY_DIR" ]; then
+              echo "📁 Creating deployment directory..."
+              mkdir -p "$DEPLOY_DIR"
+              cd "$DEPLOY_DIR"
+              echo "🔄 Cloning repository..."
+              git clone "$REPO_URL" .
+            else
+              cd "$DEPLOY_DIR"
+            fi
+            
+            # Fetch and pull latest changes
+            echo "📥 Fetching latest changes..."
+            git fetch origin main
+            
+            # Get current and new commit hashes
+            CURRENT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "")
+            NEW_COMMIT=$(git rev-parse origin/main)
+            
+            if [ "$CURRENT_COMMIT" = "$NEW_COMMIT" ]; then
+              echo "✅ Already up to date with commit $NEW_COMMIT"
+              exit 0
+            fi
+            
+            echo "🔄 Updating from $CURRENT_COMMIT to $NEW_COMMIT"
+            
+            # Stash any local changes
+            git stash push -m "auto-stash-$(date +%s)" || true
+            
+            # Checkout and reset to latest
+            git checkout main
+            git reset --hard origin/main
+            
+            # 🔐 CREATE PRODUCTION ENVIRONMENT FILE WITH GITHUB SECRETS
+            echo "🔐 Injecting credentials from GitHub Secrets..."
+            mkdir -p "$DEPLOY_DIR/secrets"
+            
+            # Export GitHub Secrets to .env.production
+            cat > "$DEPLOY_DIR/.env.production" << 'EOF'
+            # Production Environment - Auto-generated from GitHub Secrets
+            # Generated: $(date)
+            
+            DOMAIN=${{ secrets.DOMAIN }}
+            POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+            REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }}
+            NATS_AUTH_TOKEN=${{ secrets.NATS_AUTH_TOKEN }}
+            N8N_ENCRYPTION_KEY=${{ secrets.N8N_ENCRYPTION_KEY }}
+            INTEGRATION_GATEWAY_API_KEY=${{ secrets.INTEGRATION_GATEWAY_API_KEY }}
+            PGADMIN_EMAIL=${{ secrets.PGADMIN_EMAIL }}
+            PGADMIN_PASSWORD=${{ secrets.PGADMIN_PASSWORD }}
+            GRAFANA_PASSWORD=${{ secrets.GRAFANA_PASSWORD }}
+            TRAEFIK_DASHBOARD_AUTH=${{ secrets.TRAEFIK_DASHBOARD_AUTH }}
+            EOF
+            
+            # Create secret files from environment variables (using -n to avoid adding newlines)
+            echo -n "${{ secrets.POSTGRES_PASSWORD }}" > "$DEPLOY_DIR/secrets/postgres_password.txt"
+            echo -n "${{ secrets.REDIS_PASSWORD }}" > "$DEPLOY_DIR/secrets/redis_password.txt"
+            echo -n "${{ secrets.NATS_AUTH_TOKEN }}" > "$DEPLOY_DIR/secrets/nats_auth_token.txt"
+            echo -n "${{ secrets.N8N_ENCRYPTION_KEY }}" > "$DEPLOY_DIR/secrets/n8n_encryption_key.txt"
+            echo -n "${{ secrets.PGADMIN_EMAIL }}" > "$DEPLOY_DIR/secrets/pgadmin_email.txt"
+            echo -n "${{ secrets.PGADMIN_PASSWORD }}" > "$DEPLOY_DIR/secrets/pgadmin_password.txt"
+            echo -n "${{ secrets.GRAFANA_PASSWORD }}" > "$DEPLOY_DIR/secrets/grafana_password.txt"
+            echo -n "${{ secrets.TRAEFIK_DASHBOARD_AUTH }}" > "$DEPLOY_DIR/secrets/traefik_dashboard_auth.txt"
+            
+            # 🔐 CREATE CLOUDFLARE CERTIFICATES (from GitHub Secrets)
+            echo "🔐 Deploying Cloudflare origin certificates..."
+            mkdir -p "$DEPLOY_DIR/cloudflare-certs"
+            printf '%s' "${{ secrets.CLOUDFLARE_ORIGIN_CERT }}" > "$DEPLOY_DIR/cloudflare-certs/origin-cert.pem"
+            printf '%s' "${{ secrets.CLOUDFLARE_ORIGIN_KEY }}" > "$DEPLOY_DIR/cloudflare-certs/origin-key.pem"
+            
+            # Set secure permissions on certificate and secret files
+            chmod 600 "$DEPLOY_DIR/cloudflare-certs"/*.pem
+            chmod 644 "$DEPLOY_DIR/secrets"/*.txt
+            chmod 640 "$DEPLOY_DIR/.env.production"
+            
+            echo "✅ Credentials injected"
+            
+            # Log in to GitHub Container Registry
+            echo "🔐 Logging into GitHub Container Registry..."
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+            
+            # Sync certificates and configs
+            echo "🔒 Syncing certificates and configs..."
+            [ -d "cloudflare-certs" ] && chmod 644 cloudflare-certs/* 2>/dev/null || true
+            
+            # Fix permissions on executable scripts
+            chmod +x *.sh 2>/dev/null || true
+            chmod +x coresystem-gateway/*.sh 2>/dev/null || true
+            
+            # Pull pre-built images from GitHub Container Registry
+            echo "📦 Pulling pre-built images from GitHub Container Registry..."
+            docker pull ghcr.io/${{ github.repository }}/coresystem-gateway:latest || echo "Note: Image may not exist yet"
+            
+            # Update environment with image reference
+            echo "Setting image reference in docker-compose..."
+            
+            # Source production environment for docker compose
+            set -a
+            [ -f "$DEPLOY_DIR/.env.production" ] && source "$DEPLOY_DIR/.env.production"
+            set +a
+            
+            # Start services with docker compose (pulls pre-built images)
+            echo "🚀 Deploying services..."
+            docker compose -f docker-compose.yml pull 2>&1 | grep -E "(Pulling|Pull complete|Status)" || true
+            docker compose -f docker-compose.yml up -d 2>&1 | grep -E "(Creating|Recreate|Starting|Started)" || true
+            
+            # Wait for services to stabilize
+            sleep 10
+            
+            # Verify health
+            echo "✅ Verifying service health..."
+            docker compose -f docker-compose.yml ps --format "table {{.Service}}\t{{.Status}}"
+            
+            echo "🎉 Deployment completed successfully!"
+            
+            # Log out from registry
+            docker logout ghcr.io || true
+      
+      - name: Deployment Status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "✅ Build and deployment successful!"
+          else
+            echo "❌ Build or deployment failed!"
+            exit 1
+          fi

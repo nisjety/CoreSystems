@@ -1,0 +1,46 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_general_ledger_transactions",
+  description: "Bronze: General ledger transaction data from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.str("account")} AS `account`,
+  ${bronze.str("batchNumber")} AS `batchNumber`,
+  ${bronze.str("branch")} AS `branch`,
+  ${bronze.float("creditAmount")} AS `creditAmount`,
+  ${bronze.float("currCreditAmount")} AS `currCreditAmount`,
+  ${bronze.float("currDebitAmount")} AS `currDebitAmount`,
+  ${bronze.str("currency")} AS `currency`,
+  ${bronze.float("debitAmount")} AS `debitAmount`,
+  ${bronze.str("description")} AS `description`,
+  ${bronze.str("lastModifiedDateTime")} AS `lastModifiedDateTime`,
+  ${bronze.str("ledger")} AS `ledger`,
+  ${bronze.int("lineNumber")} AS `lineNumber`,
+  ${bronze.str("metadata")} AS `metadata`,
+  ${bronze.str("module")} AS `module`,
+  ${bronze.str("period")} AS `period`,
+  ${bronze.str("refNumber")} AS `refNumber`,
+  ${bronze.str("subaccount")} AS `subaccount`,
+  ${bronze.str("tranDate")} AS `tranDate`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  ${bronze.float("begBalance")} AS `begBalance`,
+  ${bronze.float("currBegBalance")} AS `currBegBalance`,
+  ${bronze.float("currEndingBalance")} AS `currEndingBalance`,
+  ${bronze.float("endingBalance")} AS `endingBalance`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`  -- v2 does not fetch this field
+FROM ${ref("dw_staging_visma", "general_ledger_transactions")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

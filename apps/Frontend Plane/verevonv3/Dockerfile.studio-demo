@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1.7
+#
+# The main frontend package references a generated Quarry SDK through a local
+# filesystem dependency outside the frontend build context. The Studio demo
+# does not import that SDK, but frozen pnpm validation still needs its package
+# identity. Supply only that manifest at the same path while retaining the
+# checked-in lockfile and exact dependency graph.
+FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2
+
+WORKDIR /app
+
+RUN apk add --no-cache curl \
+    && npm install --global pnpm@11.3.0 \
+    && mkdir -p '/Ingestion Plane/Quarry-v2/sdks/typescript'
+
+COPY --chown=node:node package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY --chown=node:node ["studio-demo/quarry-client.package.json", "/Ingestion Plane/Quarry-v2/sdks/typescript/package.json"]
+
+RUN --mount=type=cache,target=/root/.cache/pnpm/store \
+    pnpm install --frozen-lockfile \
+    && chown -R node:node /app/node_modules
+
+COPY --chown=node:node . .
+
+USER node
+EXPOSE 5174
+
+CMD ["pnpm", "run", "dev:studio-demo"]

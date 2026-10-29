@@ -1,0 +1,22 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_gold_organisation_action_safety"
+}
+
+SELECT
+  'missing_or_mismatched_gold_connection_capability' AS violation,
+  silver.tenant_id,
+  silver.source_receipt_id,
+  silver.action_position,
+  silver.action_name
+FROM ${ref("dw_1_silver_xero", "bridge_company_organisation_action")} AS silver
+LEFT JOIN ${ref("xero_gold_common", "bridge_company_organisation_action")} AS gold
+  ON silver.tenant_id = gold.tenant_id
+ AND silver.source_receipt_id = gold.source_receipt_id
+ AND silver.action_position IS NOT DISTINCT FROM gold.action_position
+WHERE gold.company_organisation_action_key IS NULL
+   OR silver.action_name IS DISTINCT FROM gold.action_name
+   OR silver.action_status IS DISTINCT FROM gold.action_status
+   OR silver.is_allowed IS DISTINCT FROM gold.is_allowed
+   OR gold.capability_scope != 'integration_connection'

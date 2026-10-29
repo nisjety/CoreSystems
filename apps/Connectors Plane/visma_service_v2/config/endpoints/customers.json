@@ -1,0 +1,36 @@
+{
+  "endpoint_name": "customers",
+  "bigquery_table": "visma_customers",
+  "primary_key": "number",
+  "source": "erp_rest",
+  "api_method": "get_customers",
+  "api_endpoint": "/v1/customer",
+  "fallback_api_method": "get_customers_v3",
+  "pagination_profile": "finance_page_number",
+  "modified_field": null,
+  "merge_type": "upsert",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": [
+    "number"
+  ],
+  "notes": "DataMart normalizer parity vs ERP (scripts/normalizer_parity.py, 2026-09-29, after correcting wrong-domain values): 24 of 42 fields equal on all 6,586 customers (was 22). mainAddress/mainContact/invoiceAddress/invoiceContact match on id but lack the address and contact details; location is null (DataMart has an internal id, the ERP a code); timeStamp is null (the ERP holds a row version). Removed 2026-09-30: the duplicate config `price_classes`, which read the same URL (/v1/customer) and stored identical rows (6,586 of 6,586, 0 differing) instead of the derived list of unique price classes its note promised. Price classes are the `priceClass` object ({id, description}) on each customer here; derive the unique list in the warehouse.",
+  "datamart": {
+    "ready": false,
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    },
+    "query_file": "config/queries/customer.graphql",
+    "type_name": "Customer",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": false,
+    "join_normalizer": "normalize_customer_with_locations",
+    "fallback_source": "erp_rest",
+    "root_field": "customers"
+  },
+  "default_query": {
+    "expandAccountInformation": "true",
+    "expandPaymentMethods": "true",
+    "expandDirectDebit": "true"
+  }
+}

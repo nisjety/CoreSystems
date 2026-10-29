@@ -1,0 +1,49 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_budget_balance_safety",
+  description: "Budget balances must preserve authoritative raw detail cardinality and resolve their available budget, account, and period references without treating source Amount and UnitAmount as one measure."
+}
+
+WITH grain AS (
+  SELECT 'budget_balance_silver_gold_grain' AS issue,
+         CAST(NULL AS STRING) AS record_id
+  FROM (SELECT 1)
+  WHERE (
+    SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_budget_balance")}
+  ) != (
+    SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_budget_balance")}
+  )
+
+  UNION ALL
+
+  SELECT 'budget_balance_budget_reference', CAST(balance.budget_balance_key AS STRING)
+  FROM ${ref("xero_gold_finance", "fact_budget_balance")} AS balance
+  LEFT JOIN ${ref("xero_gold_finance", "dim_budget")} AS budget
+    ON balance.budget_key = budget.budget_key
+  WHERE budget.budget_key IS NULL
+
+  UNION ALL
+
+  SELECT 'budget_balance_account_reference', CAST(balance.budget_balance_key AS STRING)
+  FROM ${ref("xero_gold_finance", "fact_budget_balance")} AS balance
+  LEFT JOIN ${ref("xero_gold_finance", "dim_account")} AS account
+    ON balance.account_key = account.account_key
+  WHERE balance.account_key IS NOT NULL
+    AND account.account_key IS NULL
+
+  UNION ALL
+
+  SELECT 'budget_balance_invalid_period', CAST(budget_balance_key AS STRING)
+  FROM ${ref("dw_1_silver_xero", "fact_budget_balance")}
+  WHERE NOT is_budget_period_valid
+
+  UNION ALL
+
+  SELECT 'budget_balance_measure_contract', CAST(budget_balance_key AS STRING)
+  FROM ${ref("dw_1_silver_xero", "fact_budget_balance")}
+  WHERE is_additive_within_budget_period IS NOT TRUE
+     OR is_non_additive_across_budget_versions IS NOT TRUE
+)
+SELECT issue, record_id
+FROM grain

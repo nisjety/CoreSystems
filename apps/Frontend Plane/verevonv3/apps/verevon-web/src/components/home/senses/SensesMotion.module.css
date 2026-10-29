@@ -1,0 +1,26 @@
+.figure { margin: 0; min-width: 0; width: 100%; }
+.frame { position: relative; overflow: hidden; border-radius: 12px; background: #e5e0d7; box-shadow: 0 0 0 1px rgb(26 26 26 / 6%); }
+.player { position: relative; }
+.canvas { position: relative; isolation: isolate; pointer-events: none; aspect-ratio: 4 / 5; overflow: hidden; background-color: #e5e0d7; background-image: linear-gradient(150deg, rgb(255 255 255 / 24%), transparent 68%, rgb(195 145 103 / 28%)), var(--sense-background, url('/verevon-senses/glass-study.webp')); background-position: center; background-size: cover; }
+.canvas::after { position: absolute; z-index: 0; inset: 0; content: ""; background: linear-gradient(180deg, rgb(20 18 16 / 4%), transparent 28%, rgb(20 18 16 / 16%)); pointer-events: none; }
+.scene { position: absolute; z-index: 1; top: 50%; right: 0; left: 0; aspect-ratio: 9 / 8; transform: translateY(-50%); }
+.placeholder { aspect-ratio: 4 / 5; display: grid; place-items: center; background-color: #e5e0d7; background-image: linear-gradient(150deg, rgb(255 255 255 / 24%), transparent 68%, rgb(195 145 103 / 28%)), var(--sense-background, url('/verevon-senses/glass-study.webp')); background-position: center; background-size: cover; }
+.placeholder > span { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 12px; background: #272623; color: #fffefa; font: 28px Manrope, sans-serif; }
+.frame[data-sense-kind="learn"] .canvas, .frame[data-sense-kind="learn"] .placeholder { background-color: #eee9e1; background-image: radial-gradient(circle at 68% 12%, #fffefa 0, #eee9e1 70%, #e5d9cc 100%); }
+.frame[data-sense-kind="oversee"] .canvas, .frame[data-sense-kind="oversee"] .placeholder { background-color: #dce7e7; background-image: radial-gradient(circle at 24% 18%, #f7faf8 0, #e2eceb 64%, #d0dddc 100%); }
+.frame[data-sense-kind="learn"] .canvas::after, .frame[data-sense-kind="oversee"] .canvas::after { background: none; }
+.controls { position: absolute; z-index: 30; right: 12px; bottom: 12px; display: flex; align-items: center; gap: 8px; width: min(82%, 320px); height: 44px; padding: 0 4px 0 16px; border: 1px solid rgb(0 0 0 / 10%); border-radius: 999px; background: rgb(255 255 255 / 95%); color: #1d1d1b; box-shadow: 0 4px 24px rgb(0 0 0 / 14%); backdrop-filter: blur(4px); opacity: 1; transition: opacity 180ms ease; }
+.time { flex: none; font-family: Geist, sans-serif; font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.timeline { appearance: none; flex: 1; min-width: 0; height: 4px; border-radius: 999px; cursor: pointer; }
+.timeline::-webkit-slider-thumb { appearance: none; width: 12px; height: 12px; border: 2px solid #1d1d1b; border-radius: 50%; background: #fff; }
+.timeline::-moz-range-thumb { width: 9px; height: 9px; border: 2px solid #1d1d1b; border-radius: 50%; background: #fff; }
+.control { flex: none; display: grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #1d1d1b; cursor: pointer; transition: background-color 140ms; }
+.control:focus-visible, .timeline:focus-visible { outline: 2px solid #f47753; outline-offset: 2px; }
+.caption { padding: 16px 2px 0; font-family: Manrope, sans-serif; font-size: 13px; line-height: 1.5; color: var(--verevon-j-muted); }
+@media (hover: hover) {
+	.controls { opacity: 0; pointer-events: none; }
+	.player:hover .controls, .player:focus-within .controls { opacity: 1; pointer-events: auto; }
+	.control:hover { background: rgb(0 0 0 / 5%); }
+}
+@media (max-width: 600px) { .controls { right: 8px; bottom: 8px; width: min(calc(100% - 16px), 320px); } .caption { font-size: 12px; } }
+@media (prefers-reduced-motion: reduce) { .controls, .control { transition: none; } }

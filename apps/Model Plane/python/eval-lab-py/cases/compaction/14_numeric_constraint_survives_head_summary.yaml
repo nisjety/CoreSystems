@@ -1,0 +1,27 @@
+id: "14-compaction-preserves-a-numeric-constraint"
+name: "Head-summary compaction must not lose a numeric constraint stated early"
+# Numbers are the failure mode a text summarizer drops or garbles most
+# easily (rounds it, drops a digit, restates it as a range) -- a distinct
+# risk from case 13's proper-noun-shaped fact, worth its own case rather
+# than folding into one.
+profile: chat
+seed_turns:
+  - "Before anything else: my maximum budget for this equipment order is exactly 42750 NOK, not one krone more. Keep that in mind for the rest of this conversation."
+  - "Okay, separate question: what's a good way to sanitize stainless steel prep tables between shifts?"
+  - "Thanks. What's the typical service interval for a walk-in freezer compressor?"
+  - "Got it. What causes freezer burn and how is it usually prevented?"
+  - "Understood. What's the difference between a HACCP flow diagram and a process flow diagram?"
+  - "Good. What allergen-labeling rules commonly apply to a shared commercial kitchen?"
+  - "Noted. What's a sensible frequency for calibrating a thermometer used for temperature checks?"
+  - "Thanks. What are common signs that a vacuum sealer needs maintenance?"
+  - "Okay. What's the usual reasoning behind color-coded chopping boards?"
+  - "Understood. What's a typical shelf-life for opened, refrigerated pasteurized milk?"
+  - "Good. What ventilation considerations matter most above a commercial fryer?"
+  - "Noted. What's the general point of a first-in-first-out labeling system?"
+  - "Thanks — what's a common cause of grease-trap odor complaints?"
+  - "Last one before my real question: what's a reasonable interval for deep-cleaning an ice machine?"
+prompt: "What was the maximum budget figure I gave you at the very start of this conversation, in NOK?"
+checks:
+  regex: ["42[.,\\s]?750"]
+tags: [compaction, recall]
+timeout_s: 240.0

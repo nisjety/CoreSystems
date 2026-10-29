@@ -1,0 +1,44 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "ACCPAYCREDIT supplier credits, without applying an unverified sign convention.",
+  assertions: { nonNull: ["tenant_id", "credit_note_id", "credit_note_key"], uniqueKey: ["credit_note_key"] }
+}
+
+WITH line_sets AS (
+  SELECT tenant_id, credit_note_id, COUNT(*) AS observed_line_count,
+         MAX(observed_net_subtotal) AS observed_net_subtotal,
+         LOGICAL_OR(is_line_set_ambiguous) AS has_ambiguous_lines
+  FROM ${ref("dw_1_silver_xero", "fact_credit_note_line")}
+  GROUP BY tenant_id, credit_note_id
+), credits AS (
+  SELECT c.*, COALESCE(s.observed_line_count, 0) AS observed_line_count,
+         (c.line_item_count IS DISTINCT FROM COALESCE(s.observed_line_count, 0)
+          OR c.sub_total IS NULL
+          OR ABS(COALESCE(s.observed_net_subtotal, 0) - c.sub_total) > 0.02
+          OR COALESCE(s.has_ambiguous_lines, FALSE)) AS is_line_set_ambiguous
+  FROM ${ref("dw_1_silver_xero", "fact_credit_note")} AS c
+  LEFT JOIN line_sets AS s
+    ON c.tenant_id = s.tenant_id AND c.credit_note_id = s.credit_note_id
+)
+SELECT FARM_FINGERPRINT(c.tenant_id) AS company_key,
+       FARM_FINGERPRINT(CAST(c.credit_note_date_local AS STRING)) AS date_key,
+       FARM_FINGERPRINT(CONCAT(c.tenant_id, '|', c.currency_code)) AS currency_key,
+       IF(c.contact_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(c.tenant_id, '|', c.contact_id))) AS supplier_key,
+       c.credit_note_key, c.tenant_id, c.credit_note_id, c.credit_note_number AS reference_number,
+       c.credit_note_type AS document_type, c.status, c.is_deleted, c.is_voided,
+       c.is_missing_from_staging, c.is_line_set_ambiguous,
+       c.contact_id AS supplier_id, c.contact_name AS supplier_name,
+       c.credit_note_date_local AS document_date, c.currency_code, o.base_currency,
+       c.currency_rate AS source_exchange_rate,
+       c.status IN ('AUTHORISED', 'PAID') AND NOT c.is_line_set_ambiguous AS is_reportable,
+       c.total AS source_amount_in_currency,
+       IF(c.status IN ('AUTHORISED', 'PAID') AND NOT c.is_line_set_ambiguous, c.total, NULL) AS amount_in_currency,
+       IF(c.status IN ('AUTHORISED', 'PAID') AND NOT c.is_line_set_ambiguous, c.remaining_credit, NULL) AS balance_in_currency,
+       IF(c.status IN ('AUTHORISED', 'PAID') AND NOT c.is_line_set_ambiguous, c.sub_total, NULL) AS detail_total_in_currency,
+       IF(c.status IN ('AUTHORISED', 'PAID') AND NOT c.is_line_set_ambiguous, c.total_tax, NULL) AS vat_total_in_currency,
+       CAST(NULL AS NUMERIC) AS amount, CAST(NULL AS NUMERIC) AS amount_nok,
+       c.line_item_count, c.observed_line_count, c.synced_at, 'xero' AS source_system
+FROM credits AS c
+LEFT JOIN ${ref("xero_gold_common", "dim_company")} AS o USING (tenant_id)
+WHERE c.credit_note_type = 'ACCPAYCREDIT'

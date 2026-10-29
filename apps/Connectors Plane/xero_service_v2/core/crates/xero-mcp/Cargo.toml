@@ -1,0 +1,42 @@
+[package]
+name = "xero-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.88"
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+clap.workspace = true
+dotenvy.workspace = true
+gcloud-auth = "1.3"
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+xero-auth.workspace = true
+xero-client.workspace = true
+xero-common.workspace = true
+xero-gcs.workspace = true
+xero-store.workspace = true
+xero-sync.workspace = true
+axum = "0.8"
+axum-extra = { version = "0.10", features = ["cookie"] }
+rmcp = { version = "=3.5.0", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"] }
+sha2 = "0.10"
+subtle = "2.6"
+token-source = "1.0"
+tokio-util = "0.7"
+rusqlite = { version = "0.40", features = ["bundled"] }
+url.workspace = true
+
+[dev-dependencies]
+rmcp = { version = "=3.5.0", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
+tempfile = "3"

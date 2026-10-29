@@ -1,0 +1,20 @@
+.web-vitals-panel { margin-top: 24px; padding: 30px; border: 1px solid var(--border-color, #e8e8e8); border-radius: 24px; color: var(--text-primary, #242527); background: var(--surface-color, #fff); }
+.web-vitals-panel header { display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; }
+.web-vitals-panel header span { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; font-weight: 650; color: #7b7d83; }
+.web-vitals-panel h2 { margin: 8px 0; font-size: 22px; letter-spacing: -.04em; }
+.web-vitals-panel p, .web-vitals-panel footer { color: #7b7d83; font-size: 12px; line-height: 1.65; }
+.web-vitals-panel__controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; justify-content: flex-end; }
+.web-vitals-panel label { display: grid; gap: 5px; font-size: 11px; color: #777; }
+.web-vitals-panel button, .web-vitals-panel select { border: 1px solid #e8e8e8; border-radius: 9px; padding: 10px 12px; background: transparent; color: inherit; font: inherit; font-size: 12px; }
+.web-vitals-panel button:disabled { opacity: .5; cursor: default; }
+.web-vitals-panel__groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 24px 0; }
+.web-vitals-panel article { border: 1px solid #e8e8e8; border-radius: 12px; padding: 18px; min-width: 0; }
+.web-vitals-panel h3 { font-size: 14px; margin: 0 0 20px; }
+.web-vitals-panel dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0; }
+.web-vitals-panel dt { font-size: 11px; color: #7b7d83; }
+.web-vitals-panel dd { margin: 10px 0; font-size: 22px; letter-spacing: -.04em; }
+.web-vitals-panel small { font-size: 11px; }
+.web-vitals-panel .web-vitals-panel__notice { color: #8c662f; font-size: 11px; }
+.web-vitals-panel footer { border-top: 1px solid #efefef; padding-top: 18px; }
+@media (max-width: 1050px) { .web-vitals-panel header { flex-direction: column; } .web-vitals-panel__controls { justify-content: flex-start; } }
+@media (max-width: 700px) { .web-vitals-panel { padding: 20px; } .web-vitals-panel__groups { grid-template-columns: 1fr; } }

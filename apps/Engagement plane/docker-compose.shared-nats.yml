@@ -1,0 +1,13 @@
+# Opt-in leaf transport; the canonical Studio broker and scoped users remain.
+services:
+  nats:
+    entrypoint: ["/bin/sh", "/opt/shared-nats-leaf-entrypoint.sh"]
+    command: []
+    environment:
+      NATS_LEAF_DOMAIN: STUDIO
+    volumes:
+      - ./scripts/shared-nats-leaf-entrypoint.sh:/opt/shared-nats-leaf-entrypoint.sh:ro
+      - ./nats.shared-leaf.conf:/etc/nats/shared-leaf.conf:ro
+      - ${SHARED_NATS_SECRETS_DIR:-./.local/secrets}/shared_nats_studio_leaf_password:/run/secrets/shared_nats_leaf_password:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=8m

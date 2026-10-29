@@ -1,0 +1,15 @@
+# Optional tenant authorization for Social's shared Integration Core client.
+# This is an Integration service bearer, never a Google/Meta provider token.
+services:
+  social-core:
+    environment:
+      INTEGRATION_CORE_TENANT_ORGANIZATION_ID: ${STUDIO_SOCIAL_INTEGRATION_ORGANIZATION_ID:?set the verified Social organization}
+      INTEGRATION_CORE_TENANT_BEARER_TOKEN_FILE: /run/secrets/social_integration_bearer
+      SOCIAL_METRICS_WORKER_ENABLED: "true"
+      SOCIAL_PUBLISH_WORKER_ENABLED: "false"
+    secrets:
+      - social_integration_bearer
+
+secrets:
+  social_integration_bearer:
+    file: ${STUDIO_SOCIAL_INTEGRATION_BEARER_FILE:?set an approved Social bearer secret file path}

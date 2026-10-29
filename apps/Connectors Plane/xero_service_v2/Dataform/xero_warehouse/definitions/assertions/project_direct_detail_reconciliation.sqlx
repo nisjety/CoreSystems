@@ -1,0 +1,17 @@
+config {
+  type: "assertion",
+  name: "xero_project_direct_detail_reconciliation",
+  schema: "dw_1_silver_xero_assertions",
+  description: "Every retained Xero getProject direct response must have an exact same-run getProjects collection counterpart. This validates duplicate delivery without granting direct lookup lifecycle authority."
+}
+
+SELECT
+  tenant_id,
+  project_id,
+  direct_detail_source_run_id,
+  direct_detail_source_version_id,
+  has_same_run_collection_counterpart,
+  has_collection_payload_fingerprint,
+  has_direct_detail_payload_fingerprint
+FROM ${ref("dw_1_silver_xero", "audit_project_direct_detail_reconciliation")}
+WHERE is_direct_detail_reconciled IS NOT TRUE

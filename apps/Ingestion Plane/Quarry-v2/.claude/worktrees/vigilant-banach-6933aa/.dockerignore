@@ -1,0 +1,34 @@
+# Build artifacts — must NEVER be copied into the build context
+target/
+**/target/
+**/*.rs.bk
+
+# Go build outputs
+**/bin/
+**/dist/
+
+# Worktrees + git state
+.claude/
+.git/
+.gitignore
+
+# IDE / OS noise
+.vscode/
+.idea/
+.DS_Store
+
+# Docs the binary doesn't need
+docs/
+*.md
+!README.md
+
+# Test fixtures we don't ship in production images (eval harness can be re-added per Dockerfile)
+**/.coverage/
+**/.pytest_cache/
+**/__pycache__/
+**/node_modules/
+
+# Local secrets
+.env
+.env.local
+.env.*.local

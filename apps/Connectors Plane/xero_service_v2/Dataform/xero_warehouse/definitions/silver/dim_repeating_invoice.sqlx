@@ -1,0 +1,18 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero recurring-invoice templates; template amounts are not posted revenue or expense.",
+  assertions: { nonNull: ["tenant_id", "repeating_invoice_id", "repeating_invoice_key"], uniqueKey: ["repeating_invoice_key"] }
+}
+
+SELECT CONCAT(tenant_id, '|', repeating_invoice_id) AS repeating_invoice_key,
+       tenant_id, repeating_invoice_id, record_id AS repeating_invoice_internal_id,
+       invoice_type, status, COALESCE(status = 'DELETED', FALSE) AS is_deleted,
+       TRUE AS is_template, contact_id, contact_name, reference, currency_code,
+       line_amount_types, line_item_count, sub_total, total_tax, total,
+       schedule_start_date, schedule_end_date, schedule_period, schedule_unit,
+       schedule_due_date_offset, schedule_due_date_type,
+       next_scheduled_date, next_scheduled_date_local, approved_for_sending,
+       include_pdf, mark_as_sent, send_copy, branding_theme_id, has_attachments,
+       updated_at, first_seen_at, synced_at
+FROM ${ref("dw_bronze_xero", "xero_repeating_invoices")}

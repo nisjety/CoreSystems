@@ -1,0 +1,16 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_source_exchange_rate_observation_safety",
+  description: "Native Xero rate evidence must expose coverage without claiming a known conversion direction or NOK result."
+}
+
+SELECT
+  source_entity_type AS violation,
+  CAST(source_exchange_rate_observation_key AS STRING) AS record_id
+FROM ${ref("xero_gold_finance", "fact_source_exchange_rate_observation")}
+WHERE is_source_rate_present IS DISTINCT FROM (source_exchange_rate IS NOT NULL)
+   OR is_rate_direction_known
+   OR is_financial_measure_additive
+   OR amount_nok IS NOT NULL
+   OR is_nok_amount_available

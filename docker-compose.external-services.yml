@@ -1,0 +1,66 @@
+name: external-services
+
+# Deprecated root-level integration overlay.
+#
+# Canonical Zammad ownership is Application Plane/docker-compose.zammad.yml.
+# Nohu was removed because this repository has no verified runtime image or
+# maintained contract. Nango remains available only for controlled migration;
+# active integrations are owned by Ingestion Plane/integration-corev2.
+
+services:
+  nango-postgres:
+    profiles: ["legacy-nango"]
+    image: postgres:15.18-alpine3.24
+    container_name: legacy-nango-postgres
+    environment:
+      POSTGRES_DB: nango
+      POSTGRES_USER: ${NANGO_DB_USER:-nango}
+      # Empty by default so `docker compose config` remains inspectable. The
+      # official image refuses to initialize until an operator supplies it.
+      POSTGRES_PASSWORD: ${NANGO_DB_PASSWORD:-}
+    volumes:
+      - nango_postgres_data:/var/lib/postgresql/data
+    networks:
+      - external-services-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${NANGO_DB_USER:-nango} -d nango"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  nango:
+    profiles: ["legacy-nango"]
+    image: nangohq/nango:214d010e7c4da819fdb4c8e4f8303c9d07bb6904
+    container_name: legacy-nango-api
+    environment:
+      DATABASE_URL: postgres://${NANGO_DB_USER:-nango}:${NANGO_DB_PASSWORD:-}@nango-postgres:5432/nango?sslmode=disable
+      NANGO_API_KEY: ${NANGO_API_KEY:-}
+      NANGO_SECRET_KEY: ${NANGO_SECRET_KEY:-}
+      NANGO_ENCRYPTOR_KEY: ${NANGO_ENCRYPTOR_KEY:-}
+      PORT: "3013"
+      NODE_ENV: production
+      LOG_LEVEL: info
+    ports:
+      - "127.0.0.1:3013:3013"
+    networks:
+      - external-services-net
+    depends_on:
+      nango-postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3013/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+networks:
+  external-services-net:
+    name: external-services-net
+    driver: bridge
+
+volumes:
+  nango_postgres_data:

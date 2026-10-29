@@ -1,0 +1,35 @@
+{
+  "endpoint_name": "cash_transactions",
+  "bigquery_table": "visma_cash_transactions",
+  "primary_key": "referenceNbr",
+  "source": "erp_rest",
+  "api_method": "get_cash_transactions",
+  "api_endpoint": "/v1/cashTransaction",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "referenceNbr",
+    "status",
+    "cashAccount",
+    "tranDate",
+    "amount",
+    "currency",
+    "lastModifiedDateTime"
+  ],
+  "datamart": {
+    "ready": false,
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    },
+    "query_file": "config/queries/cash_transaction.graphql",
+    "type_name": "CashTransaction",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_cash_transaction",
+    "fallback_source": "erp_rest"
+  },
+  "tier": 1
+}

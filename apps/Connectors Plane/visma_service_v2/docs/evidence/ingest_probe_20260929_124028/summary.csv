@@ -1,0 +1,14 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+branches,,1,0,succeeded,1,1,1,1,0,1,14563,471,2026-01-21 12:45:50.307+00
+branches,,2,0,succeeded,1,1,1,1,0,1,14562,514,2026-01-21 12:45:50.307+00
+currencies,,1,0,succeeded,12,12,12,1,0,12,14561,418,
+currencies,,2,0,succeeded,12,12,12,1,0,12,14560,283,
+departments,,1,0,succeeded,54,54,54,1,0,54,14559,428,
+departments,,2,0,succeeded,54,54,54,1,0,54,14558,550,
+accounts,,1,0,succeeded,614,614,614,1,0,614,14557,644,
+accounts,,2,0,succeeded,614,614,614,1,0,614,14556,799,
+customers,,1,0,succeeded,6586,6586,6586,66,0,86,14490,14610,
+customers,,2,0,succeeded,6586,6586,6586,66,0,86,14424,3685,
+suppliers,,1,1,failed,1273,0,0,13,0,73,14411,5387,
+customer_invoices,30,1,0,succeeded,1628,1628,1628,17,0,28,14394,3318,2026-09-29 12:44:16+00
+customer_invoices,30,2,0,succeeded,66,66,1628,1,0,66,14393,1956,2026-09-29 12:44:16+00

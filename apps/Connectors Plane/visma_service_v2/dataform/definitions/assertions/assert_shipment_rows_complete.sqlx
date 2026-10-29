@@ -1,0 +1,43 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_shipment_rows_complete",
+  description: "Silver must hold every shipment and shipment detail line that bronze holds. Returns one row per tenant and kind (header, line) where the count in visma_bronze.visma_shipments (distinct shipmentNumber, the staging key; lines unnested from shipmentDetailLines) differs from visma_silver.fact_shipment or fact_shipment_line.",
+  tags: ["assertion", "silver", "shipment"]
+}
+
+WITH bronze AS (
+  SELECT
+    tenantId AS tenant_id,
+    COUNT(DISTINCT shipmentNumber) AS headers,
+    SUM(ARRAY_LENGTH(JSON_QUERY_ARRAY(shipmentDetailLines))) AS lines
+  FROM ${ref("visma_bronze", "visma_shipments")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+),
+
+silver_headers AS (
+  SELECT tenant_id, COUNT(*) AS headers
+  FROM ${ref("visma_silver", "fact_shipment")}
+  GROUP BY tenant_id
+),
+
+silver_lines AS (
+  SELECT tenant_id, COUNT(*) AS lines
+  FROM ${ref("visma_silver", "fact_shipment_line")}
+  GROUP BY tenant_id
+),
+
+compared AS (
+  SELECT 'header' AS kind, b.tenant_id, b.headers AS bronze_rows, COALESCE(h.headers, 0) AS silver_rows
+  FROM bronze AS b
+  LEFT JOIN silver_headers AS h ON b.tenant_id = h.tenant_id
+  UNION ALL
+  SELECT 'line' AS kind, b.tenant_id, COALESCE(b.lines, 0) AS bronze_rows, COALESCE(l.lines, 0) AS silver_rows
+  FROM bronze AS b
+  LEFT JOIN silver_lines AS l ON b.tenant_id = l.tenant_id
+)
+
+SELECT kind, tenant_id, bronze_rows, silver_rows
+FROM compared
+WHERE bronze_rows != silver_rows

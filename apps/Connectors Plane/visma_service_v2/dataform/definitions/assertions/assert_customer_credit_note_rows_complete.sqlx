@@ -1,0 +1,30 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_customer_credit_note_rows_complete",
+  description: "Silver must hold every customer credit note that bronze holds. Returns one row per tenant where the number of distinct referenceNumber (the staging key) in visma_bronze.visma_customer_credit_notes differs from the rows of visma_silver.fact_customer_credit_note.",
+  tags: ["assertion", "silver", "customer_credit_note"]
+}
+
+WITH bronze AS (
+  SELECT
+    tenantId AS tenant_id,
+    COUNT(DISTINCT referenceNumber) AS bronze_rows
+  FROM ${ref("visma_bronze", "visma_customer_credit_notes")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+),
+
+silver AS (
+  SELECT tenant_id, COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_customer_credit_note")}
+  GROUP BY tenant_id
+)
+
+SELECT
+  COALESCE(bronze.tenant_id, silver.tenant_id) AS tenant_id,
+  COALESCE(bronze_rows, 0) AS bronze_rows,
+  COALESCE(silver_rows, 0) AS silver_rows
+FROM bronze
+FULL OUTER JOIN silver ON bronze.tenant_id = silver.tenant_id
+WHERE COALESCE(bronze_rows, 0) != COALESCE(silver_rows, 0)

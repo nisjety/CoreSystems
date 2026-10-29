@@ -1,0 +1,17 @@
+{
+  "endpoint_name": "languages",
+  "bigquery_table": "visma_languages",
+  "primary_key": "languageISO",
+  "source": "erp_rest",
+  "enabled": true,
+  "api_method": "get_languages",
+  "api_endpoint": "/v1/multilanguage/languages",
+  "pagination_profile": "none",
+  "modified_field": null,
+  "merge_type": "upsert",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": [
+    "languageISO"
+  ],
+  "notes": "Found 6 row(s) via discover_erp_endpoints.py. Key chosen from a sample of 6 row(s); the full ingest run is what proves it. Stored raw for later Dataform mapping."
+}

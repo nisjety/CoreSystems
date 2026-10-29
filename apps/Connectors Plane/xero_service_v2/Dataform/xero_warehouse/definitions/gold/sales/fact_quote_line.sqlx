@@ -1,0 +1,31 @@
+config {
+  type: "table",
+  schema: "xero_gold_sales",
+  description: "Xero quote lines; ambiguous child sets remain visible but have no additive pipeline measure.",
+  assertions: { nonNull: ["tenant_id", "quote_id", "line_item_id", "quote_line_key"], uniqueKey: ["quote_line_key"] }
+}
+
+SELECT FARM_FINGERPRINT(l.tenant_id) AS company_key,
+       FARM_FINGERPRINT(CAST(l.quote_date_local AS STRING)) AS date_key,
+       q.contact_key, q.customer_key,
+       l.quote_line_key, l.quote_key, l.tenant_id, l.quote_id,
+       l.line_item_id, l.quote_number, l.status, l.is_deleted,
+       l.is_open_pipeline, l.is_line_set_ambiguous,
+       l.is_current_line_set_observed, l.is_removed_from_source,
+       l.description, l.quantity, l.unit_amount,
+       l.currency_code, l.line_amount_raw,
+       l.net_amount_in_currency AS source_net_amount_in_currency,
+       IF(l.is_open_pipeline AND NOT l.is_line_set_ambiguous
+          AND NOT l.is_removed_from_source AND l.currency_code IS NOT NULL,
+          l.net_amount_in_currency, NULL) AS pipeline_net_amount_in_currency,
+       l.tax_amount AS source_vat_in_currency,
+       IF(l.tracking_category_1_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.tracking_category_1_id))) AS tracking_category_1_key,
+       IF(l.tracking_option_1_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.tracking_option_1_id))) AS tracking_option_1_key,
+       IF(l.tracking_category_2_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.tracking_category_2_id))) AS tracking_category_2_key,
+       IF(l.tracking_option_2_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.tracking_option_2_id))) AS tracking_option_2_key,
+       l.tracking_category_1_id, l.tracking_option_1_id,
+       l.tracking_category_2_id, l.tracking_option_2_id,
+       'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_quote_line")} AS l
+LEFT JOIN ${ref("xero_gold_sales", "fact_quote")} AS q
+  ON l.tenant_id = q.tenant_id AND l.quote_id = q.quote_id

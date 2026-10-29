@@ -1,0 +1,57 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Atomic Balance Sheet and Profit and Loss statement-line snapshots. Values are report outputs and non-additive both within a report hierarchy and across report snapshots.",
+  assertions: {
+    nonNull: ["tenant_id", "report_snapshot_key", "statement_line_snapshot_key"],
+    uniqueKey: ["statement_line_snapshot_key"]
+  }
+}
+
+WITH statement_cells AS (
+  SELECT
+    c.*,
+    COALESCE(
+      CASE
+        WHEN REGEXP_CONTAINS(c.column_header, r'\\d{4}')
+          THEN SAFE.PARSE_DATE('%e %b %Y', c.column_header)
+        ELSE SAFE.PARSE_DATE('%e %b %y', c.column_header)
+      END,
+      c.report_to,
+      SAFE_CAST(c.report_date AS DATE)
+    ) AS statement_as_of_date
+  FROM ${ref("dw_1_silver_xero", "fact_financial_report_cell")} AS c
+  WHERE c.report_type IN ('BalanceSheet', 'ProfitAndLoss')
+    AND c.is_numeric_value
+    AND NOT c.is_percentage_value
+)
+SELECT
+  report_cell_key AS statement_line_snapshot_key,
+  report_snapshot_key,
+  tenant_id,
+  report_snapshot_id,
+  report_type,
+  report_name,
+  report_from,
+  report_to,
+  report_date,
+  statement_as_of_date,
+  report_index,
+  section_index,
+  section_title,
+  row_index,
+  row_type,
+  row_label,
+  cell_index,
+  column_header,
+  attribute_id,
+  attribute_value,
+  IF(attribute_id = 'account', attribute_value, NULL) AS account_id,
+  is_summary_row,
+  is_orphan_snapshot,
+  source_numeric_value AS source_statement_amount,
+  TRUE AS is_report_snapshot,
+  TRUE AS is_non_additive,
+  TRUE AS is_non_additive_within_snapshot,
+  report_synced_at
+FROM statement_cells

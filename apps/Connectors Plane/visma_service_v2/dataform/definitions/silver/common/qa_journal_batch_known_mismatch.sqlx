@@ -1,0 +1,77 @@
+config {
+  type: "table",
+  schema: "visma_silver_common",
+  name: "qa_journal_batch_known_mismatch",
+  description: "QA: the posted journal batches whose header control totals differ from their general ledger lines in Visma's own data, accepted as known source differences. assert_journal_batch_control_totals leaves out a batch listed here only while its differences are exactly the recorded ones, so a batch that changes, and any new mismatch, still fails the run.",
+  tags: ["silver", "common", "qa", "general_ledger"]
+}
+
+-- Recorded 2026-10-13 from the 49 batches that assert_journal_batch_control_totals returned on the
+-- staging of 2026-10-01/02 (Aquatiq AS 23, Hygiene Systems 18, Aquatiq Group 5, Sense 2, Sensilist 1).
+-- All are AR or AP batches. In 47 the header's debit and credit totals agree and are larger than the sum
+-- of the batch's lines; the lines themselves balance (assert_gl_batch_nets_to_zero holds for every batch),
+-- so the ledger is intact and only the header claims more than the journal listing returns for the batch.
+-- In 2 (Hygiene Systems AP 011229, Aquatiq AS AR 035865) the header's own debit and credit totals differ.
+--
+-- Not a loss on the way: checked against live Visma on 2026-10-12 for four of the periods involved
+-- (Hygiene Systems AP 202402, Hygiene Systems AR 202405, Aquatiq AS AR 202410, Sense AR 202401), the
+-- lines staged equal the totalCount Visma returns for that period and module (1,528, 1,557, 8,814 and 567).
+-- The batch's own lines in bronze (journalTransactionLines) are as short as the general ledger lines.
+--
+-- debit_difference and credit_difference are header minus lines, as the assertion computes them. A batch
+-- listed here is left out of the assertion only while its differences are exactly these. Remove a row when
+-- Visma's data is corrected; keep the list short.
+--
+-- Reasons: header_total_exceeds_gl_lines, header_debit_differs_from_header_credit.
+
+SELECT * FROM UNNEST([
+  STRUCT('61320c0a-102d-11ee-a0e0-0693d8a7c3dd' AS tenant_id, 'AHS' AS entity_code, 'AP' AS module, '003407' AS batch_number, '202402' AS financial_period, NUMERIC '39208.75' AS debit_difference, NUMERIC '39208.75' AS credit_difference, 'header_total_exceeds_gl_lines' AS reason),
+  STRUCT('61320c0a-102d-11ee-a0e0-0693d8a7c3dd', 'AHS', 'AP', '003409', '202402', NUMERIC '71354.28', NUMERIC '71354.28', 'header_total_exceeds_gl_lines'),
+  STRUCT('61320c0a-102d-11ee-a0e0-0693d8a7c3dd', 'AHS', 'AP', '003586', '202402', NUMERIC '3136', NUMERIC '3136', 'header_total_exceeds_gl_lines'),
+  STRUCT('61320c0a-102d-11ee-a0e0-0693d8a7c3dd', 'AHS', 'AP', '003728', '202402', NUMERIC '24510', NUMERIC '24510', 'header_total_exceeds_gl_lines'),
+  STRUCT('61320c0a-102d-11ee-a0e0-0693d8a7c3dd', 'AHS', 'AR', '005014', '202405', NUMERIC '143308.66', NUMERIC '143308.66', 'header_total_exceeds_gl_lines'),
+  STRUCT('61320c0a-102d-11ee-a0e0-0693d8a7c3dd', 'AHS', 'AP', '005457', '202405', NUMERIC '2381.25', NUMERIC '2381.25', 'header_total_exceeds_gl_lines'),
+  STRUCT('61320c0a-102d-11ee-a0e0-0693d8a7c3dd', 'AHS', 'AR', '006336', '202407', NUMERIC '71044.54', NUMERIC '71044.54', 'header_total_exceeds_gl_lines'),
+  STRUCT('61320c0a-102d-11ee-a0e0-0693d8a7c3dd', 'AHS', 'AR', '007303', '202409', NUMERIC '18071.03', NUMERIC '18071.03', 'header_total_exceeds_gl_lines'),
+  STRUCT('61320c0a-102d-11ee-a0e0-0693d8a7c3dd', 'AHS', 'AP', '008508', '202410', NUMERIC '11284.49', NUMERIC '11284.49', 'header_total_exceeds_gl_lines'),
+  STRUCT('61320c0a-102d-11ee-a0e0-0693d8a7c3dd', 'AHS', 'AR', '008854', '202411', NUMERIC '2990.01', NUMERIC '2990.01', 'header_total_exceeds_gl_lines'),
+  STRUCT('61320c0a-102d-11ee-a0e0-0693d8a7c3dd', 'AHS', 'AR', '008863', '202411', NUMERIC '208840.58', NUMERIC '208840.58', 'header_total_exceeds_gl_lines'),
+  STRUCT('61320c0a-102d-11ee-a0e0-0693d8a7c3dd', 'AHS', 'AP', '009423', '202411', NUMERIC '7984.38', NUMERIC '7984.38', 'header_total_exceeds_gl_lines'),
+  STRUCT('61320c0a-102d-11ee-a0e0-0693d8a7c3dd', 'AHS', 'AP', '009543', '202411', NUMERIC '961.25', NUMERIC '961.25', 'header_total_exceeds_gl_lines'),
+  STRUCT('61320c0a-102d-11ee-a0e0-0693d8a7c3dd', 'AHS', 'AR', '009319', '202412', NUMERIC '2769.86', NUMERIC '2769.86', 'header_total_exceeds_gl_lines'),
+  STRUCT('61320c0a-102d-11ee-a0e0-0693d8a7c3dd', 'AHS', 'AR', '010775', '202502', NUMERIC '4941.17', NUMERIC '4941.17', 'header_total_exceeds_gl_lines'),
+  STRUCT('61320c0a-102d-11ee-a0e0-0693d8a7c3dd', 'AHS', 'AP', '011229', '202502', NUMERIC '0', NUMERIC '68591.8', 'header_debit_differs_from_header_credit'),
+  STRUCT('61320c0a-102d-11ee-a0e0-0693d8a7c3dd', 'AHS', 'AR', '013371', '202505', NUMERIC '26751.25', NUMERIC '26751.25', 'header_total_exceeds_gl_lines'),
+  STRUCT('61320c0a-102d-11ee-a0e0-0693d8a7c3dd', 'AHS', 'AR', '014822', '202507', NUMERIC '12518.13', NUMERIC '12518.13', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '002393', '202311', NUMERIC '1702.5', NUMERIC '1702.5', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '005710', '202401', NUMERIC '3329', NUMERIC '3329', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '008586', '202403', NUMERIC '5463', NUMERIC '5463', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '010316', '202405', NUMERIC '5917.5', NUMERIC '5917.5', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '012137', '202406', NUMERIC '2893.26', NUMERIC '2893.26', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '017345', '202409', NUMERIC '6395.81', NUMERIC '6395.81', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '019033', '202410', NUMERIC '626964.78', NUMERIC '626964.78', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '020589', '202411', NUMERIC '1209120.86', NUMERIC '1209120.86', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '020676', '202411', NUMERIC '9392.64', NUMERIC '9392.64', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '021129', '202411', NUMERIC '30303.22', NUMERIC '30303.22', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '025528', '202503', NUMERIC '264335.29', NUMERIC '264335.29', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '030061', '202505', NUMERIC '552195.67', NUMERIC '552195.67', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '030200', '202506', NUMERIC '339930.56', NUMERIC '339930.56', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '034986', '202509', NUMERIC '29483.75', NUMERIC '29483.75', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '035865', '202509', NUMERIC '5520', NUMERIC '0', 'header_debit_differs_from_header_credit'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '040111', '202512', NUMERIC '8600', NUMERIC '8600', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '040113', '202512', NUMERIC '162904', NUMERIC '162904', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AP', '044569', '202601', NUMERIC '3101.25', NUMERIC '3101.25', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '045066', '202602', NUMERIC '708128.06', NUMERIC '708128.06', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '049405', '202604', NUMERIC '13523', NUMERIC '13523', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '052331', '202605', NUMERIC '110782', NUMERIC '110782', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '060957', '202607', NUMERIC '1165.02', NUMERIC '1165.02', 'header_total_exceeds_gl_lines'),
+  STRUCT('33f319b9-4d57-11ee-960c-025417856183', 'AQUATIQ_AS', 'AR', '062484', '202608', NUMERIC '12351.24', NUMERIC '12351.24', 'header_total_exceeds_gl_lines'),
+  STRUCT('7d2c489e-21cc-11e9-b307-0aa512338dd6', 'AQUATIQ_GROUP', 'AP', '002733', '202402', NUMERIC '33850', NUMERIC '33850', 'header_total_exceeds_gl_lines'),
+  STRUCT('7d2c489e-21cc-11e9-b307-0aa512338dd6', 'AQUATIQ_GROUP', 'AP', '002813', '202402', NUMERIC '5375', NUMERIC '5375', 'header_total_exceeds_gl_lines'),
+  STRUCT('7d2c489e-21cc-11e9-b307-0aa512338dd6', 'AQUATIQ_GROUP', 'AP', '003202', '202404', NUMERIC '885', NUMERIC '885', 'header_total_exceeds_gl_lines'),
+  STRUCT('7d2c489e-21cc-11e9-b307-0aa512338dd6', 'AQUATIQ_GROUP', 'AP', '005766', '202503', NUMERIC '519', NUMERIC '519', 'header_total_exceeds_gl_lines'),
+  STRUCT('7d2c489e-21cc-11e9-b307-0aa512338dd6', 'AQUATIQ_GROUP', 'AP', '006174', '202505', NUMERIC '25500', NUMERIC '25500', 'header_total_exceeds_gl_lines'),
+  STRUCT('bb6c024e-5567-11ee-960c-025417856183', 'SENSE', 'AR', '001246', '202401', NUMERIC '75591.52', NUMERIC '75591.52', 'header_total_exceeds_gl_lines'),
+  STRUCT('bb6c024e-5567-11ee-960c-025417856183', 'SENSE', 'AR', '007145', '202507', NUMERIC '83250', NUMERIC '83250', 'header_total_exceeds_gl_lines'),
+  STRUCT('eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd', 'SENSILIST', 'AR', '000726', '202410', NUMERIC '16677.5', NUMERIC '16677.5', 'header_total_exceeds_gl_lines')
+])

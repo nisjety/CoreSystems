@@ -1,0 +1,5 @@
+# Engagement owns the product boundary. Keep the existing project identity and
+# volumes during migration: changing the name would create an empty dev stack.
+name: studio-plane
+include:
+  - path: ../Studio Plane/docker-compose.yml

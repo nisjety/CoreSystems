@@ -1,0 +1,28 @@
+{
+  "endpoint_name": "sales_categories",
+  "bigquery_table": "visma_sales_categories",
+  "primary_key": "salesCategoryId",
+  "source": "erp_rest",
+  "api_method": "get_sales_categories",
+  "api_endpoint": "/v1/salescategory",
+  "pagination_profile": "none",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "salesCategoryId",
+    "description",
+    "active",
+    "lastModifiedDateTime"
+  ],
+  "datamart": {
+    "ready": false,
+    "pilot_override": false,
+    "query_file": "config/queries/sales_category.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "erp_rest"
+  },
+  "notes": "Sales categorization master data — classifies products/services for sales analysis and reporting."
+}

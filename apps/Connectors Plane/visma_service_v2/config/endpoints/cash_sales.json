@@ -1,0 +1,41 @@
+{
+  "endpoint_name": "cash_sales",
+  "bigquery_table": "visma_cash_sales",
+  "primary_key": "referenceNumber",
+  "source": "erp_rest",
+  "api_method": "get_cash_sales",
+  "api_endpoint": "/v1/cashsale",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "referenceNumber",
+    "documentType",
+    "status",
+    "customer.number",
+    "amount",
+    "balance",
+    "lastModifiedDateTime"
+  ],
+  "datamart": {
+    "ready": false,
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    },
+    "query_file": "config/queries/cash_sale.graphql",
+    "type_name": "CashSale",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_cash_sale",
+    "fallback_source": "erp_rest"
+  },
+  "default_query": {
+    "expandApplications": "true",
+    "expandDunningInformation": "true",
+    "expandAttachments": "true",
+    "expandTaxDetails": "true",
+    "expandInvoiceAddress": "true"
+  }
+}

@@ -1,0 +1,63 @@
+# Exclude large host-side build artifacts from Docker build contexts.
+# Rust services use the Model Plane root as build context (so they can see
+# `proto/` referenced by `mp-contracts/build.rs`), which means without this
+# file the multi-GB `rust/target/` cache would be sent to Docker for every
+# build.
+
+# Rust build output
+rust/target/
+target/
+
+# Go build artifacts
+go/**/bin/
+go/**/dist/
+
+# Python caches
+python/**/__pycache__/
+python/**/.pytest_cache/
+python/**/*.egg-info/
+**/.venv/
+**/venv/
+
+# Node
+**/node_modules/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Logs and runtime state
+*.log
+logs/
+coverage/
+**/coverage/
+**/.coverage
+**/.cache/
+
+# Root-context builds are Rust-only. Go, Python, deployment files, bridges,
+# documentation and local operator state use their own contexts (or are never
+# copied into an image), so do not send them to BuildKit.
+go/
+python/
+deploy/
+bridges/
+docs/
+scripts/
+*.md
+docker-compose*.yml
+
+# Secrets and local credentials
+.env
+.env.*
+!.env.example
+**/*.pem
+**/*.key
+**/keys/
+.codegraph/
+
+# VCS
+.git/
+.gitignore

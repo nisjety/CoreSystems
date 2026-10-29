@@ -1,0 +1,22 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_tenants",
+  description: "The Visma tenants (companies) the pipeline fetches, from config/tenants/ of visma_service_v2. Gives every bronze row its organizationName.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT * FROM UNNEST([
+  STRUCT("ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd" AS tenant_id, "Aqua Pharma AS" AS tenant_name, "active" AS status, CAST(NULL AS STRING) AS valid_to, CAST(NULL AS STRING) AS bu_label, "4734948" AS datamart_company_id),
+  STRUCT("ffa4a061-8084-11e9-b307-0aa512338dd6" AS tenant_id, "Aqua Pharma Group AS" AS tenant_name, "active" AS status, CAST(NULL AS STRING) AS valid_to, CAST(NULL AS STRING) AS bu_label, "2413631" AS datamart_company_id),
+  STRUCT("2b6e5cd6-6ce0-11ee-970e-025417856183" AS tenant_id, "Aquatiq AB" AS tenant_name, "active" AS status, CAST(NULL AS STRING) AS valid_to, CAST(NULL AS STRING) AS bu_label, "4883732" AS datamart_company_id),
+  STRUCT("d1507c4a-7717-11ee-970e-025417856183" AS tenant_id, "Aquatiq Aps" AS tenant_name, "active" AS status, CAST(NULL AS STRING) AS valid_to, CAST(NULL AS STRING) AS bu_label, "4906213" AS datamart_company_id),
+  STRUCT("33f319b9-4d57-11ee-960c-025417856183" AS tenant_id, "Aquatiq AS" AS tenant_name, CAST(NULL AS STRING) AS status, CAST(NULL AS STRING) AS valid_to, CAST(NULL AS STRING) AS bu_label, CAST(NULL AS STRING) AS datamart_company_id),
+  STRUCT("bed46bb6-21cc-11e9-b307-0aa512338dd6" AS tenant_id, "Aquatiq Food Automation ApS" AS tenant_name, "active" AS status, CAST(NULL AS STRING) AS valid_to, CAST(NULL AS STRING) AS bu_label, "1868393" AS datamart_company_id),
+  STRUCT("f630d6b0-5566-11ee-960c-025417856183" AS tenant_id, "Aquatiq Food Factory AS" AS tenant_name, "historical" AS status, "2025-12-31" AS valid_to, "Hygiene Systems" AS bu_label, "4848382" AS datamart_company_id),
+  STRUCT("7d2c489e-21cc-11e9-b307-0aa512338dd6" AS tenant_id, "Aquatiq Group AS" AS tenant_name, "active" AS status, CAST(NULL AS STRING) AS valid_to, "Group Services" AS bu_label, "1042103" AS datamart_company_id),
+  STRUCT("61320c0a-102d-11ee-a0e0-0693d8a7c3dd" AS tenant_id, "Aquatiq Hygiene Systems AS" AS tenant_name, "historical" AS status, "2025-12-31" AS valid_to, "Hygiene Systems" AS bu_label, "4763407" AS datamart_company_id),
+  STRUCT("bb6c024e-5567-11ee-960c-025417856183" AS tenant_id, "Aquatiq Sense AS" AS tenant_name, "historical" AS status, "2025-12-31" AS valid_to, "Food Technology & Aquaculture" AS bu_label, "4848397" AS datamart_company_id),
+  STRUCT("9b1fa69b-5568-11ee-960c-025417856183" AS tenant_id, "Consult AS" AS tenant_name, "historical" AS status, "2025-12-31" AS valid_to, "Consult" AS bu_label, "4848416" AS datamart_company_id),
+  STRUCT("eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd" AS tenant_id, "Sensilist AS" AS tenant_name, "active" AS status, CAST(NULL AS STRING) AS valid_to, CAST(NULL AS STRING) AS bu_label, "4734974" AS datamart_company_id)
+])

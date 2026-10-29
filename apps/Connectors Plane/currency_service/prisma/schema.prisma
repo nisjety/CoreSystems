@@ -1,0 +1,46 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x", "debian-openssl-1.1.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Rate {
+  id    BigInt   @id @default(autoincrement())
+  date  DateTime @db.Date
+  base  String
+  quote String
+  value Decimal  @db.Decimal(18, 8)
+  src   String   @default("NB")
+
+  @@unique([date, base, quote], name: "rate_unique")
+  @@map("Rate")
+}
+
+model SeriesPoint {
+  id     BigInt   @id @default(autoincrement())
+  date   DateTime @db.Date
+  series String
+  label  String?
+  value  Decimal  @db.Decimal(18, 8)
+  src    String   @default("NB")
+
+  @@unique([date, series, label], name: "series_unique")
+  @@map("SeriesPoint")
+}
+
+model SyncLog {
+  id               String    @id
+  type             String
+  status           String
+  startTime        DateTime  @default(now())
+  endTime          DateTime?
+  error            String?
+  recordsProcessed Int?
+  details          String?
+
+  @@map("SyncLog")
+}

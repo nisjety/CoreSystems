@@ -1,0 +1,26 @@
+config {
+  type: "view",
+  name: "xero_invoice_current_line_keys",
+  schema: "dw_bronze_xero",
+  description: "LineItemID membership in each invoice's latest raw Xero response. Older typed lines remain available for lifecycle audit.",
+  assertions: { nonNull: ["tenant_id", "invoice_id", "line_item_id"], uniqueKey: ["tenant_id", "invoice_id", "line_item_id"] }
+}
+
+SELECT
+  invoice.tenant_id,
+  invoice.record_id AS invoice_id,
+  JSON_VALUE(line, '$.LineItemID') AS line_item_id,
+  SAFE_CAST(JSON_VALUE(line, '$.LineAmount') AS FLOAT64) AS raw_line_amount,
+  SAFE_CAST(JSON_VALUE(line, '$.TaxAmount') AS FLOAT64) AS raw_tax_amount,
+  SAFE_CAST(JSON_VALUE(line, '$.Quantity') AS FLOAT64) AS raw_quantity,
+  SAFE_CAST(JSON_VALUE(line, '$.UnitAmount') AS FLOAT64) AS raw_unit_amount,
+  JSON_VALUE(line, '$.AccountCode') AS raw_account_code,
+  JSON_VALUE(line, '$.TaxType') AS raw_tax_type,
+  JSON_VALUE(line, '$.ItemCode') AS raw_item_code,
+  JSON_VALUE(line, '$.Description') AS raw_description,
+  invoice.observed_at,
+  invoice.version_id AS parent_source_version_id
+FROM ${ref("dw_bronze_xero", "xero_raw_record_current")} AS invoice
+CROSS JOIN UNNEST(IFNULL(JSON_QUERY_ARRAY(invoice.payload_json, '$.LineItems'), [])) AS line
+WHERE invoice.endpoint = 'invoices'
+  AND invoice.record_id = JSON_VALUE(invoice.payload_json, '$.InvoiceID')

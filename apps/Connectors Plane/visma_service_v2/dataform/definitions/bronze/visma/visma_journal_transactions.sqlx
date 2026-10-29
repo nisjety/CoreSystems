@@ -1,0 +1,54 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_journal_transactions",
+  description: "Bronze: GL journal transaction batches (v2) from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.bool("autoReversing")} AS `autoReversing`,
+  ${bronze.str("batchNumber")} AS `batchNumber`,
+  ${bronze.str("branch")} AS `branch`,
+  ${bronze.float("controlTotal")} AS `controlTotal`,
+  ${bronze.float("controlTotalInCurrency")} AS `controlTotalInCurrency`,
+  ${bronze.bool("createVatTransaction")} AS `createVatTransaction`,
+  ${bronze.float("creditTotal")} AS `creditTotal`,
+  ${bronze.float("creditTotalInCurrency")} AS `creditTotalInCurrency`,
+  ${bronze.str("currencyId")} AS `currencyId`,
+  ${bronze.float("debitTotal")} AS `debitTotal`,
+  ${bronze.float("debitTotalInCurrency")} AS `debitTotalInCurrency`,
+  ${bronze.str("description")} AS `description`,
+  ${bronze.float("exchangeRate")} AS `exchangeRate`,
+  ${bronze.str("financialPeriod")} AS `financialPeriod`,
+  ${bronze.bool("hold")} AS `hold`,
+  ${bronze.str("journalTransactionLines")} AS `journalTransactionLines`,
+  ${bronze.str("lastModifiedDateTime")} AS `lastModifiedDateTime`,
+  ${bronze.str("ledger")} AS `ledger`,
+  ${bronze.str("ledgerDescription")} AS `ledgerDescription`,
+  ${bronze.str("metadata")} AS `metadata`,
+  ${bronze.str("module")} AS `module`,
+  ${bronze.str("postPeriod")} AS `postPeriod`,
+  ${bronze.bool("reversingEntry")} AS `reversingEntry`,
+  ${bronze.bool("skipVatAmountValidation")} AS `skipVatAmountValidation`,
+  ${bronze.str("status")} AS `status`,
+  ${bronze.str("transactionDate")} AS `transactionDate`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`,  -- v2 does not fetch this field
+  ${bronze.str("transactionCode")} AS `transactionCode`,
+  ${bronze.str("transactionCodeDescription")} AS `transactionCodeDescription`,
+  ${bronze.str("originalBatchNumber")} AS `originalBatchNumber`,
+  ${bronze.str("batchNumber")} AS `batchNbr`
+FROM ${ref("dw_staging_visma", "journal_transactions")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

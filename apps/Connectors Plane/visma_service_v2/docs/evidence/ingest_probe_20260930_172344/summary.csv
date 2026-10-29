@@ -1,0 +1,5 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+general_ledger_balances_v2,,1,0,succeeded,28363,28363,28363,348,0,91,12927,7531,2026-09-30 16:59:01.817+00
+general_ledger_balances_v2,,2,0,succeeded,28363,28363,28363,348,0,91,12507,4122,2026-09-30 16:59:01.817+00
+project_transactions,,1,0,succeeded,4967,4967,4967,91,0,1,12414,2983,
+project_transactions,,2,0,succeeded,4967,4967,4967,91,0,1,12323,4227,

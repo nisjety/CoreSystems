@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "visma_bronze_excel",
+  name: "raw_cost_products",
+  description: "Raw product numbers of Omkostninger.xlsx (Sheet1): the products that are charges (freight, travel, packaging and fee lines), not goods. Replaced from the workbook by dataform/tools/excel_inputs.py, all STRING."
+}

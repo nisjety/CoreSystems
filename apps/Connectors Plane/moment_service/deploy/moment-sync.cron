@@ -1,0 +1,10 @@
+# Weekly Moment -> BigQuery sync, every Sunday at 03:00 server time.
+#
+# Safe to re-run at any time: each entity is fetched in full and MERGEd on id
+# (insert new, update changed, soft-flag deleted - rows are never removed), so
+# reruns can't create duplicates, gaps, or data loss; a failed run leaves the
+# table untouched.
+#
+# Installed automatically by deploy.sh; to install by hand:
+#   crontab -e   and paste the line below
+0 3 * * 0 docker exec aquatiq-moment-service python run_sync.py >> /var/log/moment-sync.log 2>&1

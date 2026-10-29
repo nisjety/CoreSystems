@@ -1,0 +1,35 @@
+.marketing-work__task,
+.marketing-work__activity {
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  border-top: 1px solid #ebe9e4;
+  padding: 16px 0;
+}
+
+.marketing-work__task { margin-top: 12px; }
+.marketing-work__task-body, .marketing-work__activity > div { flex: 1; min-width: 0; }
+.marketing-work__task-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.marketing-work__task-title strong, .marketing-work__activity strong { color: #34332f; font-size: 13px; font-weight: 670; overflow-wrap: anywhere; }
+.marketing-work__task-title span { border-radius: 999px; padding: 3px 8px; color: #706d66; background: #f4f2ee; font-size: 10px; }
+.marketing-work__task-title span[data-status="in_progress"] { color: #8a5a16; background: #fff5df; }
+.marketing-work__task p, .marketing-work__activity p { margin-top: 5px; color: #77746e; font-size: 11px; line-height: 1.5; }
+.marketing-work__task small { display: block; margin-top: 4px; color: #99968f; font-size: 10px; }
+.marketing-work__verification { margin-top: 10px; padding: 9px 11px; border: 1px solid #e4e1db; border-radius: 8px; background: #faf9f6; }
+.dark .marketing-work__verification { border-color: var(--pulse-line); background: var(--pulse-card); }
+.marketing-work__actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.marketing-work__actions button { border: 1px solid #e4e1db; border-radius: 7px; background: white; padding: 5px 9px; color: #5a5751; font: inherit; font-size: 10px; cursor: pointer; }
+.marketing-work__actions button:hover:not(:disabled) { background: #f5f3ef; }
+.marketing-work__actions button:focus-visible { outline: 2px solid #5d85b5; outline-offset: 2px; }
+.marketing-work__actions button:disabled { opacity: .5; cursor: wait; }
+.marketing-work__state { display: flex; align-items: center; gap: 8px; min-height: 78px; border-top: 1px solid #ebe9e4; padding: 16px 0; color: #96938d; font-size: 11px; }
+.marketing-work__error { padding: 10px clamp(24px, 4vw, 48px); color: #9a342d; font-size: 11px; }
+.marketing-work__spin { animation: marketing-work-spin 1s linear infinite; }
+@keyframes marketing-work-spin { to { transform: rotate(360deg); } }
+.dark .marketing-work__task, .dark .marketing-work__activity, .dark .marketing-work__state { border-color: var(--pulse-line); }
+.dark .marketing-work__task-title strong, .dark .marketing-work__activity strong { color: var(--pulse-ink); }
+.dark .marketing-work__actions button { border-color: var(--pulse-line); color: var(--pulse-ink); background: var(--pulse-card); }
+.dark .marketing-work__task-title span { background: #34312b; }
+@media (prefers-reduced-motion: reduce) { .marketing-work__spin { animation: none; } }
+
+.marketing-work__planning{margin-top:12px}.marketing-work__planning form{display:flex;flex-wrap:wrap;align-items:end;gap:12px;padding:12px 0}.marketing-work__planning label{display:grid;gap:6px}.marketing-work__planning input,.marketing-work__planning select{border:1px solid var(--border-color,#e5e5e5);border-radius:8px;padding:8px;background:transparent;color:inherit;max-width:260px}

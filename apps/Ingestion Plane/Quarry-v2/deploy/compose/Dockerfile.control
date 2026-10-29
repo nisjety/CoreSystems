@@ -1,0 +1,75 @@
+# syntax=docker/dockerfile:1.7
+# quarry-control-go (Go durable plane: jobs/schedules/profiles/webhooks/Postgres)
+#
+# Three local module deps live in pkg/:
+#   - pkg/quarrycontracts (cross-plane Go contracts)
+#   - pkg/quarryotel      (shared OTLP/W3C TraceContext bootstrap, cycle 14)
+#   - pkg/quarryassets    (where present)
+# The build copies them all so `go mod tidy` resolves the `replace` directives
+# in services/quarry-control/go.mod.
+
+FROM golang:1.26.5-bookworm AS build
+WORKDIR /src
+ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
+ENV GOSUMDB=sum.golang.org
+
+# Copy local module dependencies first (pkg/) so cache survives service-only edits.
+COPY pkg ./pkg
+
+# Now copy the service tree.
+COPY services/quarry-control ./services/quarry-control
+
+WORKDIR /src/services/quarry-control
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    set -e; \
+    for i in 1 2 3 4 5; do \
+        if go mod download; then \
+            exit 0; \
+        fi; \
+        echo "go mod download retry $i"; \
+        sleep 8; \
+    done; \
+    exit 1
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build \
+        -ldflags="-s -w -extldflags=-static" \
+        -o /out/control ./cmd/control
+
+# ---- Runtime image -----------------------------------------------------------
+# bookworm-slim with wget for Docker healthchecks; adds ~25 MB over distroless.
+FROM debian:bookworm-20260623-slim
+ARG SOURCE_REVISION=unverified
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.title="CoreSystem Quarry control" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
+# Re-expose the build args as runtime ENV so the running process can answer
+# GET /version (internal/httpx/httpx.go) without needing Docker/registry
+# access to read the image label above.
+ENV SOURCE_REVISION=${SOURCE_REVISION} \
+    BUILD_DATE=${BUILD_DATE}
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -e; \
+    export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
+    apt-get update -qq; \
+    if ! apt-get install -y -qq --no-install-recommends \
+        ca-certificates \
+        postgresql-client \
+        wget \
+        > /tmp/apt-install.log 2>&1; then \
+        cat /tmp/apt-install.log; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/apt-install.log; \
+    echo 'quarry:x:65532:' >> /etc/group; \
+    echo 'quarry:x:65532:65532::/nonexistent:/usr/sbin/nologin' >> /etc/passwd
+
+COPY --from=build --chown=quarry:quarry /out/control /app/control
+
+USER quarry
+WORKDIR /app
+EXPOSE 8081
+# /health is GET-only; use -O /dev/null instead of --spider (which sends HEAD).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 CMD wget --quiet --tries=1 -O /dev/null http://localhost:8081/health || exit 1
+ENTRYPOINT ["/app/control"]

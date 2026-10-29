@@ -1,0 +1,31 @@
+{
+  "endpoint_name": "attributes",
+  "bigquery_table": "visma_attributes",
+  "primary_key": "attributeID",
+  "source": "erp_rest",
+  "api_method": "get_attributes",
+  "api_endpoint": "/v1/attribute",
+  "pagination_profile": "finance_page_number",
+  "modified_field": null,
+  "merge_type": "upsert",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": [
+    "attributeID",
+    "description",
+    "controlType",
+    "internal"
+  ],
+  "datamart": {
+    "ready": false,
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    },
+    "query_file": "config/queries/attribute.graphql",
+    "type_name": "Attribute",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_attribute",
+    "fallback_source": "erp_rest"
+  }
+}

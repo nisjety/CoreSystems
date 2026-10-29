@@ -1,0 +1,31 @@
+# Hand-kept copy of config/queries/datamart/vat_categories.graphql.
+# includeDeleted defaults to true: the paginator never sends the variable, and the
+# generated default (false) would hide deletions from bronze. Deleted rows arrive
+# with deletedDatabaseRecord = true (same convention as general_ledger_balance.graphql).
+query VatCategories(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = true
+) {
+  vatCategories(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    vatCategoryId
+    description
+    excludeListedTaxes
+    active
+    standardTaxCode
+    lastModifiedDateTime
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+  }
+}

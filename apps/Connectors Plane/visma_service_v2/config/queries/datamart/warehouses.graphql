@@ -1,0 +1,45 @@
+query Warehouses(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  warehouses(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    warehouseId
+    warehouseCd
+    branchId
+    replenishmentClassId
+    active
+    lockSitePICountEntry
+    description
+    locationEntry
+    avgDefaultCost
+    fifoDefaultCost
+    receiptLocationId
+    shipLocationId
+    returnLocationId
+    dropShipLocationId
+    contactId
+    addressId
+    lastModifiedDateTime
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+    locations {
+      id
+      companyId
+      updatedInDataMartDateTime
+      warehouseId
+      locationId
+    }
+  }
+}

@@ -1,0 +1,16 @@
+config { type: "assertion", schema: "dw_1_silver_xero_assertions", name: "xero_gold_expansion_measure_safety" }
+
+SELECT 'quote' entity, quote_id AS source_id FROM ${ref("xero_gold_sales", "fact_quote")}
+WHERE (NOT is_open_pipeline OR is_line_set_ambiguous) AND pipeline_amount_in_currency IS NOT NULL
+UNION ALL SELECT 'quote_line', quote_line_key FROM ${ref("xero_gold_sales", "fact_quote_line")}
+WHERE (NOT is_open_pipeline OR is_line_set_ambiguous) AND pipeline_net_amount_in_currency IS NOT NULL
+UNION ALL SELECT 'purchase_order', purchase_order_id FROM ${ref("xero_gold_procurement", "fact_purchase_order")}
+WHERE (NOT is_open_commitment OR is_billed OR is_line_set_ambiguous) AND committed_amount_in_currency IS NOT NULL
+UNION ALL SELECT 'purchase_order_line', purchase_order_line_key FROM ${ref("xero_gold_procurement", "fact_purchase_order_line")}
+WHERE (NOT is_open_commitment OR is_billed OR is_line_set_ambiguous) AND committed_net_amount_in_currency IS NOT NULL
+UNION ALL SELECT 'bank_transaction', bank_transaction_id FROM ${ref("xero_gold_finance", "fact_bank_transaction")}
+WHERE (NOT is_external_cash_flow OR is_deleted OR is_line_set_ambiguous) AND external_cash_flow_in_currency IS NOT NULL
+UNION ALL SELECT 'bank_transaction_line', bank_transaction_line_key FROM ${ref("xero_gold_finance", "fact_bank_transaction_line")}
+WHERE (NOT is_external_cash_flow OR is_deleted OR is_line_set_ambiguous) AND external_net_allocation_in_currency IS NOT NULL
+UNION ALL SELECT 'bank_transfer', bank_transfer_id FROM ${ref("xero_gold_finance", "fact_bank_transfer")}
+WHERE external_cash_flow_in_currency IS NOT NULL

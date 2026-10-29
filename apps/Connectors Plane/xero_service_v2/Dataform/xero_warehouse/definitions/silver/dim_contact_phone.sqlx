@@ -1,0 +1,21 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero contact phone numbers at tenant, contact, phone-type, and phone-number grain; rows without a current contact remain visible.",
+  assertions: { nonNull: ["tenant_id", "contact_id", "phone_type", "phone_number", "contact_phone_key"], uniqueKey: ["contact_phone_key"] }
+}
+
+SELECT
+  CONCAT(a.tenant_id, '|', a.contact_id, '|', a.phone_type, '|', a.phone_number) AS contact_phone_key,
+  a.tenant_id,
+  a.contact_id,
+  a.phone_type,
+  a.phone_number,
+  a.country_code,
+  a.area_code,
+  a.synced_at,
+  c.contact_key IS NULL AS is_contact_unresolved
+FROM ${ref("dw_bronze_xero", "xero_contact_phones")} AS a
+LEFT JOIN ${ref("dw_1_silver_xero", "dim_contact")} AS c
+  ON a.tenant_id = c.tenant_id
+ AND a.contact_id = c.contact_id

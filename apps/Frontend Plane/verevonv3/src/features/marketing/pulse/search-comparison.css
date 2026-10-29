@@ -1,0 +1,22 @@
+.search-comparison__select { display: grid; gap: 8px; color: var(--pulse-muted, #7c7d81); font-size: 11px; }
+.search-comparison select { min-height: 36px; padding: 7px 30px 7px 12px; border: 1px solid var(--pulse-line, #e9e9e9); border-radius: 9px; background: white; color: var(--pulse-ink, #1b1c1f); font: inherit; font-size: 12px; }
+.search-comparison .search-comparison__run { align-self: end; padding: 11px 16px; border-radius: 9px; background: var(--pulse-ink, #1b1c1f); color: white; }
+.search-comparison__periods, .search-comparison__summary { display: grid; gap: 18px; margin: 0 30px 22px; }
+.search-comparison__periods { grid-template-columns: repeat(2, minmax(0, 1fr)); padding-top: 8px; }
+.search-comparison dt, .search-comparison__summary span { display: block; color: var(--pulse-muted, #7c7d81); font-size: 11px; }
+.search-comparison dd { margin: 8px 0 0; font-size: 12px; line-height: 1.6; font-variant-numeric: tabular-nums; }
+.search-comparison__summary { grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--pulse-line, #e9e9e9); border-radius: 12px; padding: 20px; }
+.search-comparison__summary strong { display: block; margin-top: 14px; font-size: 28px; font-weight: 550; font-variant-numeric: tabular-nums; }
+.search-comparison__results-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px; padding: 0 30px 20px; font-size: 11px; color: var(--pulse-muted, #7c7d81); line-height: 1.6; }
+.search-comparison__results-heading p { flex: 1 1 280px; margin: 0; }
+.search-comparison__results-heading label { display: flex; gap: 8px; align-items: center; }
+.search-comparison__results-heading input { width: auto; accent-color: #262626; }
+.search-comparison .search-comparison__observation { min-width: 130px; text-align: left; line-height: 1.5; }
+.search-comparison .search-intelligence__pagination button { width: auto; padding: 6px 10px; }
+@media (max-width: 680px) {
+  .search-comparison__periods, .search-comparison__summary { margin-inline: 18px; }
+  .search-comparison__periods { grid-template-columns: 1fr; }
+  .search-comparison__summary { gap: 14px; padding: 16px; }
+  .search-comparison__summary strong { font-size: 23px; }
+  .search-comparison__results-heading { padding-inline: 18px; }
+}

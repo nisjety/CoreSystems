@@ -1,0 +1,35 @@
+import { A, useLocation } from '@solidjs/router'
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
+import { RefreshCw } from 'lucide-solid'
+import { useI18n } from '@/shared/i18n'
+import { loadWebsites, readWebsitePreference, saveWebsitePreference, type Website } from '@/shared/api/marketing/website-client'
+import { loadAnalysis, type Analysis } from '@/shared/api/visibility/tools-client'
+import type { VisibilityToolView } from '@/shared/actions/visibility-tools'
+import { visibilityViews } from '../lib/views'
+import { GroupsView, LinksView, PagesView } from './VisibilityEvidenceViews'
+import { CompetitorPanel } from './CompetitorPanel'
+import { SearchResearchPanel } from './SearchResearchPanel'
+import './visibility-tools.css'
+export function VisibilityToolsPage(props:{view:VisibilityToolView;canWrite:boolean}){
+ const {tr}=useI18n();const location=useLocation();const [websites,setWebsites]=createSignal<Website[]>([]);const [selected,setSelected]=createSignal<string|undefined>(readWebsitePreference());const [quarter,setQuarter]=createSignal(`Q${Math.floor(new Date().getUTCMonth()/3)+1}`);const [data,setData]=createSignal<Analysis>();const [failed,setFailed]=createSignal(false);const [loading,setLoading]=createSignal(true);const [registryFailed,setRegistryFailed]=createSignal(false);const [refresh,setRefresh]=createSignal(0)
+ const website=createMemo(()=>websites().find(w=>w.id===selected()));const context=()=>{const w=website();return w?{websiteId:w.id,site:w.site,websiteRevision:w.revision}:undefined}
+ const view=()=>visibilityViews.find(v=>v.key===props.view)!
+ createEffect(()=>{const controller=new AbortController();void loadWebsites(controller.signal).then(values=>{if(controller.signal.aborted)return;setWebsites(values);const id=values.find(w=>w.id===readWebsitePreference())?.id??values[0]?.id;setSelected(id);if(id)saveWebsitePreference(id);setLoading(false)}).catch(()=>{if(!controller.signal.aborted){setRegistryFailed(true);setLoading(false)}});onCleanup(()=>controller.abort())})
+ createEffect(()=>{const w=context();const q=quarter();const section=props.view;refresh();setData(undefined);setFailed(false);if(!w||section==='competitors')return;const controller=new AbortController();setLoading(true);void loadAnalysis(w,q,controller.signal).then(value=>{if(!controller.signal.aborted)setData(value)}).catch(()=>{if(!controller.signal.aborted)setFailed(true)}).finally(()=>{if(!controller.signal.aborted)setLoading(false)});onCleanup(()=>controller.abort())})
+ const period=()=>data()?`${data()!.period.startDate} – ${data()!.period.endDate}`:''
+ return <div class="visibility-tools"><nav class="visibility-mobile-nav" aria-label={tr('Bytt visning i Synlighet','Switch Visibility view')}><A href="/engagement">← {tr('Engasjement','Engagement')}</A><For each={visibilityViews}>{v=><A href={v.href} aria-current={v.key===props.view?'page':undefined}>{tr(v.no,v.en)}</A>}</For></nav><header class="visibility-tools__masthead"><div><span class="visibility-eyebrow">{tr('Synlighet','Visibility')}</span><h1>{tr(view().no,view().en)}</h1><p>{tr(view().detailNo,view().detailEn)}</p></div><div class="visibility-actions"><label>{tr('Nettsted','Website')}<select aria-label={tr('Valgt nettsted','Selected website')} value={selected()??''} onChange={e=>{const id=e.currentTarget.value;saveWebsitePreference(id);setSelected(id)}}><For each={websites()}>{w=><option value={w.id}>{new URL(w.site).hostname}{w.primary ? ` · ${tr('Primær','Primary')}` : ''}</option>}</For></select></label><Show when={props.view!=='competitors'}><label>{tr('Periode','Period')}<select value={quarter()} onChange={e=>setQuarter(e.currentTarget.value)}><For each={['Q1','Q2','Q3','Q4','FY'].filter(q=>q==='FY'||Number(q.slice(1))<=Math.floor(new Date().getUTCMonth()/3)+1)}>{q=><option value={q}>{q==='FY'?tr('Hele året','Full year'):q}</option>}</For></select></label><button type="button" disabled={loading()} onClick={()=>setRefresh(v=>v+1)}><RefreshCw size={14}/>{tr('Les lagrede data','Read saved data')}</button></Show></div></header>
+ <Show when={registryFailed()}><p role="alert">{tr('Nettstedene kunne ikke hentes. Last siden på nytt.','Could not load websites. Reload the page.')}</p></Show>
+ <Show when={!registryFailed()&&!loading()&&websites().length===0}><p class="visibility-empty">{tr('Legg til nettstedet ditt i oversikten for å komme i gang.','Add your website in the overview to get started.')} <A href="/engagement/visibility">{tr('Åpne oversikt','Open overview')} →</A></p></Show>
+ <Show when={website()}>{w=><Show when={props.view==='competitors'} fallback={<>
+ <Show when={loading()}><p role="status">{tr('Leser lagret side- og søkegrunnlag…','Reading saved page and search evidence…')}</p></Show>
+ <Show when={failed()}><p role="alert">{tr('Analysen kunne ikke leses for dette nettstedet og perioden. Prøv å lese lagrede data på nytt.','Could not read the analysis for this website and period. Retry reading saved data.')}</p></Show>
+ <Show when={data()}>{value=><><div class="visibility-coverage"><strong>{new URL(w().site).hostname}</strong><Show when={w().primary}><span class="visibility-primary-badge">{tr('Primær','Primary')}</span></Show><span>{period()}</span><span>{value().coverage.checked} {tr('sider kontrollert','pages checked')} · {value().pages.length} {tr('sider i samlet utvalg','pages in the combined sample')}</span><span>{tr('Delvis dekning','Partial coverage')}</span></div>
+ <Show when={value().coverage.searchStatus!=='connected'}><p class="visibility-note" role="status">{tr('Search Console-data er ikke tilgjengelig for dette utvalget. Koble til kontoen eller synkroniser fra oversikten. Offentlige revisjonsdata vises når de finnes.','Search Console data is unavailable for this sample. Connect the account or sync from the overview. Public audit evidence is shown when available.')}</p></Show>
+ <Show when={value().coverage.searchTruncated}><p class="visibility-note">{tr('Googles radgrense er nådd. Flere søkeord og sider kan finnes.','Google’s row limit was reached. More queries and pages may exist.')}</p></Show>
+ <Show when={props.view==='pages'}><PagesView canWrite={props.canWrite} data={value()} initialFilter={new URLSearchParams(location.search).get('url')??''}/></Show>
+ <Show when={props.view==='groups'}><GroupsView canWrite={props.canWrite} data={value()}/><SearchResearchPanel context={context()!} canWrite={props.canWrite}/></Show>
+ <Show when={props.view==='links'}><LinksView canWrite={props.canWrite} data={value()}/></Show>
+ <p class="visibility-note">{tr('Disse visningene leser lagrede målinger. De starter ingen leverandørinnhenting. Oppdagelse, revisjon og synkronisering styres fra oversikten.','These views read saved measurements and do not trigger provider collection. Discovery, auditing and sync are managed from the overview.')} <A href="/engagement/visibility">{tr('Åpne oversikt','Open overview')} →</A></p></>}</Show>
+ </>}><CompetitorPanel context={{websiteId:w().id,site:w().site,websiteRevision:w().revision}} canWrite={props.canWrite}/></Show>}</Show>
+ </div>
+}

@@ -1,0 +1,106 @@
+query SalesOrderLines(
+  $lastId: String,
+  $inventoryItemId: Int,
+  $siteId: Int,
+  $behaviors: [String!],
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  salesOrderLines(
+    lastId: $lastId,
+    inventoryItemId: $inventoryItemId,
+    siteId: $siteId,
+    behaviors: $behaviors,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    orderType
+    orderNbr
+    orderDate
+    lineNbr
+    sortOrder
+    branchId
+    customerId
+    behavior
+    operation
+    inventoryId
+    itemClassId
+    itemStatus
+    siteId
+    lotSerialNbr
+    expireDate
+    expirationDate
+    uom
+    orderQty
+    quantity
+    shippedQty
+    qtyOnShipments
+    curyUnitPrice
+    unitPriceInBaseCurrency
+    unitPrice
+    unitCost
+    curyUnitCost
+    taxCategoryId
+    subaccountId
+    alternateId
+    tranDesc
+    lineDescription
+    manualDisc
+    manualDiscount
+    discPct
+    discountPercent
+    discAmt
+    discountAmount
+    taskId
+    reasonCode
+    salesPersonId
+    commissionable
+    invtMult
+    shipComplete
+    completeQtyMin
+    undershipThreshold
+    completeQtyMax
+    overshipThreshold
+    openQty
+    curyLineAmt
+    lineAmt
+    completed
+    curyUnbilledAmt
+    shipDate
+    shipOn
+    requestDate
+    requestOn
+    discountId
+    discountCode
+    invoiceNbr
+    isFree
+    freeItem
+    poCreate
+    markForPO
+    poSource
+    isRUTROTDeductible
+    noteId
+    note
+    externalLink
+    discUnitPrice
+    extPrice
+    unbilledAmount
+    baseUnitName
+    quantityInBaseUnit
+    deletedDatabaseRecord
+    lastModifiedDateTime
+    createdInDataMartDateTime
+    attachments {
+      name
+      fileId
+      lastRevisionId
+    }
+  }
+}

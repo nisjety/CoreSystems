@@ -1,0 +1,32 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_project_transaction_lines_complete",
+  description: "Silver must hold every project transaction line that bronze holds. Returns one row per tenant where the number of distinct lines (module, refNbr, tranId) in visma_bronze.visma_project_transactions differs from the rows of visma_silver.fact_project_transaction_line. Catches records dropped between the two layers, such as the one-record-per-document rule that dropped the other period slices of a document.",
+  tags: ["assertion", "silver", "project"]
+}
+
+WITH bronze AS (
+  SELECT
+    tenantId AS tenant_id,
+    COUNT(DISTINCT FORMAT('%s|%s|%d',
+      module, refNbr, SAFE_CAST(JSON_VALUE(line, '$.tranId') AS INT64))) AS bronze_lines
+  FROM ${ref("visma_bronze", "visma_project_transactions")},
+       UNNEST(JSON_EXTRACT_ARRAY(lines)) AS line
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+),
+
+silver AS (
+  SELECT tenant_id, COUNT(*) AS silver_lines
+  FROM ${ref("visma_silver", "fact_project_transaction_line")}
+  GROUP BY tenant_id
+)
+
+SELECT
+  COALESCE(bronze.tenant_id, silver.tenant_id) AS tenant_id,
+  COALESCE(bronze_lines, 0) AS bronze_lines,
+  COALESCE(silver_lines, 0) AS silver_lines
+FROM bronze
+FULL OUTER JOIN silver ON bronze.tenant_id = silver.tenant_id
+WHERE COALESCE(bronze_lines, 0) != COALESCE(silver_lines, 0)

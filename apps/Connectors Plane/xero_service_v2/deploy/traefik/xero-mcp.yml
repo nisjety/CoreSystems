@@ -1,0 +1,42 @@
+# Install only after the internal MCP probe and endpoint approval.
+# The service is reachable on the Docker internal network, never a host port.
+http:
+  routers:
+    xero-mcp:
+      rule: "Host(`tools.aquatiq.com`) && Path(`/mcp`)"
+      entryPoints:
+        - websecure
+      service: xero-mcp-vps
+      middlewares:
+        - xero-mcp-no-store
+      priority: 1100
+      tls: {}
+    xero-mcp-oauth:
+      rule: "Host(`tools.aquatiq.com`) && (PathPrefix(`/.well-known/oauth-`) || PathPrefix(`/oauth/`))"
+      entryPoints:
+        - websecure
+      service: xero-mcp-vps
+      middlewares:
+        - xero-mcp-no-store
+        - xero-mcp-oauth-rate
+      priority: 1100
+      tls: {}
+  middlewares:
+    xero-mcp-no-store:
+      headers:
+        customResponseHeaders:
+          Cache-Control: "no-store"
+    xero-mcp-oauth-rate:
+      rateLimit:
+        average: 2
+        period: 1s
+        burst: 10
+  services:
+    xero-mcp-vps:
+      loadBalancer:
+        servers:
+          - url: "http://aquatiq-xero-mcp:5003"
+        healthCheck:
+          path: /healthz
+          interval: 15s
+          timeout: 3s

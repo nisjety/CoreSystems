@@ -1,0 +1,15 @@
+{
+	"folders": [
+		{
+			"name": "Aquatiq integrasjonen ",
+			"path": "../.."
+		},
+		{
+			"path": "../../../Aquatiq Tools"
+		},
+		{
+			"path": "../../../aquatiq-root-container"
+		}
+	],
+	"settings": {}
+}

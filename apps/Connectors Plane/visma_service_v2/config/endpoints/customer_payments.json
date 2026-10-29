@@ -1,0 +1,34 @@
+{
+  "endpoint_name": "customer_payments",
+  "bigquery_table": "visma_customer_payments",
+  "primary_key": [
+    "refNbr",
+    "type"
+  ],
+  "source": "erp_rest",
+  "api_method": "get_customer_payments",
+  "api_endpoint": "/v1/customerPayment",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "refNbr",
+    "type"
+  ],
+  "datamart": {
+    "ready": false,
+    "type_name": "CustomerPayment",
+    "query_file": "config/queries/customer_payment.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "erp_rest",
+    "join_normalizer": "normalize_customer_payment",
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    },
+    "root_field": "customerPayments"
+  },
+  "tier": 1
+}

@@ -1,0 +1,30 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_project_budget_rows_complete",
+  description: "Silver must hold every project budget line that bronze holds. Returns one row per tenant where the number of distinct (projectID, projectTaskID, accountGroupID, inventoryNumber), the staging key of visma_bronze.visma_project_budgets, differs from the rows of visma_silver.fact_project_budget. A budget line without an item (inventoryNumber <N/A>) shares project, task and account group with the item-level lines, so a key without inventoryNumber silently drops them (70 lines, 23.6M actual amount in 2026-10).",
+  tags: ["assertion", "silver", "project_budget"]
+}
+
+WITH bronze AS (
+  SELECT
+    tenantId AS tenant_id,
+    COUNT(DISTINCT FORMAT('%t|%t|%t|%t', projectID, projectTaskID, accountGroupID, inventoryNumber)) AS bronze_rows
+  FROM ${ref("visma_bronze", "visma_project_budgets")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+),
+
+silver AS (
+  SELECT tenant_id, COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_project_budget")}
+  GROUP BY tenant_id
+)
+
+SELECT
+  COALESCE(bronze.tenant_id, silver.tenant_id) AS tenant_id,
+  COALESCE(bronze_rows, 0) AS bronze_rows,
+  COALESCE(silver_rows, 0) AS silver_rows
+FROM bronze
+FULL OUTER JOIN silver ON bronze.tenant_id = silver.tenant_id
+WHERE COALESCE(bronze_rows, 0) != COALESCE(silver_rows, 0)

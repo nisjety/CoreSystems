@@ -1,0 +1,27 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Current Xero invoice-reminder configuration by company. It preserves Xero's source position and explicit empty state rather than fabricating reminder rules.",
+  assertions: {
+    nonNull: ["invoice_reminder_configuration_key", "tenant_id", "source_receipt_id"],
+    uniqueKey: ["invoice_reminder_configuration_key"]
+  }
+}
+
+SELECT
+  FARM_FINGERPRINT(invoice_reminder_configuration_key) AS invoice_reminder_configuration_key,
+  FARM_FINGERPRINT(tenant_id) AS company_key,
+  tenant_id,
+  reminder_position,
+  is_enabled,
+  is_explicitly_empty,
+  is_source_configuration_missing,
+  reminder_observed_at,
+  source_record_id,
+  source_version_id,
+  source_receipt_id,
+  source_run_id,
+  source_payload_hash,
+  is_current_configuration,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_invoice_reminder_configuration")}

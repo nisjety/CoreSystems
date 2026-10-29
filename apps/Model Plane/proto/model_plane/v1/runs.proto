@@ -1,0 +1,292 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// AutonomyRung — how much a run is permitted to do, as a strictly ordered
+// ladder. Higher is wider; each rung includes everything below it.
+//
+// Shared vocabulary on purpose: model-gateway decides and records a grant, and
+// execution-core enforces it PER CALL at execution. Baking a rung into a tool
+// schema instead would be wrong — a schema is registry-global while the
+// effective rung is per-call truth, so the same tool can be permitted on one
+// call and refused on the next within one run.
+//
+// The names mirror execution-core's own `MpSandboxPolicy` rather than inventing
+// a second scale, so a granted rung and the isolation it implies cannot drift
+// apart.
+enum AutonomyRung {
+  // No rung stated. Treated as the NARROWEST, never as a default grant: an
+  // unset field on an old client must not read as permission.
+  AUTONOMY_RUNG_UNSPECIFIED = 0;
+
+  // Investigate only. Reads run; anything with a real effect is refused.
+  AUTONOMY_RUNG_READ_ONLY = 1;
+
+  // May write within the run's own workspace. Still refuses actions that reach
+  // outside it (sending, publishing, booking, paying).
+  AUTONOMY_RUNG_WORKSPACE_WRITE = 2;
+
+  // Full effect. Reserved for an explicit, justified, human-granted escalation
+  // — never a default and never inferred.
+  AUTONOMY_RUNG_DANGER_FULL_ACCESS = 3;
+}
+
+// RunService — query and manage run lifecycle.
+// Ownership: session-core owns run metadata; execution-core owns run state transitions.
+service RunService {
+  // Get a run by ID.
+  rpc GetRun(GetRunRequest) returns (RunDetail);
+
+  // Get the minimal goal/status context for one service-owned scheduled step.
+  // This is deliberately narrower than GetRun: Execution Core uses its
+  // dedicated session:scheduled-step credential and cannot read arbitrary run
+  // transcripts or human-owned run metadata.
+  rpc GetScheduledStepContext(GetScheduledStepContextRequest) returns (ScheduledStepContext);
+
+  // List runs for a thread.
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+
+  // Cancel a running or queued run.
+  rpc CancelRun(CancelRunRequest) returns (CancelRunResponse);
+
+  // ListSystemRuns — org-scoped listing of runs with no human owner.
+  //
+  // ListRuns is thread-scoped, and a run created by a durable workflow lives in
+  // a thread that same workflow owns, so no person's thread listing can ever
+  // reach it. Without this RPC a system-initiated run is unreachable by
+  // construction even when fully authorized. Read-only: system runs are
+  // org-readable (their content is by construction the org-visible set) but
+  // mutable only by the workload that owns them.
+  rpc ListSystemRuns(ListSystemRunsRequest) returns (ListRunsResponse);
+
+  // ResolveRunOwner — authoritative tenant/user ownership check for internal
+  // execution mutations. Returns only a boolean to avoid disclosing another
+  // tenant's run metadata.
+  rpc ResolveRunOwner(ResolveRunOwnerRequest) returns (ResolveRunOwnerResponse);
+
+  // ResolveThreadOwner — authoritative tenant/user ownership check for a
+  // thread, mirroring ResolveRunOwner exactly. Also used to authorize
+  // capability-core's memory scope='session' rows: session and thread are
+  // the same underlying resource in this codebase (see agent_memory's writer
+  // in dreaming.rs, which stores a thread_id under scope='thread'), so
+  // scope='session' calls this RPC with the same thread_id too. Returns only
+  // a boolean to avoid disclosing another tenant's thread metadata.
+  rpc ResolveThreadOwner(ResolveThreadOwnerRequest) returns (ResolveThreadOwnerResponse);
+
+  // ResolveRunActionAuthority returns the non-secret, immutable run/thread
+  // bindings Control needs before issuing one target-owner action decision.
+  // It is restricted to Control's exact action-authorizer service identity;
+  // it is not a general run-inspection or user-impersonation API.
+  rpc ResolveRunActionAuthority(ResolveRunActionAuthorityRequest) returns (ResolveRunActionAuthorityResponse);
+
+  // ResolveScheduledStepAuthority returns the exact active prepared scheduled
+  // run binding for Control's per-step decision. It is narrower than ordinary
+  // run inspection: the caller supplies only immutable identifiers/digests,
+  // while Session Core derives the human subject and Space from the durable
+  // scheduled-run record. No goal, transcript, tool, credential, or decision
+  // bearer crosses this boundary.
+  rpc ResolveScheduledStepAuthority(ResolveScheduledStepAuthorityRequest) returns (ResolveScheduledStepAuthorityResponse);
+}
+
+message GetRunRequest {
+  // Run identifier (ULID).
+  string run_id = 1;
+}
+
+message GetScheduledStepContextRequest {
+  string run_id = 1;
+  string thread_id = 2;
+  string org_id = 3;
+}
+
+message ScheduledStepContext {
+  string run_id = 1;
+  string thread_id = 2;
+  string org_id = 3;
+  string goal = 4;
+  string status = 5;
+}
+
+message ListRunsRequest {
+  // Thread to list runs for.
+  string thread_id = 1;
+
+  // Filter by status (empty = all).
+  string status_filter = 2;
+
+  // Pagination cursor (ULID of last seen run).
+  string after_run_id = 3;
+
+  // Maximum results.
+  uint32 limit = 4;
+}
+
+message ListRunsResponse {
+  // Runs matching the query.
+  repeated RunDetail runs = 1;
+
+  // True if more results exist.
+  bool has_more = 2;
+}
+
+message ListSystemRunsRequest {
+  // Tenant to list within. Must equal the verified caller's organization; the
+  // org boundary is never relaxed for system runs.
+  string org_id = 1;
+
+  // Filter by status (empty = all).
+  string status_filter = 2;
+
+  // Pagination cursor (ULID of last seen run).
+  string after_run_id = 3;
+
+  // Maximum results.
+  uint32 limit = 4;
+}
+
+message CancelRunRequest {
+  // Run to cancel.
+  string run_id = 1;
+
+  // Reason for cancellation.
+  string reason = 2;
+}
+
+message CancelRunResponse {
+  // True if the run was successfully cancelled.
+  bool cancelled = 1;
+}
+
+message ResolveRunOwnerRequest {
+  string run_id = 1;
+  string org_id = 2;
+  string user_id = 3;
+}
+
+message ResolveRunOwnerResponse {
+  bool authorized = 1;
+}
+
+message ResolveThreadOwnerRequest {
+  string thread_id = 1;
+  string org_id = 2;
+  string user_id = 3;
+}
+
+message ResolveThreadOwnerResponse {
+  bool authorized = 1;
+}
+
+// ResolveRunActionAuthorityRequest is intentionally limited to the run and
+// tenant. Subject, Space, audience, resource, and privacy values are derived
+// only from the durable run/thread rows; callers cannot restate them.
+message ResolveRunActionAuthorityRequest {
+  string run_id = 1;
+  string org_id = 2;
+}
+
+// ResolveRunActionAuthorityResponse carries no transcript, goal, model output,
+// tool input, or decision bearer. Control must re-resolve current membership,
+// entitlement, privacy, recipient audience, and owner-resource authorization
+// before it issues an effect decision. `resolved=false` has no authority and
+// all other fields are empty/default.
+message ResolveRunActionAuthorityResponse {
+  bool resolved = 1;
+  string run_id = 2;
+  string org_id = 3;
+  string subject_id = 4;
+  string thread_id = 5;
+  string space_id = 6;
+  string recipient_audience_ref = 7;
+  uint64 recipient_audience_revision = 8;
+  string recipient_audience_hash = 9;
+  string privacy_policy_ref = 10;
+  // This is the thread's original resource binding, not authority for a
+  // Conversation Core ticket/case resource. The target owner still checks its
+  // own current resource ACL immediately before the effect.
+  string thread_resource_authorization_ref = 11;
+  uint64 authority_revision = 12;
+  string run_status = 13;
+}
+
+message ResolveScheduledStepAuthorityRequest {
+  string run_id = 1;
+  string thread_id = 2;
+  string org_id = 3;
+  string schedule_id = 4;
+  string fire_key = 5;
+  string template_digest = 6;
+  string policy_digest = 7;
+  string step_id = 8;
+  uint32 step_index = 9;
+  string idempotency_key = 10;
+}
+
+message ResolveScheduledStepAuthorityResponse {
+  bool resolved = 1;
+  string run_id = 2;
+  string thread_id = 3;
+  string org_id = 4;
+  string subject_id = 5;
+  string space_id = 6;
+  string schedule_id = 7;
+  string fire_key = 8;
+  string template_digest = 9;
+  string policy_digest = 10;
+  string step_id = 11;
+  uint32 step_index = 12;
+  string idempotency_key = 13;
+  string run_status = 14;
+}
+
+// RunDetail — full run metadata.
+message RunDetail {
+  // Run identifier (ULID).
+  string run_id = 1;
+
+  // Thread this run belongs to.
+  string thread_id = 2;
+
+  // Parent run for subagent runs (empty for top-level).
+  string parent_run_id = 3;
+
+  // Agent definition used.
+  string agent_id = 4;
+
+  // Run status: "queued", "running", "completed", "failed", "cancelled", "awaiting_approval".
+  string status = 5;
+
+  // Run mode: "execute", "plan", "reactive".
+  string mode = 6;
+
+  // The user's goal.
+  string goal = 7;
+
+  // Final output (populated on completion).
+  string final_output = 8;
+
+  // Error message (populated on failure).
+  string error = 9;
+
+  // Checkpoint index for resumability.
+  uint32 checkpoint_index = 10;
+
+  // Step count completed.
+  uint32 steps_completed = 11;
+
+  // Token usage.
+  uint32 input_tokens = 12;
+  uint32 output_tokens = 13;
+
+  // Timestamps.
+  google.protobuf.Timestamp created_at = 14;
+  google.protobuf.Timestamp updated_at = 15;
+
+  // Arbitrary metadata.
+  google.protobuf.Struct metadata = 16;
+}

@@ -1,0 +1,28 @@
+.public-signals { padding: 28px 30px; border: 1px solid var(--border-color, #e8e8e8); border-radius: 22px; background: var(--panel-background, #fff); color: var(--text-primary, #252525); }
+.public-signals > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.public-signals > header span { color: var(--text-secondary, #777); font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; }
+.public-signals h2 { margin: 8px 0; font-size: 22px; letter-spacing: -.04em; }
+.public-signals h3 { font-size: 16px; margin: 0 0 10px; }
+.public-signals h4 { font-size: 13px; margin: 0 0 12px; }
+.public-signals p, .public-signals footer { color: var(--text-secondary, #777); font-size: 12px; line-height: 1.8; }
+.public-signals button { border: 1px solid var(--border-color, #e6e6e6); border-radius: 10px; padding: 10px 14px; background: var(--panel-background, #fff); color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
+.public-signals button:disabled { opacity: .5; cursor: default; }
+.public-signals button:focus-visible, .public-signals a:focus-visible { outline: 2px solid #777; outline-offset: 3px; }
+.public-signals__source { margin-top: 24px; border-top: 1px solid var(--border-color, #e8e8e8); padding-top: 22px; }
+.public-signals__devices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.public-signals__devices article { border: 1px solid var(--border-color, #e8e8e8); border-radius: 12px; padding: 18px; }
+.public-signals__devices p span { display: block; }
+.public-signals dl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 18px 0 4px; }
+.public-signals dt { font-size: 11px; color: var(--text-secondary, #777); }
+.public-signals dd { margin: 6px 0 0; font-size: 22px; font-variant-numeric: tabular-nums; }
+.public-signals dd small { font-size: 11px; }
+.public-signals__table { overflow-x: auto; }
+.public-signals table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.public-signals caption { text-align: left; padding: 8px 0; color: var(--text-secondary, #777); }
+.public-signals th, .public-signals td { border-top: 1px solid var(--border-color, #e8e8e8); text-align: left; padding: 12px 8px; vertical-align: top; }
+.public-signals a { color: inherit; overflow-wrap: anywhere; }
+.public-signals details { margin: 14px 0; font-size: 12px; }
+.public-signals code { overflow-wrap: anywhere; }
+.public-signals__controls { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0; }
+.public-signals footer { margin-top: 20px; }
+@media (max-width: 760px) { .public-signals { padding: 22px 18px; } .public-signals > header { flex-direction: column; } .public-signals__devices { grid-template-columns: 1fr; } }

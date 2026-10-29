@@ -1,0 +1,2 @@
+tenant,name,endpoint,source,status,records,written,seconds,min_remaining,error,finished
+33f319b9-4d57-11ee-960c-025417856183,Aquatiq AS (pilot),general_ledger_transactions,erp_rest,failed,0,0,2314,14389,"Error: upstream returned non-success status 500: {""message"":""VismaId: 4145f294-93a4-4ed0-9fd9-0ab1b583146d. Execution Timeout Expired.  The timeout period elapsed prior to completion of the operation or the server is not responding.""}",2026-10-02T04:05:51Z

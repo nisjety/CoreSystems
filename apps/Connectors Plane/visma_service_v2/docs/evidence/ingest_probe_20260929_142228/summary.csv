@@ -1,0 +1,3 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+ap_invoice_lines,,1,0,succeeded,42298,42298,42298,85,0,298,,807,2026-09-29 13:50:35.241+00
+ap_invoice_lines,,2,0,succeeded,1,1,42298,1,0,1,,472,2026-09-29 13:50:35.241+00

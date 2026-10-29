@@ -1,0 +1,40 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Observed Xero organisation fiscal year-end configuration history. Xero supplies observation versions, not an effective date for retrospective fiscal-period restatement.",
+  assertions: {
+    nonNull: ["tenant_id", "fiscal_configuration_version_id", "financial_year_end_day", "financial_year_end_month", "fiscal_configuration_observed_at"],
+    uniqueKey: ["fiscal_configuration_version_key"]
+  }
+}
+
+WITH source AS (
+  SELECT
+    tenant_id,
+    version_id AS fiscal_configuration_version_id,
+    synced_at AS fiscal_configuration_observed_at,
+    financial_year_end_day,
+    financial_year_end_month,
+    record_id,
+    ROW_NUMBER() OVER (
+      PARTITION BY tenant_id, version_id
+      ORDER BY synced_at DESC, record_id DESC
+    ) AS version_rank
+  FROM ${ref("dw_bronze_xero", "xero_organisations")}
+)
+
+SELECT
+  CONCAT(tenant_id, '|', fiscal_configuration_version_id) AS fiscal_configuration_version_key,
+  tenant_id,
+  fiscal_configuration_version_id,
+  fiscal_configuration_observed_at,
+  financial_year_end_day,
+  financial_year_end_month,
+  record_id,
+  ROW_NUMBER() OVER (
+    PARTITION BY tenant_id
+    ORDER BY fiscal_configuration_observed_at DESC, fiscal_configuration_version_id DESC
+  ) = 1 AS is_current_configuration,
+  'xero' AS source_system
+FROM source
+WHERE version_rank = 1

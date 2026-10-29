@@ -1,0 +1,25 @@
+config { type: "assertion", schema: "dw_1_silver_xero_assertions", name: "xero_gold_reportable_measure_safety" }
+
+SELECT 'customer_invoice' AS fact_name, invoice_id AS record_id
+FROM ${ref("xero_gold_finance", "fact_customer_invoice")}
+WHERE is_reportable IS NOT TRUE AND amount_in_currency IS NOT NULL
+UNION ALL
+SELECT 'supplier_invoice', invoice_id
+FROM ${ref("xero_gold_finance", "fact_supplier_invoice")}
+WHERE is_reportable IS NOT TRUE AND amount_in_currency IS NOT NULL
+UNION ALL
+SELECT 'customer_invoice_line', line_item_id
+FROM ${ref("xero_gold_finance", "fact_customer_invoice_line")}
+WHERE (is_reportable IS NOT TRUE OR is_line_set_ambiguous) AND amount_in_currency IS NOT NULL
+UNION ALL
+SELECT 'supplier_invoice_line', line_item_id
+FROM ${ref("xero_gold_finance", "fact_supplier_invoice_line")}
+WHERE (is_reportable IS NOT TRUE OR is_line_set_ambiguous) AND amount_in_currency IS NOT NULL
+UNION ALL
+SELECT 'customer_payment', payment_id
+FROM ${ref("xero_gold_finance", "fact_customer_payment")}
+WHERE (is_reportable IS NOT TRUE OR is_currency_unresolved) AND payment_amount IS NOT NULL
+UNION ALL
+SELECT 'supplier_payment', payment_id
+FROM ${ref("xero_gold_finance", "fact_supplier_payment")}
+WHERE (is_reportable IS NOT TRUE OR is_currency_unresolved) AND payment_amount IS NOT NULL

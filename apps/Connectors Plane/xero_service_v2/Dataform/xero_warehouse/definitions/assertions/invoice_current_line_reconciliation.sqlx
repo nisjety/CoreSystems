@@ -1,0 +1,24 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_invoice_current_line_reconciliation"
+}
+
+WITH raw_lines AS (
+  SELECT tenant_id, invoice_id, COUNT(*) AS raw_current_line_count
+  FROM ${ref("dw_bronze_xero", "xero_invoice_current_line_keys")}
+  GROUP BY 1, 2
+), typed_lines AS (
+  SELECT tenant_id, invoice_id,
+         COUNTIF(NOT is_removed_from_source) AS typed_current_line_count,
+         COUNTIF(NOT is_removed_from_source AND NOT is_raw_line_aligned)
+           AS unaligned_current_line_count
+  FROM ${ref("dw_1_silver_xero", "fact_invoice_line")}
+  GROUP BY 1, 2
+)
+SELECT tenant_id, invoice_id, raw_current_line_count, typed_current_line_count,
+       unaligned_current_line_count
+FROM raw_lines
+FULL OUTER JOIN typed_lines USING (tenant_id, invoice_id)
+WHERE COALESCE(raw_current_line_count, 0) != COALESCE(typed_current_line_count, 0)
+   OR COALESCE(unaligned_current_line_count, 0) > 0

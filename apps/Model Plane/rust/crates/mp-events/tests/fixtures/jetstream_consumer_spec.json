@@ -1,0 +1,7 @@
+{
+  "durable": "model-gateway-worker",
+  "ack_policy": "explicit",
+  "ack_wait_secs": 30,
+  "max_deliver": 5,
+  "filter_subject": "mp.events.run.>"
+}

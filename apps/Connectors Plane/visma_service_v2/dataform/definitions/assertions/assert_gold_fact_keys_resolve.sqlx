@@ -1,0 +1,210 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_gold_fact_keys_resolve",
+  description: "Every non-null business key of a gold fact must exist in its dimension, or the fact row silently loses its dimension attributes in reports. Returns one row per fact, key column and dimension with unresolved keys. Known defects in 2026-10: fact_general_ledger_balance.business_unit_key (a silver key that includes the validity date, 450,798 rows), fact_fixed_asset_transaction.fixed_asset_key (business unit inside the key, 682 rows), fact_purchase_order_line.purchase_order_key (business unit inside the key, 13 rows) and every item_key (the item dimension is keyed on Visma's internal id, the facts carry the item code). department_key is not checked: the GL uses segment 3 codes that the department master list does not have.",
+  tags: ["assertion", "gold", "keys"]
+}
+
+WITH fact_keys AS (
+  SELECT 'fact_customer_credit_note' AS fact, 'customer_key' AS key_column, 'dim_customer' AS dimension, CAST(customer_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_customer_credit_note")}
+  UNION ALL
+  SELECT 'fact_customer_credit_note' AS fact, 'account_key' AS key_column, 'dim_account' AS dimension, CAST(account_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_customer_credit_note")}
+  UNION ALL
+  SELECT 'fact_customer_invoice' AS fact, 'customer_key' AS key_column, 'dim_customer' AS dimension, CAST(customer_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_customer_invoice")}
+  UNION ALL
+  SELECT 'fact_customer_invoice' AS fact, 'location_key' AS key_column, 'dim_location' AS dimension, CAST(location_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_customer_invoice")}
+  UNION ALL
+  SELECT 'fact_customer_invoice_line' AS fact, 'account_key' AS key_column, 'dim_account' AS dimension, CAST(account_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_customer_invoice_line")}
+  UNION ALL
+  SELECT 'fact_customer_invoice_line' AS fact, 'item_key' AS key_column, 'dim_inventory_item' AS dimension, CAST(item_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_customer_invoice_line")}
+  UNION ALL
+  SELECT 'fact_customer_payment' AS fact, 'customer_key' AS key_column, 'dim_customer' AS dimension, CAST(customer_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_customer_payment")}
+  UNION ALL
+  SELECT 'fact_fixed_asset_transaction' AS fact, 'fixed_asset_key' AS key_column, 'dim_fixed_asset' AS dimension, CAST(fixed_asset_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_fixed_asset_transaction")}
+  UNION ALL
+  SELECT 'fact_general_ledger' AS fact, 'account_key' AS key_column, 'dim_account' AS dimension, CAST(account_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_general_ledger")}
+  UNION ALL
+  SELECT 'fact_general_ledger' AS fact, 'business_unit_key' AS key_column, 'dim_business_unit' AS dimension, CAST(business_unit_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_general_ledger")}
+  UNION ALL
+  SELECT 'fact_general_ledger_balance' AS fact, 'account_key' AS key_column, 'dim_account' AS dimension, CAST(account_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_general_ledger_balance")}
+  UNION ALL
+  SELECT 'fact_general_ledger_balance' AS fact, 'business_unit_key' AS key_column, 'dim_business_unit' AS dimension, CAST(business_unit_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_general_ledger_balance")}
+  UNION ALL
+  SELECT 'fact_inventory_movement' AS fact, 'source_warehouse_key' AS key_column, 'dim_warehouse' AS dimension, CAST(source_warehouse_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_inventory_movement")}
+  UNION ALL
+  SELECT 'fact_inventory_movement' AS fact, 'destination_warehouse_key' AS key_column, 'dim_warehouse' AS dimension, CAST(destination_warehouse_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_inventory_movement")}
+  UNION ALL
+  SELECT 'fact_inventory_movement_line' AS fact, 'item_key' AS key_column, 'dim_inventory_item' AS dimension, CAST(item_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_inventory_movement_line")}
+  UNION ALL
+  SELECT 'fact_inventory_movement_line' AS fact, 'source_warehouse_key' AS key_column, 'dim_warehouse' AS dimension, CAST(source_warehouse_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_inventory_movement_line")}
+  UNION ALL
+  SELECT 'fact_inventory_movement_line' AS fact, 'destination_warehouse_key' AS key_column, 'dim_warehouse' AS dimension, CAST(destination_warehouse_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_inventory_movement_line")}
+  UNION ALL
+  SELECT 'fact_project_portfolio_line' AS fact, 'project_key' AS key_column, 'dim_project' AS dimension, CAST(project_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_project_portfolio_line")}
+  UNION ALL
+  SELECT 'fact_project_portfolio_line' AS fact, 'account_key' AS key_column, 'dim_account' AS dimension, CAST(account_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_project_portfolio_line")}
+  UNION ALL
+  SELECT 'fact_project_portfolio_line' AS fact, 'business_unit_key' AS key_column, 'dim_business_unit' AS dimension, CAST(business_unit_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_project_portfolio_line")}
+  UNION ALL
+  SELECT 'fact_supplier_invoice' AS fact, 'supplier_key' AS key_column, 'dim_supplier' AS dimension, CAST(supplier_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_supplier_invoice")}
+  UNION ALL
+  SELECT 'fact_supplier_invoice' AS fact, 'location_key' AS key_column, 'dim_location' AS dimension, CAST(location_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_supplier_invoice")}
+  UNION ALL
+  SELECT 'fact_supplier_invoice_line' AS fact, 'supplier_key' AS key_column, 'dim_supplier' AS dimension, CAST(supplier_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_supplier_invoice_line")}
+  UNION ALL
+  SELECT 'fact_supplier_invoice_line' AS fact, 'account_key' AS key_column, 'dim_account' AS dimension, CAST(account_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_supplier_invoice_line")}
+  UNION ALL
+  SELECT 'fact_supplier_invoice_line' AS fact, 'item_key' AS key_column, 'dim_inventory_item' AS dimension, CAST(item_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_supplier_invoice_line")}
+  UNION ALL
+  SELECT 'fact_supplier_payment' AS fact, 'supplier_key' AS key_column, 'dim_supplier' AS dimension, CAST(supplier_key AS STRING) AS fk
+  FROM ${ref("visma_gold_finance", "fact_supplier_payment")}
+  UNION ALL
+  SELECT 'dim_sales_order' AS fact, 'customer_key' AS key_column, 'dim_customer' AS dimension, CAST(customer_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "dim_sales_order")}
+  UNION ALL
+  SELECT 'dim_sales_order' AS fact, 'warehouse_key' AS key_column, 'dim_warehouse' AS dimension, CAST(warehouse_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "dim_sales_order")}
+  UNION ALL
+  SELECT 'dim_sales_order' AS fact, 'sales_person_key' AS key_column, 'dim_sales_person' AS dimension, CAST(sales_person_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "dim_sales_order")}
+  UNION ALL
+  SELECT 'dim_shipment' AS fact, 'from_warehouse_key' AS key_column, 'dim_warehouse' AS dimension, CAST(from_warehouse_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "dim_shipment")}
+  UNION ALL
+  SELECT 'dim_shipment' AS fact, 'to_warehouse_key' AS key_column, 'dim_warehouse' AS dimension, CAST(to_warehouse_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "dim_shipment")}
+  UNION ALL
+  SELECT 'fact_purchase_order_line' AS fact, 'supplier_key' AS key_column, 'dim_supplier' AS dimension, CAST(supplier_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "fact_purchase_order_line")}
+  UNION ALL
+  SELECT 'fact_purchase_order_line' AS fact, 'item_key' AS key_column, 'dim_inventory_item' AS dimension, CAST(item_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "fact_purchase_order_line")}
+  UNION ALL
+  SELECT 'fact_purchase_order_line' AS fact, 'warehouse_key' AS key_column, 'dim_warehouse' AS dimension, CAST(warehouse_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "fact_purchase_order_line")}
+  UNION ALL
+  SELECT 'fact_purchase_order_line' AS fact, 'purchase_order_key' AS key_column, 'dim_purchase_order' AS dimension, CAST(purchase_order_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "fact_purchase_order_line")}
+  UNION ALL
+  SELECT 'fact_sales_order_line' AS fact, 'customer_key' AS key_column, 'dim_customer' AS dimension, CAST(customer_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "fact_sales_order_line")}
+  UNION ALL
+  SELECT 'fact_sales_order_line' AS fact, 'account_key' AS key_column, 'dim_account' AS dimension, CAST(account_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "fact_sales_order_line")}
+  UNION ALL
+  SELECT 'fact_sales_order_line' AS fact, 'item_key' AS key_column, 'dim_inventory_item' AS dimension, CAST(item_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "fact_sales_order_line")}
+  UNION ALL
+  SELECT 'fact_sales_order_line' AS fact, 'warehouse_key' AS key_column, 'dim_warehouse' AS dimension, CAST(warehouse_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "fact_sales_order_line")}
+  UNION ALL
+  SELECT 'fact_sales_order_line' AS fact, 'sales_person_key' AS key_column, 'dim_sales_person' AS dimension, CAST(sales_person_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "fact_sales_order_line")}
+  UNION ALL
+  SELECT 'fact_sales_order_line' AS fact, 'business_unit_key' AS key_column, 'dim_business_unit' AS dimension, CAST(business_unit_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "fact_sales_order_line")}
+  UNION ALL
+  SELECT 'fact_sales_order_line' AS fact, 'sales_order_key' AS key_column, 'dim_sales_order' AS dimension, CAST(sales_order_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "fact_sales_order_line")}
+  UNION ALL
+  SELECT 'fact_shipment_detail_line' AS fact, 'item_key' AS key_column, 'dim_inventory_item' AS dimension, CAST(item_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "fact_shipment_detail_line")}
+  UNION ALL
+  SELECT 'fact_shipment_detail_line' AS fact, 'location_key' AS key_column, 'dim_location' AS dimension, CAST(location_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "fact_shipment_detail_line")}
+  UNION ALL
+  SELECT 'fact_shipment_detail_line' AS fact, 'warehouse_key' AS key_column, 'dim_warehouse' AS dimension, CAST(warehouse_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "fact_shipment_detail_line")}
+  UNION ALL
+  SELECT 'fact_shipment_detail_line' AS fact, 'shipment_key' AS key_column, 'dim_shipment' AS dimension, CAST(shipment_key AS STRING) AS fk
+  FROM ${ref("visma_gold_sales", "fact_shipment_detail_line")}
+),
+
+dimension_keys AS (
+  SELECT 'dim_customer' AS dimension, CAST(customer_key AS STRING) AS k
+  FROM ${ref("visma_gold_finance", "dim_customer")}
+  UNION ALL
+  SELECT 'dim_supplier' AS dimension, CAST(supplier_key AS STRING) AS k
+  FROM ${ref("visma_gold_finance", "dim_supplier")}
+  UNION ALL
+  SELECT 'dim_account' AS dimension, CAST(account_key AS STRING) AS k
+  FROM ${ref("visma_gold_finance", "dim_account")}
+  UNION ALL
+  SELECT 'dim_inventory_item' AS dimension, CAST(item_key AS STRING) AS k
+  FROM ${ref("visma_gold_common", "dim_inventory_item")}
+  UNION ALL
+  SELECT 'dim_location' AS dimension, CAST(location_key AS STRING) AS k
+  FROM ${ref("visma_gold_common", "dim_location")}
+  UNION ALL
+  SELECT 'dim_location' AS dimension, CAST(location_tenant_key AS STRING) AS k
+  FROM ${ref("visma_gold_common", "dim_location")}
+  UNION ALL
+  SELECT 'dim_warehouse' AS dimension, CAST(warehouse_key AS STRING) AS k
+  FROM ${ref("visma_gold_common", "dim_warehouse")}
+  UNION ALL
+  SELECT 'dim_sales_person' AS dimension, CAST(sales_person_key AS STRING) AS k
+  FROM ${ref("visma_gold_common", "dim_sales_person")}
+  UNION ALL
+  SELECT 'dim_business_unit' AS dimension, CAST(business_unit_key AS STRING) AS k
+  FROM ${ref("visma_gold_common", "dim_business_unit")}
+  UNION ALL
+  SELECT 'dim_project' AS dimension, CAST(project_key AS STRING) AS k
+  FROM ${ref("visma_gold_common", "dim_project")}
+  UNION ALL
+  SELECT 'dim_fixed_asset' AS dimension, CAST(fixed_asset_key AS STRING) AS k
+  FROM ${ref("visma_gold_finance", "dim_fixed_asset")}
+  UNION ALL
+  SELECT 'dim_purchase_order' AS dimension, CAST(purchase_order_key AS STRING) AS k
+  FROM ${ref("visma_gold_sales", "dim_purchase_order")}
+  UNION ALL
+  SELECT 'dim_sales_order' AS dimension, CAST(sales_order_key AS STRING) AS k
+  FROM ${ref("visma_gold_sales", "dim_sales_order")}
+  UNION ALL
+  SELECT 'dim_shipment' AS dimension, CAST(shipment_key AS STRING) AS k
+  FROM ${ref("visma_gold_sales", "dim_shipment")}
+),
+
+distinct_dimension_keys AS (
+  SELECT DISTINCT dimension, k
+  FROM dimension_keys
+)
+
+SELECT
+  fact_keys.fact,
+  fact_keys.key_column,
+  fact_keys.dimension,
+  COUNT(*) AS fact_rows,
+  COUNTIF(fact_keys.fk IS NOT NULL) AS keyed_rows,
+  COUNTIF(fact_keys.fk IS NOT NULL AND distinct_dimension_keys.k IS NULL) AS unresolved_rows
+FROM fact_keys
+LEFT JOIN distinct_dimension_keys
+  ON fact_keys.dimension = distinct_dimension_keys.dimension AND fact_keys.fk = distinct_dimension_keys.k
+GROUP BY fact_keys.fact, fact_keys.key_column, fact_keys.dimension
+HAVING COUNTIF(fact_keys.fk IS NOT NULL AND distinct_dimension_keys.k IS NULL) > 0
+ORDER BY unresolved_rows DESC

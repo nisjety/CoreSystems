@@ -1,0 +1,10 @@
+config {
+  type: "assertion",
+  name: "xero_project_task_direct_detail_reconciliation",
+  schema: "dw_1_silver_xero_assertions",
+  description: "Every retained Xero getTask direct response must agree with the same-run getTasks observation without granting direct lookup lifecycle authority."
+}
+
+SELECT *
+FROM ${ref("dw_1_silver_xero", "audit_project_task_direct_detail_reconciliation")}
+WHERE is_direct_detail_reconciled IS NOT TRUE

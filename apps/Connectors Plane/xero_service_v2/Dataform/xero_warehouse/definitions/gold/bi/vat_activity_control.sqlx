@@ -1,0 +1,47 @@
+config {
+  type: "table",
+  schema: "xero_datamart",
+  description: "Native-currency Xero MVA control aggregate by tenant, fiscal period, tax classification, and currency. It excludes incomplete or non-reportable source lines and is not a statutory VAT return.",
+  assertions: {
+    nonNull: ["vat_activity_control_key", "tenant_id", "currency_code"],
+    uniqueKey: ["vat_activity_control_key"]
+  }
+}
+
+WITH reportable AS (
+  SELECT *
+  FROM ${ref("xero_gold_finance", "fact_vat_activity")}
+  WHERE is_reportable
+)
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(
+    tenant_id, '|', COALESCE(financial_period_key, 0), '|',
+    COALESCE(tax_type, ''), '|', COALESCE(report_tax_type, ''), '|', currency_code
+  )) AS vat_activity_control_key,
+  company_key,
+  tenant_id,
+  financial_period_key,
+  financial_period_basis,
+  is_financial_period_derived,
+  currency_code,
+  tax_type,
+  report_tax_type,
+  COUNT(*) AS source_line_count,
+  COUNT(DISTINCT source_document_key) AS source_document_count,
+  COUNTIF(tax_direction = 'output') AS output_tax_line_count,
+  COUNTIF(tax_direction = 'input') AS input_tax_line_count,
+  SUM(CASE WHEN tax_direction = 'output' THEN net_amount_in_currency ELSE 0 END) AS output_net_amount_in_currency,
+  SUM(CASE WHEN tax_direction = 'input' THEN net_amount_in_currency ELSE 0 END) AS input_net_amount_in_currency,
+  SUM(CASE WHEN tax_direction = 'output' THEN signed_tax_amount_in_currency ELSE 0 END) AS output_vat_in_currency,
+  SUM(CASE WHEN tax_direction = 'input' THEN signed_tax_amount_in_currency ELSE 0 END) AS input_vat_in_currency,
+  SUM(CASE
+    WHEN tax_direction = 'output' THEN signed_tax_amount_in_currency
+    WHEN tax_direction = 'input' THEN -signed_tax_amount_in_currency
+    ELSE 0
+  END) AS net_vat_position_in_currency,
+  CAST(NULL AS NUMERIC) AS amount_nok,
+  FALSE AS is_nok_amount_available,
+  'xero' AS source_system
+FROM reportable
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9

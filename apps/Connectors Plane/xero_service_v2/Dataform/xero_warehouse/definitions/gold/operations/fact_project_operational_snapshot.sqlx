@@ -1,0 +1,111 @@
+config {
+  type: "table",
+  schema: "xero_gold_operations",
+  description: "Lifecycle-aware Xero Project operational snapshot. It is not a project P&L: Xero Projects does not provide ledger-linked project transaction, budget, cost, or margin evidence.",
+  assertions: {
+    nonNull: ["tenant_id", "project_id", "project_key", "company_key"],
+    uniqueKey: ["project_key"]
+  }
+}
+
+WITH task_metrics AS (
+  SELECT
+    tenant_id,
+    project_id,
+    COUNT(*) AS task_count,
+    COUNTIF(task_status = 'INPROGRESS') AS in_progress_task_count,
+    SUM(total_minutes) AS task_total_minutes,
+    SUM(minutes_invoiced) AS task_minutes_invoiced,
+    SUM(minutes_to_be_invoiced) AS task_minutes_to_be_invoiced,
+    SUM(non_chargeable_minutes) AS task_non_chargeable_minutes
+  FROM ${ref("dw_1_silver_xero", "dim_project_task")}
+  WHERE is_current
+  GROUP BY tenant_id, project_id
+), time_metrics AS (
+  SELECT
+    tenant_id,
+    project_id,
+    COUNT(*) AS time_entry_count,
+    COUNTIF(is_duration_valid) AS valid_time_entry_count,
+    SUM(IF(is_duration_valid, duration_minutes, NULL)) AS logged_duration_minutes,
+    MIN(entry_date) AS first_time_entry_date,
+    MAX(entry_date) AS last_time_entry_date
+  FROM ${ref("dw_1_silver_xero", "fact_project_time_entry")}
+  WHERE is_current
+  GROUP BY tenant_id, project_id
+)
+SELECT
+  project.project_key,
+  project.company_key,
+  project.contact_key,
+  project.tenant_id,
+  project.project_id,
+  project.contact_id,
+  project.is_contact_unresolved,
+  project.project_name,
+  project.project_status,
+  project.currency_code,
+  project.deadline_date,
+  project.is_current AND project.project_status IN ('DRAFT', 'INPROGRESS') AS is_operationally_open,
+  project.is_current AND project.project_status = 'COMPLETED' AS is_completed,
+  project.estimate_amount,
+  project.estimate_currency_code,
+  project.total_invoiced_amount,
+  project.total_invoiced_currency_code,
+  project.total_to_be_invoiced_amount,
+  project.total_to_be_invoiced_currency_code,
+  project.total_expense_amount,
+  project.total_expense_currency_code,
+  project.expense_amount_invoiced,
+  project.expense_amount_invoiced_currency_code,
+  project.expense_amount_to_be_invoiced,
+  project.expense_amount_to_be_invoiced_currency_code,
+  project.total_task_amount,
+  project.total_task_currency_code,
+  project.task_amount_invoiced,
+  project.task_amount_invoiced_currency_code,
+  project.task_amount_to_be_invoiced,
+  project.task_amount_to_be_invoiced_currency_code,
+  project.project_amount_invoiced,
+  project.project_amount_invoiced_currency_code,
+  project.credit_note_amount,
+  project.credit_note_currency_code,
+  project.deposit_amount,
+  project.deposit_currency_code,
+  project.deposit_applied_amount,
+  project.deposit_applied_currency_code,
+  project.minutes_logged,
+  project.minutes_to_be_invoiced,
+  project.has_direct_detail_evidence,
+  project.is_direct_detail_reconciled,
+  project.direct_detail_observed_at,
+  project.direct_detail_source_run_id,
+  COALESCE(task.task_count, 0) AS task_count,
+  COALESCE(task.in_progress_task_count, 0) AS in_progress_task_count,
+  task.task_total_minutes,
+  task.task_minutes_invoiced,
+  task.task_minutes_to_be_invoiced,
+  task.task_non_chargeable_minutes,
+  COALESCE(time.time_entry_count, 0) AS time_entry_count,
+  COALESCE(time.valid_time_entry_count, 0) AS valid_time_entry_count,
+  time.logged_duration_minutes,
+  time.first_time_entry_date,
+  time.last_time_entry_date,
+  project.is_source_deleted,
+  project.is_current,
+  project.is_removed,
+  project.removed_in_run_id,
+  project.removed_observed_at,
+  project.record_state,
+  project.first_seen_at,
+  project.last_seen_at,
+  project.project_observed_at,
+  project.source_run_id,
+  'xero' AS source_system
+FROM ${ref("xero_gold_common", "dim_project")} AS project
+LEFT JOIN task_metrics AS task
+  ON project.tenant_id = task.tenant_id
+ AND project.project_id = task.project_id
+LEFT JOIN time_metrics AS time
+  ON project.tenant_id = time.tenant_id
+ AND project.project_id = time.project_id

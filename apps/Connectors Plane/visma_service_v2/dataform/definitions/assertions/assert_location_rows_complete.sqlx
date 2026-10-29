@@ -1,0 +1,30 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_location_rows_complete",
+  description: "Silver must hold every location that bronze holds. A location id is only unique within its business account (HOVED alone belongs to 26,628 accounts), so the staging key of visma_bronze.visma_locations is (baccount.number, locationId). Returns one row per tenant where the number of distinct (baccount.number, locationId) differs from the rows of visma_silver.dim_location, which keys on the location id alone and keeps 149 of 35,726 locations (2026-10).",
+  tags: ["assertion", "silver", "location"]
+}
+
+WITH bronze AS (
+  SELECT
+    tenantId AS tenant_id,
+    COUNT(DISTINCT FORMAT('%t|%t', JSON_VALUE(baccount, '$.number'), locationId)) AS bronze_rows
+  FROM ${ref("visma_bronze", "visma_locations")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+),
+
+silver AS (
+  SELECT tenant_id, COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "dim_location")}
+  GROUP BY tenant_id
+)
+
+SELECT
+  COALESCE(bronze.tenant_id, silver.tenant_id) AS tenant_id,
+  COALESCE(bronze_rows, 0) AS bronze_rows,
+  COALESCE(silver_rows, 0) AS silver_rows
+FROM bronze
+FULL OUTER JOIN silver ON bronze.tenant_id = silver.tenant_id
+WHERE COALESCE(bronze_rows, 0) != COALESCE(silver_rows, 0)

@@ -1,0 +1,12 @@
+# Dedicated Chrome UX Report key; never reuse the restricted PageSpeed key.
+# Integration Core alone receives it. URL onboarding needs no per-user grant.
+services:
+  integration-api:
+    environment:
+      CRUX_API_KEY_FILE: /run/secrets/crux_api_key
+    secrets:
+      - crux_api_key
+
+secrets:
+  crux_api_key:
+    file: ${INTEGRATION_LOCAL_CRUX_KEY_FILE:?set a protected dedicated CrUX API key file}

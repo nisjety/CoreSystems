@@ -1,0 +1,33 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_commercial_current_line_reconciliation"
+}
+
+WITH raw_lines AS (
+  SELECT endpoint, tenant_id, document_id, COUNT(*) AS raw_current_line_count
+  FROM ${ref("dw_bronze_xero", "xero_commercial_current_line_keys")}
+  GROUP BY 1, 2, 3
+), typed_lines AS (
+  SELECT 'quotes' AS endpoint, tenant_id, quote_id AS document_id,
+         COUNTIF(NOT is_removed_from_source) AS typed_current_line_count,
+         COUNTIF(NOT is_removed_from_source AND NOT is_raw_line_aligned)
+           AS unaligned_current_line_count,
+         COUNTIF(NOT is_current_line_set_observed) AS unverified_line_count
+  FROM ${ref("dw_1_silver_xero", "fact_quote_line")}
+  GROUP BY 1, 2, 3
+  UNION ALL
+  SELECT 'purchase_orders', tenant_id, purchase_order_id,
+         COUNTIF(NOT is_removed_from_source),
+         COUNTIF(NOT is_removed_from_source AND NOT is_raw_line_aligned),
+         COUNTIF(NOT is_current_line_set_observed)
+  FROM ${ref("dw_1_silver_xero", "fact_purchase_order_line")}
+  GROUP BY 1, 2, 3
+)
+SELECT endpoint, tenant_id, document_id, raw_current_line_count,
+       typed_current_line_count, unaligned_current_line_count, unverified_line_count
+FROM raw_lines
+FULL OUTER JOIN typed_lines USING (endpoint, tenant_id, document_id)
+WHERE COALESCE(raw_current_line_count, 0) != COALESCE(typed_current_line_count, 0)
+   OR COALESCE(unaligned_current_line_count, 0) > 0
+   OR COALESCE(unverified_line_count, 0) > 0

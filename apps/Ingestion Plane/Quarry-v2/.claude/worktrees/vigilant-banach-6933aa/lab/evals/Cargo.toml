@@ -1,0 +1,32 @@
+[package]
+name = "quarry-evals"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+quarry-transform = { path = "../../crates/quarry-transform" }
+quarry-core = { path = "../../crates/quarry-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+url = { version = "2.5", features = ["serde"] }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+
+[[bin]]
+name = "quarry-eval"
+path = "src/main.rs"
+
+[[bin]]
+name = "quarry-bakeoff"
+path = "src/bakeoff.rs"
+
+[[bin]]
+name = "quarry-provider-matrix"
+path = "src/provider_matrix.rs"
+
+[[bin]]
+name = "quarry-release-matrix"
+path = "src/release_matrix.rs"

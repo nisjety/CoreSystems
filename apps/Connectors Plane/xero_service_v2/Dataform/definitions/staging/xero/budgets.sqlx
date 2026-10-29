@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "dw_staging_xero",
+  name: "budgets",
+  description: "Current Xero budget headers from per-budget detail; populated by etl/xero/budgets.py."
+}

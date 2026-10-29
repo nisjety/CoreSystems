@@ -1,0 +1,2 @@
+tenant,name,endpoint,source,status,records,written,seconds,min_remaining,error,finished
+2b6e5cd6-6ce0-11ee-970e-025417856183,Aquatiq AB,vat_zones,erp_rest,ok,5,5,0,14955,,2026-10-01T01:39:57Z

@@ -1,0 +1,197 @@
+# syntax=docker/dockerfile:1.7
+# quarry-edge-rs (Rust hot path: REST/SSE/cache/transform)
+#
+# Workspace declares rust-version = 1.85 but locked AWS SDK/Smithy packages
+# require Rust 1.94.1+. Use the same pinned 1.97 toolchain as Model Plane so a
+# future stable release cannot silently alter the build or invalidate caches.
+#
+# Native deps:
+# - protobuf-compiler: tonic-build (gRPC clients, gated behind `grpc`)
+# - cmake/perl/clang/build-essential: boring-sys2 (BoringSSL via wreq)
+
+# ---- Base toolchain stage ----------------------------------------------------
+# Use the maintained cargo-chef toolchain image and pin its multi-platform
+# digest. This removes a network-dependent `cargo install` from every clean
+# build while retaining a toolchain compatible with the locked AWS SDK graph.
+FROM lukemathwalker/cargo-chef:latest-rust-1.97-bookworm@sha256:974d873357408b6ececac8729285204664e23f5aab21a34e353ae5bf9bb899a2 AS chef-base
+WORKDIR /src
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+    CARGO_NET_RETRY=10 \
+    CARGO_HTTP_TIMEOUT=120 \
+    CARGO_HTTP_MULTIPLEXING=false
+
+# System dependencies for our crate graph:
+# - pkg-config, libssl-dev, ca-certificates: standard rustls + reqwest
+# - protobuf-compiler:                       tonic-build (gRPC clients)
+# - cmake, perl, clang, build-essential:     boring-sys2 native compile
+# - git, golang-go:                          boring-sys2's build.rs runs
+#                                            BoringSSL's util/go tooling and
+#                                            git-clones submodules at compile
+#                                            time. Without these the build
+#                                            panics at boring-sys2/build/main.rs:571
+#                                            with "No such file or directory".
+# apt lists are kept on a cache mount, so we drop the "rm -rf .../lists" that
+# would otherwise defeat the cache.
+RUN --mount=type=cache,id=quarry-edge-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=quarry-edge-apt-lib,target=/var/lib/apt,sharing=locked \
+    set -e; \
+    export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
+    apt-get update -qq; \
+    if ! apt-get install -y -qq --no-install-recommends \
+        pkg-config libssl-dev ca-certificates \
+        protobuf-compiler \
+        cmake perl clang build-essential \
+        git golang-go \
+        > /tmp/apt-install.log 2>&1; then \
+        cat /tmp/apt-install.log; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/apt-install.log
+
+# cargo-chef computes a dependency-only recipe so the heavy dependency compile
+# is cached independently of first-party source churn. The binary is already
+# present in the pinned base image above.
+
+# ---- Planner stage -----------------------------------------------------------
+# Reads the full workspace and emits recipe.json (the dependency graph only).
+FROM chef-base AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo ./.cargo
+COPY crates ./crates
+COPY lab ./lab
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ---- Builder stage -----------------------------------------------------------
+FROM chef-base AS build
+
+# Wave 7 — reqwest 0.13's http3 surface is gated behind
+# `--cfg reqwest_unstable`. The `.cargo/config.toml` copied above sets
+# this via `[build] rustflags = [...]`, but we also set the env-var
+# form so the gate is audit-visible in `docker image inspect` (the
+# config-file form is invisible there). Both produce the same result;
+# cargo dedupes the flag.
+ENV CARGO_BUILD_RUSTFLAGS="--cfg=reqwest_unstable"
+
+# P2 / cluster #grpc — production image ships with the `grpc` feature
+# compiled in. Quarry can then route Data Plane ingest over HTTP/2 +
+# protobuf (via `GrpcIngestAdapter` → `DocumentService.CreateDocument`)
+# OR over HTTP/JSON (legacy `IngestClient`), selected at runtime via
+# `QUARRY_EDGE__DATA_PLANE_TRANSPORT=http|grpc`. Default remains HTTP so
+# existing deployments need no env-var change; flipping the var to
+# `grpc` activates the proto path without a rebuild.
+#
+# Wave 7 / cluster #http3 — `http3` is also compiled in so the optional
+# QUIC driver is available at runtime. The driver is OFF by default and
+# only fires when the request carries `prefer_http3: true` AND the edge
+# was started with `QUARRY_EDGE__HTTP3_ENABLED=1`. See
+# crates/quarry-runtime/src/http3.rs for the TLS-fingerprint caveat.
+#
+# Phase 1 Track C / cluster #9 — `postgres-queue` is compiled in so the
+# durable baseline + diff store (PostgresBaselineStore) and the
+# `/v1/change/*` change-monitoring routes activate at runtime. The store
+# is wired only when `QUARRY_EDGE__DATABASE_URL` is set; without it the
+# edge runs in-memory exactly as before, and the change routes 501. The
+# binary runs `quarry_runtime::run_migrations` against that DSN on boot
+# (see main.rs) so the `quarry_baselines` / `quarry_change_diffs` tables
+# exist before the store serves a request.
+#
+# Cap parallel codegen so the release build's peak memory fits a constrained
+# Docker Desktop VM — a from-scratch build otherwise spawns one rustc+LLVM per
+# core and can OOM (which silently kills the build with exit 101).
+ENV CARGO_BUILD_JOBS=2
+ARG QUARRY_EDGE_FEATURES=grpc,http3,postgres-queue
+
+# Cook dependencies only, from the recipe. This is the expensive layer and it
+# is invalidated only when the dependency graph (Cargo.toml/Cargo.lock) changes,
+# not on first-party source edits. Feature flags must match the final build so
+# the cooked dependency artifacts are reused. The cooked artifacts land in
+# /src/target, which is the shared target cache mount reused by the build below.
+COPY --from=planner /src/recipe.json recipe.json
+RUN --mount=type=cache,id=quarry-edge-cargo-registry-v2,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=quarry-edge-cargo-git-v2,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=quarry-edge-target,target=/src/target,sharing=locked \
+    if [ -n "${QUARRY_EDGE_FEATURES}" ]; then \
+        cargo chef cook --release --recipe-path recipe.json -p quarry-edge --features "${QUARRY_EDGE_FEATURES}"; \
+    else \
+        cargo chef cook --release --recipe-path recipe.json -p quarry-edge; \
+    fi
+
+# Copy first-party source last so the cook layer above stays cache-hot on
+# source-only changes.
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo ./.cargo
+COPY crates ./crates
+COPY lab ./lab
+
+RUN --mount=type=cache,id=quarry-edge-cargo-registry-v2,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=quarry-edge-cargo-git-v2,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=quarry-edge-target,target=/src/target,sharing=locked \
+    if [ -n "${QUARRY_EDGE_FEATURES}" ]; then \
+        cargo build --release -p quarry-edge --bin quarry-edge-rs --features "${QUARRY_EDGE_FEATURES}"; \
+    else \
+        cargo build --release -p quarry-edge --bin quarry-edge-rs; \
+    fi \
+    && mkdir -p /out \
+    && cp /src/target/release/quarry-edge-rs /out/quarry-edge-rs
+
+# ---- Runtime image -----------------------------------------------------------
+# Use bookworm-slim (not distroless) so healthcheck has wget available and
+# operators can shell in for triage. Chromium is included so the local
+# Chromiumoxide browser driver can render JavaScript when Browserbase is not
+# configured.
+#
+# Chromium is pinned to an explicit version via a snapshot.debian.org source
+# rather than left to float on bare `chromium` from bookworm-security. A
+# `docker buildx prune --all` once wiped the apt cache mount and a fresh
+# install pulled 150.0.7871.46-1~deb12u1, which crashes every headless
+# launch with SIGTRAP on arm64 Docker Desktop hosts (matches upstream
+# chromium reports of aarch64/hypervisor SIGTRAP regressions; see
+# docs/BROWSER_WORKSPACE_PLAN.md for the incident). 149.0.7827.102-1~deb12u1
+# is confirmed working (headless --dump-dom exits 0 with real output) and is
+# the newest release with an arm64 build below the broken one. Pinning here
+# means a future forced cache-clear can no longer silently regress this.
+FROM debian:bookworm-20260623-slim
+ARG CHROMIUM_VERSION=149.0.7827.102-1~deb12u1
+ARG CHROMIUM_SNAPSHOT=20260610T215132Z
+ARG SOURCE_REVISION=unverified
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.title="CoreSystem Quarry edge" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
+# Re-expose the build args as runtime ENV so the running process can answer
+# GET /version (crates/quarry-edge/src/routes.rs) without needing
+# Docker/registry access to read the image label above.
+ENV SOURCE_REVISION=${SOURCE_REVISION} \
+    BUILD_DATE=${BUILD_DATE}
+RUN set -e; \
+    export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
+    echo "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${CHROMIUM_SNAPSHOT}/ bookworm-security main" \
+        > /etc/apt/sources.list.d/chromium-pin.list; \
+    apt-get update -qq; \
+    if ! apt-get install -y -qq --no-install-recommends \
+        ca-certificates \
+        "chromium=${CHROMIUM_VERSION}" \
+        "chromium-common=${CHROMIUM_VERSION}" \
+        "chromium-sandbox=${CHROMIUM_VERSION}" \
+        fonts-liberation \
+        wget \
+        > /tmp/apt-install.log 2>&1; then \
+        cat /tmp/apt-install.log; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/apt-install.log; \
+    rm -rf /var/lib/apt/lists/*; \
+    echo 'quarry:x:65532:' >> /etc/group; \
+    echo 'quarry:x:65532:65532::/nonexistent:/usr/sbin/nologin' >> /etc/passwd
+
+COPY --from=build --chown=quarry:quarry \
+    /out/quarry-edge-rs /usr/local/bin/quarry-edge-rs
+
+ENV CHROME=/usr/bin/chromium
+
+USER quarry
+EXPOSE 8082
+# Use -O /dev/null instead of --spider — /health responds to GET only,
+# --spider sends HEAD which the axum router rejects with 405.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 CMD wget --quiet --tries=1 -O /dev/null http://localhost:8082/health || exit 1
+ENTRYPOINT ["/usr/local/bin/quarry-edge-rs"]

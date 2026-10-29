@@ -1,0 +1,252 @@
+syntax = "proto3";
+
+package coresystem.gateway.docker.v1;
+
+option go_package = "github.com/coresystem/integration-gateway/api/proto/docker/v1;dockerv1";
+
+import "google/protobuf/timestamp.proto";
+
+// DockerService provides Docker container management for internal microservices
+service DockerService {
+  // ListContainers returns all containers
+  rpc ListContainers(ListContainersRequest) returns (ListContainersResponse);
+  
+  // GetContainer returns details for a specific container
+  rpc GetContainer(GetContainerRequest) returns (GetContainerResponse);
+  
+  // StartContainer starts a stopped container
+  rpc StartContainer(StartContainerRequest) returns (StartContainerResponse);
+  
+  // StopContainer stops a running container
+  rpc StopContainer(StopContainerRequest) returns (StopContainerResponse);
+  
+  // RestartContainer restarts a container
+  rpc RestartContainer(RestartContainerRequest) returns (RestartContainerResponse);
+  
+  // GetContainerLogs retrieves logs from a container
+  rpc GetContainerLogs(GetContainerLogsRequest) returns (GetContainerLogsResponse);
+  
+  // GetContainerStats returns real-time statistics for a container
+  rpc GetContainerStats(GetContainerStatsRequest) returns (GetContainerStatsResponse);
+  
+  // ListImages returns all Docker images
+  rpc ListImages(ListImagesRequest) returns (ListImagesResponse);
+  
+  // ListNetworks returns all Docker networks
+  rpc ListNetworks(ListNetworksRequest) returns (ListNetworksResponse);
+  
+  // ListVolumes returns all Docker volumes
+  rpc ListVolumes(ListVolumesRequest) returns (ListVolumesResponse);
+  
+  // GetSystemInfo returns Docker system information
+  rpc GetSystemInfo(GetSystemInfoRequest) returns (GetSystemInfoResponse);
+  
+  // GetAquatiqServices returns all Aquatiq-prefixed services
+  rpc GetAquatiqServices(GetAquatiqServicesRequest) returns (GetAquatiqServicesResponse);
+}
+
+// ListContainersRequest with optional filters
+message ListContainersRequest {
+  bool all = 1; // Include stopped containers
+  map<string, string> filters = 2; // Docker filters (name, status, etc.)
+}
+
+// ListContainersResponse contains list of containers
+message ListContainersResponse {
+  repeated ContainerInfo containers = 1;
+}
+
+// GetContainerRequest identifies a specific container
+message GetContainerRequest {
+  string container_id = 1; // Container ID or name
+}
+
+// GetContainerResponse contains full container details
+message GetContainerResponse {
+  ContainerInfo container = 1;
+}
+
+// StartContainerRequest identifies container to start
+message StartContainerRequest {
+  string container_id = 1;
+}
+
+// StartContainerResponse confirms container started
+message StartContainerResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// StopContainerRequest identifies container to stop
+message StopContainerRequest {
+  string container_id = 1;
+  int32 timeout_seconds = 2; // Grace period before force kill
+}
+
+// StopContainerResponse confirms container stopped
+message StopContainerResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// RestartContainerRequest identifies container to restart
+message RestartContainerRequest {
+  string container_id = 1;
+  int32 timeout_seconds = 2;
+}
+
+// RestartContainerResponse confirms container restarted
+message RestartContainerResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// GetContainerLogsRequest for retrieving logs
+message GetContainerLogsRequest {
+  string container_id = 1;
+  int32 tail = 2; // Number of lines from end (0 = all)
+  int64 since_unix = 3; // Unix timestamp
+  bool follow = 4; // Stream logs (not implemented in unary RPC)
+}
+
+// GetContainerLogsResponse contains log output
+message GetContainerLogsResponse {
+  string logs = 1;
+}
+
+// GetContainerStatsRequest for real-time stats
+message GetContainerStatsRequest {
+  string container_id = 1;
+}
+
+// GetContainerStatsResponse contains container statistics
+message GetContainerStatsResponse {
+  ContainerStats stats = 1;
+}
+
+// ListImagesRequest with optional filters
+message ListImagesRequest {
+  bool all = 1; // Include intermediate images
+}
+
+// ListImagesResponse contains list of images
+message ListImagesResponse {
+  repeated ImageInfo images = 1;
+}
+
+// ListNetworksRequest with optional filters
+message ListNetworksRequest {
+  map<string, string> filters = 1;
+}
+
+// ListNetworksResponse contains list of networks
+message ListNetworksResponse {
+  repeated NetworkInfo networks = 1;
+}
+
+// ListVolumesRequest with optional filters
+message ListVolumesRequest {
+  map<string, string> filters = 1;
+}
+
+// ListVolumesResponse contains list of volumes
+message ListVolumesResponse {
+  repeated VolumeInfo volumes = 1;
+}
+
+// GetSystemInfoRequest is empty
+message GetSystemInfoRequest {}
+
+// GetSystemInfoResponse contains Docker system info
+message GetSystemInfoResponse {
+  string version = 1;
+  string api_version = 2;
+  string os = 3;
+  string architecture = 4;
+  int32 containers = 5;
+  int32 containers_running = 6;
+  int32 containers_paused = 7;
+  int32 containers_stopped = 8;
+  int32 images = 9;
+  string driver = 10;
+  int64 memory_total = 11;
+}
+
+// GetAquatiqServicesRequest is empty
+message GetAquatiqServicesRequest {}
+
+// GetAquatiqServicesResponse contains Aquatiq services
+message GetAquatiqServicesResponse {
+  repeated ContainerInfo services = 1;
+}
+
+// ContainerInfo represents a Docker container
+message ContainerInfo {
+  string id = 1;
+  repeated string names = 2;
+  string image = 3;
+  string image_id = 4;
+  string command = 5;
+  google.protobuf.Timestamp created = 6;
+  string state = 7;
+  string status = 8;
+  repeated PortBinding ports = 9;
+  map<string, string> labels = 10;
+  int64 size_rw = 11;
+  int64 size_root_fs = 12;
+}
+
+// PortBinding represents a port mapping
+message PortBinding {
+  int32 private_port = 1;
+  int32 public_port = 2;
+  string type = 3; // tcp or udp
+  string ip = 4;
+}
+
+// ContainerStats represents container statistics
+message ContainerStats {
+  string container_id = 1;
+  string name = 2;
+  double cpu_percentage = 3;
+  int64 memory_usage = 4;
+  int64 memory_limit = 5;
+  double memory_percentage = 6;
+  int64 network_rx = 7;
+  int64 network_tx = 8;
+  int64 block_read = 9;
+  int64 block_write = 10;
+  int32 pids = 11;
+}
+
+// ImageInfo represents a Docker image
+message ImageInfo {
+  string id = 1;
+  repeated string repo_tags = 2;
+  repeated string repo_digests = 3;
+  google.protobuf.Timestamp created = 4;
+  int64 size = 5;
+  int64 virtual_size = 6;
+  map<string, string> labels = 7;
+}
+
+// NetworkInfo represents a Docker network
+message NetworkInfo {
+  string id = 1;
+  string name = 2;
+  string driver = 3;
+  string scope = 4;
+  bool internal = 5;
+  bool attachable = 6;
+  map<string, string> labels = 7;
+}
+
+// VolumeInfo represents a Docker volume
+message VolumeInfo {
+  string name = 1;
+  string driver = 2;
+  string mountpoint = 3;
+  google.protobuf.Timestamp created = 4;
+  string scope = 5;
+  map<string, string> labels = 6;
+}

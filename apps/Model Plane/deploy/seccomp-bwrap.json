@@ -1,0 +1,43 @@
+{
+  "_comment": "Scoped seccomp profile for execution-core so bubblewrap (bwrap) can create unprivileged user namespaces (clone/unshare with CLONE_NEWUSER) for sandboxed code execution. Docker's DEFAULT profile blocks userns creation under default settings; this profile uses allow-by-default + an explicit deny-list of escape/escalation syscalls — strictly safer than `seccomp=unconfined`, while still permitting the clone/unshare/mount/pivot_root that bwrap needs. bwrap then re-confines the payload (read-only root, dropped caps, network unshare). Wire via: security_opt: [ seccomp=./seccomp-bwrap.json ] on the execution-core service ONLY.",
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "archMap": [
+    { "architecture": "SCMP_ARCH_X86_64", "subArchitectures": ["SCMP_ARCH_X86", "SCMP_ARCH_X32"] },
+    { "architecture": "SCMP_ARCH_AARCH64", "subArchitectures": ["SCMP_ARCH_ARM"] }
+  ],
+  "syscalls": [
+    {
+      "names": [
+        "ptrace",
+        "kcmp",
+        "process_vm_readv",
+        "process_vm_writev",
+        "perf_event_open",
+        "bpf",
+        "add_key",
+        "keyctl",
+        "request_key",
+        "open_by_handle_at",
+        "name_to_handle_at",
+        "init_module",
+        "finit_module",
+        "delete_module",
+        "kexec_load",
+        "kexec_file_load",
+        "reboot",
+        "swapon",
+        "swapoff",
+        "settimeofday",
+        "clock_settime",
+        "acct",
+        "quotactl",
+        "nfsservctl",
+        "_sysctl",
+        "personality"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "comment": "Block container-escape / host-compromise / kernel-module / time / keyring primitives. clone, unshare, mount, pivot_root, umount2, setns are intentionally NOT here so bwrap can build the sandbox namespace."
+    }
+  ]
+}

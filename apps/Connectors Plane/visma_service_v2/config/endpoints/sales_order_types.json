@@ -1,0 +1,26 @@
+{
+  "endpoint_name": "sales_order_types",
+  "bigquery_table": "visma_sales_order_types",
+  "primary_key": "orderType",
+  "source": "erp_rest",
+  "api_method": "get_sales_order_types",
+  "api_endpoint": "/v1/salesordertype",
+  "pagination_profile": "finance_page_number",
+  "modified_field": null,
+  "merge_type": "upsert",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": [
+    "orderType",
+    "description",
+    "active"
+  ],
+  "datamart": {
+    "ready": false,
+    "pilot_override": false,
+    "query_file": "config/queries/sales_order_type.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "erp_rest"
+  }
+}

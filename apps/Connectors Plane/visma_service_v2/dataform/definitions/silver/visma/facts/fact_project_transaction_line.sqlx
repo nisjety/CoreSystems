@@ -1,0 +1,345 @@
+config {
+  type: "table",
+  schema: "visma_silver",
+  name: "fact_project_transaction_line",
+  description: "Silver: Project transaction lines flattened from visma_project_transactions. Grain: one row per tenant + module + reference_number + tran_id. is_historical_project_migration marks carried-over history (migrated opening balances, the merger move) by seed_project_history_rule.",
+  tags: ["silver", "visma", "fact"]
+}
+
+WITH subaccount_dim AS (
+  SELECT
+    tenant_id,
+    subaccount_id,
+    subaccount_number,
+    segment2 AS segment2_value
+  FROM ${ref("visma_silver", "dim_subaccount")}
+),
+
+business_unit_mapping AS (
+  SELECT
+    tenant_id,
+    source_segment_2_value,
+    business_unit_id,
+    business_unit_name,
+    valid_from,
+    COALESCE(valid_to, DATE '9999-12-31') AS valid_to
+  FROM ${ref("visma_silver_excel", "business_unit_mapping")}
+),
+
+-- The day a tenant's subaccount structure changes: from valid_from of its first segment-2 rule,
+-- segment 2 is the business unit (before that it was the department). Aquatiq AS: 2026-01-01.
+structure_cutover AS (
+  SELECT tenant_id, MIN(valid_from) AS first_day
+  FROM business_unit_mapping
+  WHERE source_segment_2_value IS NOT NULL
+  GROUP BY tenant_id
+),
+
+history_rule AS (
+  SELECT *
+  FROM ${ref("visma_silver_excel", "seed_project_history_rule")}
+  WHERE account_cd IS NOT NULL OR description_regex IS NOT NULL
+),
+
+-- One staging record per (document, period): a document that has lines in several periods is
+-- fetched once per period (`scanPeriod`), each time with only that period's lines. Keeping one
+-- record per document would drop every other period's lines, and which ones depended on a tie in
+-- the sync timestamps. Line identity is `tran_id` (present on every line, never shared between
+-- periods or documents), so keeping all the slices cannot duplicate a line.
+source_base AS (
+  SELECT * EXCEPT (rn)
+  FROM (
+    SELECT
+      src.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY src.tenantId, src.module, src.refNbr, src.scanPeriod
+        ORDER BY
+          COALESCE(src.refreshedAt, src.syncedAt) DESC,
+          COALESCE(src.firstSyncedAt, src.syncedAt) DESC,
+          src.syncedAt DESC
+      ) AS rn
+    FROM ${ref("visma_bronze", "visma_project_transactions")} AS src
+    WHERE src.isDeleted IS DISTINCT FROM TRUE
+  )
+  WHERE rn = 1
+),
+
+line_base AS (
+  SELECT
+    src.tenantId AS tenant_id,
+    src.syncedAt AS synced_at,
+    src.organizationName AS organization_name,
+    COALESCE(JSON_VALUE(src.businessUnitId, '$.id'), CAST(src.businessUnitId AS STRING)) AS source_business_unit_id,
+    src.businessUnitName AS source_business_unit_name,
+    src.refNbr AS reference_number,
+    src.module,
+    src.status,
+    src.description AS header_description,
+
+    CAST(line_offset + 1 AS STRING) AS line_number,
+    SAFE_CAST(JSON_VALUE(line_json, '$.tranId') AS INT64) AS tran_id,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(line_json, '$.date') AS DATE),
+      DATE(SAFE_CAST(JSON_VALUE(line_json, '$.date') AS DATETIME)),
+      DATE(SAFE_CAST(JSON_VALUE(line_json, '$.date') AS TIMESTAMP))
+    ) AS transaction_date,
+    TRIM(COALESCE(
+      JSON_VALUE(line_json, '$.inventoryId.number'),
+      JSON_VALUE(line_json, '$.inventory.number'),
+      JSON_VALUE(line_json, '$.inventoryItem.number'),
+      JSON_VALUE(line_json, '$.inventoryId')
+    )) AS inventory_id,
+    COALESCE(
+      JSON_VALUE(line_json, '$.inventoryId.description'),
+      JSON_VALUE(line_json, '$.inventory.description'),
+      JSON_VALUE(line_json, '$.inventoryItem.description')
+    ) AS inventory_description,
+    JSON_VALUE(line_json, '$.description') AS line_description,
+    COALESCE(
+      JSON_VALUE(line_json, '$.uom'),
+      JSON_VALUE(line_json, '$.uoM'),
+      JSON_VALUE(line_json, '$.unitOfMeasure')
+    ) AS unit_of_measure,
+    SAFE_CAST(JSON_VALUE(line_json, '$.quantity') AS NUMERIC) AS quantity,
+    SAFE_CAST(JSON_VALUE(line_json, '$.unitRate') AS NUMERIC) AS unit_rate,
+    SAFE_CAST(JSON_VALUE(line_json, '$.amount') AS NUMERIC) AS amount,
+    SAFE_CAST(JSON_VALUE(line_json, '$.billable') AS BOOL) AS is_billable,
+    SAFE_CAST(JSON_VALUE(line_json, '$.released') AS BOOL) AS is_released,
+    SAFE_CAST(JSON_VALUE(line_json, '$.allocated') AS BOOL) AS is_allocated,
+    SAFE_CAST(JSON_VALUE(line_json, '$.billableQuantity') AS NUMERIC) AS billable_quantity,
+    JSON_VALUE(line_json, '$.financialPeriod') AS financial_period,
+    JSON_VALUE(line_json, '$.batchNbr') AS batch_number,
+    SAFE_CAST(JSON_VALUE(line_json, '$.useBillableQty') AS BOOL) AS use_billable_quantity,
+    CASE
+      WHEN STARTS_WITH(COALESCE(JSON_VALUE(line_json, '$.startDate'), ''), '0001-01-01') THEN NULL
+      ELSE COALESCE(
+        SAFE_CAST(JSON_VALUE(line_json, '$.startDate') AS DATE),
+        DATE(SAFE_CAST(JSON_VALUE(line_json, '$.startDate') AS DATETIME)),
+        DATE(SAFE_CAST(JSON_VALUE(line_json, '$.startDate') AS TIMESTAMP))
+      )
+    END AS start_date,
+    CASE
+      WHEN STARTS_WITH(COALESCE(JSON_VALUE(line_json, '$.endDate'), ''), '0001-01-01') THEN NULL
+      ELSE COALESCE(
+        SAFE_CAST(JSON_VALUE(line_json, '$.endDate') AS DATE),
+        DATE(SAFE_CAST(JSON_VALUE(line_json, '$.endDate') AS DATETIME)),
+        DATE(SAFE_CAST(JSON_VALUE(line_json, '$.endDate') AS TIMESTAMP))
+      )
+    END AS end_date,
+    SAFE_CAST(JSON_VALUE(line_json, '$.lastModifiedDateTime') AS TIMESTAMP) AS line_last_modified_at,
+    SAFE_CAST(JSON_VALUE(line_json, '$.overtimeMultiplier') AS NUMERIC) AS overtime_multiplier,
+
+    NULLIF(
+      NULLIF(
+        TRIM(COALESCE(
+          JSON_VALUE(line_json, '$.project.id'),
+          JSON_VALUE(line_json, '$.project.projectId')
+        )),
+        ''
+      ),
+      'X'
+    ) AS project_id,
+    CASE
+      WHEN NULLIF(
+        NULLIF(
+          TRIM(COALESCE(
+            JSON_VALUE(line_json, '$.project.id'),
+            JSON_VALUE(line_json, '$.project.projectId')
+          )),
+          ''
+        ),
+        'X'
+      ) IS NULL THEN NULL
+      ELSE COALESCE(
+        JSON_VALUE(line_json, '$.project.description'),
+        JSON_VALUE(line_json, '$.project.name')
+      )
+    END AS project_name,
+    COALESCE(
+      JSON_VALUE(line_json, '$.projectTask.id'),
+      JSON_VALUE(line_json, '$.projectTask.taskId')
+    ) AS project_task_id,
+    COALESCE(
+      JSON_VALUE(line_json, '$.projectTask.description'),
+      JSON_VALUE(line_json, '$.projectTask.name')
+    ) AS project_task_name,
+
+    JSON_VALUE(line_json, '$.debitAccount.type') AS debit_account_type,
+    TRIM(COALESCE(
+      JSON_VALUE(line_json, '$.debitAccount.number'),
+      JSON_VALUE(line_json, '$.debitAccount.id')
+    )) AS debit_account_cd,
+    JSON_VALUE(line_json, '$.debitAccount.description') AS debit_account_description,
+    COALESCE(
+      JSON_VALUE(line_json, '$.debitSubaccount.id'),
+      JSON_VALUE(line_json, '$.debitSubaccount.subaccountNumber')
+    ) AS debit_subaccount_id,
+    COALESCE(
+      JSON_VALUE(line_json, '$.branch.number'),
+      JSON_VALUE(line_json, '$.branch.id')
+    ) AS branch_id,
+
+    TRIM(COALESCE(
+      JSON_VALUE(line_json, '$.customerVendor.number'),
+      JSON_VALUE(line_json, '$.customerVendor.id')
+    )) AS customer_vendor_id,
+    JSON_VALUE(line_json, '$.customerVendor.name') AS customer_vendor_name,
+    TRIM(JSON_VALUE(line_json, '$.accountGroup.number')) AS account_group_number,
+    JSON_VALUE(line_json, '$.accountGroup.name') AS account_group_name,
+    TRIM(JSON_VALUE(line_json, '$.debitAccountGroup.number')) AS debit_account_group_number,
+    JSON_VALUE(line_json, '$.debitAccountGroup.name') AS debit_account_group_name
+  FROM source_base AS src
+  CROSS JOIN UNNEST(JSON_QUERY_ARRAY(src.lines)) AS line_json WITH OFFSET AS line_offset
+),
+
+-- Carried-over history (seed_project_history_rule): migrated opening balances and the merger move.
+rule_hit AS (
+  SELECT
+    l.tenant_id,
+    l.module,
+    l.reference_number,
+    COALESCE(CAST(l.tran_id AS STRING), l.line_number) AS line_id,
+    r.rule_code,
+    r.include_batch_companions,
+    l.batch_number
+  FROM line_base AS l
+  JOIN history_rule AS r
+    ON  (r.account_cd IS NULL OR r.account_cd = l.debit_account_cd)
+    AND (r.module IS NULL OR r.module = l.module)
+    AND (r.description_regex IS NULL
+         OR REGEXP_CONTAINS(
+              CONCAT(COALESCE(l.line_description, ''), ' | ', COALESCE(l.header_description, '')),
+              r.description_regex))
+),
+
+direct_hit AS (
+  SELECT tenant_id, module, reference_number, line_id, MIN(rule_code) AS rule_code
+  FROM rule_hit
+  GROUP BY tenant_id, module, reference_number, line_id
+),
+
+history_batch AS (
+  SELECT DISTINCT tenant_id, module, batch_number
+  FROM rule_hit
+  WHERE include_batch_companions
+    AND batch_number IS NOT NULL
+),
+
+flagged AS (
+  SELECT
+    l.*,
+    (d.rule_code IS NOT NULL OR hb.batch_number IS NOT NULL) AS is_historical_project_migration,
+    COALESCE(d.rule_code, IF(hb.batch_number IS NOT NULL, 'batch_companion', NULL)) AS historical_migration_rule
+  FROM line_base AS l
+  LEFT JOIN direct_hit AS d
+    ON  d.tenant_id = l.tenant_id
+    AND d.module = l.module
+    AND d.reference_number = l.reference_number
+    AND d.line_id = COALESCE(CAST(l.tran_id AS STRING), l.line_number)
+  LEFT JOIN history_batch AS hb
+    ON  hb.tenant_id = l.tenant_id
+    AND hb.module = l.module
+    AND hb.batch_number = l.batch_number
+),
+
+enriched AS (
+  SELECT
+    l.*,
+    sd.segment2_value AS source_segment_2_value,
+    -- On the day before the structure change the parent company posted the merger move with the new
+    -- structure (segment 2 = business unit; all 233 project lines of Aquatiq AS on 2025-12-31 do).
+    -- The date window would map them to the old default (Chemistry) and leave every moved project
+    -- with two business units. An exact segment-2 match of the new structure wins on that day only.
+    COALESCE(bn.business_unit_id, bm.business_unit_id) AS mapped_business_unit_id,
+    COALESCE(bn.business_unit_name, bm.business_unit_name) AS mapped_business_unit_name,
+    CASE
+      WHEN bn.business_unit_id IS NOT NULL THEN 'cutover_day_segment2_match'
+      WHEN bm.business_unit_id IS NULL THEN 'no_mapping'
+      WHEN bm.source_segment_2_value IS NOT NULL THEN 'subaccount_segment2_match'
+      ELSE 'tenant_default_match'
+    END AS business_unit_match_rule,
+    ROW_NUMBER() OVER (
+      PARTITION BY l.tenant_id, l.module, l.reference_number, COALESCE(CAST(l.tran_id AS STRING), l.line_number)
+      ORDER BY
+        CASE WHEN bm.source_segment_2_value IS NOT NULL THEN 1 ELSE 0 END DESC,
+        bm.valid_from DESC,
+        l.line_last_modified_at DESC
+    ) AS bu_match_rank
+  FROM flagged AS l
+  LEFT JOIN subaccount_dim AS sd
+    ON l.tenant_id = sd.tenant_id
+   AND (
+     l.debit_subaccount_id = sd.subaccount_id
+     OR l.debit_subaccount_id = sd.subaccount_number
+   )
+  LEFT JOIN business_unit_mapping AS bm
+    ON l.tenant_id = bm.tenant_id
+   AND l.transaction_date BETWEEN bm.valid_from AND bm.valid_to
+   AND (
+     bm.source_segment_2_value IS NULL
+     OR bm.source_segment_2_value = COALESCE(sd.segment2_value, '0')
+   )
+  LEFT JOIN structure_cutover AS sc
+    ON  sc.tenant_id = l.tenant_id
+    AND l.transaction_date = DATE_SUB(sc.first_day, INTERVAL 1 DAY)
+  LEFT JOIN business_unit_mapping AS bn
+    ON  bn.tenant_id = sc.tenant_id
+    AND bn.valid_from = sc.first_day
+    AND bn.source_segment_2_value = sd.segment2_value
+)
+
+SELECT
+  tenant_id,
+  synced_at,
+  organization_name,
+  source_business_unit_id,
+  source_business_unit_name,
+  COALESCE(mapped_business_unit_id, source_business_unit_id) AS business_unit_id,
+  COALESCE(mapped_business_unit_name, source_business_unit_name, organization_name) AS business_unit_name,
+  source_segment_2_value,
+  business_unit_match_rule,
+  is_historical_project_migration,
+  historical_migration_rule,
+
+  reference_number,
+  module,
+  status,
+  header_description,
+  line_number,
+  tran_id,
+  transaction_date,
+  inventory_id,
+  inventory_description,
+  line_description,
+  unit_of_measure,
+  quantity,
+  unit_rate,
+  amount,
+  is_billable,
+  is_released,
+  is_allocated,
+  billable_quantity,
+  financial_period,
+  batch_number,
+  use_billable_quantity,
+  start_date,
+  end_date,
+  line_last_modified_at,
+  overtime_multiplier,
+  project_id,
+  project_name,
+  project_task_id,
+  project_task_name,
+  debit_account_type,
+  debit_account_cd,
+  debit_account_description,
+  debit_subaccount_id,
+  branch_id,
+  customer_vendor_id,
+  customer_vendor_name,
+  account_group_number,
+  account_group_name,
+  debit_account_group_number,
+  debit_account_group_name
+FROM enriched
+WHERE bu_match_rank = 1

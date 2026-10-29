@@ -1,0 +1,17 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero bank transfers; source amount has no verified currency in this typed contract.",
+  assertions: { nonNull: ["tenant_id", "bank_transfer_id", "bank_transfer_key"], uniqueKey: ["bank_transfer_key"] }
+}
+
+SELECT CONCAT(tenant_id, '|', bank_transfer_id) AS bank_transfer_key,
+       tenant_id, bank_transfer_id, record_id AS bank_transfer_internal_id,
+       status, reference, transfer_date, created_at,
+       from_bank_account_id, from_bank_account_code, from_bank_account_name,
+       to_bank_account_id, to_bank_account_code, to_bank_account_name,
+       from_bank_transaction_id, to_bank_transaction_id,
+       from_is_reconciled, to_is_reconciled, amount AS source_amount,
+       currency_rate AS source_currency_rate, has_attachments,
+       updated_at, first_seen_at, synced_at
+FROM ${ref("dw_bronze_xero", "xero_bank_transfers")}

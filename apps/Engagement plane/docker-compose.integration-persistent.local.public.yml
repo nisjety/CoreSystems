@@ -1,0 +1,5 @@
+# Explicit loopback publish for the existing intergration-core Google client.
+services:
+  integration-api:
+    ports:
+      - "127.0.0.1:3026:3026"

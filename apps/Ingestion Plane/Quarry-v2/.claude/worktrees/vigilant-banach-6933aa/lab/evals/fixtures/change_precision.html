@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Change Detection Precision Probe</title>
+    <meta name="description" content="A page that exercises whitespace-only and reordered-only change scenarios.">
+</head>
+<body>
+    <header>
+        <nav>
+            <a href="/">Home</a>
+        </nav>
+    </header>
+    <main>
+        <article>
+            <h1>Change Detection Precision</h1>
+            <p>Three sentences make up the body of this article.</p>
+            <p>The first paragraph asserts that whitespace-only changes do not constitute a real delta.</p>
+            <p>The second paragraph asserts that paragraph reordering without content change is not a real delta either.</p>
+            <h2>Why this matters</h2>
+            <p>Pages frequently re-render with cosmetic changes — extra whitespace from a build pipeline, reordered widgets, normalized punctuation. Treating these as content deltas wastes downstream work.</p>
+            <p>The text-fingerprint and paragraph-diff layers exist precisely to suppress these false positives.</p>
+        </article>
+    </main>
+    <footer>
+        <a href="/privacy">Privacy</a>
+    </footer>
+</body>
+</html>

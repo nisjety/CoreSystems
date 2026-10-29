@@ -1,0 +1,63 @@
+config { type: "assertion", schema: "dw_1_silver_xero_assertions", name: "xero_gold_credit_note_safety" }
+
+WITH grain AS (
+  SELECT 'customer_credit_note_line' AS fact_name,
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_credit_note_line")}
+          WHERE credit_note_type = 'ACCRECCREDIT') AS source_count,
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_customer_credit_note_line")}) AS gold_count
+  UNION ALL
+  SELECT 'supplier_credit_note_line',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_credit_note_line")}
+          WHERE credit_note_type = 'ACCPAYCREDIT'),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_supplier_credit_note_line")})
+  UNION ALL
+  SELECT 'customer_credit_note_allocation',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_credit_note_allocation")}
+          WHERE credit_note_type = 'ACCRECCREDIT'),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_customer_credit_note_allocation")})
+  UNION ALL
+  SELECT 'supplier_credit_note_allocation',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_credit_note_allocation")}
+          WHERE credit_note_type = 'ACCPAYCREDIT'),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_supplier_credit_note_allocation")})
+), unsafe AS (
+  SELECT 'customer_credit_note' AS fact_name, credit_note_id AS record_id
+  FROM ${ref("xero_gold_finance", "fact_customer_credit_note")}
+  WHERE is_reportable IS NOT TRUE AND amount_in_currency IS NOT NULL
+  UNION ALL
+  SELECT 'supplier_credit_note', credit_note_id
+  FROM ${ref("xero_gold_finance", "fact_supplier_credit_note")}
+  WHERE is_reportable IS NOT TRUE AND amount_in_currency IS NOT NULL
+  UNION ALL
+  SELECT 'customer_credit_note_line', line_item_id
+  FROM ${ref("xero_gold_finance", "fact_customer_credit_note_line")}
+  WHERE (is_reportable IS NOT TRUE OR is_line_set_ambiguous) AND amount_in_currency IS NOT NULL
+  UNION ALL
+  SELECT 'supplier_credit_note_line', line_item_id
+  FROM ${ref("xero_gold_finance", "fact_supplier_credit_note_line")}
+  WHERE (is_reportable IS NOT TRUE OR is_line_set_ambiguous) AND amount_in_currency IS NOT NULL
+  UNION ALL
+  SELECT 'customer_credit_note_allocation', allocation_id
+  FROM ${ref("xero_gold_finance", "fact_customer_credit_note_allocation")}
+  WHERE (is_reportable IS NOT TRUE OR is_invoice_unresolved OR is_currency_mismatch
+         OR is_invoice_type_mismatch OR is_observed_with_credit_note IS NOT TRUE)
+    AND amount_in_currency IS NOT NULL
+  UNION ALL
+  SELECT 'supplier_credit_note_allocation', allocation_id
+  FROM ${ref("xero_gold_finance", "fact_supplier_credit_note_allocation")}
+  WHERE (is_reportable IS NOT TRUE OR is_invoice_unresolved OR is_currency_mismatch
+         OR is_invoice_type_mismatch OR is_observed_with_credit_note IS NOT TRUE)
+    AND amount_in_currency IS NOT NULL
+  UNION ALL
+  SELECT 'orphan_credit_note_line', credit_note_line_key
+  FROM ${ref("dw_1_silver_xero", "fact_credit_note_line")}
+  WHERE credit_note_key IS NULL
+  UNION ALL
+  SELECT 'orphan_credit_note_allocation', allocation_key
+  FROM ${ref("dw_1_silver_xero", "fact_credit_note_allocation")}
+  WHERE credit_note_key IS NULL
+)
+SELECT fact_name, CAST(source_count AS STRING) AS record_id
+FROM grain WHERE source_count != gold_count
+UNION ALL
+SELECT fact_name, record_id FROM unsafe

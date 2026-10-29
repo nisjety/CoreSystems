@@ -1,0 +1,55 @@
+{
+  "endpoint_name": "project_tasks",
+  "bigquery_table": "visma_project_tasks",
+  "primary_key": [
+    "projectInternalId",
+    "taskId"
+  ],
+  "source": "erp_rest",
+  "api_method": "get_project_tasks",
+  "api_endpoint": "/v1/projecttask",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "partitioning": {
+    "mode": "cartesian",
+    "max_partitions": 20000,
+    "dimensions": [
+      {
+        "query_param": "projectId",
+        "source_endpoint": "/v1/project",
+        "source_path": "projectID",
+        "carry": {
+          "projectId": "projectID"
+        }
+      }
+    ]
+  },
+  "validation_fields": [
+    "internalId",
+    "projectInternalId",
+    "taskId",
+    "description",
+    "status",
+    "restrictEmployees",
+    "lastModifiedDateTime",
+    "createdDateTime",
+    "branch.number",
+    "branch.name",
+    "visibility"
+  ],
+  "notes": "/v1/projecttask answers HTTP 400 'Either ProjectId or ProjectInternalId or PublicId must be specified' without a project filter (verified live 2026-09-29: a missing-parameter error, not a 'module not enabled' signal), so the endpoint is fetched once per project: partitioning lists /v1/project (walked completely and checked against its totalCount) and asks for projectId=<projectID>. One request per project at least (pilot 1,237). Rows get projectId (the project's code) added; projectInternalId is in the API's rows. An empty project list (a tenant without the project module) means nothing to fetch. DataMart projectTasks returns all 3,108 tasks across 1,219 projects in 7 pages of 500 and stays the cheaper source once its parity is proven.",
+  "datamart": {
+    "ready": false,
+    "query_file": "config/queries/project_task.graphql",
+    "root_field": "projectTasks",
+    "type_name": "ProjectTask",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "erp_rest",
+    "join_normalizer": "normalize_project_task"
+  },
+  "tier": 4
+}

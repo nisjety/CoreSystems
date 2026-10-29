@@ -1,0 +1,14 @@
+# Only the already-cross-plane shared broker is linked. The private Control
+# broker and scoped GDPR durable consumers remain unchanged.
+services:
+  control-shared-nats:
+    entrypoint: ["/bin/sh", "/opt/shared-nats-leaf-entrypoint.sh"]
+    command: []
+    environment:
+      NATS_LEAF_DOMAIN: CONTROL_SHARED
+    volumes:
+      - ../Engagement plane/scripts/shared-nats-leaf-entrypoint.sh:/opt/shared-nats-leaf-entrypoint.sh:ro
+      - ./nats.shared-leaf.conf:/etc/nats/shared-leaf.conf:ro
+      - ${SHARED_NATS_SECRETS_DIR:-../Engagement plane/.local/secrets}/shared_nats_control_leaf_password:/run/secrets/shared_nats_leaf_password:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=8m

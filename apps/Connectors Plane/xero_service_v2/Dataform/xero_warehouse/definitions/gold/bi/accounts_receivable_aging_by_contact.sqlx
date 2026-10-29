@@ -1,0 +1,40 @@
+config {
+  type: "table",
+  schema: "xero_datamart",
+  description: "Accounts Receivable aging by Xero contact, requested report date, currency evidence and aging bucket. Unidentified currencies remain segregated by their original source header and are never converted.",
+  assertions: { nonNull: ["accounts_receivable_aging_contact_key", "tenant_id", "customer_id", "source_measure_header", "age_bucket"], uniqueKey: ["accounts_receivable_aging_contact_key"] }
+}
+
+WITH due_amounts AS (
+  SELECT *
+  FROM ${ref("xero_gold_finance", "fact_accounts_receivable_aging_report_amount")}
+  WHERE source_measure_name = 'Due'
+    AND is_open_due_amount
+    AND is_amount_parse_valid
+)
+SELECT
+  FARM_FINGERPRINT(CONCAT(
+    tenant_id, '|', report_run_id, '|', customer_id, '|', CAST(requested_report_date AS STRING), '|',
+    source_measure_header, '|', age_bucket
+  )) AS accounts_receivable_aging_contact_key,
+  ANY_VALUE(company_key) AS company_key,
+  ANY_VALUE(customer_key) AS customer_key,
+  ANY_VALUE(requested_report_date_key) AS requested_report_date_key,
+  tenant_id,
+  report_run_id,
+  customer_id,
+  requested_report_date,
+  source_measure_header,
+  currency_code,
+  is_currency_identified,
+  age_bucket,
+  SUM(source_amount_in_report_currency) AS open_due_amount_in_report_currency,
+  COUNT(*) AS open_due_measure_count,
+  LOGICAL_AND(is_contact_request_manifested) AS is_contact_request_manifested,
+  LOGICAL_AND(is_report_run_contact_set_complete) AS is_portfolio_snapshot_complete,
+  MAX(report_synced_at) AS report_synced_at,
+  'xero' AS source_system
+FROM due_amounts
+GROUP BY
+  tenant_id, report_run_id, customer_id, requested_report_date,
+  source_measure_header, currency_code, is_currency_identified, age_bucket

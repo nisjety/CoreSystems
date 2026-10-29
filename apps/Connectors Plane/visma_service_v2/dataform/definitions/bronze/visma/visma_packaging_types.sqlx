@@ -1,0 +1,34 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_packaging_types",
+  description: "Bronze: Packaging type definitions for shipping from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.bool("activeByDefault")} AS `activeByDefault`,
+  ${bronze.str("boxId")} AS `boxId`,
+  ${bronze.float("boxWeight")} AS `boxWeight`,
+  ${bronze.str("lastModifiedDateTime")} AS `lastModifiedDateTime`,
+  ${bronze.float("maxVolume")} AS `maxVolume`,
+  ${bronze.float("maxWeight")} AS `maxWeight`,
+  ${bronze.str("metadata")} AS `metadata`,
+  ${bronze.str("volumeUoM")} AS `volumeUoM`,
+  ${bronze.str("weightUoM")} AS `weightUoM`,
+  ${bronze.str("description")} AS `description`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`  -- v2 does not fetch this field
+FROM ${ref("dw_staging_visma", "packaging_types")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

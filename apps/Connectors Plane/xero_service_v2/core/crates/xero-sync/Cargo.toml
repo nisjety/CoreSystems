@@ -1,0 +1,25 @@
+[package]
+name    = "xero-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow      = { workspace = true }
+xero-common = { workspace = true }
+xero-auth   = { workspace = true }
+xero-client = { workspace = true }
+xero-gcs    = { workspace = true }
+tokio       = { workspace = true }
+chrono      = { workspace = true }
+tracing     = { workspace = true }
+uuid        = { workspace = true }
+futures     = { workspace = true }
+serde_json  = { workspace = true }
+serde       = { workspace = true }
+async-trait = { workspace = true }
+tempfile    = "3"
+
+[dev-dependencies]
+xero-client = { workspace = true, features = ["test-support"] }

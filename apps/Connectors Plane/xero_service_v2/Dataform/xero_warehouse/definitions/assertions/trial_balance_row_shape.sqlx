@@ -1,0 +1,15 @@
+config { type: "assertion", schema: "dw_1_silver_xero_assertions", name: "xero_trial_balance_row_shape" }
+
+SELECT
+  tenant_id,
+  report_snapshot_id,
+  balance_row_key,
+  account_id,
+  account_column_count,
+  debit_column_count,
+  credit_column_count,
+  ytd_debit_column_count,
+  ytd_credit_column_count,
+  unexpected_column_count
+FROM ${ref("dw_1_silver_xero", "fact_general_ledger_balance")}
+WHERE NOT is_structurally_complete

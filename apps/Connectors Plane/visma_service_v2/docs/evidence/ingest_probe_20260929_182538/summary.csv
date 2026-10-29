@@ -1,0 +1,5 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+countries,,1,0,succeeded,260,260,260,1,0,260,,661,2026-09-29 11:04:29.173+00
+countries,,2,0,succeeded,1,1,260,1,0,1,,450,2026-09-29 11:04:29.173+00
+departments,,1,0,succeeded,54,54,54,1,0,54,14440,458,2026-02-19 13:27:34.987+00
+departments,,2,0,succeeded,1,1,54,1,0,1,14439,2433,2026-02-19 13:27:34.987+00

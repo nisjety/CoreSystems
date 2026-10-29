@@ -1,0 +1,19 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Xero recurring-invoice template-line dimension; no line is treated as posted accounting activity.",
+  assertions: { nonNull: ["tenant_id", "line_item_id", "repeating_invoice_line_key"], uniqueKey: ["repeating_invoice_line_key"] }
+}
+
+SELECT FARM_FINGERPRINT(l.tenant_id) AS company_key,
+       FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.currency_code)) AS currency_key,
+       IF(l.account_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.account_id))) AS account_key,
+       l.repeating_invoice_line_key, l.repeating_invoice_key, l.tenant_id,
+       l.repeating_invoice_id, l.line_item_id, l.line_position,
+       l.invoice_type, l.status, l.is_deleted, TRUE AS is_template,
+       l.is_line_set_ambiguous, l.account_id, l.account_code, l.item_code,
+       l.description, l.quantity, l.unit_amount, l.tax_type,
+       l.net_amount_in_currency AS source_net_amount_in_currency,
+       l.tax_amount AS source_tax_amount, l.line_amount_raw, l.currency_code,
+       l.synced_at, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_repeating_invoice_line")} AS l

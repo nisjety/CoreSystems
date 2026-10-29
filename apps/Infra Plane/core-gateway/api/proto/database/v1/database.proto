@@ -1,0 +1,141 @@
+syntax = "proto3";
+
+package coresystem.gateway.database.v1;
+
+option go_package = "github.com/coresystem/integration-gateway/api/proto/database/v1;databasev1";
+
+import "google/protobuf/timestamp.proto";
+
+// DatabaseService provides database health and management for internal microservices
+service DatabaseService {
+  // CheckPostgreSQL performs PostgreSQL health check
+  rpc CheckPostgreSQL(CheckPostgreSQLRequest) returns (CheckPostgreSQLResponse);
+  
+  // CheckRedis performs Redis health check
+  rpc CheckRedis(CheckRedisRequest) returns (CheckRedisResponse);
+  
+  // GetPostgreSQLStats returns detailed PostgreSQL statistics
+  rpc GetPostgreSQLStats(GetPostgreSQLStatsRequest) returns (GetPostgreSQLStatsResponse);
+  
+  // GetRedisStats returns detailed Redis statistics
+  rpc GetRedisStats(GetRedisStatsRequest) returns (GetRedisStatsResponse);
+  
+  // GetConnectionPoolStats returns connection pool information
+  rpc GetConnectionPoolStats(GetConnectionPoolStatsRequest) returns (GetConnectionPoolStatsResponse);
+}
+
+// CheckPostgreSQLRequest for PostgreSQL health check
+message CheckPostgreSQLRequest {
+  string database_name = 1; // Optional: specific database to check
+}
+
+// CheckPostgreSQLResponse contains PostgreSQL health status
+message CheckPostgreSQLResponse {
+  DatabaseStatus status = 1;
+  string version = 2;
+  int32 active_connections = 3;
+  int32 max_connections = 4;
+  int64 database_size_bytes = 5;
+  int64 response_time_ms = 6;
+  google.protobuf.Timestamp checked_at = 7;
+  string error = 8;
+}
+
+// CheckRedisRequest for Redis health check
+message CheckRedisRequest {
+  string connection_name = 1; // Optional: specific connection to check
+}
+
+// CheckRedisResponse contains Redis health status
+message CheckRedisResponse {
+  DatabaseStatus status = 1;
+  string version = 2;
+  int32 connected_clients = 3;
+  int64 used_memory_bytes = 4;
+  int64 max_memory_bytes = 5;
+  int64 response_time_ms = 6;
+  google.protobuf.Timestamp checked_at = 7;
+  string error = 8;
+}
+
+// GetPostgreSQLStatsRequest for detailed stats
+message GetPostgreSQLStatsRequest {
+  string database_name = 1;
+}
+
+// GetPostgreSQLStatsResponse contains detailed PostgreSQL statistics
+message GetPostgreSQLStatsResponse {
+  string version = 1;
+  int32 total_connections = 2;
+  int32 active_connections = 3;
+  int32 idle_connections = 4;
+  int32 max_connections = 5;
+  int64 database_size_bytes = 6;
+  int64 table_count = 7;
+  int64 index_count = 8;
+  int64 cache_hit_ratio = 9; // Percentage
+  int64 transactions_committed = 10;
+  int64 transactions_rolled_back = 11;
+  google.protobuf.Timestamp uptime_since = 12;
+  repeated TableStats table_stats = 13;
+}
+
+// GetRedisStatsRequest for detailed stats
+message GetRedisStatsRequest {
+  string connection_name = 1;
+}
+
+// GetRedisStatsResponse contains detailed Redis statistics
+message GetRedisStatsResponse {
+  string version = 1;
+  string mode = 2; // standalone, cluster, sentinel
+  int32 connected_clients = 3;
+  int32 blocked_clients = 4;
+  int64 used_memory_bytes = 5;
+  int64 used_memory_peak_bytes = 6;
+  int64 max_memory_bytes = 7;
+  double memory_fragmentation_ratio = 8;
+  int64 total_keys = 9;
+  int64 expired_keys = 10;
+  int64 evicted_keys = 11;
+  int64 keyspace_hits = 12;
+  int64 keyspace_misses = 13;
+  double hit_rate = 14; // Percentage
+  google.protobuf.Timestamp uptime_since = 15;
+}
+
+// GetConnectionPoolStatsRequest for pool information
+message GetConnectionPoolStatsRequest {
+  string pool_name = 1; // "postgresql" or "redis"
+}
+
+// GetConnectionPoolStatsResponse contains pool statistics
+message GetConnectionPoolStatsResponse {
+  string pool_name = 1;
+  int32 total_connections = 2;
+  int32 idle_connections = 3;
+  int32 active_connections = 4;
+  int32 max_connections = 5;
+  int32 wait_count = 6;
+  int64 wait_duration_ms = 7;
+  int64 max_idle_closed = 8;
+  int64 max_lifetime_closed = 9;
+}
+
+// TableStats represents PostgreSQL table statistics
+message TableStats {
+  string table_name = 1;
+  int64 row_count = 2;
+  int64 table_size_bytes = 3;
+  int64 index_size_bytes = 4;
+  int64 total_size_bytes = 5;
+}
+
+// DatabaseStatus enum for database health state
+enum DatabaseStatus {
+  DATABASE_STATUS_UNSPECIFIED = 0;
+  DATABASE_STATUS_HEALTHY = 1;
+  DATABASE_STATUS_DEGRADED = 2;
+  DATABASE_STATUS_UNHEALTHY = 3;
+  DATABASE_STATUS_UNAVAILABLE = 4;
+}

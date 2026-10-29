@@ -1,0 +1,17 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero purchase order headers; billed orders remain visible but are not open commitments.",
+  assertions: { nonNull: ["tenant_id", "purchase_order_id", "purchase_order_key"], uniqueKey: ["purchase_order_key"] }
+}
+
+SELECT CONCAT(tenant_id, '|', purchase_order_id) AS purchase_order_key,
+       tenant_id, purchase_order_id, record_id AS purchase_order_internal_id,
+       purchase_order_number, purchase_order_type, reference, status,
+       status = 'DELETED' AS is_deleted,
+       status = 'AUTHORISED' AS is_open_commitment,
+       status = 'BILLED' AS is_billed,
+       contact_id, contact_name, order_date_local, currency_code, currency_rate,
+       branding_theme_id, line_amount_types, line_item_count, sub_total, total_tax, total,
+       updated_at, first_seen_at, synced_at
+FROM ${ref("dw_bronze_xero", "xero_purchase_orders")}

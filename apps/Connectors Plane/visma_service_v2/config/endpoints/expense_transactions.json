@@ -1,0 +1,27 @@
+{
+  "endpoint_name": "expense_transactions",
+  "enabled": true,
+  "bigquery_table": "visma_expense_transactions",
+  "primary_key": [
+    "transactionId",
+    "taxFree",
+    "amount"
+  ],
+  "logical_keys": [
+    "tenantId",
+    "transactionId",
+    "taxFree",
+    "amount"
+  ],
+  "source": "expense_api",
+  "api_method": "/api/v1/transactions",
+  "modified_field": "approvalDate",
+  "merge_type": "upsert",
+  "sync_pattern": "watermark_upsert",
+  "validation_fields": [
+    "transactionId",
+    "approvalDate"
+  ],
+  "notes": "Requires VISMA_OAUTH_SCOPE_EXPENSE with an approved expense-public-api transaction scope. No DataMart counterpart exists (Visma Expense is a separate product) — `datamart: null` is intentional, not a placeholder. tenantId is a logical scoping key written by the orchestrator's enrich() step; it is not in primary_key because transactionId is already globally unique across tenants in Visma Expense.One transactionId can come back as several rows that differ in amount, pricePerUnit, taxFree and (nearly always) payCode: Aquatiq Group AS returned 17,442 rows for 17,161 ids, 281 ids with two rows (measured 2026-10-01), e.g. 9.6 and 121.6 on one claim. The key therefore adds taxFree and amount, which every row has (payCode is often null and cannot be part of a key). The pilot tenant has no such split, so transactionId alone passed there.",
+  "datamart": null
+}

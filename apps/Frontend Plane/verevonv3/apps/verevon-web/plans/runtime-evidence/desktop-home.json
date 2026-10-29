@@ -1,0 +1,1839 @@
+{
+  "url": "http://127.0.0.1:3100/",
+  "readyState": "complete",
+  "sampleMs": 13030.800000011921,
+  "viewport": {
+    "width": 1440,
+    "height": 900
+  },
+  "nav": [
+    {
+      "ttfb": 16.400000035762787,
+      "domContentLoaded": 80.30000001192093,
+      "load": 663.1000000238419,
+      "transferSize": 26151
+    }
+  ],
+  "paints": [
+    {
+      "name": "first-paint",
+      "time": 360
+    },
+    {
+      "name": "first-contentful-paint",
+      "time": 360
+    }
+  ],
+  "observed": {
+    "lcp": [
+      {
+        "time": 360,
+        "size": 57540,
+        "url": "",
+        "element": "SPAN",
+        "text": "kunnskap og handling"
+      }
+    ],
+    "shifts": [
+      {
+        "time": 334.60000002384186,
+        "value": 0.0014735781779008927,
+        "hadRecentInput": false
+      },
+      {
+        "time": 833.1000000238419,
+        "value": 0.005376824524176955,
+        "hadRecentInput": false
+      },
+      {
+        "time": 2147.7000000476837,
+        "value": 0.005190626859546527,
+        "hadRecentInput": false
+      }
+    ],
+    "tasks": [
+      {
+        "time": 71,
+        "duration": 51
+      },
+      {
+        "time": 412.4000000357628,
+        "duration": 53
+      },
+      {
+        "time": 583.5,
+        "duration": 54
+      },
+      {
+        "time": 702.1000000238419,
+        "duration": 105
+      },
+      {
+        "time": 847.2000000476837,
+        "duration": 62
+      }
+    ]
+  },
+  "resources": [
+    {
+      "url": "http://127.0.0.1:3100/_next/static/media/797e433ab948586e-s.p.0r6juujl39pe6.woff2",
+      "type": "link",
+      "bytes": 23408,
+      "encoded": 23108,
+      "duration": 13.400000035762787
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/media/caa3a2e1cccd8315-s.p.0wgildi0cnwt9.woff2",
+      "type": "link",
+      "bytes": 29588,
+      "encoded": 29288,
+      "duration": 15.400000035762787
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fverevon-mood%2Fshared-surface-amber.jpg&w=1080&q=75",
+      "type": "link",
+      "bytes": 16368,
+      "encoded": 16068,
+      "duration": 41.09999996423721
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2F3-guys-working.jpg&w=640&q=75",
+      "type": "link",
+      "bytes": 17488,
+      "encoded": 17188,
+      "duration": 42.39999997615814
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fverevon-layers%2Fmanagement-layer.png&w=750&q=75",
+      "type": "link",
+      "bytes": 18014,
+      "encoded": 17714,
+      "duration": 45.59999996423721
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/233p45nuh4m5b.css",
+      "type": "link",
+      "bytes": 1265,
+      "encoded": 965,
+      "duration": 24.099999964237213
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2pv02s_0vsqln.css",
+      "type": "link",
+      "bytes": 34891,
+      "encoded": 34591,
+      "duration": 28.69999998807907
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/09lkwf_qozcls.js",
+      "type": "link",
+      "bytes": 9775,
+      "encoded": 9475,
+      "duration": 166.20000004768372
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2z9867j-49xml.js",
+      "type": "script",
+      "bytes": 9538,
+      "encoded": 9238,
+      "duration": 168.5
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/3n3dzy_m5hzj8.js",
+      "type": "script",
+      "bytes": 38884,
+      "encoded": 38584,
+      "duration": 173.69999998807907
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/3l2f1y3a9ppw-.js",
+      "type": "script",
+      "bytes": 71274,
+      "encoded": 70974,
+      "duration": 378.5999999642372
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/turbopack-0w1nrrx9uy0af.js",
+      "type": "script",
+      "bytes": 4452,
+      "encoded": 4152,
+      "duration": 167.5
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/14xy9ype22mwn.js",
+      "type": "script",
+      "bytes": 4334,
+      "encoded": 4034,
+      "duration": 233.4000000357628
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2hi4qfwktzw-c.js",
+      "type": "script",
+      "bytes": 13167,
+      "encoded": 12867,
+      "duration": 235.89999997615814
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2efcj7x7n5p82.js",
+      "type": "script",
+      "bytes": 6574,
+      "encoded": 6274,
+      "duration": 234.20000004768372
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/08d5nm27n6c04.js",
+      "type": "script",
+      "bytes": 35188,
+      "encoded": 34888,
+      "duration": 377.5
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/43ypyj1ngpd0q.js",
+      "type": "script",
+      "bytes": 10703,
+      "encoded": 10403,
+      "duration": 344.0999999642372
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2slkcx5_t7zxy.js",
+      "type": "script",
+      "bytes": 46046,
+      "encoded": 45746,
+      "duration": 374.69999998807907
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/0vrk5obp2n1z6.js",
+      "type": "script",
+      "bytes": 63137,
+      "encoded": 62837,
+      "duration": 448.10000002384186
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/0n4hdvr1jjose.js",
+      "type": "script",
+      "bytes": 17786,
+      "encoded": 17486,
+      "duration": 455.10000002384186
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/23-osay-bduqw.js",
+      "type": "script",
+      "bytes": 27871,
+      "encoded": 27571,
+      "duration": 546.6999999880791
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-scattered/archive-catalog-6549263-poster.jpg",
+      "type": "video",
+      "bytes": 45278,
+      "encoded": 44978,
+      "duration": 14.099999964237213
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/waiting-room-ai-poster.jpg",
+      "type": "video",
+      "bytes": 50644,
+      "encoded": 50344,
+      "duration": 21.299999952316284
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-control/autonomous-car-ai-poster.jpg",
+      "type": "video",
+      "bytes": 62193,
+      "encoded": 61893,
+      "duration": 27
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/verevon-hero-premiere-light.mp4",
+      "type": "video",
+      "bytes": 13627854,
+      "encoded": 13627554,
+      "duration": 615.3999999761581
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/waiting-room-ai.mp4",
+      "type": "video",
+      "bytes": 300,
+      "encoded": 0,
+      "duration": 461.5
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-scattered/archive-catalog-6549263.mp4",
+      "type": "video",
+      "bytes": 300,
+      "encoded": 0,
+      "duration": 466.9000000357628
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-control/autonomous-car-ai.mp4",
+      "type": "video",
+      "bytes": 300,
+      "encoded": 0,
+      "duration": 454.5999999642372
+    },
+    {
+      "url": "http://127.0.0.1:3100/fonts/arbeit-pro-light/arbeit-pro-light.woff",
+      "type": "css",
+      "bytes": 24324,
+      "encoded": 24024,
+      "duration": 100.59999996423721
+    },
+    {
+      "url": "http://127.0.0.1:3100/fonts/protokoll-light/ProtokollLight-Web.woff2",
+      "type": "css",
+      "bytes": 47320,
+      "encoded": 47020,
+      "duration": 101.40000003576279
+    },
+    {
+      "url": "http://127.0.0.1:3100/fonts/arbeit-pro-book/arbeit-pro-book.woff",
+      "type": "css",
+      "bytes": 30020,
+      "encoded": 29720,
+      "duration": 85.5
+    },
+    {
+      "url": "http://127.0.0.1:3100/fonts/protokoll-medium/ProtokollMedium-Web.woff2",
+      "type": "css",
+      "bytes": 50288,
+      "encoded": 49988,
+      "duration": 89.30000001192093
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fa95a19e05613baa759395e7dfc3241e5.jpg&w=256&q=75",
+      "type": "img",
+      "bytes": 12076,
+      "encoded": 11776,
+      "duration": 217.80000001192093
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fverevon-mood%2Fdesk-vast-white.jpg&w=128&q=75",
+      "type": "img",
+      "bytes": 1494,
+      "encoded": 1194,
+      "duration": 228.5999999642372
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fverevon-mood%2Fwindow-city-dusk.jpg&w=96&q=75",
+      "type": "img",
+      "bytes": 1978,
+      "encoded": 1678,
+      "duration": 263.5
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fsoft-orb.png&w=96&q=75",
+      "type": "img",
+      "bytes": 528,
+      "encoded": 228,
+      "duration": 268.5
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fagent-run-console-running.jpg&w=96&q=75",
+      "type": "img",
+      "bytes": 1760,
+      "encoded": 1460,
+      "duration": 269.4000000357628
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-control/autonomous-car-ai.mp4",
+      "type": "video",
+      "bytes": 13454,
+      "encoded": 13154,
+      "duration": 31.30000001192093
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-control/autonomous-car-ai.mp4",
+      "type": "video",
+      "bytes": 300,
+      "encoded": 0,
+      "duration": 11.800000011920929
+    },
+    {
+      "url": "http://127.0.0.1:3100/icon.svg?icon.1f08xbrdru65q.svg",
+      "type": "other",
+      "bytes": 1290,
+      "encoded": 990,
+      "duration": 8.400000035762787
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/23ena0124ggyr.js",
+      "type": "script",
+      "bytes": 1060,
+      "encoded": 760,
+      "duration": 28.100000023841858
+    },
+    {
+      "url": "http://127.0.0.1:3100/trust?_rsc=5CB68i4pnAekjehf",
+      "type": "fetch",
+      "bytes": 610,
+      "encoded": 310,
+      "duration": 17.19999998807907
+    },
+    {
+      "url": "http://127.0.0.1:3100/plattform/felles-kontekst?_rsc=5CB68i4pnAekjehf",
+      "type": "fetch",
+      "bytes": 626,
+      "encoded": 326,
+      "duration": 17.399999976158142
+    },
+    {
+      "url": "http://127.0.0.1:3100/produkt/arbeidsflyten?_rsc=5CB68i4pnAekjehf",
+      "type": "fetch",
+      "bytes": 623,
+      "encoded": 323,
+      "duration": 17.5
+    },
+    {
+      "url": "http://127.0.0.1:3100/?_rsc=7h4NYy5eoyMcNlUN",
+      "type": "fetch",
+      "bytes": 1069,
+      "encoded": 769,
+      "duration": 17.400000035762787
+    },
+    {
+      "url": "http://127.0.0.1:3100/?_rsc=yIp22O3xgPPxC28X",
+      "type": "fetch",
+      "bytes": 1341,
+      "encoded": 1041,
+      "duration": 17.400000035762787
+    },
+    {
+      "url": "http://127.0.0.1:3100/?_rsc=8nTjltbQWvg6NcbE",
+      "type": "fetch",
+      "bytes": 778,
+      "encoded": 478,
+      "duration": 13.199999988079071
+    },
+    {
+      "url": "http://127.0.0.1:3100/trust?_rsc=7h4NYy5eoyMcNlUN",
+      "type": "fetch",
+      "bytes": 1207,
+      "encoded": 907,
+      "duration": 12.699999988079071
+    },
+    {
+      "url": "http://127.0.0.1:3100/trust?_rsc=QrSYbpq5bUKFJKrB",
+      "type": "fetch",
+      "bytes": 578,
+      "encoded": 278,
+      "duration": 11.800000011920929
+    },
+    {
+      "url": "http://127.0.0.1:3100/trust?_rsc=ZU2_C0vaTnlg9HMu",
+      "type": "fetch",
+      "bytes": 8368,
+      "encoded": 8068,
+      "duration": 11.199999988079071
+    },
+    {
+      "url": "http://127.0.0.1:3100/plattform/felles-kontekst?_rsc=7h4NYy5eoyMcNlUN",
+      "type": "fetch",
+      "bytes": 1018,
+      "encoded": 718,
+      "duration": 11.399999976158142
+    },
+    {
+      "url": "http://127.0.0.1:3100/plattform/felles-kontekst?_rsc=miIqoOECqzo3dAqN",
+      "type": "fetch",
+      "bytes": 578,
+      "encoded": 278,
+      "duration": 11.100000023841858
+    },
+    {
+      "url": "http://127.0.0.1:3100/plattform/felles-kontekst?_rsc=UNwo8vwKItJtsqo7",
+      "type": "fetch",
+      "bytes": 578,
+      "encoded": 278,
+      "duration": 10
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/1c39wlp_3mxy9.js",
+      "type": "script",
+      "bytes": 2800,
+      "encoded": 2500,
+      "duration": 64.5
+    },
+    {
+      "url": "http://127.0.0.1:3100/plattform/felles-kontekst?_rsc=y3IK-xaZzhEm0YDc",
+      "type": "fetch",
+      "bytes": 5619,
+      "encoded": 5319,
+      "duration": 8.400000035762787
+    },
+    {
+      "url": "http://127.0.0.1:3100/produkt/arbeidsflyten?_rsc=7h4NYy5eoyMcNlUN",
+      "type": "fetch",
+      "bytes": 1033,
+      "encoded": 733,
+      "duration": 11
+    },
+    {
+      "url": "http://127.0.0.1:3100/produkt/arbeidsflyten?_rsc=iL4J34_HEq6rvE9J",
+      "type": "fetch",
+      "bytes": 578,
+      "encoded": 278,
+      "duration": 10.199999988079071
+    },
+    {
+      "url": "http://127.0.0.1:3100/produkt/arbeidsflyten?_rsc=mBOPn7Pz8SuU4oaG",
+      "type": "fetch",
+      "bytes": 578,
+      "encoded": 278,
+      "duration": 9.800000011920929
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2laayue2rxzbx.js",
+      "type": "script",
+      "bytes": 11820,
+      "encoded": 11520,
+      "duration": 59.30000001192093
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/321_9c-b3d2v9.js",
+      "type": "script",
+      "bytes": 46488,
+      "encoded": 46188,
+      "duration": 126
+    },
+    {
+      "url": "http://127.0.0.1:3100/produkt/arbeidsflyten?_rsc=eUXoDlPZMBuNqP7U",
+      "type": "fetch",
+      "bytes": 5484,
+      "encoded": 5184,
+      "duration": 15.300000011920929
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/0ouccnjxpk9jl.js",
+      "type": "script",
+      "bytes": 12491,
+      "encoded": 12191,
+      "duration": 46.60000002384186
+    }
+  ],
+  "videos": [
+    {
+      "src": "http://127.0.0.1:3100/verevon-vibe/verevon-hero-premiere-light.mp4",
+      "paused": false,
+      "time": 12.18417,
+      "ready": 4,
+      "top": 0
+    },
+    {
+      "src": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/waiting-room-ai.mp4",
+      "paused": true,
+      "time": 0,
+      "ready": 4,
+      "top": 1925
+    },
+    {
+      "src": "http://127.0.0.1:3100/verevon-vibe/problem-scattered/archive-catalog-6549263.mp4",
+      "paused": true,
+      "time": 0,
+      "ready": 4,
+      "top": 1925
+    },
+    {
+      "src": "http://127.0.0.1:3100/verevon-vibe/problem-control/autonomous-car-ai.mp4",
+      "paused": true,
+      "time": 0,
+      "ready": 4,
+      "top": 1925
+    }
+  ],
+  "network": [
+    {
+      "url": "http://127.0.0.1:3100/",
+      "status": 200,
+      "mime": "text/html",
+      "headers": {
+        "Cache-Control": "s-maxage=31536000",
+        "Connection": "keep-alive",
+        "Content-Encoding": "gzip",
+        "Content-Type": "text/html; charset=utf-8",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "ETag": "\"3q7h0nvrpl4702\"",
+        "Keep-Alive": "timeout=5",
+        "Transfer-Encoding": "chunked",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding",
+        "X-Powered-By": "Next.js",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1\n1",
+        "x-nextjs-stale-time": "300"
+      },
+      "received": 0,
+      "finishedBytes": 26352,
+      "bytes": 26352
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-scattered/archive-catalog-6549263-poster.jpg",
+      "status": 200,
+      "mime": "image/jpeg",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"afb2-1a05058e6f2\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Content-Length": "44978",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:38 GMT",
+        "Content-Type": "image/jpeg"
+      },
+      "received": 44978,
+      "finishedBytes": 45260,
+      "bytes": 45260
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/waiting-room-ai-poster.jpg",
+      "status": 200,
+      "mime": "image/jpeg",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"c4a8-1a05058eb96\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Content-Length": "50344",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:39 GMT",
+        "Content-Type": "image/jpeg"
+      },
+      "received": 50344,
+      "finishedBytes": 50626,
+      "bytes": 50626
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/233p45nuh4m5b.css",
+      "status": 200,
+      "mime": "text/css",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"e81-1a07f02378b\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "text/css; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 982,
+      "finishedBytes": 1346,
+      "bytes": 1346
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2pv02s_0vsqln.css",
+      "status": 200,
+      "mime": "text/css",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"346e3-1a07f0233b6\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:05 GMT",
+        "Content-Type": "text/css; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 34632,
+      "finishedBytes": 34998,
+      "bytes": 34998
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-control/autonomous-car-ai-poster.jpg",
+      "status": 200,
+      "mime": "image/jpeg",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"f1c5-1a05058e63c\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Content-Length": "61893",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:38 GMT",
+        "Content-Type": "image/jpeg"
+      },
+      "received": 61893,
+      "finishedBytes": 62175,
+      "bytes": 62175
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fverevon-mood%2Fshared-surface-amber.jpg&w=1080&q=75",
+      "status": 200,
+      "mime": "image/webp",
+      "headers": {
+        "Content-Security-Policy": "script-src 'none'; frame-src 'none'; sandbox;",
+        "Cache-Control": "public, max-age=14400, must-revalidate",
+        "ETag": "kTMRGN4tvINMVQS4DCMsA-H0i4gdid4ql8rNwGrazro",
+        "Connection": "keep-alive",
+        "Content-Length": "16068",
+        "X-Nextjs-Cache": "HIT",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Keep-Alive": "timeout=5",
+        "Content-Type": "image/webp",
+        "Vary": "Accept",
+        "Content-Disposition": "attachment; filename=\"shared-surface-amber.webp\""
+      },
+      "received": 16068,
+      "finishedBytes": 16504,
+      "bytes": 16504
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2F3-guys-working.jpg&w=640&q=75",
+      "status": 200,
+      "mime": "image/webp",
+      "headers": {
+        "Content-Security-Policy": "script-src 'none'; frame-src 'none'; sandbox;",
+        "Cache-Control": "public, max-age=14400, must-revalidate",
+        "ETag": "jkR-3Atpl9mZuifWQplejAFMymXhs2NCS51792jwXEY",
+        "Connection": "keep-alive",
+        "Content-Length": "17188",
+        "X-Nextjs-Cache": "HIT",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Keep-Alive": "timeout=5",
+        "Content-Type": "image/webp",
+        "Vary": "Accept",
+        "Content-Disposition": "attachment; filename=\"3-guys-working.webp\""
+      },
+      "received": 17188,
+      "finishedBytes": 17618,
+      "bytes": 17618
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fverevon-layers%2Fmanagement-layer.png&w=750&q=75",
+      "status": 200,
+      "mime": "image/webp",
+      "headers": {
+        "Content-Security-Policy": "script-src 'none'; frame-src 'none'; sandbox;",
+        "Cache-Control": "public, max-age=14400, must-revalidate",
+        "ETag": "8ya-13cTKH-IRaXOhu3Du7w1Xvt0sM8QurD4ZcpZwUc",
+        "Connection": "keep-alive",
+        "Content-Length": "17714",
+        "X-Nextjs-Cache": "HIT",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Keep-Alive": "timeout=5",
+        "Content-Type": "image/webp",
+        "Vary": "Accept",
+        "Content-Disposition": "attachment; filename=\"management-layer.webp\""
+      },
+      "received": 17714,
+      "finishedBytes": 18146,
+      "bytes": 18146
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/media/797e433ab948586e-s.p.0r6juujl39pe6.woff2",
+      "status": 200,
+      "mime": "font/woff2",
+      "headers": {
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "ETag": "W/\"5a44-1a07f023644\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Content-Length": "23108",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "font/woff2"
+      },
+      "received": 23108,
+      "finishedBytes": 23408,
+      "bytes": 23408
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/media/caa3a2e1cccd8315-s.p.0wgildi0cnwt9.woff2",
+      "status": 200,
+      "mime": "font/woff2",
+      "headers": {
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "ETag": "W/\"7268-1a07f0237c7\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Content-Length": "29288",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "font/woff2"
+      },
+      "received": 29288,
+      "finishedBytes": 29588,
+      "bytes": 29588
+    },
+    {
+      "url": "http://127.0.0.1:3100/fonts/arbeit-pro-light/arbeit-pro-light.woff",
+      "status": 200,
+      "mime": "font/woff",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"5dd8-1a05058e579\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Content-Length": "24024",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:38 GMT",
+        "Content-Type": "font/woff"
+      },
+      "received": 24024,
+      "finishedBytes": 24305,
+      "bytes": 24305
+    },
+    {
+      "url": "http://127.0.0.1:3100/fonts/protokoll-light/ProtokollLight-Web.woff2",
+      "status": 200,
+      "mime": "font/woff2",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"b7ac-1a05058e57a\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Content-Length": "47020",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:38 GMT",
+        "Content-Type": "font/woff2"
+      },
+      "received": 47020,
+      "finishedBytes": 47302,
+      "bytes": 47302
+    },
+    {
+      "url": "http://127.0.0.1:3100/fonts/arbeit-pro-book/arbeit-pro-book.woff",
+      "status": 200,
+      "mime": "font/woff",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"7418-1a05058e578\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Content-Length": "29720",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:38 GMT",
+        "Content-Type": "font/woff"
+      },
+      "received": 29720,
+      "finishedBytes": 30001,
+      "bytes": 30001
+    },
+    {
+      "url": "http://127.0.0.1:3100/fonts/protokoll-medium/ProtokollMedium-Web.woff2",
+      "status": 200,
+      "mime": "font/woff2",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"c344-1a05058e57d\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Content-Length": "49988",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:38 GMT",
+        "Content-Type": "font/woff2"
+      },
+      "received": 49988,
+      "finishedBytes": 50270,
+      "bytes": 50270
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/09lkwf_qozcls.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"802c-1a07f023594\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 9493,
+      "finishedBytes": 9872,
+      "bytes": 9872
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/turbopack-0w1nrrx9uy0af.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"2954-1a07f0236ec\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 4170,
+      "finishedBytes": 4549,
+      "bytes": 4549
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2z9867j-49xml.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"ad78-1a07f023511\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 9256,
+      "finishedBytes": 9635,
+      "bytes": 9635
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/3n3dzy_m5hzj8.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"22929-1a07f0236ee\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 38626,
+      "finishedBytes": 39006,
+      "bytes": 39006
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/14xy9ype22mwn.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"287e-1a07f023642\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 4051,
+      "finishedBytes": 4430,
+      "bytes": 4430
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2efcj7x7n5p82.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"4066-1a07f0234d4\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 6292,
+      "finishedBytes": 6671,
+      "bytes": 6671
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2hi4qfwktzw-c.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"d566-1a07f0236db\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 12885,
+      "finishedBytes": 13264,
+      "bytes": 13264
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/43ypyj1ngpd0q.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"7477-1a07f023425\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:05 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 10421,
+      "finishedBytes": 10800,
+      "bytes": 10800
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2slkcx5_t7zxy.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"22f82-1a07f0235c7\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 45788,
+      "finishedBytes": 46168,
+      "bytes": 46168
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/08d5nm27n6c04.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"1bd07-1a07f02361f\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 34924,
+      "finishedBytes": 35304,
+      "bytes": 35304
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/3l2f1y3a9ppw-.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"377e2-1a07f02378b\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 71029,
+      "finishedBytes": 71414,
+      "bytes": 71414
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/verevon-hero-premiere-light.mp4",
+      "status": 206,
+      "mime": "video/mp4",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"cff0a2-1a05058ec20\"",
+        "Connection": "keep-alive",
+        "Content-Range": "bytes 0-13627553/13627554",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Content-Length": "13627554",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:40 GMT",
+        "Content-Type": "video/mp4"
+      },
+      "received": 13627554,
+      "finishedBytes": 13627895,
+      "bytes": 13627895
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/waiting-room-ai.mp4",
+      "status": 206,
+      "mime": "video/mp4",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"3071fc-1a05058eba1\"",
+        "Connection": "keep-alive",
+        "Content-Range": "bytes 0-3174907/3174908",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Content-Length": "3174908",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:39 GMT",
+        "Content-Type": "video/mp4"
+      },
+      "received": 0,
+      "bytes": 0
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-scattered/archive-catalog-6549263.mp4",
+      "status": 206,
+      "mime": "video/mp4",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"427cb91-1a05058e7b9\"",
+        "Connection": "keep-alive",
+        "Content-Range": "bytes 0-69716880/69716881",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Content-Length": "69716881",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:38 GMT",
+        "Content-Type": "video/mp4"
+      },
+      "received": 0,
+      "bytes": 0
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/0vrk5obp2n1z6.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"2ea16-1a07f023568\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 62889,
+      "finishedBytes": 63269,
+      "bytes": 63269
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-control/autonomous-car-ai.mp4",
+      "status": 206,
+      "mime": "video/mp4",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"a03362-1a05058e658\"",
+        "Connection": "keep-alive",
+        "Content-Range": "bytes 0-10498913/10498914",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Content-Length": "10498914",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:38 GMT",
+        "Content-Type": "video/mp4"
+      },
+      "received": 0,
+      "bytes": 0
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/0n4hdvr1jjose.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"a96e-1a07f023614\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 17511,
+      "finishedBytes": 17890,
+      "bytes": 17890
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fa95a19e05613baa759395e7dfc3241e5.jpg&w=256&q=75",
+      "status": 200,
+      "mime": "image/webp",
+      "headers": {
+        "Content-Security-Policy": "script-src 'none'; frame-src 'none'; sandbox;",
+        "Cache-Control": "public, max-age=14400, must-revalidate",
+        "ETag": "S5sTmWhAXatpg0rwPJ4NOABsNb9T2SbluL6Hzfo94xQ",
+        "Connection": "keep-alive",
+        "Content-Length": "11776",
+        "X-Nextjs-Cache": "HIT",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Keep-Alive": "timeout=5",
+        "Content-Type": "image/webp",
+        "Vary": "Accept",
+        "Content-Disposition": "attachment; filename=\"a95a19e05613baa759395e7dfc3241e5.webp\""
+      },
+      "received": 11776,
+      "finishedBytes": 12224,
+      "bytes": 12224
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fverevon-mood%2Fdesk-vast-white.jpg&w=128&q=75",
+      "status": 200,
+      "mime": "image/webp",
+      "headers": {
+        "Content-Security-Policy": "script-src 'none'; frame-src 'none'; sandbox;",
+        "Cache-Control": "public, max-age=14400, must-revalidate",
+        "ETag": "b459eY2VjeY5iUbGbfZMa3KomnzK_T6Xs3bSazQBrD4",
+        "Connection": "keep-alive",
+        "Content-Length": "1194",
+        "X-Nextjs-Cache": "HIT",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Keep-Alive": "timeout=5",
+        "Content-Type": "image/webp",
+        "Vary": "Accept",
+        "Content-Disposition": "attachment; filename=\"desk-vast-white.webp\""
+      },
+      "received": 1194,
+      "finishedBytes": 1624,
+      "bytes": 1624
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fverevon-mood%2Fwindow-city-dusk.jpg&w=96&q=75",
+      "status": 200,
+      "mime": "image/webp",
+      "headers": {
+        "Content-Security-Policy": "script-src 'none'; frame-src 'none'; sandbox;",
+        "Cache-Control": "public, max-age=14400, must-revalidate",
+        "ETag": "gNhBeXA5NvAP9SZpGFHdOoz0zQjyLfNTACugkov8HRg",
+        "Connection": "keep-alive",
+        "Content-Length": "1678",
+        "X-Nextjs-Cache": "HIT",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Keep-Alive": "timeout=5",
+        "Content-Type": "image/webp",
+        "Vary": "Accept",
+        "Content-Disposition": "attachment; filename=\"window-city-dusk.webp\""
+      },
+      "received": 1678,
+      "finishedBytes": 2109,
+      "bytes": 2109
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fsoft-orb.png&w=96&q=75",
+      "status": 200,
+      "mime": "image/webp",
+      "headers": {
+        "Content-Security-Policy": "script-src 'none'; frame-src 'none'; sandbox;",
+        "Cache-Control": "public, max-age=14400, must-revalidate",
+        "ETag": "0bO0290IH012632qK_GY-G0Fu3BTR3r193M_m3Znu2k",
+        "Connection": "keep-alive",
+        "Content-Length": "228",
+        "X-Nextjs-Cache": "HIT",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Keep-Alive": "timeout=5",
+        "Content-Type": "image/webp",
+        "Vary": "Accept",
+        "Content-Disposition": "attachment; filename=\"soft-orb.webp\""
+      },
+      "received": 228,
+      "finishedBytes": 650,
+      "bytes": 650
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fagent-run-console-running.jpg&w=96&q=75",
+      "status": 200,
+      "mime": "image/webp",
+      "headers": {
+        "Content-Security-Policy": "script-src 'none'; frame-src 'none'; sandbox;",
+        "Cache-Control": "public, max-age=14400, must-revalidate",
+        "ETag": "A1lF5twCHp_04z32AaLrF7fsz0vh1Qz-3kSkO7w4Yrk",
+        "Connection": "keep-alive",
+        "Content-Length": "1460",
+        "X-Nextjs-Cache": "HIT",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Keep-Alive": "timeout=5",
+        "Content-Type": "image/webp",
+        "Vary": "Accept",
+        "Content-Disposition": "attachment; filename=\"agent-run-console-running.webp\""
+      },
+      "received": 1460,
+      "finishedBytes": 1900,
+      "bytes": 1900
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-control/autonomous-car-ai.mp4",
+      "status": 206,
+      "mime": "video/mp4",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"a03362-1a05058e658\"",
+        "Connection": "keep-alive",
+        "Content-Range": "bytes 10485760-10498913/10498914",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Content-Length": "13154",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:38 GMT",
+        "Content-Type": "video/mp4"
+      },
+      "received": 13154,
+      "finishedBytes": 13499,
+      "bytes": 13499
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-control/autonomous-car-ai.mp4",
+      "status": 206,
+      "mime": "video/mp4",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"a03362-1a05058e658\"",
+        "Connection": "keep-alive",
+        "Content-Range": "bytes 131072-10498913/10498914",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Content-Length": "10367842",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:38 GMT",
+        "Content-Type": "video/mp4"
+      },
+      "received": 3750,
+      "bytes": 3750
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/23-osay-bduqw.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"115a9-1a07f023575\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 27600,
+      "finishedBytes": 27980,
+      "bytes": 27980
+    },
+    {
+      "url": "http://127.0.0.1:3100/icon.svg?icon.1f08xbrdru65q.svg",
+      "status": 200,
+      "mime": "image/svg+xml",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "Date": "Tue, 08 Sep 2026 03:30:44 GMT",
+        "content-type": "image/svg+xml",
+        "vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch"
+      },
+      "received": 1002,
+      "finishedBytes": 1321,
+      "bytes": 1321
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/23ena0124ggyr.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "ETag": "W/\"2f8-1a07f023813\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Content-Length": "760",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 760,
+      "finishedBytes": 1107,
+      "bytes": 1107
+    },
+    {
+      "url": "http://127.0.0.1:3100/trust?_rsc=5CB68i4pnAekjehf",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 322,
+      "finishedBytes": 719,
+      "bytes": 719
+    },
+    {
+      "url": "http://127.0.0.1:3100/plattform/felles-kontekst?_rsc=5CB68i4pnAekjehf",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 338,
+      "finishedBytes": 735,
+      "bytes": 735
+    },
+    {
+      "url": "http://127.0.0.1:3100/produkt/arbeidsflyten?_rsc=5CB68i4pnAekjehf",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 335,
+      "finishedBytes": 732,
+      "bytes": 732
+    },
+    {
+      "url": "http://127.0.0.1:3100/?_rsc=7h4NYy5eoyMcNlUN",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 781,
+      "finishedBytes": 1178,
+      "bytes": 1178
+    },
+    {
+      "url": "http://127.0.0.1:3100/?_rsc=yIp22O3xgPPxC28X",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 1053,
+      "finishedBytes": 1450,
+      "bytes": 1450
+    },
+    {
+      "url": "http://127.0.0.1:3100/?_rsc=8nTjltbQWvg6NcbE",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 490,
+      "finishedBytes": 887,
+      "bytes": 887
+    },
+    {
+      "url": "http://127.0.0.1:3100/trust?_rsc=7h4NYy5eoyMcNlUN",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 924,
+      "finishedBytes": 1316,
+      "bytes": 1316
+    },
+    {
+      "url": "http://127.0.0.1:3100/trust?_rsc=QrSYbpq5bUKFJKrB",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 295,
+      "finishedBytes": 687,
+      "bytes": 687
+    },
+    {
+      "url": "http://127.0.0.1:3100/trust?_rsc=ZU2_C0vaTnlg9HMu",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 8091,
+      "finishedBytes": 8483,
+      "bytes": 8483
+    },
+    {
+      "url": "http://127.0.0.1:3100/plattform/felles-kontekst?_rsc=7h4NYy5eoyMcNlUN",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 730,
+      "finishedBytes": 1127,
+      "bytes": 1127
+    },
+    {
+      "url": "http://127.0.0.1:3100/plattform/felles-kontekst?_rsc=miIqoOECqzo3dAqN",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 290,
+      "finishedBytes": 687,
+      "bytes": 687
+    },
+    {
+      "url": "http://127.0.0.1:3100/plattform/felles-kontekst?_rsc=UNwo8vwKItJtsqo7",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 290,
+      "finishedBytes": 687,
+      "bytes": 687
+    },
+    {
+      "url": "http://127.0.0.1:3100/plattform/felles-kontekst?_rsc=y3IK-xaZzhEm0YDc",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 5342,
+      "finishedBytes": 5734,
+      "bytes": 5734
+    },
+    {
+      "url": "http://127.0.0.1:3100/produkt/arbeidsflyten?_rsc=7h4NYy5eoyMcNlUN",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 745,
+      "finishedBytes": 1142,
+      "bytes": 1142
+    },
+    {
+      "url": "http://127.0.0.1:3100/produkt/arbeidsflyten?_rsc=iL4J34_HEq6rvE9J",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 290,
+      "finishedBytes": 687,
+      "bytes": 687
+    },
+    {
+      "url": "http://127.0.0.1:3100/produkt/arbeidsflyten?_rsc=mBOPn7Pz8SuU4oaG",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 290,
+      "finishedBytes": 687,
+      "bytes": 687
+    },
+    {
+      "url": "http://127.0.0.1:3100/produkt/arbeidsflyten?_rsc=eUXoDlPZMBuNqP7U",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 5187,
+      "finishedBytes": 5599,
+      "bytes": 5599
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/1c39wlp_3mxy9.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"16c4-1a07f023649\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 2517,
+      "finishedBytes": 2896,
+      "bytes": 2896
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2laayue2rxzbx.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"849e-1a07f0237ff\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 11538,
+      "finishedBytes": 11917,
+      "bytes": 11917
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/0ouccnjxpk9jl.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"7e1d-1a07f023481\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 12209,
+      "finishedBytes": 12588,
+      "bytes": 12588
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/321_9c-b3d2v9.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"22f82-1a07f023432\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:30:45 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 46225,
+      "finishedBytes": 46605,
+      "bytes": 46605
+    }
+  ],
+  "name": "desktop-home"
+}

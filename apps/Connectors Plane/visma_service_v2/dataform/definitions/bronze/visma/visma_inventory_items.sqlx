@@ -1,0 +1,73 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_inventory_items",
+  description: "Bronze: Inventory item master data from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.str("attachments", "s.payload")} AS `attachments`,
+  ${bronze.attributes("s.payload")} AS `attributes`,
+  ${bronze.str("baseUnit", "s.payload")} AS `baseUnit`,
+  ${bronze.float("currentCost", "s.payload")} AS `currentCost`,
+  ${bronze.float("defaultPrice", "s.payload")} AS `defaultPrice`,
+  ${bronze.str("defaultWarehouse", "s.payload")} AS `defaultWarehouse`,
+  ${bronze.str("description", "s.payload")} AS `description`,
+  ${bronze.str("intrastat", "s.payload")} AS `intrastat`,
+  ${bronze.str("inventoryId", "s.payload")} AS `inventoryId`,
+  ${bronze.str("inventoryNumber", "s.payload")} AS `inventoryNumber`,
+  ${bronze.str("inventoryUnits", "s.payload")} AS `inventoryUnits`,
+  ${bronze.str("itemClass", "s.payload")} AS `itemClass`,
+  ${bronze.bool("kitItem", "s.payload")} AS `kitItem`,
+  ${bronze.float("lastCost", "s.payload")} AS `lastCost`,
+  ${bronze.str("lastModifiedDateTime", "s.payload")} AS `lastModifiedDateTime`,
+  ${bronze.str("metadata", "s.payload")} AS `metadata`,
+  ${bronze.str("packaging", "s.payload")} AS `packaging`,
+  ${bronze.float("pendingCost", "s.payload")} AS `pendingCost`,
+  ${bronze.str("pendingCostDate", "s.payload")} AS `pendingCostDate`,
+  ${bronze.str("postingClass", "s.payload")} AS `postingClass`,
+  ${bronze.str("purchaseUnit", "s.payload")} AS `purchaseUnit`,
+  ${bronze.float("recommendedPrice", "s.payload")} AS `recommendedPrice`,
+  ${bronze.str("salesCategories", "s.payload")} AS `salesCategories`,
+  ${bronze.str("salesUnit", "s.payload")} AS `salesUnit`,
+  ${bronze.str("status", "s.payload")} AS `status`,
+  ${bronze.bool("stockItem", "s.payload")} AS `stockItem`,
+  ${bronze.str("supplierDetails", "s.payload")} AS `supplierDetails`,
+  ${bronze.str("timestamp", "s.payload")} AS `timestamp`,
+  ${bronze.str("type", "s.payload")} AS `type`,
+  ${bronze.str("vatCode", "s.payload")} AS `vatCode`,
+  ${bronze.str("crossReferences", "s.payload")} AS `crossReferences`,
+  ${bronze.str("lotSerialClass", "s.payload")} AS `lotSerialClass`,
+  ${bronze.str("priceClass", "s.payload")} AS `priceClass`,
+  ${bronze.str("priceClassID", "s.payload")} AS `priceClassID`,
+  ${bronze.str("unspsc", "s.payload")} AS `unspsc`,
+  ${bronze.str("warehouseDetails", "s.payload")} AS `warehouseDetails`,
+  ${bronze.str("defaultIssueFrom", "s.payload")} AS `defaultIssueFrom`,
+  ${bronze.str("defaultReceiptTo", "s.payload")} AS `defaultReceiptTo`,
+  ${bronze.str("availability", "o.payload")} AS `availability`,
+  ${bronze.int("internalId", "o.payload")} AS `internalId`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`,  -- v2 does not fetch this field
+
+  -- Fields v2 fetches that the v1 table never had
+  ${bronze.str("accountInformation", "s.payload")} AS `accountInformation`,
+  ${bronze.str("body", "s.payload")} AS `body`,
+  ${bronze.str("effectiveDate", "s.payload")} AS `effectiveDate`,
+  ${bronze.str("note", "s.payload")} AS `note`,
+  ${bronze.int("priceWorkgroupID", "s.payload")} AS `priceWorkgroupID`
+FROM ${ref("dw_staging_visma", "inventory_items")} AS s
+LEFT JOIN (SELECT * FROM ${ref("dw_staging_visma", "sales_order_inventory")} WHERE deleted_at IS NULL) AS o
+  ON o.tenant_id = s.tenant_id AND TRIM(JSON_VALUE(o.payload, '$.inventoryId')) = TRIM(JSON_VALUE(s.payload, '$.inventoryNumber'))
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

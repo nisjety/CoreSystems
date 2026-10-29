@@ -1,0 +1,73 @@
+[workspace]
+resolver = "2"
+members = [
+    "core/crates/xero-common",
+    "core/crates/xero-auth",
+    "core/crates/xero-client",
+    "core/crates/xero-sync",
+    "core/crates/xero-cli",
+    "core/crates/xero-gcs",
+    "core/crates/xero-bff",
+    "core/crates/xero-store",
+    "core/crates/xero-mcp",
+]
+
+[workspace.package]
+version    = "0.1.0"
+edition    = "2021"
+rust-version = "1.80"
+license    = "Proprietary"
+authors    = ["Aquatiq Integrasjonen"]
+
+[workspace.dependencies]
+# Async runtime + HTTP client
+tokio    = { version = "1.40", features = ["full"] }
+reqwest  = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+futures  = "0.3"
+
+# Bytes (verbatim raw response bodies)
+bytes    = "1"
+
+# Serialization
+serde      = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Errors + observability
+anyhow            = "1.0"
+thiserror         = "1.0"
+tracing           = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+async-trait       = "0.1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Config
+dotenvy = "0.15"
+
+# IDs
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Base64 (custom-connection auth)
+base64 = "0.22"
+
+# Random
+rand = "0.8"
+
+# URL helpers
+url = "2.5"
+
+# Testing
+tokio-test         = "0.4"
+pretty_assertions  = "1.4"
+
+# Workspace-internal
+xero-common = { path = "core/crates/xero-common" }
+xero-auth   = { path = "core/crates/xero-auth" }
+xero-client = { path = "core/crates/xero-client" }
+xero-sync   = { path = "core/crates/xero-sync" }
+xero-gcs    = { path = "core/crates/xero-gcs" }
+xero-store  = { path = "core/crates/xero-store" }

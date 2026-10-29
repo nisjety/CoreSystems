@@ -1,0 +1,18 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Test auth app e2e",
+			"type": "shell",
+			"command": "pnpm",
+			"args": [
+				"run",
+				"test:e2e"
+			],
+			"problemMatcher": [
+				"$tsc"
+			],
+			"group": "build"
+		}
+	]
+}

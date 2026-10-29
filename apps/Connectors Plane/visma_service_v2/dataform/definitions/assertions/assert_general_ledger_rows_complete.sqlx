@@ -1,0 +1,45 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_general_ledger_rows_complete",
+  description: "Silver must hold every general ledger line and period balance that bronze holds. Returns one row per tenant and kind (transaction, balance) where the count in visma_bronze.visma_general_ledger_transactions (distinct module, batchNumber, lineNumber) or visma_general_ledger_balances_v2 (distinct account.number, subAccountCd, financialPeriod, ledger.id), the staging keys, differs from visma_silver.fact_general_ledger or fact_general_ledger_balance.",
+  tags: ["assertion", "silver", "general_ledger"]
+}
+
+WITH bronze AS (
+  SELECT
+    'transaction' AS kind,
+    tenantId AS tenant_id,
+    COUNT(DISTINCT FORMAT('%t|%t|%t', module, batchNumber, lineNumber)) AS bronze_rows
+  FROM ${ref("visma_bronze", "visma_general_ledger_transactions")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT
+    'balance' AS kind,
+    tenantId AS tenant_id,
+    COUNT(DISTINCT FORMAT('%t|%t|%t|%t',
+      JSON_VALUE(account, '$.number'), subAccountCd, financialPeriod, JSON_VALUE(ledger, '$.id'))) AS bronze_rows
+  FROM ${ref("visma_bronze", "visma_general_ledger_balances_v2")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+),
+
+silver AS (
+  SELECT 'transaction' AS kind, tenant_id, COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_general_ledger")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'balance' AS kind, tenant_id, COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_general_ledger_balance")}
+  GROUP BY tenant_id
+)
+
+SELECT
+  COALESCE(bronze.kind, silver.kind) AS kind,
+  COALESCE(bronze.tenant_id, silver.tenant_id) AS tenant_id,
+  COALESCE(bronze_rows, 0) AS bronze_rows,
+  COALESCE(silver_rows, 0) AS silver_rows
+FROM bronze
+FULL OUTER JOIN silver ON bronze.kind = silver.kind AND bronze.tenant_id = silver.tenant_id
+WHERE COALESCE(bronze_rows, 0) != COALESCE(silver_rows, 0)

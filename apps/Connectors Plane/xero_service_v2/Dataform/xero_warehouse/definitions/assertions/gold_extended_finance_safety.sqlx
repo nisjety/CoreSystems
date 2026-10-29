@@ -1,0 +1,173 @@
+config { type: "assertion", schema: "dw_1_silver_xero_assertions", name: "xero_gold_extended_finance_safety" }
+
+WITH grain AS (
+  SELECT 'currency' AS entity,
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "dim_currency")}) AS silver_count,
+         (SELECT COUNT(*) FROM ${ref("xero_gold_common", "dim_currency")}) AS gold_count
+  UNION ALL
+  SELECT 'tax_rate',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "dim_tax_rate")} ),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "dim_tax_rate")})
+  UNION ALL
+  SELECT 'customer_overpayment',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_overpayment")} WHERE overpayment_type = 'RECEIVE-OVERPAYMENT'),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_customer_overpayment")})
+  UNION ALL
+  SELECT 'supplier_overpayment',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_overpayment")} WHERE overpayment_type = 'SPEND-OVERPAYMENT'),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_supplier_overpayment")})
+  UNION ALL
+  SELECT 'customer_overpayment_line',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_overpayment_line")} WHERE overpayment_type = 'RECEIVE-OVERPAYMENT'),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_customer_overpayment_line")})
+  UNION ALL
+  SELECT 'supplier_overpayment_line',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_overpayment_line")} WHERE overpayment_type = 'SPEND-OVERPAYMENT'),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_supplier_overpayment_line")})
+  UNION ALL
+  SELECT 'batch_payment',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_batch_payment")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_batch_payment")})
+  UNION ALL
+  SELECT 'batch_payment_line',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_batch_payment_line")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_batch_payment_line")})
+  UNION ALL
+  SELECT 'linked_transaction',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_linked_transaction")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_linked_transaction")})
+  UNION ALL
+  SELECT 'repeating_invoice',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "dim_repeating_invoice")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "dim_repeating_invoice")})
+  UNION ALL
+  SELECT 'repeating_invoice_line',
+         (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "dim_repeating_invoice_line")}),
+         (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "dim_repeating_invoice_line")})
+), unsafe AS (
+  SELECT 'customer_overpayment_measure' AS entity, overpayment_key AS record_id
+  FROM ${ref("xero_gold_finance", "fact_customer_overpayment")}
+  WHERE is_reportable IS NOT TRUE
+    AND (amount_in_currency IS NOT NULL OR balance_in_currency IS NOT NULL
+         OR detail_total_in_currency IS NOT NULL OR vat_total_in_currency IS NOT NULL)
+  UNION ALL
+  SELECT 'supplier_overpayment_measure', overpayment_key
+  FROM ${ref("xero_gold_finance", "fact_supplier_overpayment")}
+  WHERE is_reportable IS NOT TRUE
+    AND (amount_in_currency IS NOT NULL OR balance_in_currency IS NOT NULL
+         OR detail_total_in_currency IS NOT NULL OR vat_total_in_currency IS NOT NULL)
+  UNION ALL
+  SELECT 'customer_overpayment_line_measure', overpayment_line_key
+  FROM ${ref("xero_gold_finance", "fact_customer_overpayment_line")}
+  WHERE (is_reportable IS NOT TRUE OR is_line_set_ambiguous)
+    AND (amount_in_currency IS NOT NULL OR vat_total_in_currency IS NOT NULL)
+  UNION ALL
+  SELECT 'supplier_overpayment_line_measure', overpayment_line_key
+  FROM ${ref("xero_gold_finance", "fact_supplier_overpayment_line")}
+  WHERE (is_reportable IS NOT TRUE OR is_line_set_ambiguous)
+    AND (amount_in_currency IS NOT NULL OR vat_total_in_currency IS NOT NULL)
+  UNION ALL
+  SELECT 'batch_payment_additivity', batch_payment_key
+  FROM ${ref("xero_gold_finance", "fact_batch_payment")}
+  WHERE is_payment_aggregate IS NOT TRUE OR is_non_additive IS NOT TRUE
+     OR (is_deleted AND is_detail_reconciled)
+  UNION ALL
+  SELECT 'batch_payment_line_additivity', batch_payment_line_key
+  FROM ${ref("xero_gold_finance", "fact_batch_payment_line")}
+  WHERE is_payment_aggregate IS NOT TRUE OR is_non_additive IS NOT TRUE
+  UNION ALL
+  SELECT 'repeating_invoice_template', repeating_invoice_key
+  FROM ${ref("xero_gold_finance", "dim_repeating_invoice")}
+  WHERE is_template IS NOT TRUE
+  UNION ALL
+  SELECT 'repeating_invoice_line_template', repeating_invoice_line_key
+  FROM ${ref("xero_gold_finance", "dim_repeating_invoice_line")}
+  WHERE is_template IS NOT TRUE
+), currency_reference AS (
+  SELECT 'customer_invoice_currency_reference' AS entity, f.invoice_key AS record_id
+  FROM ${ref("xero_gold_finance", "fact_customer_invoice")} AS f
+  LEFT JOIN ${ref("xero_gold_common", "dim_currency")} AS c USING (currency_key)
+  WHERE f.currency_key IS NOT NULL AND c.currency_key IS NULL
+  UNION ALL
+  SELECT 'supplier_invoice_currency_reference', f.invoice_key
+  FROM ${ref("xero_gold_finance", "fact_supplier_invoice")} AS f
+  LEFT JOIN ${ref("xero_gold_common", "dim_currency")} AS c USING (currency_key)
+  WHERE f.currency_key IS NOT NULL AND c.currency_key IS NULL
+  UNION ALL
+  SELECT 'customer_invoice_line_currency_reference', f.invoice_line_key
+  FROM ${ref("xero_gold_finance", "fact_customer_invoice_line")} AS f
+  LEFT JOIN ${ref("xero_gold_common", "dim_currency")} AS c USING (currency_key)
+  WHERE f.currency_key IS NOT NULL AND c.currency_key IS NULL
+  UNION ALL
+  SELECT 'supplier_invoice_line_currency_reference', f.invoice_line_key
+  FROM ${ref("xero_gold_finance", "fact_supplier_invoice_line")} AS f
+  LEFT JOIN ${ref("xero_gold_common", "dim_currency")} AS c USING (currency_key)
+  WHERE f.currency_key IS NOT NULL AND c.currency_key IS NULL
+  UNION ALL
+  SELECT 'customer_credit_note_currency_reference', f.credit_note_key
+  FROM ${ref("xero_gold_finance", "fact_customer_credit_note")} AS f
+  LEFT JOIN ${ref("xero_gold_common", "dim_currency")} AS c USING (currency_key)
+  WHERE f.currency_key IS NOT NULL AND c.currency_key IS NULL
+  UNION ALL
+  SELECT 'supplier_credit_note_currency_reference', f.credit_note_key
+  FROM ${ref("xero_gold_finance", "fact_supplier_credit_note")} AS f
+  LEFT JOIN ${ref("xero_gold_common", "dim_currency")} AS c USING (currency_key)
+  WHERE f.currency_key IS NOT NULL AND c.currency_key IS NULL
+  UNION ALL
+  SELECT 'customer_credit_note_line_currency_reference', f.credit_note_line_key
+  FROM ${ref("xero_gold_finance", "fact_customer_credit_note_line")} AS f
+  LEFT JOIN ${ref("xero_gold_common", "dim_currency")} AS c USING (currency_key)
+  WHERE f.currency_key IS NOT NULL AND c.currency_key IS NULL
+  UNION ALL
+  SELECT 'supplier_credit_note_line_currency_reference', f.credit_note_line_key
+  FROM ${ref("xero_gold_finance", "fact_supplier_credit_note_line")} AS f
+  LEFT JOIN ${ref("xero_gold_common", "dim_currency")} AS c USING (currency_key)
+  WHERE f.currency_key IS NOT NULL AND c.currency_key IS NULL
+  UNION ALL
+  SELECT 'customer_credit_note_allocation_currency_reference', f.allocation_key
+  FROM ${ref("xero_gold_finance", "fact_customer_credit_note_allocation")} AS f
+  LEFT JOIN ${ref("xero_gold_common", "dim_currency")} AS c USING (currency_key)
+  WHERE f.currency_key IS NOT NULL AND c.currency_key IS NULL
+  UNION ALL
+  SELECT 'supplier_credit_note_allocation_currency_reference', f.allocation_key
+  FROM ${ref("xero_gold_finance", "fact_supplier_credit_note_allocation")} AS f
+  LEFT JOIN ${ref("xero_gold_common", "dim_currency")} AS c USING (currency_key)
+  WHERE f.currency_key IS NOT NULL AND c.currency_key IS NULL
+  UNION ALL
+  SELECT 'customer_overpayment_currency_reference', f.overpayment_key
+  FROM ${ref("xero_gold_finance", "fact_customer_overpayment")} AS f
+  LEFT JOIN ${ref("xero_gold_common", "dim_currency")} AS c USING (currency_key)
+  WHERE f.currency_key IS NOT NULL AND c.currency_key IS NULL
+  UNION ALL
+  SELECT 'supplier_overpayment_currency_reference', f.overpayment_key
+  FROM ${ref("xero_gold_finance", "fact_supplier_overpayment")} AS f
+  LEFT JOIN ${ref("xero_gold_common", "dim_currency")} AS c USING (currency_key)
+  WHERE f.currency_key IS NOT NULL AND c.currency_key IS NULL
+  UNION ALL
+  SELECT 'customer_overpayment_line_currency_reference', f.overpayment_line_key
+  FROM ${ref("xero_gold_finance", "fact_customer_overpayment_line")} AS f
+  LEFT JOIN ${ref("xero_gold_common", "dim_currency")} AS c USING (currency_key)
+  WHERE f.currency_key IS NOT NULL AND c.currency_key IS NULL
+  UNION ALL
+  SELECT 'supplier_overpayment_line_currency_reference', f.overpayment_line_key
+  FROM ${ref("xero_gold_finance", "fact_supplier_overpayment_line")} AS f
+  LEFT JOIN ${ref("xero_gold_common", "dim_currency")} AS c USING (currency_key)
+  WHERE f.currency_key IS NOT NULL AND c.currency_key IS NULL
+  UNION ALL
+  SELECT 'repeating_invoice_currency_reference', f.repeating_invoice_key
+  FROM ${ref("xero_gold_finance", "dim_repeating_invoice")} AS f
+  LEFT JOIN ${ref("xero_gold_common", "dim_currency")} AS c USING (currency_key)
+  WHERE f.currency_key IS NOT NULL AND c.currency_key IS NULL
+  UNION ALL
+  SELECT 'repeating_invoice_line_currency_reference', f.repeating_invoice_line_key
+  FROM ${ref("xero_gold_finance", "dim_repeating_invoice_line")} AS f
+  LEFT JOIN ${ref("xero_gold_common", "dim_currency")} AS c USING (currency_key)
+  WHERE f.currency_key IS NOT NULL AND c.currency_key IS NULL
+)
+SELECT entity, CAST(silver_count AS STRING) AS record_id
+FROM grain
+WHERE silver_count != gold_count
+UNION ALL
+SELECT entity, record_id FROM unsafe
+UNION ALL
+SELECT entity, record_id FROM currency_reference

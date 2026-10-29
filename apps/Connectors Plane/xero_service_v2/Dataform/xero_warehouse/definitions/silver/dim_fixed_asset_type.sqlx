@@ -1,0 +1,66 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero fixed-asset types with explicit, tenant-scoped chart-of-account reference checks.",
+  assertions: {
+    nonNull: ["tenant_id", "asset_type_id", "asset_type_key"],
+    uniqueKey: ["asset_type_key"]
+  }
+}
+
+WITH latest AS (
+  SELECT *
+  FROM ${ref("dw_bronze_xero", "xero_fixed_asset_type_observations")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, asset_type_id
+    ORDER BY asset_observed_at DESC, source_receipt_id DESC, source_version_id DESC
+  ) = 1
+), accounts AS (
+  SELECT tenant_id, account_id
+  FROM ${ref("dw_1_silver_xero", "dim_account")}
+)
+SELECT
+  CONCAT(latest.tenant_id, '|', latest.asset_type_id) AS asset_type_key,
+  latest.tenant_id,
+  latest.asset_type_id,
+  latest.asset_type_name,
+  latest.fixed_asset_account_id,
+  latest.accumulated_depreciation_account_id,
+  latest.depreciation_expense_account_id,
+  IF(latest.fixed_asset_account_id IS NULL, NULL,
+     CONCAT(latest.tenant_id, '|', latest.fixed_asset_account_id)) AS fixed_asset_account_key,
+  IF(latest.accumulated_depreciation_account_id IS NULL, NULL,
+     CONCAT(latest.tenant_id, '|', latest.accumulated_depreciation_account_id))
+    AS accumulated_depreciation_account_key,
+  IF(latest.depreciation_expense_account_id IS NULL, NULL,
+     CONCAT(latest.tenant_id, '|', latest.depreciation_expense_account_id))
+    AS depreciation_expense_account_key,
+  latest.fixed_asset_account_id IS NOT NULL AND fixed_asset.account_id IS NULL
+    AS is_fixed_asset_account_unresolved,
+  latest.accumulated_depreciation_account_id IS NOT NULL AND accumulated.account_id IS NULL
+    AS is_accumulated_depreciation_account_unresolved,
+  latest.depreciation_expense_account_id IS NOT NULL AND expense.account_id IS NULL
+    AS is_depreciation_expense_account_unresolved,
+  latest.lock_private_use_account,
+  latest.locked_asset_count,
+  latest.book_depreciation_method,
+  latest.book_depreciation_calculation_method,
+  latest.book_depreciation_rate,
+  latest.book_effective_life_years,
+  latest.book_depreciation_averaging_method,
+  latest.is_source_deleted,
+  latest.asset_observed_at,
+  latest.source_record_id,
+  latest.source_version_id,
+  latest.source_receipt_id,
+  latest.source_run_id
+FROM latest
+LEFT JOIN accounts AS fixed_asset
+  ON latest.tenant_id = fixed_asset.tenant_id
+ AND latest.fixed_asset_account_id = fixed_asset.account_id
+LEFT JOIN accounts AS accumulated
+  ON latest.tenant_id = accumulated.tenant_id
+ AND latest.accumulated_depreciation_account_id = accumulated.account_id
+LEFT JOIN accounts AS expense
+  ON latest.tenant_id = expense.tenant_id
+ AND latest.depreciation_expense_account_id = expense.account_id

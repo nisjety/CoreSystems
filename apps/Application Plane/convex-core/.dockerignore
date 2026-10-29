@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+!.env.example
+node_modules
+npm-debug.log*
+coverage
+dist
+.convex
+*.tsbuildinfo
+Dockerfile*
+docker-compose*.yml
+README.md

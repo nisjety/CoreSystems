@@ -1,0 +1,22 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero customer and supplier credit-note headers, including deleted/voided states.",
+  assertions: { nonNull: ["tenant_id", "credit_note_id", "credit_note_key"], uniqueKey: ["credit_note_key"] }
+}
+
+WITH latest AS (
+  SELECT * FROM ${ref("dw_bronze_xero", "xero_credit_notes")}
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY tenant_id, record_id ORDER BY synced_at DESC, version_id DESC) = 1
+)
+SELECT CONCAT(b.tenant_id, '|', b.credit_note_id) AS credit_note_key,
+       b.tenant_id, b.credit_note_id, b.credit_note_number, b.credit_note_type,
+       b.status, b.status = 'DELETED' AS is_deleted, b.status = 'VOIDED' AS is_voided,
+       b.contact_id, b.contact_name, b.currency_code, b.currency_rate,
+       b.credit_note_date_local, b.line_amount_types, b.line_item_count,
+       b.sub_total, b.total_tax, b.total, b.remaining_credit,
+       b.updated_at, b.synced_at, b.version_id,
+       s.record_id IS NULL AS is_missing_from_staging
+FROM latest AS b
+LEFT JOIN ${ref("dw_staging_xero", "credit_notes")} AS s
+  ON b.tenant_id = s.tenant_id AND b.record_id = s.record_id

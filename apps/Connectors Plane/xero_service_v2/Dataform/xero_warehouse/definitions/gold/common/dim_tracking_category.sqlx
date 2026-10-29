@@ -1,0 +1,12 @@
+config {
+  type: "table",
+  schema: "xero_gold_common",
+  description: "Xero tracking-category dimension. Categories stay generic because each tenant defines their own business meaning.",
+  assertions: { nonNull: ["tenant_id", "tracking_category_id", "tracking_category_key"], uniqueKey: ["tracking_category_key"] }
+}
+
+SELECT FARM_FINGERPRINT(CONCAT(tenant_id, '|', tracking_category_id)) AS tracking_category_key,
+       FARM_FINGERPRINT(tenant_id) AS company_key,
+       tenant_id, tracking_category_id, category_name, status, is_active,
+       option_count, first_seen_at, synced_at, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_tracking_category")}

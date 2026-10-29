@@ -1,0 +1,29 @@
+{
+	"folders": [
+		{
+			"path": "../../.."
+		},
+		{
+			"path": "../../../../../Bachelor/apps/TextService"
+		},
+		{
+			"path": "../../../../../Bachelor/apps/ReadabilityService"
+		},
+		{
+			"path": "../../../../../Aquatiq/Aquatiq Risk Kontroll"
+		},
+		{
+			"path": "../../../../../Aquatiq/MagicInfo"
+		},
+		{
+			"path": "../../../../../Aquatiq/Aquatiq file management"
+		},
+		{
+			"path": "../../../../firecrawl"
+		},
+		{
+			"path": "../../../../claude-code-fork"
+		}
+	],
+	"settings": {}
+}

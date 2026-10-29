@@ -1,0 +1,86 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Quote lines retain older typed rows; only a complete aligned raw quote response can mark a line removed.",
+  assertions: { nonNull: ["tenant_id", "quote_id", "line_item_id", "quote_line_key"], uniqueKey: ["quote_line_key"] }
+}
+
+WITH source_parents AS (
+  SELECT tenant_id, record_id AS quote_id, observed_at, source_updated_at,
+         JSON_TYPE(JSON_QUERY(SAFE.PARSE_JSON(payload_json), '$.LineItems')) = 'array'
+           AS has_line_items_array,
+         ARRAY_LENGTH(JSON_QUERY_ARRAY(payload_json, '$.LineItems')) AS raw_line_count
+  FROM ${ref("dw_bronze_xero", "xero_raw_record_current")}
+  WHERE endpoint = 'quotes'
+    AND record_id = JSON_VALUE(payload_json, '$.QuoteID')
+), matched AS (
+  SELECT l.*, h.quote_key, h.quote_number, h.status, h.is_deleted,
+         h.is_open_pipeline, h.contact_id, h.quote_date_local, h.currency_code,
+         h.line_amount_types, h.line_item_count, h.sub_total AS header_sub_total,
+         source.has_line_items_array, source.raw_line_count,
+         source.observed_at = h.synced_at AS is_parent_observation_aligned,
+         source.source_updated_at IS NOT DISTINCT FROM h.updated_at
+           AS is_parent_update_aligned,
+         raw_line.line_item_id AS raw_line_item_id,
+         raw_line.raw_line_amount, raw_line.raw_tax_amount,
+         raw_line.raw_quantity, raw_line.raw_unit_amount,
+         raw_line.raw_description
+  FROM ${ref("dw_bronze_xero", "xero_quote_lines")} AS l
+  LEFT JOIN ${ref("dw_1_silver_xero", "fact_quote")} AS h
+    ON l.tenant_id = h.tenant_id AND l.quote_id = h.quote_id
+  LEFT JOIN source_parents AS source
+    ON l.tenant_id = source.tenant_id AND l.quote_id = source.quote_id
+  LEFT JOIN ${ref("dw_bronze_xero", "xero_commercial_current_line_keys")} AS raw_line
+    ON raw_line.endpoint = 'quotes'
+   AND l.tenant_id = raw_line.tenant_id
+   AND l.quote_id = raw_line.document_id
+   AND l.line_item_id = raw_line.line_item_id
+), evidence AS (
+  SELECT *, COALESCE(has_line_items_array
+    AND is_parent_observation_aligned AND is_parent_update_aligned
+    AND raw_line_count = line_item_count, FALSE) AS is_current_line_set_observed
+  FROM matched
+), classified AS (
+  SELECT *,
+         is_current_line_set_observed AND raw_line_item_id IS NULL AS is_removed_from_source,
+         is_current_line_set_observed AND raw_line_item_id IS NOT NULL
+           AND raw_line_amount IS NOT DISTINCT FROM line_amount
+           AND raw_tax_amount IS NOT DISTINCT FROM tax_amount
+           AND raw_quantity IS NOT DISTINCT FROM quantity
+           AND raw_unit_amount IS NOT DISTINCT FROM unit_amount
+           AND raw_description IS NOT DISTINCT FROM description
+           AS is_raw_line_aligned
+  FROM evidence
+), lines AS (
+  SELECT l.*,
+         COUNTIF(NOT l.is_removed_from_source) OVER
+           (PARTITION BY l.tenant_id, l.quote_id) AS observed_line_count,
+         COUNTIF(NOT l.is_removed_from_source AND NOT l.is_raw_line_aligned) OVER
+           (PARTITION BY l.tenant_id, l.quote_id) AS unaligned_current_line_count,
+         COUNTIF(NOT l.is_removed_from_source AND l.line_amount IS NULL) OVER
+           (PARTITION BY l.tenant_id, l.quote_id) AS missing_amount_count,
+         SUM(IF(l.is_removed_from_source, 0,
+                IF(l.line_amount_types = 'Inclusive',
+                   l.line_amount - COALESCE(l.tax_amount, 0), l.line_amount))) OVER
+           (PARTITION BY l.tenant_id, l.quote_id) AS observed_net_subtotal
+  FROM classified AS l
+)
+SELECT CONCAT(tenant_id, '|', quote_id, '|', line_item_id) AS quote_line_key,
+       tenant_id, quote_id, quote_key, line_item_id, quote_number,
+       status, is_deleted, is_open_pipeline, contact_id, quote_date_local,
+       currency_code, line_amount_types, description, quantity, unit_amount,
+       line_amount AS line_amount_raw, tax_amount, discount_amount,
+       IF(line_amount_types = 'Inclusive', line_amount - COALESCE(tax_amount, 0), line_amount)
+         AS net_amount_in_currency,
+       tracking_category_1_id, tracking_option_1_id,
+       tracking_category_2_id, tracking_option_2_id,
+       line_item_count, observed_line_count, header_sub_total, observed_net_subtotal,
+       missing_amount_count, is_current_line_set_observed,
+       is_removed_from_source, is_raw_line_aligned,
+       (NOT is_current_line_set_observed OR quote_key IS NULL
+        OR line_item_count IS DISTINCT FROM observed_line_count
+        OR header_sub_total IS NULL OR unaligned_current_line_count > 0
+        OR ABS(COALESCE(observed_net_subtotal, 0) - header_sub_total) > 0.02)
+         AS is_line_set_ambiguous,
+       synced_at
+FROM lines

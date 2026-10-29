@@ -1,0 +1,26 @@
+[Unit]
+Description=Aquatiq Root Container Webhook Deployment Listener
+Documentation=https://github.com/I-Dacosta/Aquatiq
+After=network.target docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/coresystem
+Environment="GITHUB_WEBHOOK_SECRET=%i"
+Environment="WEBHOOK_PORT=9000"
+ExecStart=/opt/coresystem/webhook-deploy.sh server
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/coresystem /var/log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,40 @@
+query Terms(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  terms(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    termsId
+    description
+    dueDateType
+    dayFrom1
+    dayFrom2
+    dayTo1
+    dayTo2
+    dueDay1
+    dueDay2
+    discountType
+    discountDay
+    discountPercent
+    instalmentType
+    numberOfInstalments
+    instalmentFrequency
+    instalmentMethod
+    visibleTo
+    delayDays
+    moveDueDateIfOnTheWeekend
+    calculationType
+    lastModifiedDateTime
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+  }
+}

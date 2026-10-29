@@ -1,0 +1,19 @@
+# Optional local-only overlay for a previously authorized, org-scoped Google
+# Search Console connection. Supply the mounted bearer through the approved
+# secret-management path; never put the token in an env file or this compose.
+# Use alongside docker-compose.marketing-local.yml after the connection ID
+# has been verified in Integration Core. A preferred property is optional.
+services:
+  marketing-core:
+    environment:
+      INTEGRATION_CORE_URL: http://integration-core:3026
+      GOOGLE_CONNECTION_ID: ${MARKETING_LOCAL_GOOGLE_CONNECTION_ID:?set the verified Google connection ID}
+      GOOGLE_GSC_PROPERTY: ${MARKETING_LOCAL_GSC_PROPERTY:-}
+      INTEGRATION_BEARER_TOKEN_FILE: /run/secrets/marketing_local_integration_bearer
+    secrets:
+      - source: marketing_local_integration_bearer
+        target: marketing_local_integration_bearer
+
+secrets:
+  marketing_local_integration_bearer:
+    file: ${MARKETING_LOCAL_INTEGRATION_BEARER_FILE:?set the approved org-scoped bearer secret file path}

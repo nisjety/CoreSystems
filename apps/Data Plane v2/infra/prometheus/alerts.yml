@@ -1,0 +1,126 @@
+groups:
+  - name: dataplane_v2
+    rules:
+      # ── Retrieval Latency ─────────────────────────────────────────
+      # Spec D5-10 release-gate threshold: hybrid p95 < 800ms.
+      - alert: RetrievalLatencyAboveSpec
+        expr: histogram_quantile(0.95, rate(dpv2_retrieval_duration_seconds_bucket[5m])) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          service: retrieval-engine-rs
+        annotations:
+          summary: "Retrieval p95 latency > 800ms (D5-10 spec gate)"
+          description: "p95 retrieval latency is {{ $value | humanizeDuration }} (D5-10 gate: 800ms)"
+
+      - alert: RetrievalLatencyHigh
+        expr: histogram_quantile(0.95, rate(dpv2_retrieval_duration_seconds_bucket[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+          service: retrieval-engine-rs
+        annotations:
+          summary: "Retrieval p95 latency > 2s"
+          description: "p95 retrieval latency is {{ $value | humanizeDuration }} (hard threshold: 2s)"
+
+      - alert: RetrievalLatencyCritical
+        expr: histogram_quantile(0.95, rate(dpv2_retrieval_duration_seconds_bucket[5m])) > 5
+        for: 2m
+        labels:
+          severity: critical
+          service: retrieval-engine-rs
+        annotations:
+          summary: "Retrieval p95 latency > 5s — consider rollback"
+          description: "p95 retrieval latency is {{ $value | humanizeDuration }}"
+
+      # ── Error Rate ────────────────────────────────────────────────
+      - alert: RetrievalErrorRateHigh
+        expr: >
+          rate(dpv2_retrieval_errors_total[5m])
+          / rate(dpv2_retrieval_requests_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          service: retrieval-engine-rs
+        annotations:
+          summary: "Retrieval error rate > 5%"
+          description: "Error rate is {{ $value | humanizePercentage }}"
+
+      - alert: RetrievalErrorRateCritical
+        expr: >
+          rate(dpv2_retrieval_errors_total[5m])
+          / rate(dpv2_retrieval_requests_total[5m]) > 0.10
+        for: 2m
+        labels:
+          severity: critical
+          service: retrieval-engine-rs
+        annotations:
+          summary: "Retrieval error rate > 10% — consider rollback"
+
+      # ── Embedding Provider ────────────────────────────────────────
+      - alert: EmbeddingRetryRateHigh
+        expr: >
+          rate(dpv2_embed_retries_total[5m])
+          / rate(dpv2_embed_requests_total[5m]) > 0.20
+        for: 5m
+        labels:
+          severity: warning
+          service: retrieval-engine-rs
+        annotations:
+          summary: "Embedding retry rate > 20% — provider degraded"
+
+      # ── Cache ─────────────────────────────────────────────────────
+      - alert: EmbeddingCacheHitRateLow
+        expr: >
+          rate(dpv2_embed_cache_hits_total[10m])
+          / (rate(dpv2_embed_cache_hits_total[10m]) + rate(dpv2_embed_requests_total[10m])) < 0.10
+        for: 15m
+        labels:
+          severity: info
+          service: retrieval-engine-rs
+        annotations:
+          summary: "Embedding cache hit rate < 10% — cache may be cold or undersized"
+
+      # ── gRPC ──────────────────────────────────────────────────────
+      - alert: GrpcLatencyHigh
+        expr: histogram_quantile(0.95, rate(dpv2_grpc_duration_seconds_bucket[5m])) > 3
+        for: 5m
+        labels:
+          severity: warning
+          service: retrieval-engine-rs
+        annotations:
+          summary: "gRPC p95 latency > 3s for {{ $labels.service }}/{{ $labels.method }}"
+
+      # ── Quality signals ───────────────────────────────────────────
+      - alert: ZeroResultQueryRateHigh
+        expr: >
+          rate(dpv2_retrieval_zero_results_total[10m])
+          / rate(dpv2_retrieval_requests_total[10m]) > 0.20
+        for: 10m
+        labels:
+          severity: warning
+          service: retrieval-engine-rs
+        annotations:
+          summary: "Zero-result query rate > 20% — corpus may be misindexed or queries off-topic"
+          description: "Zero-result rate is {{ $value | humanizePercentage }} for org {{ $labels.org_id }}"
+
+      - alert: TracePersistFailureSpike
+        expr: rate(dpv2_trace_persist_failures_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          service: retrieval-engine-rs
+        annotations:
+          summary: "Trace persistence failing — Postgres degraded?"
+          description: "Trace writes failing at {{ $value }} req/s. Retrieval still serves but audit trail is incomplete."
+
+      # ── Infrastructure ────────────────────────────────────────────
+      - alert: ServiceNotReady
+        expr: up{job="dataplane-v2"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: dataplane-v2
+        annotations:
+          summary: "Data Plane v2 service down"
+          description: "{{ $labels.instance }} is not responding to scrapes"

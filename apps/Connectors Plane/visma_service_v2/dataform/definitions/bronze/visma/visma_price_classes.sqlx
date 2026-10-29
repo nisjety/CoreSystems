@@ -1,0 +1,77 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_price_classes",
+  description: "Bronze: the price classes in use, with descriptions. Not an endpoint of Visma: derived from customer locations (priceClassId) and customers (priceClass {id, description}), the same rule v1 used (see docs/derived_tables.md of visma_service_v2).",
+  tags: ["bronze", "visma", "derived"]
+}
+
+-- Hand-written; tools/generate_bronze.py does not touch this file.
+--
+-- 1. every priceClassId on a customer location gives a class with an empty description;
+-- 2. every priceClass {id, description} on a customer adds the class, or supplies the description
+--    when the class is known but has none. A description that is set is never replaced.
+-- One row per tenant and class id.
+
+WITH from_locations AS (
+  SELECT
+    tenant_id,
+    JSON_VALUE(payload, '$.priceClassId') AS id,
+    '' AS description,
+    first_seen_at,
+    updated_at,
+    last_run_id
+  FROM ${ref("dw_staging_visma", "customer_locations")}
+  WHERE deleted_at IS NULL
+    AND IFNULL(JSON_VALUE(payload, '$.priceClassId'), '') != ''
+),
+
+from_customers AS (
+  SELECT
+    tenant_id,
+    JSON_VALUE(payload, '$.priceClass.id') AS id,
+    IFNULL(JSON_VALUE(payload, '$.priceClass.description'), '') AS description,
+    first_seen_at,
+    updated_at,
+    last_run_id
+  FROM ${ref("dw_staging_visma", "customers")}
+  WHERE deleted_at IS NULL
+    AND JSON_TYPE(JSON_QUERY(payload, '$.priceClass')) = 'object'
+    AND IFNULL(JSON_VALUE(payload, '$.priceClass.id'), '') != ''
+),
+
+all_classes AS (
+  SELECT * FROM from_locations
+  UNION ALL
+  SELECT * FROM from_customers
+),
+
+one_per_class AS (
+  SELECT
+    tenant_id,
+    id,
+    -- a description that is set wins over an empty one; among set ones the earliest record
+    ARRAY_AGG(description ORDER BY (description != '') DESC, first_seen_at, last_run_id LIMIT 1)[OFFSET(0)] AS description,
+    MIN(first_seen_at) AS first_seen_at,
+    MAX(updated_at) AS updated_at,
+    ARRAY_AGG(last_run_id ORDER BY updated_at DESC LIMIT 1)[OFFSET(0)] AS last_run_id
+  FROM all_classes
+  GROUP BY tenant_id, id
+)
+
+SELECT
+  c.last_run_id AS `syncId`,
+  c.updated_at AS `syncedAt`,
+  c.first_seen_at AS `firstSyncedAt`,
+  c.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  FALSE AS `isDeleted`,
+  CAST(NULL AS TIMESTAMP) AS `deletedAt`,
+  c.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  c.description AS `description`,
+  c.id AS `id`
+FROM one_per_class AS c
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = c.tenant_id

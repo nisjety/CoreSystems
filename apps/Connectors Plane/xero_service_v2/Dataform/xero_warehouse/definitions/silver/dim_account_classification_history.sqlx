@@ -1,0 +1,237 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Append-only account classification observations. Xero-native classes are preserved while effective-dated finance mappings are applied only when their explicit tenant/account contract covers the observed date.",
+  assertions: {
+    nonNull: ["account_classification_history_key", "tenant_id", "account_id", "source_version_id", "valid_from_observed_at"],
+    uniqueKey: ["account_classification_history_key"]
+  }
+}
+
+WITH observed_base AS (
+  SELECT
+    CONCAT(tenant_id, '|', account_id) AS account_key,
+    tenant_id,
+    account_id,
+    record_id AS account_internal_id,
+    account_code,
+    account_name,
+    account_description,
+    account_type,
+    account_class,
+    status,
+    COALESCE(status = 'ARCHIVED', FALSE) AS is_archived,
+    is_active,
+    tax_type,
+    reporting_code,
+    reporting_name,
+    updated_at,
+    synced_at,
+    first_seen_at,
+    version_id AS source_version_id
+  FROM ${ref("dw_bronze_xero", "xero_accounts")}
+), active_mappings AS (
+  SELECT
+    mapping_id,
+    tenant_id,
+    account_id,
+    valid_from,
+    valid_to,
+    mapping_source,
+    mapping_version,
+    bs_pl,
+    fsli_1,
+    fsli_2,
+    fsli_3,
+    ebitda_flag,
+    net_income_flag,
+    cash_flow_1,
+    cash_flow_2,
+    cash_flow_3,
+    working_capital_flag,
+    capex_flag,
+    intercompany_flag,
+    approved_at
+  FROM ${ref("xero_reference", "xero_account_reporting_mapping")}
+  WHERE is_active IS TRUE
+    AND NULLIF(TRIM(mapping_id), '') IS NOT NULL
+    AND NULLIF(TRIM(mapping_source), '') IS NOT NULL
+    AND NULLIF(TRIM(mapping_version), '') IS NOT NULL
+    AND NULLIF(TRIM(bs_pl), '') IS NOT NULL
+    AND NULLIF(TRIM(fsli_1), '') IS NOT NULL
+    AND valid_from IS NOT NULL
+    AND approved_at IS NOT NULL
+    AND (valid_to IS NULL OR valid_to > valid_from)
+), mapping_candidates AS (
+  SELECT
+    base.*,
+    COUNT(mapping.mapping_id) OVER (
+      PARTITION BY base.tenant_id, base.account_id, base.source_version_id
+    ) AS mapping_match_count,
+    ROW_NUMBER() OVER (
+      PARTITION BY base.tenant_id, base.account_id, base.source_version_id
+      ORDER BY mapping.valid_from DESC, mapping.approved_at DESC, mapping.mapping_version DESC,
+               mapping.mapping_id DESC
+    ) AS mapping_rank,
+    mapping.bs_pl AS source_bs_pl,
+    mapping.fsli_1 AS source_fsli_1,
+    mapping.fsli_2 AS source_fsli_2,
+    mapping.fsli_3 AS source_fsli_3,
+    mapping.ebitda_flag,
+    mapping.net_income_flag,
+    mapping.cash_flow_1,
+    mapping.cash_flow_2,
+    mapping.cash_flow_3,
+    mapping.working_capital_flag,
+    mapping.capex_flag,
+    mapping.intercompany_flag,
+    mapping.mapping_source AS account_mapping_source,
+    mapping.mapping_id AS account_mapping_id,
+    mapping.mapping_version AS account_mapping_version,
+    mapping.valid_from AS mapping_valid_from,
+    mapping.valid_to AS mapping_valid_to,
+    mapping.approved_at AS mapping_approved_at
+  FROM observed_base AS base
+  LEFT JOIN active_mappings AS mapping
+    ON base.tenant_id = mapping.tenant_id
+   AND base.account_id = mapping.account_id
+   AND DATE(base.synced_at) >= mapping.valid_from
+   AND (mapping.valid_to IS NULL OR DATE(base.synced_at) < mapping.valid_to)
+), observed AS (
+  SELECT
+    base.* EXCEPT(
+      source_bs_pl,
+      source_fsli_1,
+      source_fsli_2,
+      source_fsli_3,
+      ebitda_flag,
+      net_income_flag,
+      cash_flow_1,
+      cash_flow_2,
+      cash_flow_3,
+      working_capital_flag,
+      capex_flag,
+      intercompany_flag,
+      account_mapping_source,
+      account_mapping_id,
+      account_mapping_version,
+      mapping_valid_from,
+      mapping_valid_to,
+      mapping_approved_at
+    ),
+    CASE WHEN mapping_match_count = 1 THEN source_bs_pl END AS source_bs_pl,
+    CASE WHEN mapping_match_count = 1 THEN source_fsli_1 END AS source_fsli_1,
+    CASE WHEN mapping_match_count = 1 THEN source_fsli_2 END AS source_fsli_2,
+    CASE WHEN mapping_match_count = 1 THEN source_fsli_3 END AS source_fsli_3,
+    CASE WHEN mapping_match_count = 1 THEN ebitda_flag END AS ebitda_flag,
+    CASE WHEN mapping_match_count = 1 THEN net_income_flag END AS net_income_flag,
+    CASE WHEN mapping_match_count = 1 THEN cash_flow_1 END AS cash_flow_1,
+    CASE WHEN mapping_match_count = 1 THEN cash_flow_2 END AS cash_flow_2,
+    CASE WHEN mapping_match_count = 1 THEN cash_flow_3 END AS cash_flow_3,
+    CASE WHEN mapping_match_count = 1 THEN working_capital_flag END AS working_capital_flag,
+    CASE WHEN mapping_match_count = 1 THEN capex_flag END AS capex_flag,
+    CASE WHEN mapping_match_count = 1 THEN intercompany_flag END AS intercompany_flag,
+    CASE WHEN mapping_match_count = 1 THEN account_mapping_source END AS account_mapping_source,
+    CASE WHEN mapping_match_count = 1 THEN account_mapping_id END AS account_mapping_id,
+    CASE WHEN mapping_match_count = 1 THEN account_mapping_version END AS account_mapping_version,
+    CASE WHEN mapping_match_count = 1 THEN mapping_valid_from END AS mapping_valid_from,
+    CASE WHEN mapping_match_count = 1 THEN mapping_valid_to END AS mapping_valid_to,
+    CASE WHEN mapping_match_count = 1 THEN mapping_approved_at END AS mapping_approved_at
+  FROM mapping_candidates AS base
+  WHERE mapping_rank = 1
+), classified AS (
+  SELECT
+    observed.*,
+    COALESCE(
+      NULLIF(TRIM(source_bs_pl), ''),
+      CASE account_class
+        WHEN 'ASSET' THEN 'BS'
+        WHEN 'LIABILITY' THEN 'BS'
+        WHEN 'EQUITY' THEN 'BS'
+        WHEN 'REVENUE' THEN 'P&L'
+        WHEN 'EXPENSE' THEN 'P&L'
+      END
+    ) AS bs_pl,
+    COALESCE(
+      NULLIF(TRIM(source_fsli_1), ''),
+      CASE account_class
+        WHEN 'ASSET' THEN 'Assets'
+        WHEN 'LIABILITY' THEN 'Equity and liabilities'
+        WHEN 'EQUITY' THEN 'Equity and liabilities'
+        WHEN 'REVENUE' THEN 'Revenue'
+        WHEN 'EXPENSE' THEN 'Operating expenses'
+      END
+    ) AS fsli_1,
+    CASE
+      WHEN account_mapping_id IS NOT NULL
+       AND NULLIF(TRIM(account_mapping_source), '') IS NOT NULL
+       AND NULLIF(TRIM(account_mapping_version), '') IS NOT NULL
+       AND NULLIF(TRIM(source_bs_pl), '') IS NOT NULL
+       AND NULLIF(TRIM(source_fsli_1), '') IS NOT NULL
+       AND mapping_valid_from IS NOT NULL
+       AND mapping_approved_at IS NOT NULL
+       AND (mapping_valid_to IS NULL OR mapping_valid_to > mapping_valid_from)
+        THEN 'finance_governed_account_mapping'
+      WHEN account_class IN ('ASSET', 'LIABILITY', 'EQUITY', 'REVENUE', 'EXPENSE')
+        THEN 'native_account_class_fallback'
+      ELSE 'unmapped'
+    END AS account_mapping_method
+  FROM observed
+), intervalled AS (
+  SELECT
+    classified.*,
+    LEAD(synced_at) OVER (
+      PARTITION BY tenant_id, account_id
+      ORDER BY synced_at, source_version_id
+    ) AS valid_to_observed_at
+  FROM classified
+)
+
+SELECT
+  CONCAT(tenant_id, '|', account_id, '|', source_version_id) AS account_classification_history_key,
+  account_key,
+  tenant_id,
+  account_id,
+  account_internal_id,
+  account_code,
+  account_name,
+  account_description,
+  account_type,
+  account_class,
+  status,
+  is_archived,
+  is_active,
+  tax_type,
+  reporting_code,
+  reporting_name,
+  source_bs_pl,
+  source_fsli_1,
+  source_fsli_2,
+  source_fsli_3,
+  ebitda_flag,
+  net_income_flag,
+  cash_flow_1,
+  cash_flow_2,
+  cash_flow_3,
+  working_capital_flag,
+  capex_flag,
+  intercompany_flag,
+  mapping_match_count AS account_mapping_match_count,
+  mapping_match_count > 1 AS is_account_mapping_ambiguous,
+  account_mapping_id,
+  account_mapping_source,
+  account_mapping_version,
+  mapping_valid_from,
+  mapping_valid_to,
+  mapping_approved_at,
+  bs_pl,
+  fsli_1,
+  account_mapping_method,
+  bs_pl IS NOT NULL AND fsli_1 IS NOT NULL AS is_financial_statement_classification_complete,
+  updated_at AS source_updated_at,
+  synced_at AS valid_from_observed_at,
+  valid_to_observed_at,
+  valid_to_observed_at IS NULL AS is_current_classification,
+  first_seen_at,
+  source_version_id
+FROM intervalled

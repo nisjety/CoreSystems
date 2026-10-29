@@ -1,0 +1,37 @@
+{
+  "endpoint_name": "credit_terms",
+  "bigquery_table": "visma_credit_terms",
+  "primary_key": "termsId",
+  "source": "erp_rest",
+  "api_method": "get_credit_terms",
+  "api_endpoint": "/v1/creditTerm",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "termsId",
+    "description",
+    "visibleTo",
+    "dueDateType",
+    "dueDay1",
+    "discountPercent",
+    "createdDateTime",
+    "lastModifiedDateTime"
+  ],
+  "notes": "DataMart normalizer parity vs ERP (scripts/normalizer_parity.py, 2026-09-29, after correcting wrong-domain values): 21 of 22 fields equal on all 22 terms (was 8 of 22: DataMart enum names are translated to ERP codes). createdDateTime is null because DataMart only knows its own load time.",
+  "datamart": {
+    "ready": false,
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    },
+    "query_file": "config/queries/credit_term.graphql",
+    "type_name": "Terms",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_credit_term",
+    "fallback_source": "erp_rest",
+    "root_field": "terms"
+  }
+}

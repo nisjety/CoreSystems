@@ -1,0 +1,93 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Completeness evidence for Xero contact-scoped aged-report runs. A run is complete only when one successful contact discovery, one successful keyed request per discovered contact, and one keyed report snapshot per request agree."
+}
+
+WITH contact_discovery AS (
+  SELECT
+    tenant_id,
+    run_id,
+    SUM(records) AS discovered_contact_count,
+    COUNTIF(error_present OR termination != 'ended_on_empty_page') AS invalid_contact_outcome_count
+  FROM ${ref("dw_staging_xero", "sync_run_entities")}
+  WHERE endpoint = 'contacts'
+  GROUP BY tenant_id, run_id
+), report_requests AS (
+  SELECT
+    tenant_id,
+    run_id,
+    endpoint AS report,
+    COUNT(*) AS request_outcome_count,
+    COUNT(DISTINCT request_key) AS distinct_request_key_count,
+    COUNTIF(
+      error_present
+      OR termination != 'report-snapshot'
+      OR request_key IS NULL
+      OR NOT REGEXP_CONTAINS(request_key, r'^contact:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+    ) AS invalid_request_outcome_count
+  FROM ${ref("dw_staging_xero", "sync_run_entities")}
+  WHERE endpoint IN ('report_aged_receivables_by_contact', 'report_aged_payables_by_contact')
+  GROUP BY tenant_id, run_id, report
+), successful_requests AS (
+  SELECT DISTINCT
+    tenant_id,
+    run_id,
+    endpoint AS report,
+    request_key
+  FROM ${ref("dw_staging_xero", "sync_run_entities")}
+  WHERE endpoint IN ('report_aged_receivables_by_contact', 'report_aged_payables_by_contact')
+    AND NOT error_present
+    AND termination = 'report-snapshot'
+    AND REGEXP_CONTAINS(request_key, r'^contact:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+), snapshots AS (
+  SELECT
+    snapshot.tenant_id,
+    snapshot.run_id,
+    snapshot.report,
+    COUNT(*) AS source_snapshot_count,
+    COUNT(DISTINCT snapshot.contact_id) AS distinct_snapshot_contact_count,
+    COUNTIF(snapshot.contact_id IS NULL) AS missing_snapshot_contact_count,
+    COUNT(DISTINCT SAFE_CAST(snapshot.report_date AS DATE)) AS requested_report_date_count,
+    COUNTIF(request.request_key IS NULL) AS unmanifested_snapshot_count
+  FROM ${ref("dw_1_silver_xero", "fact_financial_report_snapshot")} AS snapshot
+  LEFT JOIN successful_requests AS request
+    ON snapshot.tenant_id = request.tenant_id
+   AND snapshot.run_id = request.run_id
+   AND snapshot.report = request.report
+   AND request.request_key = CONCAT('contact:', snapshot.contact_id)
+  WHERE snapshot.report IN ('report_aged_receivables_by_contact', 'report_aged_payables_by_contact')
+  GROUP BY snapshot.tenant_id, snapshot.run_id, snapshot.report
+)
+SELECT
+  request.tenant_id,
+  request.run_id,
+  request.report,
+  contact.discovered_contact_count,
+  request.request_outcome_count,
+  request.distinct_request_key_count,
+  request.invalid_request_outcome_count,
+  snapshot.source_snapshot_count,
+  snapshot.distinct_snapshot_contact_count,
+  snapshot.missing_snapshot_contact_count,
+  snapshot.requested_report_date_count,
+  snapshot.unmanifested_snapshot_count,
+  COALESCE(contact.invalid_contact_outcome_count, 1) = 0
+    AND contact.discovered_contact_count IS NOT NULL
+    AND request.invalid_request_outcome_count = 0
+    AND request.request_outcome_count = contact.discovered_contact_count
+    AND request.distinct_request_key_count = contact.discovered_contact_count
+    AND snapshot.source_snapshot_count = contact.discovered_contact_count
+    AND snapshot.distinct_snapshot_contact_count = contact.discovered_contact_count
+    AND snapshot.missing_snapshot_contact_count = 0
+    AND snapshot.unmanifested_snapshot_count = 0
+    AND snapshot.requested_report_date_count = 1
+    AS is_report_run_contact_set_complete
+FROM report_requests AS request
+LEFT JOIN contact_discovery AS contact
+  ON request.tenant_id = contact.tenant_id
+ AND request.run_id = contact.run_id
+LEFT JOIN snapshots AS snapshot
+  ON request.tenant_id = snapshot.tenant_id
+ AND request.run_id = snapshot.run_id
+ AND request.report = snapshot.report

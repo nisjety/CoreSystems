@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "dw_staging_xero",
+  name: "contact_groups",
+  description: "Current Xero contact group headers from per-group detail; populated by etl/xero/contact_groups.py."
+}

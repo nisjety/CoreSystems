@@ -1,0 +1,113 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero payment headers, including deleted payment markers; one row per tenant and payment.",
+  assertions: {
+    nonNull: ["tenant_id", "payment_id", "payment_key"],
+    uniqueKey: ["payment_key"]
+  }
+}
+
+WITH payment_inputs AS (
+  SELECT
+    p.*,
+    source.invoice_currency_code AS raw_embedded_invoice_currency_code,
+    source.payment_id IS NOT NULL AS has_raw_payment_observation,
+    source.invoice_id = p.invoice_id
+      AND source.observed_at = p.synced_at
+      AND source.source_updated_at = p.updated_at
+      AND source.payment_status = p.status
+      AND source.payment_type = p.payment_type
+      AND source.payment_amount = p.amount AS is_raw_typed_aligned,
+    UPPER(NULLIF(TRIM(i.currency_code), '')) AS raw_header_invoice_currency_code,
+    i.invoice_type AS header_invoice_type
+  FROM ${ref("payment_versions")} AS p
+  LEFT JOIN ${ref("dw_bronze_xero", "xero_payment_invoice_currency")} AS source
+    ON source.tenant_id = p.tenant_id
+   AND source.payment_id = p.payment_id
+  LEFT JOIN ${ref("fact_invoice")} AS i
+    ON i.tenant_id = p.tenant_id
+   AND i.invoice_id = p.invoice_id
+  WHERE NOT p.is_superseded
+), payment_context AS (
+  SELECT
+    * EXCEPT(raw_embedded_invoice_currency_code, raw_header_invoice_currency_code),
+    IF(is_raw_typed_aligned
+         AND REGEXP_CONTAINS(raw_embedded_invoice_currency_code, r'^[A-Z]{3}$'),
+       raw_embedded_invoice_currency_code, NULL) AS embedded_invoice_currency_code,
+    IF(REGEXP_CONTAINS(raw_header_invoice_currency_code, r'^[A-Z]{3}$'),
+       raw_header_invoice_currency_code, NULL) AS header_invoice_currency_code,
+    (is_raw_typed_aligned AND raw_embedded_invoice_currency_code IS NOT NULL
+      AND NOT REGEXP_CONTAINS(raw_embedded_invoice_currency_code, r'^[A-Z]{3}$'))
+      OR (raw_header_invoice_currency_code IS NOT NULL
+        AND NOT REGEXP_CONTAINS(raw_header_invoice_currency_code, r'^[A-Z]{3}$'))
+      AS is_currency_invalid,
+    has_raw_payment_observation AND NOT COALESCE(is_raw_typed_aligned, FALSE)
+      AS is_raw_typed_mismatch,
+    invoice_type IS NULL AND header_invoice_type IS NULL AS is_invoice_type_unresolved,
+    CASE
+      WHEN payment_type = 'ACCRECPAYMENT' THEN
+        (invoice_type IS NOT NULL AND invoice_type != 'ACCREC')
+        OR (header_invoice_type IS NOT NULL AND header_invoice_type != 'ACCREC')
+      WHEN payment_type = 'ACCPAYPAYMENT' THEN
+        (invoice_type IS NOT NULL AND invoice_type != 'ACCPAY')
+        OR (header_invoice_type IS NOT NULL AND header_invoice_type != 'ACCPAY')
+      ELSE FALSE
+    END AS is_invoice_type_mismatch
+  FROM payment_inputs
+), resolved AS (
+  SELECT
+    *,
+    header_invoice_currency_code IS NOT NULL
+      AND embedded_invoice_currency_code IS NOT NULL
+      AND header_invoice_currency_code != embedded_invoice_currency_code
+      AS is_currency_conflict
+  FROM payment_context
+)
+SELECT
+  CONCAT(tenant_id, '|', payment_id) AS payment_key,
+  tenant_id,
+  payment_id,
+  record_id AS payment_internal_id,
+  payment_type,
+  status,
+  is_deleted,
+  is_missing_from_staging,
+  reference,
+  is_reconciled,
+  account_id,
+  account_code,
+  contact_id,
+  contact_name,
+  invoice_id,
+  invoice_number,
+  invoice_type,
+  batch_payment_id,
+  amount,
+  bank_amount,
+  currency_rate,
+  payment_date,
+  updated_at,
+  synced_at,
+  first_seen_at,
+  version_id,
+  header_invoice_currency_code,
+  embedded_invoice_currency_code,
+  IF(is_currency_conflict OR is_currency_invalid, NULL,
+     COALESCE(header_invoice_currency_code, embedded_invoice_currency_code)) AS invoice_currency_code,
+  CASE
+    WHEN is_currency_invalid THEN 'invalid_source_currency'
+    WHEN is_currency_conflict THEN 'conflict'
+    WHEN header_invoice_currency_code IS NOT NULL THEN 'invoice_header'
+    WHEN embedded_invoice_currency_code IS NOT NULL THEN 'payment_embedded_invoice'
+    ELSE 'unresolved'
+  END AS invoice_currency_source,
+  is_currency_conflict,
+  is_currency_invalid,
+  is_invoice_type_mismatch,
+  is_invoice_type_unresolved,
+  is_raw_typed_mismatch,
+  is_currency_conflict OR is_currency_invalid
+    OR COALESCE(header_invoice_currency_code, embedded_invoice_currency_code) IS NULL
+    AS is_currency_unresolved
+FROM resolved

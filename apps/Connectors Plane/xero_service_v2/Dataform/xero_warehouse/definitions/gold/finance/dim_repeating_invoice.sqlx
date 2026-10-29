@@ -1,0 +1,22 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Xero recurring-invoice template dimension. Amounts describe a template and are not booked revenue or expense.",
+  assertions: { nonNull: ["tenant_id", "repeating_invoice_id", "repeating_invoice_key"], uniqueKey: ["repeating_invoice_key"] }
+}
+
+SELECT FARM_FINGERPRINT(r.tenant_id) AS company_key,
+       FARM_FINGERPRINT(CONCAT(r.tenant_id, '|', r.currency_code)) AS currency_key,
+       IF(r.contact_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(r.tenant_id, '|', r.contact_id))) AS contact_key,
+       IF(r.branding_theme_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(r.tenant_id, '|', r.branding_theme_id))) AS branding_theme_key,
+       r.repeating_invoice_key, r.tenant_id, r.repeating_invoice_id,
+       r.invoice_type, r.status, r.is_deleted, TRUE AS is_template,
+       r.contact_id, r.contact_name, r.reference, r.currency_code,
+       r.schedule_start_date, r.schedule_end_date, r.schedule_period, r.schedule_unit,
+       r.schedule_due_date_offset, r.schedule_due_date_type,
+       r.next_scheduled_date, r.next_scheduled_date_local, r.approved_for_sending,
+       r.include_pdf, r.mark_as_sent, r.send_copy, r.branding_theme_id,
+       r.line_item_count, r.sub_total AS source_subtotal_amount,
+       r.total_tax AS source_tax_amount, r.total AS source_total_amount,
+       r.updated_at, r.first_seen_at, r.synced_at, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_repeating_invoice")} AS r

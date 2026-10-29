@@ -1,0 +1,48 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  name: "dim_repeating_invoice_line",
+  description: "Silver: current lines on Xero repeating-invoice templates. Grain: one row per tenant, template, and line position.",
+  tags: ["silver", "xero", "dimension"]
+}
+
+WITH current_templates AS (
+  SELECT tenant_id, record_id, synced_at, repeating_invoice_id
+  FROM ${ref("dw_staging_xero", "repeating_invoices")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, record_id
+    ORDER BY synced_at DESC
+  ) = 1
+)
+
+SELECT
+  s.tenant_id,
+  s.synced_at,
+  COALESCE(s.repeating_invoice_id, h.repeating_invoice_id) AS repeating_invoice_id,
+  s.line_position,
+  s.line_item_id,
+  s.account_id,
+  s.account_code,
+  s.item_code,
+  s.description,
+  SAFE_CAST(s.quantity AS FLOAT64) AS quantity,
+  SAFE_CAST(s.unit_amount AS FLOAT64) AS unit_amount,
+  SAFE_CAST(s.line_amount AS FLOAT64) AS line_amount,
+  SAFE_CAST(s.tax_amount AS FLOAT64) AS tax_amount,
+  s.tax_type,
+  SAFE_CAST(s.discount_rate AS FLOAT64) AS discount_rate,
+  SAFE_CAST(s.discount_amount AS FLOAT64) AS discount_amount,
+  s.tracking_category_1_id,
+  s.tracking_category_1_name,
+  s.tracking_option_1_id,
+  s.tracking_option_1_name,
+  s.tracking_category_2_id,
+  s.tracking_category_2_name,
+  s.tracking_option_2_id,
+  s.tracking_option_2_name,
+  'xero' AS _source
+FROM ${ref("dw_staging_xero", "repeating_invoice_line_snapshots")} AS s
+JOIN current_templates AS h
+  ON s.tenant_id = h.tenant_id
+ AND s.record_id = h.record_id
+ AND s.synced_at = h.synced_at

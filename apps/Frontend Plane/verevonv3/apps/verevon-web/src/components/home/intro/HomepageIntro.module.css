@@ -1,0 +1,106 @@
+.intro {
+	--home-intro-motion: full;
+	--home-intro-background-opacity: 1;
+	--home-intro-x: 0px;
+	--home-intro-y: 0px;
+	--home-intro-scale: 1;
+	position: fixed;
+	inset: 0;
+	z-index: 80;
+	display: grid;
+	place-items: center;
+	overflow: clip;
+	background: rgb(248 248 247 / var(--home-intro-background-opacity));
+	color: var(--verevon-primary);
+	touch-action: none;
+}
+
+.intro[data-phase="complete"] {
+	pointer-events: none;
+	visibility: hidden;
+}
+
+.intro[data-phase="checking"] .brandFrame {
+	opacity: 0;
+}
+
+.brandFrame {
+	position: fixed;
+	left: 50%;
+	top: 50%;
+	transform: translate3d(calc(-50% + var(--home-intro-x)), calc(-50% + var(--home-intro-y)), 0) scale(var(--home-intro-scale));
+	will-change: transform;
+}
+
+.brand {
+	position: relative;
+	display: block;
+	height: 44px;
+	container-type: inline-size;
+	will-change: color, opacity, transform;
+}
+
+.mark {
+	position: absolute;
+	left: 0;
+	top: 50%;
+	display: block;
+	width: 100%;
+	height: auto;
+	transform-origin: 50% 50%;
+	will-change: transform;
+}
+
+.canvas {
+	display: block;
+	width: 100%;
+	height: 100%;
+}
+
+.renderSource {
+	position: fixed;
+	left: -9999px;
+	top: -9999px;
+	width: 82px;
+	height: 68px;
+	visibility: hidden;
+	pointer-events: none;
+}
+
+.wordmark {
+	position: absolute;
+	top: 50%;
+	left: 30%;
+	display: flex;
+	gap: 0.18em;
+	font: 400 12cqw/1.2 var(--font-verevon);
+	font-synthesis: none;
+	white-space: nowrap;
+	perspective: 400px;
+	transform: translateY(-50%);
+	transform-origin: left center;
+	will-change: transform;
+}
+
+.letterWindow {
+	display: block;
+	overflow: hidden;
+	padding: 0.05em 0;
+	line-height: 1;
+}
+
+.letter {
+	display: block;
+	transform: translateY(1.12em) rotateX(-90deg);
+	transform-origin: 50% 100%;
+	opacity: 0;
+	backface-visibility: hidden;
+	will-change: transform, opacity;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.intro {
+		--home-intro-motion: reduce;
+		display: none;
+	}
+}

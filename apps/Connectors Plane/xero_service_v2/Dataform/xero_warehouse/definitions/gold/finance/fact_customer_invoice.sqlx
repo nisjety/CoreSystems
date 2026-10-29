@@ -1,0 +1,29 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "ACCREC invoice headers; transaction-currency measures only until functional FX is reconciled.",
+  assertions: { nonNull: ["tenant_id", "invoice_id", "invoice_key"], uniqueKey: ["invoice_key"] }
+}
+
+SELECT FARM_FINGERPRINT(i.tenant_id) AS company_key,
+       FARM_FINGERPRINT(CAST(i.invoice_date_local AS STRING)) AS date_key,
+       FARM_FINGERPRINT(CONCAT(i.tenant_id, '|', i.currency_code)) AS currency_key,
+       IF(i.contact_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(i.tenant_id, '|', i.contact_id))) AS customer_key,
+       IF(i.branding_theme_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(i.tenant_id, '|', i.branding_theme_id))) AS branding_theme_key,
+       i.invoice_key, i.tenant_id, i.invoice_id, i.invoice_number AS reference_number,
+       i.invoice_type AS document_type, i.status, i.is_deleted, i.is_voided,
+       i.is_missing_from_staging, i.contact_id AS customer_id, i.contact_name AS customer_name, i.branding_theme_id,
+       i.invoice_date_local AS document_date, i.due_date_local AS document_due_date,
+       i.currency_code, c.base_currency, i.currency_rate AS source_exchange_rate,
+       i.status IN ('AUTHORISED', 'PAID') AS is_reportable,
+       i.total AS source_amount_in_currency,
+       IF(i.status IN ('AUTHORISED', 'PAID'), i.total, NULL) AS amount_in_currency,
+       IF(i.status IN ('AUTHORISED', 'PAID'), i.amount_due, NULL) AS balance_in_currency,
+       i.amount_paid AS source_paid_in_currency,
+       IF(i.status IN ('AUTHORISED', 'PAID'), i.sub_total, NULL) AS detail_total_in_currency,
+       IF(i.status IN ('AUTHORISED', 'PAID'), i.total_tax, NULL) AS vat_total_in_currency,
+       CAST(NULL AS NUMERIC) AS amount, CAST(NULL AS NUMERIC) AS amount_nok,
+       i.line_item_count, i.synced_at, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_invoice")} AS i
+LEFT JOIN ${ref("xero_gold_common", "dim_company")} AS c USING (tenant_id)
+WHERE i.invoice_type = 'ACCREC'

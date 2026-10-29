@@ -1,0 +1,40 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_organizations",
+  description: "Bronze: Organization hierarchy with branches and bank settings from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.str("bankSettings")} AS `bankSettings`,
+  ${bronze.str("baseCurrency")} AS `baseCurrency`,
+  ${bronze.str("corporateId")} AS `corporateId`,
+  ${bronze.str("defaultCountry")} AS `defaultCountry`,
+  ${bronze.str("deliveryAddress")} AS `deliveryAddress`,
+  ${bronze.str("deliveryContact")} AS `deliveryContact`,
+  ${bronze.bool("fileTaxByBranches")} AS `fileTaxByBranches`,
+  ${bronze.str("lastModifiedDateTime")} AS `lastModifiedDateTime`,
+  ${bronze.str("ledger")} AS `ledger`,
+  ${bronze.str("mainAddress")} AS `mainAddress`,
+  ${bronze.str("mainContact")} AS `mainContact`,
+  ${bronze.str("name")} AS `name`,
+  ${bronze.str("organizationCd")} AS `organizationCd`,
+  ${bronze.str("organizationType")} AS `organizationType`,
+  ${bronze.str("timeStamp")} AS `timeStamp`,
+  ${bronze.str("vatRegistrationId")} AS `vatRegistrationId`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`  -- v2 does not fetch this field
+FROM ${ref("dw_staging_visma", "organizations")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

@@ -1,0 +1,19 @@
+# Opt-in restored projection contract, with its matching schema/deployer.
+# Run from this directory with both -f files; the base stack remains unchanged.
+services:
+  convex-backend:
+    volumes:
+      - ../apps/Application Plane/convex-core/convex:/app/convex:ro
+  convex-gateway:
+    build:
+      context: ../apps/Application Plane/convex-core
+      dockerfile: Dockerfile
+  convex-subscriber:
+    build:
+      context: ../apps/Application Plane/convex-core
+      dockerfile: Dockerfile
+    environment:
+      NATS_URL: ${CONTROL_PROJECTION_NATS_URL:-nats://control-shared-nats:4222}
+      NATS_USER: ${APPLICATION_CONVEX_CONTROL_NATS_USER:-application-convex-control}
+      NATS_PASSWORD: ${APPLICATION_CONVEX_CONTROL_NATS_PASSWORD:-}
+      CONVEX_CONTROL_PROJECTION_KEY: ${CONVEX_CONTROL_PROJECTION_KEY:-}

@@ -1,0 +1,19 @@
+# Local-only OAuth E2E overlay. Use only with docker-compose.marketing-local.yml.
+# It intentionally enables the three-part isolated test-auth gate for a stack
+# bound to localhost with an in-memory connection store; never use this overlay
+# outside a disposable local development environment.
+services:
+  integration-core:
+    environment:
+      GOOGLE_CLIENT_ID: ${MARKETING_LOCAL_GOOGLE_CLIENT_ID:?set by the OAuth launcher}
+      GOOGLE_CLIENT_SECRET_FILE: /run/secrets/marketing_local_google_client_secret
+      ALLOW_LEGACY_TENANT_KEY: "1"
+      ALLOW_INSECURE_DEV_DEFAULTS: "1"
+      ISOLATED_E2E: "1"
+    secrets:
+      - source: marketing_local_google_client_secret
+        target: marketing_local_google_client_secret
+
+secrets:
+  marketing_local_google_client_secret:
+    file: ${MARKETING_LOCAL_GOOGLE_CLIENT_SECRET_FILE:?set by the OAuth launcher}

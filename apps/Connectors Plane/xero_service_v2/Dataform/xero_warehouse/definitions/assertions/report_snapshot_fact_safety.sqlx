@@ -1,0 +1,19 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_report_snapshot_fact_safety"
+}
+
+SELECT 'statement' AS snapshot_type, statement_line_snapshot_key AS snapshot_key
+FROM ${ref("dw_1_silver_xero", "fact_financial_statement_line_snapshot")}
+WHERE is_orphan_snapshot
+   OR NOT is_non_additive
+   OR NOT is_non_additive_within_snapshot
+   OR source_statement_amount IS NULL
+UNION ALL
+SELECT 'bank' AS snapshot_type, bank_balance_snapshot_key AS snapshot_key
+FROM ${ref("dw_1_silver_xero", "fact_bank_balance_snapshot")}
+WHERE is_orphan_snapshot
+   OR NOT is_non_additive
+   OR NOT is_non_additive_within_snapshot
+   OR source_bank_amount IS NULL

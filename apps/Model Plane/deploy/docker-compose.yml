@@ -1,0 +1,1443 @@
+name: model-plane
+
+x-build-metadata: &build-metadata
+  SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION build arg required for image provenance}
+  BUILD_DATE: ${BUILD_DATE:?BUILD_DATE build arg required for image provenance}
+
+x-runtime-defaults: &runtime-defaults
+  restart: unless-stopped
+  init: true
+  stop_grace_period: 30s
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "3"
+
+services:
+  # --- Infrastructure ---
+
+  postgres:
+    <<: *runtime-defaults
+    image: postgres:16.14-alpine3.24
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}
+      POSTGRES_DB: session_core
+    ports:
+      - "127.0.0.1:55434:5432"
+    volumes:
+      - mp-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 5
+
+  nats:
+    <<: *runtime-defaults
+    image: nats:2.12.12-alpine3.22@sha256:2ca98656a279b2d88cfdf2b8c3f0d5d7f3941ae9dc2ab12ebaa92d83e0f4ccdb
+    command: ["-c", "/etc/nats/nats.conf"]
+    environment:
+      MODEL_GATEWAY_NATS_PASSWORD: "\"${MODEL_GATEWAY_NATS_PASSWORD:?MODEL_GATEWAY_NATS_PASSWORD is required}\""
+      MODEL_COST_CORE_NATS_PASSWORD: "\"${MODEL_COST_CORE_NATS_PASSWORD:?MODEL_COST_CORE_NATS_PASSWORD is required}\""
+      MODEL_SESSION_CORE_NATS_PASSWORD: "\"${MODEL_SESSION_CORE_NATS_PASSWORD:?MODEL_SESSION_CORE_NATS_PASSWORD is required}\""
+      MODEL_CAPABILITY_CORE_NATS_PASSWORD: "\"${MODEL_CAPABILITY_CORE_NATS_PASSWORD:?MODEL_CAPABILITY_CORE_NATS_PASSWORD is required}\""
+      MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD: "\"${MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD:?MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD is required}\""
+      MODEL_TOOL_COMPLETION_NATS_PASSWORD: "\"${MODEL_TOOL_COMPLETION_NATS_PASSWORD:?MODEL_TOOL_COMPLETION_NATS_PASSWORD is required}\""
+      APPLICATION_CONVEX_MODEL_NATS_PASSWORD: "\"${APPLICATION_CONVEX_MODEL_NATS_PASSWORD:?APPLICATION_CONVEX_MODEL_NATS_PASSWORD is required}\""
+      APPLICATION_INSIGHT_MODEL_NATS_PASSWORD: "\"${APPLICATION_INSIGHT_MODEL_NATS_PASSWORD:?APPLICATION_INSIGHT_MODEL_NATS_PASSWORD is required}\""
+      AUDIT_MODEL_NATS_PASSWORD: "\"${AUDIT_MODEL_NATS_PASSWORD:?AUDIT_MODEL_NATS_PASSWORD is required}\""
+      MODEL_NATS_PROVISIONER_PASSWORD: "\"${MODEL_NATS_PROVISIONER_PASSWORD:?MODEL_NATS_PROVISIONER_PASSWORD is required}\""
+    volumes:
+      - mp-nats-data:/data
+      - ./nats.conf:/etc/nats/nats.conf:ro
+    ports:
+      - "127.0.0.1:4228:4222"
+      - "127.0.0.1:8228:8222"
+    networks:
+      default:
+      inter-plane-bus:
+        aliases:
+          - model-nats
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Deployment-owned JetStream topology. Runtime services intentionally cannot
+  # create or mutate streams/consumers; this one-shot service establishes and
+  # verifies the fixed contracts before session-core starts.
+  nats-provisioner:
+    build:
+      context: ../go
+      dockerfile: services/nats-provisioner/Dockerfile
+      args: *build-metadata
+    restart: "no"
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_USER: observability-provisioner-model
+      NATS_PASSWORD: ${MODEL_NATS_PROVISIONER_PASSWORD:?MODEL_NATS_PROVISIONER_PASSWORD is required}
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - default
+
+  minio:
+    <<: *runtime-defaults
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MODEL_MINIO_ROOT_USER:?MODEL_MINIO_ROOT_USER is required}
+      MINIO_ROOT_PASSWORD: ${MODEL_MINIO_ROOT_PASSWORD:?MODEL_MINIO_ROOT_PASSWORD is required}
+    ports:
+      - "127.0.0.1:9002:9000"
+      - "127.0.0.1:9003:9001"
+    volumes:
+      - mp-minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      retries: 3
+
+  dragonfly:
+    <<: *runtime-defaults
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
+    command:
+      - "--cache_mode=true"
+      - "--maxmemory=256mb"
+      - "--proactor_threads=1"
+      - "--dir=/data"
+      - "--requirepass=${MODEL_DRAGONFLY_PASSWORD:?MODEL_DRAGONFLY_PASSWORD is required}"
+    ports:
+      - "127.0.0.1:6391:6379"
+    volumes:
+      - mp-dragonfly-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${MODEL_DRAGONFLY_PASSWORD:?MODEL_DRAGONFLY_PASSWORD is required}", "ping"]
+      interval: 5s
+      retries: 3
+
+  temporal:
+    <<: *runtime-defaults
+    image: temporalio/auto-setup:1.27.2
+    environment:
+      DB: postgres12_pgx        # valid drivers: mysql8 / postgres12 / postgres12_pgx / cassandra
+      DB_PORT: "5432"
+      POSTGRES_USER: postgres
+      POSTGRES_PWD: ${MODEL_TEMPORAL_POSTGRES_PASSWORD:?MODEL_TEMPORAL_POSTGRES_PASSWORD is required}
+      POSTGRES_SEEDS: temporal-postgres
+    ports:
+      - "127.0.0.1:7234:7233"
+    depends_on:
+      temporal-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "temporal operator cluster health --address temporal:7233 | grep -q SERVING"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+
+  temporal-postgres:
+    <<: *runtime-defaults
+    image: postgres:16.14-alpine3.24
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${MODEL_TEMPORAL_POSTGRES_PASSWORD:?MODEL_TEMPORAL_POSTGRES_PASSWORD is required}
+      POSTGRES_DB: temporal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 5
+    volumes:
+      - mp-temporal-postgres-data:/var/lib/postgresql/data
+
+  temporal-ui:
+    <<: *runtime-defaults
+    image: temporalio/ui:2.30.0
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    ports:
+      - "127.0.0.1:8233:8080"
+    depends_on:
+      temporal:
+        condition: service_healthy
+
+  # OTEL collector for distributed tracing
+  otel-collector:
+    <<: *runtime-defaults
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "127.0.0.1:4317:4317"   # OTLP gRPC
+      - "127.0.0.1:4318:4318"   # OTLP HTTP
+      - "127.0.0.1:8889:8889"   # Prometheus exporter
+
+  # --- Rust services ---
+
+  model-gateway:
+    <<: *runtime-defaults
+    build:
+      context: ..
+      dockerfile: rust/services/model-gateway/Dockerfile
+      args: *build-metadata
+    ports:
+      - "127.0.0.1:8080:8080"   # HTTP
+      - "127.0.0.1:9090:9090"   # gRPC compatibility probe; production overlay removes host ports
+    environment:
+      RUST_LOG: info
+      # This service also joins inter-plane-bus, where the generic `nats`
+      # hostname can resolve another plane's broker. Use the plane-unique alias.
+      NATS_URL: nats://model-nats:4222
+      NATS_USER: model-gateway-runtime
+      NATS_PASSWORD: ${MODEL_GATEWAY_NATS_PASSWORD:?MODEL_GATEWAY_NATS_PASSWORD is required}
+      # Release profile is v1-only. Re-enable a legacy bridge only through a
+      # separately reviewed migration profile with a matching scoped principal.
+      MP_COMPAT_MODE: v1_only
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: model-gateway
+      # Empty by default = "Verevon Auto": inference-core resolves an unpinned
+      # request to the configured provider's own default (per-provider), so chat
+      # works with whichever provider key is set (Anthropic-only, OpenAI-only,
+      # or both). Set DEFAULT_MODEL to pin a specific model org-wide.
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-}
+      RATE_LIMIT_RPM: "100"
+      # Local-dev auth bypass is defined in ../.env, but compose was not
+      # forwarding it, so Verevon's `dev-bypass` bearer was rejected before
+      # inference. Production should leave this empty and configure JWKS.
+      MODEL_GATEWAY_AUTH_DEV_BYPASS: ${MODEL_GATEWAY_AUTH_DEV_BYPASS:-}
+      ALLOW_INSECURE_DEV_DEFAULTS: ${ALLOW_INSECURE_DEV_DEFAULTS:-}
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-}
+      # Keep the local Docker default aligned with Auth Core's canonical
+      # issuer. Production overlays must still provide AUTH_CORE_ISSUER
+      # explicitly rather than relying on this development default.
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
+      AUTH_CORE_AUDIENCE: ${AUTH_CORE_AUDIENCE:-model-gateway}
+      EXECUTION_CORE_AUTH_AUDIENCE: ${EXECUTION_CORE_AUTH_AUDIENCE:-execution-core}
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      MODEL_GATEWAY_SERVICE_ID: ${MODEL_GATEWAY_SERVICE_ID:-model-gateway}
+      MODEL_GATEWAY_SERVICE_API_KEY: ${MODEL_GATEWAY_SERVICE_API_KEY:?MODEL_GATEWAY_SERVICE_API_KEY is required}
+      # Mandatory keyed-MAC material for opaque durable StartManagedRun keys.
+      # It is an independent managed secret, never a user credential.
+      MODEL_GATEWAY_MANAGED_START_KEY_SECRET: ${MODEL_GATEWAY_MANAGED_START_KEY_SECRET:?MODEL_GATEWAY_MANAGED_START_KEY_SECRET is required}
+      # Wave 7 — fine-tuning kill switch + budget guard (off by default in
+      # production-style profile; dev override flips FINETUNE_ENABLED=1).
+      FINETUNE_ENABLED: ${FINETUNE_ENABLED:-0}
+      FINETUNE_ORG_BUDGET_USD: ${FINETUNE_ORG_BUDGET_USD:-50}
+      FINETUNE_PER_JOB_BUDGET_USD: ${FINETUNE_PER_JOB_BUDGET_USD:-20}
+      # Dedicated finetune-poller session-core credential — NOT
+      # MODEL_GATEWAY_SERVICE_API_KEY above, which is registered
+      # retentionByAudience=zdr for terminalize/heartbeat. Optional like the
+      # Azure creds above: finetune_poller::spawn() soft-fails (poller idles,
+      # logs, never crashes the gateway) when unset, matching FINETUNE_ENABLED
+      # defaulting off.
+      FINETUNE_POLLER_SERVICE_ID: ${FINETUNE_POLLER_SERVICE_ID:-model-gateway-finetune-poller}
+      FINETUNE_POLLER_SERVICE_API_KEY: ${FINETUNE_POLLER_SERVICE_API_KEY:-}
+      # Use explicit Model Plane aliases here. The gateway also joins the
+      # shared inter-plane bus for Verevon, where names like `session-core`
+      # can resolve to Control Plane services instead.
+      SESSION_CORE_ADDR: http://model-plane-session-core-1:9091
+      INFERENCE_CORE_ADDR: http://model-plane-inference-core-1:9092
+      # Phase 7 B5 — cost-core HTTP API. The gateway reads the price catalogue
+      # (GET /api/v1/pricing) to populate the streamed Usage `cost_usd` off the
+      # same source cost-core prices the durable ledger with. Unset → null cost.
+      COST_CORE_URL: ${COST_CORE_URL:-http://model-plane-cost-core-1:8089}
+      # orchestrator-core's gRPC (OrchestrationCoreService proxy → session-core)
+      # listens on :9080; :8084 is its HTTP health port. Pointing the gateway's
+      # gRPC client at :8084 yields "h2 protocol error".
+      ORCHESTRATOR_CORE_ADDR: http://model-plane-orchestrator-core-1:9080
+      # execution-core gRPC — used to resume a run after an approval is granted
+      # (B3 approval→resume). Without this the gateway falls back to
+      # localhost:9093 and the resume call fails with "tcp connect error".
+      EXECUTION_CORE_ADDR: http://model-plane-execution-core-1:9093
+      SANDBOX_MANAGER_ADDR: http://model-plane-sandbox-manager-1:9094
+      BROWSER_BROKER_ADDR: http://model-plane-browser-broker-1:9095
+      BROWSER_BROKER_AUTH_AUDIENCE: ${BROWSER_BROKER_AUTH_AUDIENCE:-browser-broker}
+      MEMORY_SERVICE_URL: http://model-plane-session-core-1:9091
+      # Legacy env name retained for older gateway builds; memory authority is
+      # session-core, which syncs to Letta through LETTA_MEMORY_ADDR below.
+      LETTA_BRIDGE_ADDR: http://model-plane-session-core-1:9091
+      CAPABILITY_CORE_ADDR: http://model-plane-capability-core-1:9097
+      CAPABILITY_CORE_HTTP_URL: http://model-plane-capability-core-1:8085
+      # Data Plane v2 — retrieval-engine serves Retrieval+Document+Knowledge on
+      # ONE gRPC port (50052). Without this the gateway falls to localhost:50052
+      # (unreachable in-container) → "tcp connect error" on RAG/upload. The
+      # var name is DATAPLANE_* (state.rs::from_env), NOT the .env DATA_PLANE_*.
+      # (graph/wiki gRPC clients have a separate HTTP-only architecture mismatch
+      # in Data Plane v2 — tracked, not wired here.)
+      DATAPLANE_RETRIEVAL_URL: ${DATAPLANE_RETRIEVAL_URL:-http://dpv2-retrieval-engine:50052}
+      # graphRAG (dpv2-graph-index gRPC :50053) + LLM wiki (dpv2-wiki-store gRPC
+      # :50054). Both serve gRPC on inter-plane-bus; the gateway only defaulted
+      # to localhost. These make the graph_client/wiki_client REACHABLE; calling
+      # them from the chat path is a separate (not-yet-wired) integration.
+      DATAPLANE_GRAPH_URL: ${DATAPLANE_GRAPH_URL:-http://dpv2-graph-index:50053}
+      DATAPLANE_WIKI_URL: ${DATAPLANE_WIKI_URL:-http://dpv2-wiki-store:50054}
+      # retrieval-engine's ApiKeyInterceptor requires this as `x-api-key` gRPC
+      # metadata (else "invalid or missing credential"). Maps the .env key.
+      DATAPLANE_INTERNAL_KEY: ${DATAPLANE_INTERNAL_KEY:-${DATA_PLANE_INTERNAL_KEY:-}}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-08-01-preview}
+      # Wave 11 — Speech provider (TTS via /audio/speech, STT via
+      # /audio/transcriptions). Auto-detects Azure when
+      # AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_API_KEY are set,
+      # otherwise falls back to OpenAI when OPENAI_API_KEY is set,
+      # otherwise both RPCs return Unimplemented.
+      #
+      # Azure deployment names default to "tts" and "whisper"; override
+      # to match what's actually deployed in the Azure portal.
+      AZURE_OPENAI_TTS_DEPLOYMENT: ${AZURE_OPENAI_TTS_DEPLOYMENT:-tts}
+      AZURE_OPENAI_STT_DEPLOYMENT: ${AZURE_OPENAI_STT_DEPLOYMENT:-whisper}
+      # Per-operation Azure overrides — set when TTS or STT lives in a
+      # different Azure resource than chat (e.g. gpt-4o-mini-tts in
+      # eastus2 while everything else is in swedencentral). Empty / unset
+      # → falls through to AZURE_OPENAI_ENDPOINT / _API_KEY / _API_VERSION.
+      #
+      # P0.4 residency: the eastus2 TTS resource egresses voice to the US.
+      # speech.rs IGNORES the AZURE_OPENAI_TTS_* override (falling back to the
+      # EU AZURE_OPENAI_ENDPOINT) unless MODEL_PLANE_ALLOW_NON_EU_TTS=true.
+      # Default off so voice stays EU-resident.
+      MODEL_PLANE_ALLOW_NON_EU_TTS: ${MODEL_PLANE_ALLOW_NON_EU_TTS:-false}
+      AZURE_OPENAI_TTS_ENDPOINT: ${AZURE_OPENAI_TTS_ENDPOINT:-}
+      AZURE_OPENAI_TTS_API_KEY: ${AZURE_OPENAI_TTS_API_KEY:-}
+      AZURE_OPENAI_TTS_API_VERSION: ${AZURE_OPENAI_TTS_API_VERSION:-}
+      AZURE_OPENAI_STT_ENDPOINT: ${AZURE_OPENAI_STT_ENDPOINT:-}
+      AZURE_OPENAI_STT_API_KEY: ${AZURE_OPENAI_STT_API_KEY:-}
+      AZURE_OPENAI_STT_API_VERSION: ${AZURE_OPENAI_STT_API_VERSION:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_TTS_MODEL: ${OPENAI_TTS_MODEL:-tts-1}
+      OPENAI_STT_MODEL: ${OPENAI_STT_MODEL:-whisper-1}
+      # Wave 9 — Quarry-v2 edge for Fetch + ExtractStructured RPCs.
+      # Empty / unset → both RPCs return Unimplemented (gateway still
+      # serves Invoke, Health, etc.). quarry-edge lives in a separate
+      # compose project (Ingestion Plane) but, like this gateway, is
+      # joined to the shared external `inter-plane-bus` network — so
+      # the in-network service name resolves directly (Phase 6
+      # compose-wiring fix: this previously defaulted to
+      # host.docker.internal, a stale carry-over from before quarry-edge
+      # joined inter-plane-bus; live-verified both routes work, the
+      # in-network name removes the dependency on quarry-edge's
+      # host-published port staying bound to 127.0.0.1).
+      QUARRY_EDGE_URL: ${QUARRY_EDGE_URL:-http://quarry-edge:8082}
+      QUARRY_EDGE_TIMEOUT_SECS: ${QUARRY_EDGE_TIMEOUT_SECS:-30}
+      # Deep research (composer "Dyp research" → `deepResearch: true` on
+      # /v1/invoke/stream). Runs plan → concurrent search → concurrent read →
+      # synthesize inside the gateway (see rust/services/model-gateway/src/
+      # deep_research.rs) and emits a cited `document` artifact. It rides the
+      # SAME quarry-edge above — with QUARRY_EDGE_URL unset the pipeline reports
+      # that research could not run instead of answering as if it had.
+      #
+      # Every var below is a SPEND LIMIT, not a tuning knob: the pipeline fans
+      # out over the network and then pays for a large-context inference, so an
+      # unbounded phase is an unbounded bill. Each is clamped in code to a hard
+      # ceiling, so a typo cannot turn one chat turn into an unbounded spend —
+      # the values here are the documented defaults, not the enforcement.
+      #   sub-queries planned+searched  (ceiling 10)
+      DEEP_RESEARCH_MAX_SUB_QUERIES: ${DEEP_RESEARCH_MAX_SUB_QUERIES:-6}
+      #   pages fetched and read        (ceiling 16)
+      DEEP_RESEARCH_MAX_PAGES: ${DEEP_RESEARCH_MAX_PAGES:-8}
+      #   characters kept per page      (ceiling 20000; also bounded upstream by
+      #   tool_loop's own 4000-char fetch_url truncation)
+      DEEP_RESEARCH_PAGE_CHARS: ${DEEP_RESEARCH_PAGE_CHARS:-4000}
+      #   total evidence admitted into the synthesis prompt (ceiling 120000) —
+      #   the number that actually bounds the inference cost
+      DEEP_RESEARCH_CORPUS_CHARS: ${DEEP_RESEARCH_CORPUS_CHARS:-40000}
+      #   wall clock for the whole pipeline (ceiling 600). On expiry it
+      #   synthesizes from what it holds and says the budget ran out.
+      DEEP_RESEARCH_TIMEOUT_SECS: ${DEEP_RESEARCH_TIMEOUT_SECS:-120}
+      #   output tokens for the report itself (ceiling 16384)
+      DEEP_RESEARCH_REPORT_TOKENS: ${DEEP_RESEARCH_REPORT_TOKENS:-4096}
+      #   model tier for the cheap sub-query decomposition. Splitting a question
+      #   into search phrases is a rewrite task the user never reads, so it uses
+      #   the intent layer's cheapest mode; the REPORT is written by the turn's
+      #   own model, never this one.
+      DEEP_RESEARCH_PLAN_MODEL: ${DEEP_RESEARCH_PLAN_MODEL:-verevon-budget}
+      # Local semantic-response cache (Dragonfly exact-match). Default ON,
+      # pointing at the Model Plane Dragonfly; set empty to disable. Exact
+      # (org+user+model+prompt) match only — no embeddings and no cross-plane
+      # calls; the vector-similarity tier is owned by Data Plane v2 and layered
+      # on separately. There is deliberately NO hosted third-party tier: the
+      # managed Redis LangCache backend was removed because it POSTed the
+      # fully-assembled prompt and the model's answer to an outside host with no
+      # TTL and no delete path, so erasure could not reach the copy.
+      SEMANTIC_CACHE_URL: ${SEMANTIC_CACHE_URL:-redis://:${MODEL_DRAGONFLY_PASSWORD:?MODEL_DRAGONFLY_PASSWORD is required}@dragonfly:6379}
+      SEMANTIC_CACHE_TTL_SECS: ${SEMANTIC_CACHE_TTL_SECS:-3600}
+      # Semantic (vector) cache tier — owned by Data Plane v2 (embeddings +
+      # Qdrant). With this AND SEMANTIC_CACHE_URL set (default), the gateway
+      # LAYERS them: a fast Dragonfly exact-match hit first, then a DPv2
+      # /v1/cache/semantic/* (HTTP) fallback that also warms the exact tier.
+      # Off by default → exact-match only. DATAPLANE_INTERNAL_KEY (above)
+      # authorizes the call; the HTTP base reuses the same retrieval-engine the
+      # graph-grounding path already targets.
+      SEMANTIC_CACHE_DATAPLANE_ENABLED: ${SEMANTIC_CACHE_DATAPLANE_ENABLED:-false}
+      DATAPLANE_RETRIEVAL_HTTP_URL: ${DATAPLANE_RETRIEVAL_HTTP_URL:-http://dpv2-retrieval-engine:8004}
+      # shipping-core (Ingestion Plane) — backs the shipping_get_quotes plain-
+      # chat builtin. Without this the gateway falls back to localhost:8080,
+      # unreachable from inside this container; execution-core's own agentic
+      # tool reaches the same service via its separate SHIPPING_CORE_URL_EXEC.
+      SHIPPING_CORE_URL: ${SHIPPING_CORE_URL:-http://shipping-core:8080}
+      # information-core (Application Plane weather/traffic/news aggregator,
+      # wraps Yr/met.no) — backs the plain-chat `get_weather` builtin. Without
+      # this the gateway falls back to http://information-core:3190, which is
+      # already the right in-network name (both services join
+      # inter-plane-bus), so this mostly exists to make the wiring explicit
+      # and overridable. execution-core's separate agentic path reaches the
+      # same service via its own `_EXEC`-suffixed vars below; this pair is
+      # model-gateway's own, NOT a duplicate of those.
+      INFORMATION_CORE_URL: ${INFORMATION_CORE_URL:-http://information-core:3190}
+      INFORMATION_CORE_INTERNAL_KEY: ${INFORMATION_CORE_INTERNAL_KEY:-${INTERNAL_API_KEY:-}}
+      # Verevon workspace READ tools — the "AI-first" bridge: data the signed-in
+      # user can see in the UI is answerable in plain chat. Both cores join
+      # inter-plane-bus, same as information-core above, so the service-name
+      # defaults resolve in-network without host port mapping.
+      #   insights_overview       -> insight-core GET /api/v1/insights/overview
+      #   social_list_accounts    -> social-core  GET /api/v1/social/accounts
+      #   social_list_posts       -> social-core  GET /api/v1/social/posts
+      #   social_list_campaigns   -> social-core  GET /api/v1/social/campaigns
+      # Both gate on x-internal-api-key (their own INTERNAL_API_KEY) and scope
+      # every read by the x-org-id header, which model-gateway sets from the
+      # VERIFIED request org — never from model input. Leaving the key unset
+      # makes the tools fail with a named configuration error rather than
+      # sending a request that can only 401.
+      INSIGHT_CORE_URL: ${INSIGHT_CORE_URL:-http://insight-core:3163}
+      SOCIAL_CORE_URL: ${SOCIAL_CORE_URL:-http://social-core:3162}
+      # Control Plane owns per-org quotas (`org_quotas`); the gateway reads the
+      # spend/token ceiling and hands it to cost-core's budget check. Resolved by
+      # COMPOSE SERVICE NAME on inter-plane-bus (org-core has no alias there),
+      # and 8080 is the in-container HTTP port — 18080 is only the host mapping.
+      # A wrong value here fails OPEN and only logs, so the caps would silently
+      # stop enforcing rather than erroring.
+      ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
+      # Secret half of the org-core service credential; the id half is
+      # MODEL_GATEWAY_SERVICE_ID, already set above. The pair is registered in
+      # Control Plane's ORG_CORE_SERVICE_CREDENTIALS under principal
+      # "model-gateway" with scope org:read:any — the same registration shape
+      # execution-core uses. That scope is what makes the ceiling ENFORCE:
+      # fetch_org_limits fails open, so an unset token means no org ceiling is
+      # applied at any point, silently.
+      #
+      # Deliberately org:read:any ONLY, NOT the settings-write scope an earlier
+      # note here asked for: org-core rejects any ":self" scope held by a
+      # principal other than verevon-gateway, in a check that runs before it
+      # opens a listener. Adding it would not enable the cap write — it would
+      # stop org-core from booting.
+      #
+      # Cap writes are not missing, they live elsewhere: the Verevon gateway
+      # holds that scope, mints the required v3 delegation naming the acting
+      # user, and serves PUT /api/v1/orgs/:id/quotas/:key. SetPolicy's own cap
+      # write therefore returns org-core's 403 by design.
+      # UNSET is still a supported state: no org ceiling is applied.
+      MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN: ${MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN:-}
+      APPLICATION_CORE_INTERNAL_KEY: ${APPLICATION_CORE_INTERNAL_KEY:-${INTERNAL_API_KEY:-}}
+      # Verevon's own public origin, as seen by a user's browser through the
+      # verevonv3 gateway. Used only to build the OAuth redirect_uri for MCP
+      # server connections (e.g. Visma Net) — an external authorization
+      # server must redirect back to a URL the browser can actually reach,
+      # never this container's internal address.
+      VEREVON_PUBLIC_ORIGIN: ${VEREVON_PUBLIC_ORIGIN:-http://localhost:5173}
+      # Shared Model-Plane-local secret authenticating this gateway's
+      # GET .../oauth-token call to capability-core when resolving an
+      # OAuth-connected MCP server's token at tools/call dispatch time (no
+      # live per-user bearer exists on that execution-core-triggered path).
+      # Must match capability-core's own MCP_OAUTH_SERVICE_TOKEN below. Empty
+      # disables the resolve path — servers with no stored OAuth tokens are
+      # unaffected either way.
+      MCP_OAUTH_SERVICE_TOKEN: ${MCP_OAUTH_SERVICE_TOKEN:-}
+      # ADR-0003 — the platform layer of the authored-instruction hierarchy
+      # (`apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md`): deployment-level
+      # configuration, deliberately not a database row (no "platform
+      # operator" authority tier exists in this codebase). Composed ahead of
+      # the org and Space layers on every chat turn. Empty means no platform
+      # layer, same silent-absent contract as the other layers.
+      PLATFORM_SYSTEM_INSTRUCTIONS: ${PLATFORM_SYSTEM_INSTRUCTIONS:-}
+    networks:
+      default: {}
+      inter-plane-bus:
+        aliases:
+          - model-plane-model-gateway-1
+          - model-gateway
+    depends_on:
+      nats:
+        condition: service_healthy
+      dragonfly:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
+      interval: 10s
+      retries: 3
+
+  session-core:
+    <<: *runtime-defaults
+    build:
+      context: ..
+      dockerfile: rust/services/session-core/Dockerfile
+      args: *build-metadata
+    ports:
+      - "127.0.0.1:18081:8081"  # HTTP health — host 18081 avoids collision with Ingestion Plane quarry-control (host 8081)
+      - "127.0.0.1:9091:9091"   # gRPC
+    environment:
+      RUST_LOG: info
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
+      NATS_URL: nats://nats:4222
+      NATS_USER: session-core-runtime
+      NATS_PASSWORD: ${MODEL_SESSION_CORE_NATS_PASSWORD:?MODEL_SESSION_CORE_NATS_PASSWORD is required}
+      # Dedicated shared-broker identity for the cross-plane GDPR erasure
+      # consumer only (see gdpr_nats.rs). This is NOT the plane-local NATS_URL
+      # above and must never be repointed at the Model Plane's own broker —
+      # CONTROLPLANE only exists on control-shared-nats.
+      NATS_SHARED_URL: nats://control-shared-nats:4222
+      NATS_SHARED_USER: session-core-gdpr
+      NATS_SHARED_PASSWORD: ${SESSION_CORE_GDPR_NATS_PASSWORD:?SESSION_CORE_GDPR_NATS_PASSWORD is required}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: session-core
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      SESSION_CORE_AUTH_AUDIENCE: ${SESSION_CORE_AUTH_AUDIENCE:-session-core}
+      # Scheduled runs accept only Control-signed, short-lived preparation and
+      # execution decisions. These are public verification material, never a
+      # Control signing key. Leaving either value empty keeps the RPCs
+      # fail-closed, which is the intended unprovisioned-development state.
+      CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
+      CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
+      # Dedicated short-lived service-principal credentials for the optional
+      # session-core -> letta-bridge path. When LETTA_MEMORY_ADDR is non-empty,
+      # session-core fails startup closed unless all three are configured.
+      # The same credential mints the aud=inference-core token the Dreaming
+      # extraction loop presents; Auth Core scopes the two audiences separately.
+      SESSION_CORE_SERVICE_ID: ${SESSION_CORE_SERVICE_ID:-session-core}
+      SESSION_CORE_SERVICE_API_KEY: ${SESSION_CORE_SERVICE_API_KEY:-}
+      # AES-256-GCM key for encrypted approval continuation descriptors. The
+      # service fails closed when a descriptor is requested without this key.
+      SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY: ${SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY:-}
+      # Dreaming's LLM memory extraction (dream_extractor.rs). Unset this
+      # address, or set DREAMING_LLM_EXTRACTION=0, and Dreaming falls back to
+      # the deterministic phrase matcher alone.
+      INFERENCE_CORE_ADDR: ${INFERENCE_CORE_ADDR:-http://model-plane-inference-core-1:9092}
+      DREAMING_LLM_EXTRACTION: ${DREAMING_LLM_EXTRACTION:-1}
+      DREAMING_LLM_MODEL: ${DREAMING_LLM_MODEL:-claude-haiku-4-5}
+      CONTEXT_RECENT_MESSAGES: "20"
+      COMPACTION_THRESHOLD: "80000"
+      # P0.4 residency: region stamped onto every run record at StartRun.
+      # Defaults to the EU region (Sweden Central).
+      MODEL_PLANE_RESIDENCY: ${MODEL_PLANE_RESIDENCY:-swedencentral}
+      LETTA_MEMORY_ADDR: ${LETTA_MEMORY_ADDR:-http://model-plane-letta-bridge-1:9096}
+      # Data Plane v2 grounding tiers for AssembleContext. Without these,
+      # session-core fell back to localhost inside its own container, so the
+      # retrieval, knowledge AND graph segments were silently always empty --
+      # connect_lazy() makes the clients look configured and the callers degrade
+      # to empty on RPC failure by design, so nothing ever errored. Reached over
+      # inter-plane-bus; grpc.rs::dataplane_addr accepts _URL or _ADDR.
+      DATAPLANE_RETRIEVAL_URL: ${DATAPLANE_RETRIEVAL_URL:-http://dpv2-retrieval-engine:50052}
+      DATAPLANE_GRAPH_URL: ${DATAPLANE_GRAPH_URL:-http://dpv2-graph-index:50053}
+      # Retrieval-engine-rs serves KnowledgeService on the same port; split only
+      # if the Data Plane ever separates them.
+      DATAPLANE_KNOWLEDGE_URL: ${DATAPLANE_KNOWLEDGE_URL:-http://dpv2-retrieval-engine:50052}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      nats-provisioner:
+        condition: service_completed_successfully
+    networks:
+      default: {}
+      inter-plane-bus: {}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/healthz"]
+      interval: 10s
+      retries: 3
+
+  inference-core:
+    <<: *runtime-defaults
+    build:
+      context: ..
+      dockerfile: rust/services/inference-core/Dockerfile
+      args: *build-metadata
+    ports:
+      - "127.0.0.1:18082:8082"  # HTTP health — host 18082 avoids collision with Ingestion Plane quarry-edge (host 8082)
+      - "127.0.0.1:9092:9092"   # gRPC compatibility probe; production overlay removes host ports
+    environment:
+      RUST_LOG: info
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      # Base URL for minting the aud=session-core service token used by the
+      # background routing-policy read (defaults to the host-published auth-core
+      # like the other Model cores' JWKS URL). Empty key → the read stays
+      # unauthenticated and fail-soft (keeps the default routing policy).
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://host.docker.internal:3011}
+      # STT deployment on the Azure OpenAI resource. The provider default
+      # ("whisper") does not exist on this resource — the deployed
+      # transcription models are gpt-4o-transcribe / gpt-4o-mini-transcribe.
+      # mini is the dictation default: fast, cheap, accepts webm/opus.
+      AZURE_OPENAI_STT_DEPLOYMENT: ${AZURE_OPENAI_STT_DEPLOYMENT:-gpt-4o-mini-transcribe}
+      INFERENCE_ROUTING_SERVICE_API_KEY: ${INFERENCE_ROUTING_SERVICE_API_KEY:-}
+      INFERENCE_CORE_AUTH_AUDIENCE: ${INFERENCE_CORE_AUTH_AUDIENCE:?INFERENCE_CORE_AUTH_AUDIENCE is required}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: inference-core
+      INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-azure,anthropic,openai,cohere}
+      INFERENCE_MAX_RETRIES: ${INFERENCE_MAX_RETRIES:-3}
+      INFERENCE_CACHE_TTL_SECS: ${INFERENCE_CACHE_TTL_SECS:-300}
+      # Verevon intent layer — turns the verevon-budget/-balance/-genius modes into
+      # a concrete model from request complexity + the org's cost-core budget,
+      # with model-router as the cheap fallback (see provider/intent.rs). The
+      # budget gate is best-effort: COST_CORE_URL points at cost-core's HTTP API;
+      # org/user scope arrives via gRPC metadata (x-org-id/x-user-id) and degrades
+      # to an Unknown posture when absent.
+      VEREVON_INTENT_ENABLED: ${VEREVON_INTENT_ENABLED:-1}
+      COST_CORE_URL: ${COST_CORE_URL:-http://model-plane-cost-core-1:8089}
+      VEREVON_INTENT_BUDGET_USD: ${VEREVON_INTENT_BUDGET_USD:-50}
+      # Runtime RoutingPolicy store: inference-core polls session-core's
+      # RoutingPolicy gRPC for the live intent-routing policy (the Verevon
+      # "model router" tuning), refreshing every ROUTER_POLICY_REFRESH_SECS.
+      # Unset → the chain runs on the built-in RoutingPolicy::default.
+      # Both services join inter-plane-bus, where the generic `session-core`
+      # hostname belongs to Control Plane. Pin the plane-unique Model alias.
+      SESSION_CORE_URL: http://model-plane-session-core-1:9091
+      ROUTER_POLICY_REFRESH_SECS: ${ROUTER_POLICY_REFRESH_SECS:-60}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Azure AI Foundry Claude (claude-ai project). When set, the `anthropic`
+      # provider slot routes claude-* models to <endpoint>/anthropic/v1/messages
+      # (native Anthropic body + x-api-key auth) instead of api.anthropic.com.
+      AZURE_ANTHROPIC_ENDPOINT: ${AZURE_ANTHROPIC_ENDPOINT:-}
+      AZURE_ANTHROPIC_API_KEY: ${AZURE_ANTHROPIC_API_KEY:-}
+      AZURE_ANTHROPIC_DEPLOYMENTS: ${AZURE_ANTHROPIC_DEPLOYMENTS:-}
+      # Azure AI Foundry Cohere (core-ai-rg, same resource as AZURE_OPENAI_*
+      # above but the unified "AI Model Inference API" route, not the classic
+      # /openai/deployments/{name} shape). When set, the `cohere` provider
+      # slot serves Command A Plus — exclusive_catalog, so it never absorbs
+      # another provider's traffic.
+      AZURE_COHERE_ENDPOINT: ${AZURE_COHERE_ENDPOINT:-}
+      AZURE_COHERE_API_KEY: ${AZURE_COHERE_API_KEY:-}
+      AZURE_COHERE_API_VERSION: ${AZURE_COHERE_API_VERSION:-2024-05-01-preview}
+      AZURE_COHERE_DEPLOYMENT: ${AZURE_COHERE_DEPLOYMENT:-cohere-command-a-plus}
+      AZURE_COHERE_REGION: ${AZURE_COHERE_REGION:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-https://api.openai.com/v1}
+      OPENAI_CHAT_MODELS: ${OPENAI_CHAT_MODELS:-}
+      OPENAI_EMBEDDING_MODELS: ${OPENAI_EMBEDDING_MODELS:-}
+      OPENAI_IMAGE_MODELS: ${OPENAI_IMAGE_MODELS:-}
+      OPENAI_VISION_MODELS: ${OPENAI_VISION_MODELS:-}
+      # Realtime session broker. OPENAI_REALTIME_MODEL is present in
+      # ../.env for local dev; keep explicit forwarding so inference-core
+      # sees it even though compose only exposes listed environment keys.
+      OPENAI_REALTIME_API_BASE: ${OPENAI_REALTIME_API_BASE:-}
+      OPENAI_REALTIME_WEBSOCKET_URL: ${OPENAI_REALTIME_WEBSOCKET_URL:-}
+      OPENAI_REALTIME_MODEL: ${OPENAI_REALTIME_MODEL:-gpt-realtime}
+      OPENAI_REALTIME_MODELS: ${OPENAI_REALTIME_MODELS:-}
+      # Azure realtime broker (preferred — uses the valid Azure key via api-key
+      # auth instead of the bad OpenAI key). Activates only when a realtime
+      # deployment is set. URLs derive from AZURE_OPENAI_ENDPOINT unless
+      # overridden to match the resource's exact preview API surface.
+      AZURE_OPENAI_REALTIME_DEPLOYMENT: ${AZURE_OPENAI_REALTIME_DEPLOYMENT:-}
+      AZURE_OPENAI_REALTIME_API_VERSION: ${AZURE_OPENAI_REALTIME_API_VERSION:-}
+      AZURE_OPENAI_REALTIME_SESSIONS_URL: ${AZURE_OPENAI_REALTIME_SESSIONS_URL:-}
+      AZURE_OPENAI_REALTIME_WEBSOCKET_URL: ${AZURE_OPENAI_REALTIME_WEBSOCKET_URL:-}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2025-01-01-preview}
+      AZURE_OPENAI_REGION: ${AZURE_OPENAI_REGION:-}
+      # Azure AI Foundry Claude is a SEPARATE Azure resource from Azure OpenAI, so
+      # it carries its own region. Neither may inherit the other's geography: an
+      # unset region here means "cannot prove EU", classified as no residency
+      # commitment rather than promoted to EU.
+      AZURE_ANTHROPIC_REGION: ${AZURE_ANTHROPIC_REGION:-}
+      # Declared Azure OpenAI deployment type (DataZoneStandard / Standard /
+      # GlobalStandard). Neither the endpoint host nor the region reveals this, and
+      # a Global deployment in an EU region still processes inference worldwide —
+      # so leaving it unset means the EU boundary cannot be proven, and the
+      # provider is classified as making no residency commitment.
+      AZURE_OPENAI_DEPLOYMENT_TYPE: ${AZURE_OPENAI_DEPLOYMENT_TYPE:-}
+      # Deny-by-default: an explicitly Global/Worldwide deployment type refuses to
+      # boot unless this is set, because it voids the EU residency claim.
+      MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT: ${MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT:-false}
+      # Records that a provider making no residency commitment is accepted. Without
+      # it the service still boots but logs a warning per such provider.
+      MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY: ${MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY:-false}
+      # ZDR is evidence-bound. The legacy boolean below is read ONLY to reject an
+      # unbacked assertion: with it true and no attestation supplied, the service
+      # refuses to boot rather than silently serving ZDR traffic on no evidence.
+      # Supply all five variables per resource, or leave the boolean false.
+      # REVIEW_BY bounds the claim: past that date the attestation stops granting
+      # ZDR rather than coasting on nobody remembering the approval lapsed.
+      #   printf '%s\n%s\n%s\n%s\n%s\n' \
+      #     "$RESOURCE_ID" "$APPROVAL_REF" "$EFFECTIVE_DATE" "$REVIEW_BY" "$REVIEWER" \
+      #     | sha256sum
+      AZURE_OPENAI_ZDR_CONFIRMED: ${AZURE_OPENAI_ZDR_CONFIRMED:-false}
+      AZURE_OPENAI_ZDR_RESOURCE_ID: ${AZURE_OPENAI_ZDR_RESOURCE_ID:-}
+      AZURE_OPENAI_ZDR_APPROVAL_REF: ${AZURE_OPENAI_ZDR_APPROVAL_REF:-}
+      AZURE_OPENAI_ZDR_EFFECTIVE_DATE: ${AZURE_OPENAI_ZDR_EFFECTIVE_DATE:-}
+      AZURE_OPENAI_ZDR_REVIEW_BY: ${AZURE_OPENAI_ZDR_REVIEW_BY:-}
+      AZURE_OPENAI_ZDR_REVIEWER: ${AZURE_OPENAI_ZDR_REVIEWER:-}
+      AZURE_OPENAI_ZDR_DIGEST: ${AZURE_OPENAI_ZDR_DIGEST:-}
+      # The Foundry Claude resource has its own retention approval, so its own
+      # attestation. Before this existed no Claude route could serve ZDR at all.
+      AZURE_ANTHROPIC_ZDR_CONFIRMED: ${AZURE_ANTHROPIC_ZDR_CONFIRMED:-false}
+      AZURE_ANTHROPIC_ZDR_RESOURCE_ID: ${AZURE_ANTHROPIC_ZDR_RESOURCE_ID:-}
+      AZURE_ANTHROPIC_ZDR_APPROVAL_REF: ${AZURE_ANTHROPIC_ZDR_APPROVAL_REF:-}
+      AZURE_ANTHROPIC_ZDR_EFFECTIVE_DATE: ${AZURE_ANTHROPIC_ZDR_EFFECTIVE_DATE:-}
+      AZURE_ANTHROPIC_ZDR_REVIEW_BY: ${AZURE_ANTHROPIC_ZDR_REVIEW_BY:-}
+      AZURE_ANTHROPIC_ZDR_REVIEWER: ${AZURE_ANTHROPIC_ZDR_REVIEWER:-}
+      AZURE_ANTHROPIC_ZDR_DIGEST: ${AZURE_ANTHROPIC_ZDR_DIGEST:-}
+      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
+      AZURE_OPENAI_CHAT_DEPLOYMENTS: ${AZURE_OPENAI_CHAT_DEPLOYMENTS:-}
+      AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-}
+      AZURE_OPENAI_EMBEDDING_DEPLOYMENTS: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENTS:-}
+      AZURE_OPENAI_IMAGE_DEPLOYMENT: ${AZURE_OPENAI_IMAGE_DEPLOYMENT:-}
+      AZURE_OPENAI_IMAGE_DEPLOYMENTS: ${AZURE_OPENAI_IMAGE_DEPLOYMENTS:-}
+      AZURE_OPENAI_VISION_DEPLOYMENT: ${AZURE_OPENAI_VISION_DEPLOYMENT:-}
+      AZURE_OPENAI_VISION_DEPLOYMENTS: ${AZURE_OPENAI_VISION_DEPLOYMENTS:-}
+      AZURE_OPENAI_TRANSLATION_DEPLOYMENT: ${AZURE_OPENAI_TRANSLATION_DEPLOYMENT:-}
+      AZURE_OPENAI_LANGUAGE_DEPLOYMENT: ${AZURE_OPENAI_LANGUAGE_DEPLOYMENT:-}
+      # Azure OpenAI Sora/video jobs. Endpoint/key fall back to the generic
+      # Azure OpenAI values in inference-core, but pass operation-specific
+      # overrides and deployment names when present in ../.env.
+      AZURE_OPENAI_VIDEO_ENDPOINT: ${AZURE_OPENAI_VIDEO_ENDPOINT:-}
+      AZURE_OPENAI_VIDEO_API_KEY: ${AZURE_OPENAI_VIDEO_API_KEY:-}
+      AZURE_OPENAI_VIDEO_API_VERSION: ${AZURE_OPENAI_VIDEO_API_VERSION:-preview}
+      AZURE_OPENAI_VIDEO_MODEL: ${AZURE_OPENAI_VIDEO_MODEL:-}
+      AZURE_OPENAI_VIDEO_DEPLOYMENT: ${AZURE_OPENAI_VIDEO_DEPLOYMENT:-}
+      AZURE_OPENAI_VIDEO_MODELS: ${AZURE_OPENAI_VIDEO_MODELS:-}
+      AZURE_TRANSLATOR_API_KEY: ${AZURE_TRANSLATOR_API_KEY:-${AZURE_TRANSLATOR_KEY:-}}
+      AZURE_TRANSLATOR_KEY: ${AZURE_TRANSLATOR_KEY:-}
+      AZURE_TRANSLATOR_ENDPOINT: ${AZURE_TRANSLATOR_ENDPOINT:-}
+      AZURE_TRANSLATOR_REGION: ${AZURE_TRANSLATOR_REGION:-}
+      AZURE_AI_LANGUAGE_ENDPOINT: ${AZURE_AI_LANGUAGE_ENDPOINT:-}
+      AZURE_AI_LANGUAGE_KEY: ${AZURE_AI_LANGUAGE_KEY:-}
+      AZURE_AI_LANGUAGE_API_VERSION: ${AZURE_AI_LANGUAGE_API_VERSION:-}
+      AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: ${AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT:-}
+      AZURE_DOCUMENT_INTELLIGENCE_KEY: ${AZURE_DOCUMENT_INTELLIGENCE_KEY:-}
+      AZURE_DOCUMENT_INTELLIGENCE_API_VERSION: ${AZURE_DOCUMENT_INTELLIGENCE_API_VERSION:-}
+      AZURE_SPEECH_ENDPOINT: ${AZURE_SPEECH_ENDPOINT:-}
+      AZURE_SPEECH_KEY: ${AZURE_SPEECH_KEY:-}
+      AZURE_SPEECH_REGION: ${AZURE_SPEECH_REGION:-}
+      AZURE_SPEECH_DEFAULT_VOICE: ${AZURE_SPEECH_DEFAULT_VOICE:-}
+      DEFAULT_PROVIDER: anthropic
+    # Join the shared bus so cross-plane callers can reach inference-core by
+    # name. Data Plane v2's retrieval-engine embeds queries via
+    # MODEL_PLANE_AI_CORE_GRPC_URL=http://inference-core:9092 — without this it
+    # only sat on model-plane-network → dpv2 got DNS_FAIL → "model-plane
+    # embedding failed" → RAG silently degraded to ungrounded.
+    networks:
+      default: {}
+      inter-plane-bus:
+        aliases:
+          - model-plane-inference-core-1
+          - inference-core
+    depends_on:
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/readyz"]
+      interval: 10s
+      retries: 3
+
+  execution-core:
+    <<: *runtime-defaults
+    # Sandbox (Tier-2): the image ships `bubblewrap` so code execution is
+    # isolated (namespaces + filesystem). bwrap needs unprivileged user
+    # namespaces (clone/unshare CLONE_NEWUSER) which Docker's default seccomp
+    # blocks. seccomp-bwrap.json is a SCOPED profile (allow-by-default + an
+    # explicit deny-list of escape/escalation syscalls) — strictly safer than
+    # `seccomp:unconfined` while permitting the clone/unshare/mount bwrap needs.
+    # If the HOST disables unprivileged userns entirely, also set the host
+    # sysctl `kernel.unprivileged_userns_clone=1` (host-level, not compose).
+    security_opt:
+      - seccomp=./seccomp-bwrap.json
+    build:
+      context: ..
+      dockerfile: rust/services/execution-core/Dockerfile
+      args: *build-metadata
+    ports:
+      - "127.0.0.1:18083:8083"  # HTTP health — host 18083 avoids collision with the RentNå Expo dev server (host 8083)
+      - "127.0.0.1:9093:9093"   # gRPC compatibility probe; production overlay removes host ports
+    environment:
+      RUST_LOG: info
+      # Autonomous tool-using runs route through Azure's model-router deployment,
+      # which selects the best model per turn (tool-calling model selection is
+      # handled by the router, cost-aware). Overridable per deployment; empty →
+      # honor the caller's requested model. Plain chat is unaffected.
+      EXECUTION_AGENT_MODEL: ${EXECUTION_AGENT_MODEL:-model-router}
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MODEL_MINIO_ROOT_USER:?MODEL_MINIO_ROOT_USER is required}
+      MINIO_SECRET_KEY: ${MODEL_MINIO_ROOT_PASSWORD:?MODEL_MINIO_ROOT_PASSWORD is required}
+      MINIO_BUCKET: ${OBJECT_STORAGE_BUCKET:-model-plane-artifacts}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: execution-core
+      SESSION_CORE_ADDR: http://model-plane-session-core-1:9091
+      # Cross-plane dependencies resolve on the private inter-plane bus; no
+      # host-published development ports are part of the service contract.
+      # Social workspace tools (list_social_accounts / publish_social_post).
+      SOCIAL_CORE_URL: ${SOCIAL_CORE_URL:-http://social-core:3162}
+      INFERENCE_CORE_ADDR: http://inference-core:9092
+      # model-gateway gRPC — governed loop fetches/proxies an org's registered
+      # MCP tools (ListMcpTools + ProxyMcpTool). Same model-plane-network, so the
+      # service name resolves; best-effort (no MCP tools offered if unreachable).
+      MODEL_GATEWAY_ADDR: ${MODEL_GATEWAY_ADDR_EXEC:-http://model-gateway:9090}
+      # Documented primary for the agent run driver (RunAgent) Infer round.
+      INFERENCE_CORE_URL: http://inference-core:9092
+      CAPABILITY_CORE_ADDR: http://capability-core:9097
+      # Capability HEALTH attestation is an HTTP API, separate from the gRPC
+      # policy address above. execution-core is the health authority for the
+      # capabilities it owns (cap.command.sandbox, cap.command.shell): it probes
+      # bwrap + the interpreter and attests what it actually measured. Without
+      # this URL attestation is skipped with a WARN, and those capabilities stay
+      # `unavailable` — which is the correct fail-closed state, not a silent one.
+      CAPABILITY_CORE_HTTP_URL: http://capability-core:8085
+      # Browser grants are revalidated immediately before browser_agent
+      # dispatch. This private service endpoint is never a host-published API.
+      BROWSER_BROKER_ADDR: http://browser-broker:9095
+      # Quarry-v2 edge (Ingestion Plane) — backs the real web_search / web_fetch
+      # agentic tools and the browser-agent loop.
+      QUARRY_EDGE_URL: ${QUARRY_EDGE_URL:-http://quarry-edge:8082}
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      # Independently verify a dedicated Execution Core user bearer before any
+      # execution mutation. Data Plane credentials arrive separately through
+      # x-data-plane-authorization and are never accepted as local authority.
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
+      EXECUTION_CORE_AUTH_AUDIENCE: ${EXECUTION_CORE_AUTH_AUDIENCE:-execution-core}
+      EXECUTION_CORE_SERVICE_ID: ${EXECUTION_CORE_SERVICE_ID:-execution-core}
+      EXECUTION_CORE_SERVICE_API_KEY: ${EXECUTION_CORE_SERVICE_API_KEY:?EXECUTION_CORE_SERVICE_API_KEY is required}
+      # Per-call capability decisions are signed by capability-core and
+      # verified immediately before execution. Development may leave these
+      # unset (allow decisions then carry no evidence); production overlays
+      # make both sides mandatory so an allow cannot cross the dispatch gate
+      # without an Ed25519 proof.
+      EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY: ${EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY:-}
+      # The scheduled-step lane independently verifies the short-lived Control
+      # decision at the Execution Core effect boundary. Reuse the deployment's
+      # Control public key set; an absent key keeps the lane disabled.
+      EXECUTION_CORE_SCHEDULED_STEP_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
+      EXECUTION_CORE_SCHEDULED_STEP_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
+      # Governed tickets.create adapter. All bindings are intentionally empty
+      # by default: the adapter stays disabled until Control, Conversation
+      # Core, and Execution Core have distinct, least-privilege credentials.
+      # Never place the values in this Compose file; provision them through the
+      # deployment's private environment/secret store.
+      CONTROL_PLANE_USER_CORE_URL: ${CONTROL_PLANE_USER_CORE_URL:-}
+      EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN: ${EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN:-}
+      CONVERSATION_CORE_AGENT_ACTION_URL: ${CONVERSATION_CORE_AGENT_ACTION_URL:-}
+      CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN: ${CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN:-}
+      EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN: ${EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN:-}
+      EXECUTION_CORE_ALLOW_INSECURE_TICKET_LOOPBACK: ${EXECUTION_CORE_ALLOW_INSECURE_TICKET_LOOPBACK:-false}
+      # Feature-gates QuarryAgentClient::from_env() (browser_agent loop) — the
+      # env var this block's QUARRY_EDGE_URL comment already promises but that
+      # was never actually wired here (Phase 2, found live: run_browser_agent_loop
+      # failed fast with "browser agent unavailable" until this was added).
+      QUARRY_BROWSER_AGENT_ENABLED: ${QUARRY_BROWSER_AGENT_ENABLED:-1}
+      # Data Plane v2 retrieval — backs the real knowledge_search agentic tool
+      # (RAG over the org's ingested docs). DATAPLANE_INTERNAL_KEY is sent as
+      # the x-api-key credential.
+      DATAPLANE_RETRIEVAL_URL: ${DATAPLANE_RETRIEVAL_URL_EXEC:-http://retrieval-engine:50052}
+      DATAPLANE_INTERNAL_KEY: ${DATAPLANE_INTERNAL_KEY:-${DATA_PLANE_INTERNAL_KEY:-}}
+      # Information-core (Application Plane) — backs the real news / traffic /
+      # yr_weather / track_shipment agentic tools.
+      INFORMATION_CORE_URL: ${INFORMATION_CORE_URL_EXEC:-http://information-core:3190}
+      # information-core gates /api/v1/* on x-internal-api-key (no-key → 401), so
+      # the info tools must present the shared internal key.
+      INFORMATION_CORE_INTERNAL_KEY: ${INFORMATION_CORE_INTERNAL_KEY:-${INTERNAL_API_KEY:-}}
+      # shipping-core (Ingestion Plane) — backs get_shipping_quotes /
+      # shipping_carriers.
+      SHIPPING_CORE_URL: ${SHIPPING_CORE_URL_EXEC:-http://shipping-core:8080}
+      # integration-corev2 (Ingestion Plane) — backs list_provider_actions /
+      # execute_provider_action (the agent's typed bridge to every
+      # OAuth-connected provider operation). The gateway gates /api/v1/* on
+      # its service authentication contract.
+      INTEGRATION_COREV2_URL: ${INTEGRATION_COREV2_URL_EXEC:-http://integration-api:3026}
+      INTEGRATION_COREV2_INTERNAL_KEY: ${INTEGRATION_COREV2_INTERNAL_KEY:-${INTERNAL_API_KEY:-}}
+      # Shipping and Integration accept short-lived Auth Core ingestion tokens.
+      # execution-core mints them with this registered service principal instead
+      # of forwarding a shared internal key or caller-selected tenant headers.
+      INGESTION_SERVICE_ID: ${INGESTION_SERVICE_ID:-model-execution}
+      INGESTION_SERVICE_API_KEY: ${MODEL_EXECUTION_SERVICE_API_KEY:?MODEL_EXECUTION_SERVICE_API_KEY is required}
+      # user-core (Control Plane) — GetUser/GetUserProfile only, to fill in
+      # book_shipment's recipient contact (Bring and other carriers reject a
+      # booking outright without one) when the model didn't supply any.
+      # Reachable over inter-plane-bus, the network Model Plane and Control
+      # Plane share; user-core's gRPC listener has no published host port.
+      USER_CORE_GRPC_ADDR: ${USER_CORE_GRPC_ADDR:-http://user-service:50012}
+      USER_CORE_GRPC_CREDENTIAL_ID: ${USER_CORE_GRPC_CREDENTIAL_ID:-execution-core-primary}
+      USER_CORE_GRPC_PRINCIPAL: ${USER_CORE_GRPC_PRINCIPAL:-execution-core}
+      USER_CORE_GRPC_SERVICE_AUTH: ${EXECUTION_CORE_USER_CORE_GRPC_TOKEN:?EXECUTION_CORE_USER_CORE_GRPC_TOKEN is required}
+      # Signs the provider-write attestation integration-corev2 requires on a
+      # write action (see IntegrationActionsClient::execute_action). Public
+      # half is registered under issuer "model-execution" in integration-corev2's
+      # INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON. Absent → writes fail
+      # closed with an honest tool error rather than reaching integration-corev2
+      # unattested.
+      EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY: ${EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY:-}
+      EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID: ${EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID:-}
+      # Post-approval continuation dispatcher (approval_delivery_worker):
+      # auto-discovers every organization via org-core's internal directory
+      # (org:read:any) by default. EXECUTION_CORE_APPROVAL_DELIVERY_ORG_IDS is
+      # an explicit override for staged rollout, not the normal path — see
+      # org_directory's module doc.
+      ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
+      # Shared with org-core's ORG_CORE_SERVICE_CREDENTIALS (Control Plane
+      # docker-compose.yml) under principal "execution-core", scope
+      # org:read:any — the same scope session-core/integration-corev2/
+      # billing-core already hold for this class of read. Generated
+      # independently in each plane's local secrets store today (same as
+      # its siblings SESSION_ORG_CORE_SERVICE_TOKEN/
+      # INTEGRATION_ORG_CORE_SERVICE_TOKEN): the two sides must be
+      # reconciled to the same value manually until the credential-rollout
+      # ritual (verevon-roadmap.md) runs — not a gap unique to this token.
+      EXECUTION_ORG_CORE_SERVICE_TOKEN: ${EXECUTION_ORG_CORE_SERVICE_TOKEN:-}
+      EXECUTION_CORE_APPROVAL_DELIVERY_ORG_IDS: ${EXECUTION_CORE_APPROVAL_DELIVERY_ORG_IDS:-}
+      EXECUTION_CORE_APPROVAL_DELIVERY_POLL_SECONDS: ${EXECUTION_CORE_APPROVAL_DELIVERY_POLL_SECONDS:-15}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      session-core:
+        condition: service_healthy
+      inference-core:
+        condition: service_healthy
+    networks:
+      default: {}
+      inter-plane-bus: {}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/readyz"]
+      interval: 10s
+      retries: 3
+
+  # --- Go services ---
+
+  orchestrator-core:
+    <<: *runtime-defaults
+    build:
+      context: ../go
+      dockerfile: services/orchestrator-core/Dockerfile
+      args: *build-metadata
+    ports:
+      - "127.0.0.1:8084:8084"   # HTTP health
+      - "127.0.0.1:9080:9080"   # gRPC (OrchestrationCoreService + OrchestratorWorkflowService)
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      NATS_URL: nats://nats:4222
+      NATS_USER: orchestrator-core-runtime
+      NATS_PASSWORD: ${MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD:?MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD is required}
+      SESSION_CORE_ADDR: session-core:9091
+      LETTA_BRIDGE_AUTH_AUDIENCE: ${LETTA_BRIDGE_AUTH_AUDIENCE:-letta-bridge}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
+      # Mint endpoint for the outbound activity credential (see the block below).
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      INFERENCE_CORE_ADDR: inference-core:9092
+      EXECUTION_CORE_ADDR: execution-core:9093
+      CAPABILITY_CORE_ADDR: capability-core:9097
+      ENABLE_COMPAT_ADAPTER: "false"
+      MP_COMPAT_MODE: v1_only
+      # Durable store for feedback_ratings (thumbs up/down -> skill promotion
+      # scores). Without this the service falls back to an in-memory store and
+      # logs a WARN: ratings survive only until the next restart, so a skill can
+      # never accumulate enough samples to be promoted.
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
+      # --- StartWorkflow (OrchestratorWorkflowService) -----------------------
+      # The production entry point into the durable Temporal tier. It is the ONLY
+      # locally-authenticated RPC here; the OrchestrationCoreService methods stay
+      # session-core proxies that forward the caller's credential.
+      #
+      # Audience of the Auth Core JWTs StartWorkflow accepts. NOTE: `orchestrator-core`
+      # is not yet a mintable audience in auth-core's PlaneAudience union, so no
+      # such token can be issued today — the JWT path is code-complete but
+      # unusable until Control Plane adds it. Until then the internal credential
+      # below is the working path.
+      ORCHESTRATOR_CORE_AUTH_AUDIENCES: ${ORCHESTRATOR_CORE_AUTH_AUDIENCES:-orchestrator-core}
+      # Model-Plane-local shared secret for hops with no live per-user bearer
+      # (capability-core's cron task dispatcher). Same pattern as
+      # MCP_OAUTH_SERVICE_TOKEN. Must match capability-core's value below.
+      # BOTH this and the org list must be set or the path stays disabled: a
+      # secret with no org allowlist would be an unbounded credential.
+      ORCHESTRATOR_INTERNAL_SERVICE_TOKEN: ${ORCHESTRATOR_INTERNAL_SERVICE_TOKEN:-}
+      # Comma-separated organizations the internal credential may start work
+      # for. There is no wildcard, so a leaked secret still cannot reach another
+      # tenant.
+      ORCHESTRATOR_INTERNAL_SERVICE_ORGS: ${ORCHESTRATOR_INTERNAL_SERVICE_ORGS:-}
+      # --- Outbound credential for Temporal activities -----------------------
+      # A Temporal activity's context comes from the SDK worker, not from a gRPC
+      # server handler, so there is NO inbound bearer for the client factory to
+      # forward. Without these, every activity dials session-core /
+      # inference-core / capability-core / letta-bridge with no credential and is
+      # answered Unauthenticated — and because the activities treat only
+      # Unavailable as non-fatal, that is a hard failure: workflows start but no
+      # activity that touches a sibling can do real work.
+      #
+      # The token is minted per (org, audience) and refreshed ahead of expiry;
+      # a pasted static token cannot work, because auth-core's plane tokens
+      # default to a 300-second TTL. Absent key => minting is skipped and the
+      # service logs a WARN naming these variables.
+      #
+      # Requires an `orchestrator-core` entry in Auth Core's
+      # PLANE_SERVICE_PRINCIPALS_JSON whose retentionByAudience for session-core
+      # is `persistent`: session-core refuses any ZDR credential for a
+      # non-`:read` scope, and StartRun is a write.
+      #
+      # execution-core is minted only for the dedicated scheduled-step RPC;
+      # the gRPC client filters that bearer by method. ExecuteStep and RunAgent
+      # remain user-bound and never receive this service credential. See
+      # internal/servicecred.
+      ORCHESTRATOR_CORE_SERVICE_ID: ${ORCHESTRATOR_CORE_SERVICE_ID:-orchestrator-core}
+      ORCHESTRATOR_CORE_SERVICE_API_KEY: ${ORCHESTRATOR_CORE_SERVICE_API_KEY:-}
+      # Fresh Control authority for the StartScheduledRun activity. The
+      # dedicated credential is intentionally optional in dev: without every
+      # value the activity fails closed instead of using a standing grant.
+      CONTROL_USER_CORE_URL: ${CONTROL_USER_CORE_URL:-}
+      ORCHESTRATOR_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN: ${ORCHESTRATOR_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN:-}
+      ORCHESTRATOR_CORE_CONTROL_SCHEDULE_STEP_SERVICE_TOKEN: ${ORCHESTRATOR_CORE_CONTROL_SCHEDULE_STEP_SERVICE_TOKEN:-}
+      CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
+      CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
+    depends_on:
+      temporal:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    # alpine final image has no curl (only ca-certificates); use busybox wget.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8084/healthz"]
+      interval: 10s
+      retries: 3
+
+  capability-core:
+    <<: *runtime-defaults
+    build:
+      context: ../go
+      dockerfile: services/capability-core/Dockerfile
+      args: *build-metadata
+    ports:
+      - "127.0.0.1:8085:8085"   # HTTP health
+      - "127.0.0.1:9097:9097"   # gRPC
+    environment:
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
+      REDIS_URL: redis://:${MODEL_DRAGONFLY_PASSWORD:?MODEL_DRAGONFLY_PASSWORD is required}@dragonfly:6379
+      NATS_URL: nats://nats:4222
+      NATS_USER: capability-core-runtime
+      NATS_PASSWORD: ${MODEL_CAPABILITY_CORE_NATS_PASSWORD:?MODEL_CAPABILITY_CORE_NATS_PASSWORD is required}
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
+      CAPABILITY_CORE_AUTH_AUDIENCE: ${CAPABILITY_CORE_AUTH_AUDIENCE:-capability-core}
+      CAPABILITY_CORE_DECISION_SIGNING_KEY: ${CAPABILITY_CORE_DECISION_SIGNING_KEY:-}
+      CAPABILITY_CORE_DECISION_SIGNING_KID: ${CAPABILITY_CORE_DECISION_SIGNING_KID:-capability-decision-v1}
+      # Outbound service-token minting for the skill-learning review, which
+      # calls session-core (read the transcript, upsert the skill) and
+      # inference-core (review it). The two JWKS/ISSUER vars above verify
+      # INBOUND tokens; these mint OUTBOUND ones. Minting rather than a static
+      # token is not a preference: plane tokens for these audiences default to a
+      # 300-SECOND TTL, so a pasted token 401s about five minutes after boot.
+      # Absent key => minting is skipped, the consumer logs a WARN naming this
+      # variable, and learning stays disabled rather than failing silently.
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      CAPABILITY_CORE_SERVICE_ID: ${CAPABILITY_CORE_SERVICE_ID:-capability-core}
+      CAPABILITY_CORE_SERVICE_API_KEY: ${CAPABILITY_CORE_SERVICE_API_KEY:-}
+      # Capability Core reauthorizes every due scheduled fire directly with
+      # Control before it can prepare a service-owned Session Core thread.
+      # The credential must be registered only as capability-core with
+      # spaces:schedule:reauthorize; it is intentionally distinct from the
+      # Orchestrator effect-time credential below. Empty values fail closed.
+      CONTROL_USER_CORE_URL: ${CONTROL_USER_CORE_URL:-}
+      CAPABILITY_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN: ${CAPABILITY_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN:-}
+      CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
+      CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
+      APIS_GURU_OPENAPI_DIRECTORY_PATH: ${APIS_GURU_OPENAPI_DIRECTORY_PATH:-/var/lib/capability-core/openapi-directory}
+      # Optional Letta tool-definition ranking. This is not memory/passages
+      # search and never expands the durable tenant-scoped capability catalog.
+      LETTA_TOOL_SEARCH_ENABLED: ${LETTA_TOOL_SEARCH_ENABLED:-false}
+      LETTA_TOOL_SEARCH_URL: ${LETTA_TOOL_SEARCH_URL:-}
+      LETTA_API_KEY: ${LETTA_API_KEY:-}
+      LETTA_TOOL_SEARCH_MODE: ${LETTA_TOOL_SEARCH_MODE:-hybrid}
+      LETTA_TOOL_SEARCH_TIMEOUT: ${LETTA_TOOL_SEARCH_TIMEOUT:-2s}
+      LETTA_TOOL_SEARCH_LIMIT: ${LETTA_TOOL_SEARCH_LIMIT:-50}
+      LETTA_TOOL_SEARCH_MAX_RESPONSE_BYTES: ${LETTA_TOOL_SEARCH_MAX_RESPONSE_BYTES:-262144}
+      LETTA_TOOL_SEARCH_ALLOW_INSECURE_LOOPBACK: ${LETTA_TOOL_SEARCH_ALLOW_INSECURE_LOOPBACK:-false}
+      # AES-256-GCM key encrypting mcp_oauth_tokens at rest (access_token /
+      # refresh_token columns). Must be base64 and decode to exactly 32
+      # bytes. Unset leaves the oauth-token(s) endpoints 503ing rather than
+      # falling back to plaintext storage — generate with, e.g.,
+      # `openssl rand -base64 32`.
+      MCP_TOKEN_ENCRYPTION_KEY: ${MCP_TOKEN_ENCRYPTION_KEY:-}
+      # Shared Model-Plane-local secret accepted on GET .../oauth-token as an
+      # alternative to the normal per-user JWT principal — model-gateway's
+      # execution-core-triggered tools/call dispatch has no live per-user
+      # bearer to present. Must match model-gateway's own
+      # MCP_OAUTH_SERVICE_TOKEN above. Empty disables that one path; the
+      # per-user JWT path is unaffected either way.
+      MCP_OAUTH_SERVICE_TOKEN: ${MCP_OAUTH_SERVICE_TOKEN:-}
+      # Backends for the /commands delegation AND — the reason they are now set
+      # — the G7 learning-review consumer. startLearningConsumer is a no-op when
+      # either address is empty, so with these unset the RUN_COMPLETED consumer
+      # never even subscribed: it logged "learning-review consumer disabled" once
+      # at boot and was silent forever after, which reads exactly like a healthy
+      # consumer that has had nothing to do.
+      SESSION_CORE_ADDR: ${SESSION_CORE_ADDR:-session-core:9091}
+      INFERENCE_CORE_ADDR: ${INFERENCE_CORE_ADDR:-inference-core:9092}
+      # Auth Core service JWTs for those two backends. Both cores authenticate
+      # every RPC, so without these the learning review dies on its first
+      # transcript read with "verified caller credential required" — the events
+      # arrive, the review never runs. `session-core` and `inference-core` are
+      # already mintable plane audiences, so this needs only a service-principal
+      # registry entry in Auth Core (PLANE_SERVICE_PRINCIPALS_JSON), no code.
+      # Required scopes: session:read + session:skills:write (session-core),
+      # inference:invoke (inference-core).
+      SESSION_CORE_SERVICE_TOKEN: ${CAPABILITY_CORE_SESSION_CORE_SERVICE_TOKEN:-}
+      INFERENCE_CORE_SERVICE_TOKEN: ${CAPABILITY_CORE_INFERENCE_CORE_SERVICE_TOKEN:-}
+      # --- cron -> durable run hand-off --------------------------------------
+      # The cron sweeper fires due schedules into `tasks`; the task executor
+      # claims them and turns each into a durable Temporal run through
+      # orchestrator-core's StartWorkflow RPC. That RPC is what closes the loop:
+      # the run's CompleteRunActivity emits RUN_COMPLETED, which is what the
+      # learning-review consumer in this service has always been waiting for.
+      ORCHESTRATOR_WORKFLOW_ADDR: ${ORCHESTRATOR_WORKFLOW_ADDR:-orchestrator-core:9080}
+      # FALLBACK credential only. Must equal orchestrator-core's
+      # ORCHESTRATOR_INTERNAL_SERVICE_TOKEN, and that side must list this
+      # deployment's org(s) in ORCHESTRATOR_INTERNAL_SERVICE_ORGS.
+      #
+      # The PREFERRED credential is a minted service JWT for audience
+      # `orchestrator-core`, taken automatically from the
+      # CAPABILITY_CORE_SERVICE_ID / _SERVICE_API_KEY / AUTH_CORE_URL trio above —
+      # no extra variable needed. It matters because only a JWT carries a SIGNED
+      # retention posture, and orchestrator-core refuses the three workflows that
+      # persist derived content (MemoryConsolidation, SkillPromotion,
+      # FeedbackPromotion) to any caller without one. That refusal is by identity,
+      # so nothing configured on this shared-secret path can reach them.
+      #
+      # Requires an `orchestrator-core` entry on capability-core's service
+      # principal in Auth Core with BOTH `orchestration:workflow:start` and
+      # `:start:global` (PolicyGlobalRegistry demands both) and
+      # retentionByAudience `persistent` — a service token defaults to zdr:true,
+      # and a ZDR caller is refused by the very gate this exists to satisfy.
+      #
+      # Either credential alone is enough to dispatch; with neither, workflow
+      # dispatch is disabled and the task executor stays OFF (see below) rather
+      # than stranding tasks. ORCHESTRATOR_CORE_SERVICE_TOKEN is a static
+      # break-glass override for the mint.
+      ORCHESTRATOR_INTERNAL_SERVICE_TOKEN: ${ORCHESTRATOR_INTERNAL_SERVICE_TOKEN:-}
+      ORCHESTRATOR_CORE_SERVICE_TOKEN: ${ORCHESTRATOR_CORE_SERVICE_TOKEN:-}
+      # Workflow a fired task runs when its cron template names none.
+      TASK_DEFAULT_WORKFLOW_TYPE: ${TASK_DEFAULT_WORKFLOW_TYPE:-InteractiveRunSupervision}
+      # Tri-state, deliberately left unset by default:
+      #   unset  -> ON when the workflow dispatcher above is configured, OFF
+      #             otherwise. This is the safe default: the executor runs only
+      #             when it can actually complete the hand-off.
+      #   "false" -> always OFF.
+      #   "true"  -> always ON, even publish-only. Forcing this on without the
+      #             workflow dispatcher above no longer strands claimed tasks in
+      #             `running`: this repository ships no consumer of
+      #             mp.v1.capability.task.dispatched, so each claimed task now
+      #             fails immediately with an explicit reason instead (loud
+      #             ERROR-level startup log too). Only set
+      #             TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH=true below once
+      #             this deployment actually runs its own consumer of that
+      #             subject — that is what restores publish-and-leave-`running`
+      #             behavior.
+      TASK_EXECUTOR_ENABLED: ${TASK_EXECUTOR_ENABLED:-}
+      # See TASK_EXECUTOR_ENABLED above. Leave unset/false unless this
+      # deployment has built and deployed its own consumer of
+      # mp.v1.capability.task.dispatched.
+      TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH: ${TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH:-}
+      # --- AUTO-2: run-watch notify consumer ----------------------------------
+      # "Notify me when this run finishes" — internal/runwatch.Notifier calls
+      # notification-core's delegated POST /notification-requests (Application
+      # Plane) for every user who watched a run once its terminal event
+      # arrives. Reached over inter-plane-bus (see the networks: block below);
+      # NOTIFICATION_CORE_URL defaults to the same address the other planes
+      # already use for it (see e.g. Ingestion Plane/docker-compose.yml). Empty
+      # either var and startRunWatchConsumer simply does not start the
+      # consumer (logged) — the rest of capability-core is unaffected.
+      NOTIFICATION_CORE_URL: ${NOTIFICATION_CORE_URL:-http://notification-core:3140}
+      # Must be registered on notification-core's side as the "capability-core"
+      # delegation principal (NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN in
+      # Application Plane/docker-compose.yml) — same shared-secret pattern as
+      # NOTIFICATION_GATEWAY_SERVICE_TOKEN/NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN
+      # there, just a third, independently-revocable caller identity.
+      NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN: ${NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN:-}
+    volumes:
+      - mp-capability-core-data:/var/lib/capability-core
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dragonfly:
+        condition: service_healthy
+      orchestrator-core:
+        condition: service_started
+    networks:
+      # Model Plane's own default network, plus inter-plane-bus so the
+      # run-watch notify consumer above can reach notification-core, which is
+      # itself joined to inter-plane-bus (Application Plane/docker-compose.yml).
+      # Mirrors session-core's and model-gateway's identical two-network block
+      # elsewhere in this file — capability-core had no networks: key at all
+      # before this (implicit default-only), which is why this key is new here
+      # rather than an addition to an existing list.
+      default: {}
+      inter-plane-bus: {}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/healthz"]
+      interval: 10s
+      retries: 3
+
+  sandbox-manager:
+    <<: *runtime-defaults
+    build:
+      context: ../go
+      dockerfile: services/sandbox-manager/Dockerfile
+      args: *build-metadata
+    ports:
+      - "127.0.0.1:8086:8086"   # HTTP health
+      - "127.0.0.1:9094:9094"   # gRPC
+    environment:
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      SANDBOX_MANAGER_AUTH_AUDIENCE: ${SANDBOX_MANAGER_AUTH_AUDIENCE:-sandbox-manager}
+      REDIS_URL: redis://:${MODEL_DRAGONFLY_PASSWORD:?MODEL_DRAGONFLY_PASSWORD is required}@dragonfly:6379
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MODEL_MINIO_ROOT_USER:?MODEL_MINIO_ROOT_USER is required}
+      MINIO_SECRET_KEY: ${MODEL_MINIO_ROOT_PASSWORD:?MODEL_MINIO_ROOT_PASSWORD is required}
+    depends_on:
+      dragonfly:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/healthz"]
+      interval: 10s
+      retries: 3
+
+  browser-broker:
+    <<: *runtime-defaults
+    build:
+      context: ../go
+      dockerfile: services/browser-broker/Dockerfile
+      args: *build-metadata
+    ports:
+      - "127.0.0.1:8087:8087"   # HTTP health
+      - "127.0.0.1:9095:9095"   # gRPC
+    environment:
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      BROWSER_BROKER_AUTH_AUDIENCE: ${BROWSER_BROKER_AUTH_AUDIENCE:-browser-broker}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8087/healthz"]
+      interval: 10s
+      retries: 3
+
+  letta-bridge:
+    <<: *runtime-defaults
+    build:
+      context: ../go
+      dockerfile: services/letta-bridge/Dockerfile
+      args: *build-metadata
+    ports:
+      - "127.0.0.1:8088:8088"   # HTTP health
+      - "127.0.0.1:9096:9096"   # gRPC
+    environment:
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      LETTA_BRIDGE_AUTH_AUDIENCE: ${LETTA_BRIDGE_AUTH_AUDIENCE:-letta-bridge}
+      LETTA_URL: ${LETTA_URL:-${LETTA_SERVER_URL:-http://localhost:8283}}
+      LETTA_SERVER_URL: ${LETTA_SERVER_URL:-${LETTA_URL:-http://localhost:8283}}
+      SESSION_CORE_ADDR: session-core:9091
+      # Long-term agent memory → local agent-memory-server (Redis Stack vector
+      # backend). Unset AGENT_MEMORY_URL to fall back to the in-memory store.
+      AGENT_MEMORY_URL: ${AGENT_MEMORY_URL:-http://agent-memory-server:8000}
+      AGENT_MEMORY_TOKEN: ${AGENT_MEMORY_TOKEN:-}
+      # Durable Postgres memory fallback (auto-creates schema on boot).
+      # Gateway/orchestrator route through session-core:9091; session-core then
+      # calls this bridge with an aud=letta-bridge, org-scoped credential.
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
+    depends_on:
+      agent-memory-server:
+        condition: service_healthy
+    healthcheck:
+      # Liveness must not depend on a first semantic query. `/readyz` remains
+      # the semantic-capability signal and must be verified separately by a
+      # release smoke test after an authenticated search.
+      test: ["CMD", "curl", "-f", "http://localhost:8088/healthz"]
+      interval: 10s
+      retries: 3
+
+  # Long-term agent-memory backend: agent-memory-server (REST, LiteLLM) on a
+  # dedicated local Redis Stack (RediSearch vector index). letta-bridge points
+  # AGENT_MEMORY_URL here. Fully local — no Redis Cloud. Embeddings + generation
+  # via OpenAI by default (set OPENAI_API_KEY); LiteLLM also supports Azure et al.
+  agent-memory-redis:
+    <<: *runtime-defaults
+    image: redis/redis-stack-server:7.4.0-v3
+    command: ["redis-stack-server", "--requirepass", "${AGENT_MEMORY_REDIS_PASSWORD:?AGENT_MEMORY_REDIS_PASSWORD is required}", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - mp-agent-memory-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${AGENT_MEMORY_REDIS_PASSWORD:?AGENT_MEMORY_REDIS_PASSWORD is required}", "ping"]
+      interval: 5s
+      retries: 5
+
+  agent-memory-server:
+    <<: *runtime-defaults
+    image: redislabs/agent-memory-server:0.15.1
+    command: ["agent-memory", "api", "--host", "0.0.0.0", "--port", "8000", "--task-backend=asyncio"]
+    environment:
+      REDIS_URL: redis://:${AGENT_MEMORY_REDIS_PASSWORD:?AGENT_MEMORY_REDIS_PASSWORD is required}@agent-memory-redis:6379
+      PORT: "8000"
+      AUTH_MODE: ${AGENT_MEMORY_AUTH_MODE:-disabled}
+      DISABLE_AUTH: ${AGENT_MEMORY_DISABLE_AUTH:-true}
+      # LiteLLM model + provider config, wired to the Model Plane's existing
+      # provider creds (sourced from apps/Model Plane/deploy/.env). Pick one:
+      #   • OpenAI: set OPENAI_API_KEY — models default to gpt-4o-mini /
+      #     text-embedding-3-small below.
+      #   • Azure OpenAI (what the rest of Model Plane uses): set
+      #     AGENT_MEMORY_GENERATION_MODEL=azure/<chat-deployment> and
+      #     AGENT_MEMORY_EMBEDDING_MODEL=azure/<embedding-deployment>; the
+      #     AZURE_* creds below are mapped from the Model Plane AZURE_OPENAI_* vars.
+      GENERATION_MODEL: ${AGENT_MEMORY_GENERATION_MODEL:-gpt-4o-mini}
+      FAST_MODEL: ${AGENT_MEMORY_FAST_MODEL:-gpt-4o-mini}
+      EMBEDDING_MODEL: ${AGENT_MEMORY_EMBEDDING_MODEL:-text-embedding-3-small}
+      # The vector index dimension, stated EXPLICITLY because the server cannot
+      # infer it for an Azure-prefixed model and silently guesses wrong.
+      #
+      # agent-memory-server looks the embedding model up in its MODEL_CONFIGS
+      # table, which is keyed WITHOUT a provider prefix ("text-embedding-3-large").
+      # With EMBEDDING_MODEL=azure/text-embedding-3-large the lookup misses and it
+      # falls back to redisvl_vector_dimensions, whose default is 1536 — while the
+      # LiteLLM client passes dimensions=None and gets the model's native 3072.
+      # Every write then failed to index with "blob size 12288 (expected 6144)",
+      # leaving num_docs 0 and semantic recall permanently dead. The server does
+      # NOT self-heal: it calls index.create(overwrite=False) on boot and logs
+      # "Index already exists, not overwriting".
+      #
+      # Must match the dimension of AGENT_MEMORY_EMBEDDING_MODEL: 3072 for
+      # text-embedding-3-large, 1536 for -3-small/-ada-002. Changing it requires
+      # rebuilding the index (`agent-memory rebuild-index`) — see the runbook note
+      # in the README; an existing index keeps its old dimension forever.
+      REDISVL_VECTOR_DIMENSIONS: ${AGENT_MEMORY_VECTOR_DIMENSIONS:-3072}
+      # OpenAI path
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-}
+      # Azure path — LiteLLM reads AZURE_API_*; map from the Model Plane's
+      # AZURE_OPENAI_* (same vars inference-core/model-gateway already consume).
+      AZURE_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_API_BASE: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-08-01-preview}
+      ENABLE_TOPIC_EXTRACTION: ${AGENT_MEMORY_TOPIC_EXTRACTION:-true}
+      LOG_LEVEL: ${AGENT_MEMORY_LOG_LEVEL:-INFO}
+    ports:
+      - "127.0.0.1:8100:8000"   # REST (host-exposed for debugging)
+    depends_on:
+      agent-memory-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost',8000),3).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  cost-core:
+    <<: *runtime-defaults
+    build:
+      context: ../go
+      dockerfile: services/cost-core/Dockerfile
+      args: *build-metadata
+    ports:
+      - "127.0.0.1:8089:8089"   # HTTP health + API
+      - "127.0.0.1:9098:9098"   # gRPC
+    environment:
+      LOG_LEVEL: info
+      # cost-core joins the inter-plane bus (so the Verevon gateway can reach its
+      # HTTP API). `model-nats` is a plane-unique network alias; Postgres remains
+      # private to the default Model network. This avoids generated container
+      # names and prevents accidental resolution to another plane's NATS.
+      NATS_URL: nats://model-nats:4222
+      NATS_USER: cost-core-runtime
+      NATS_PASSWORD: ${MODEL_COST_CORE_NATS_PASSWORD:?MODEL_COST_CORE_NATS_PASSWORD is required}
+      # SECOND, narrowly-scoped connection (identity "cost-core-gdpr") to the
+      # shared cross-plane control-shared-nats broker, used only by the GDPR
+      # org-erasure consumer. Deliberately distinct from NATS_URL/NATS_USER/
+      # NATS_PASSWORD above (the Model-Plane-local `model-nats` broker the
+      # USAGE_ENVELOPE subscriber uses) so this credential never shares a
+      # connection/permission surface with plane-local traffic. cost-core is
+      # already attached to `inter-plane-bus` below, where control-shared-nats
+      # is reachable by that alias. The consumer durable
+      # (cost-core-org-erasure) and this identity's publish/subscribe
+      # permissions must be provisioned in control-shared-nats.conf and
+      # audit-core's provisioner before this becomes live.
+      COST_CORE_GDPR_NATS_URL: nats://control-shared-nats:4222
+      COST_CORE_GDPR_NATS_USER: cost-core-gdpr
+      COST_CORE_GDPR_NATS_PASSWORD: ${COST_CORE_GDPR_NATS_PASSWORD:?COST_CORE_GDPR_NATS_PASSWORD is required}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: cost-core
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
+      # CSV. `inference-core` is accepted so the intent layer's budget check —
+      # which forwards the caller's own delegated aud=inference-core token —
+      # verifies here (see cost-core cmd/main.go for why this is read-only in
+      # effect: CostAuthorizer + handleBudgetCheck pin org/user to the token).
+      COST_CORE_AUTH_AUDIENCE: ${COST_CORE_AUTH_AUDIENCE:-cost-core,inference-core}
+      # Durable cost ledger (the migration entrypoint applies 0001_cost_ledger +
+      # 0002_model_pricing on boot). Shares the Model Plane Postgres / session_core DB.
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
+    depends_on:
+      nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      # Stay on the Model Plane network (postgres/nats) AND join the shared
+      # inter-plane-bus so the Verevon gateway's cost/usage dashboard (Phase 7
+      # B5) can reach the ledger HTTP API by its alias.
+      default: {}
+      inter-plane-bus:
+        aliases:
+          - model-plane-cost-core-1
+          - cost-core
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8089/healthz"]
+      interval: 10s
+      retries: 3
+
+  bridge-core:
+    <<: *runtime-defaults
+    build:
+      context: ../go
+      dockerfile: services/bridge-core/Dockerfile
+      args: *build-metadata
+    ports:
+      - "127.0.0.1:8091:8091"   # HTTP session API + public health
+      - "127.0.0.1:9100:9100"   # standard gRPC health only
+    environment:
+      LOG_LEVEL: info
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: bridge-core
+      SESSION_CORE_ADDR: session-core:9091
+      MODEL_GATEWAY_ADDR: model-gateway:9090
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      BRIDGE_CORE_AUTH_AUDIENCE: ${BRIDGE_CORE_AUTH_AUDIENCE:-bridge-core}
+    depends_on:
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8091/healthz"]
+      interval: 10s
+      retries: 3
+
+volumes:
+  mp-postgres-data:
+  mp-nats-data:
+  mp-minio-data:
+  mp-temporal-postgres-data:
+  mp-dragonfly-data:
+  mp-agent-memory-redis-data:
+  mp-capability-core-data:
+
+networks:
+  default:
+    name: model-plane-network
+  inter-plane-bus:
+    external: true

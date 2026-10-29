@@ -20,6 +20,7 @@ COPY convex.json ./
 COPY .env.local ./
 COPY startup.sh ./
 COPY nats-subscriber.js ./
+COPY nats-subscriber.control-projection.cjs ./
 
 # Make startup script executable
 RUN chmod +x startup.sh

@@ -1,0 +1,50 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_contacts",
+  description: "Bronze: Contact master data (name, email, phone, address) from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.bool("active")} AS `active`,
+  ${bronze.str("address")} AS `address`,
+  ${bronze.str("businessAccount")} AS `businessAccount`,
+  ${bronze.str("businessAccountType")} AS `businessAccountType`,
+  ${bronze.int("contactId")} AS `contactId`,
+  ${bronze.str("contactMethod")} AS `contactMethod`,
+  ${bronze.str("displayName")} AS `displayName`,
+  ${bronze.bool("doNotCall")} AS `doNotCall`,
+  ${bronze.bool("doNotEmail")} AS `doNotEmail`,
+  ${bronze.bool("doNotFax")} AS `doNotFax`,
+  ${bronze.bool("doNotMail")} AS `doNotMail`,
+  ${bronze.str("email")} AS `email`,
+  ${bronze.str("firstName")} AS `firstName`,
+  ${bronze.str("lastModifiedDateTime")} AS `lastModifiedDateTime`,
+  ${bronze.str("lastName")} AS `lastName`,
+  ${bronze.str("metadata")} AS `metadata`,
+  ${bronze.bool("noMarketing")} AS `noMarketing`,
+  ${bronze.bool("noMassMail")} AS `noMassMail`,
+  ${bronze.str("phone1")} AS `phone1`,
+  ${bronze.str("phone2")} AS `phone2`,
+  ${bronze.str("position")} AS `position`,
+  ${bronze.bool("sameAsAccount")} AS `sameAsAccount`,
+  ${bronze.str("timeStamp")} AS `timeStamp`,
+  ${bronze.str("title")} AS `title`,
+  ${bronze.str("web")} AS `web`,
+  ${bronze.str("phone3")} AS `phone3`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`  -- v2 does not fetch this field
+FROM ${ref("dw_staging_visma", "contacts")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

@@ -1,0 +1,16 @@
+.film {
+	background: #211c1a url("/verevon-vibe/hero-verevon-poster.jpg") 91% center / cover no-repeat;
+}
+
+.filmShade {
+	position: absolute;
+	inset: 0;
+	background:
+		radial-gradient(ellipse at 23% 56%, rgb(17 15 15 / 18%), transparent 47%),
+		linear-gradient(90deg, rgb(17 15 15 / 48%) 0%, rgb(17 15 15 / 19%) 42%, rgb(17 15 15 / 8%) 67%, rgb(17 15 15 / 25%) 100%);
+	pointer-events: none;
+}
+
+@media (max-width: 760px) {
+	.film { background-position: 76% center; }
+}

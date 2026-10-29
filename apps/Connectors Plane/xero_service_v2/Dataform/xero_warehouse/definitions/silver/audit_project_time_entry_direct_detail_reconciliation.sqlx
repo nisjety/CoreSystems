@@ -1,0 +1,95 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Same-run reconciliation of Xero getTimeEntry direct responses to parent-scoped getTimeEntries observations. Direct lookup validates field delivery without controlling time-entry lifecycle.",
+  assertions: {
+    nonNull: ["direct_detail_reconciliation_key", "tenant_id", "project_id", "time_entry_id", "direct_detail_source_run_id"],
+    uniqueKey: ["direct_detail_reconciliation_key"]
+  }
+}
+
+WITH collection_observations AS (
+  SELECT
+    entry.tenant_id,
+    entry.project_id,
+    entry.time_entry_id,
+    entry.projection_schema_revision,
+    entry.source_run_id,
+    entry.project_observed_at AS collection_observed_at,
+    entry.source_version_id AS collection_source_version_id,
+    entry.source_receipt_id AS collection_source_receipt_id,
+    TO_HEX(SHA256(TO_JSON_STRING(STRUCT(
+      entry.project_id AS project_id,
+      entry.time_entry_id AS time_entry_id,
+      entry.task_id AS task_id,
+      entry.user_id AS user_id,
+      entry.time_entry_status AS time_entry_status,
+      entry.entry_date AS entry_date,
+      entry.entered_at AS entered_at,
+      entry.duration_minutes AS duration_minutes
+    )))) AS shared_time_entry_fingerprint
+  FROM ${ref("dw_bronze_xero", "xero_project_time_entry_observations")} AS entry
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY entry.tenant_id, entry.project_id, entry.time_entry_id, entry.source_run_id
+    ORDER BY entry.projection_schema_revision DESC, entry.project_observed_at DESC,
+             entry.source_receipt_id DESC, entry.source_version_id DESC
+  ) = 1
+), direct_detail_observations AS (
+  SELECT
+    entry.tenant_id,
+    entry.project_id,
+    entry.time_entry_id,
+    entry.projection_schema_revision,
+    entry.project_time_entry_detail_observation_id,
+    entry.project_observed_at AS direct_detail_observed_at,
+    entry.source_version_id AS direct_detail_source_version_id,
+    entry.source_receipt_id AS direct_detail_source_receipt_id,
+    entry.source_run_id AS direct_detail_source_run_id,
+    TO_HEX(SHA256(TO_JSON_STRING(STRUCT(
+      entry.project_id AS project_id,
+      entry.time_entry_id AS time_entry_id,
+      entry.task_id AS task_id,
+      entry.user_id AS user_id,
+      entry.time_entry_status AS time_entry_status,
+      entry.entry_date AS entry_date,
+      entry.entered_at AS entered_at,
+      entry.duration_minutes AS duration_minutes
+    )))) AS direct_detail_shared_time_entry_fingerprint
+  FROM ${ref("dw_bronze_xero", "xero_project_time_entry_detail_observations")} AS entry
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY entry.tenant_id, entry.project_id, entry.time_entry_id, entry.source_run_id
+    ORDER BY entry.projection_schema_revision DESC, entry.project_observed_at DESC,
+             entry.source_receipt_id DESC, entry.source_version_id DESC
+  ) = 1
+)
+SELECT
+  CONCAT(detail.tenant_id, '|', detail.project_id, '|', detail.time_entry_id, '|',
+         detail.direct_detail_source_run_id, '|', detail.direct_detail_source_version_id)
+    AS direct_detail_reconciliation_key,
+  detail.tenant_id,
+  detail.project_id,
+  detail.time_entry_id,
+  detail.project_time_entry_detail_observation_id,
+  detail.direct_detail_observed_at,
+  detail.direct_detail_source_version_id,
+  detail.direct_detail_source_receipt_id,
+  detail.direct_detail_source_run_id,
+  detail.direct_detail_shared_time_entry_fingerprint,
+  collection.collection_observed_at,
+  collection.collection_source_version_id,
+  collection.collection_source_receipt_id,
+  collection.shared_time_entry_fingerprint AS collection_shared_time_entry_fingerprint,
+  collection.time_entry_id IS NOT NULL AS has_same_run_collection_counterpart,
+  collection.shared_time_entry_fingerprint IS NOT NULL AS has_collection_shared_fingerprint,
+  detail.direct_detail_shared_time_entry_fingerprint IS NOT NULL AS has_direct_detail_shared_fingerprint,
+  collection.time_entry_id IS NOT NULL
+    AND collection.shared_time_entry_fingerprint IS NOT NULL
+    AND detail.direct_detail_shared_time_entry_fingerprint IS NOT NULL
+    AND collection.shared_time_entry_fingerprint = detail.direct_detail_shared_time_entry_fingerprint
+    AS is_direct_detail_reconciled
+FROM direct_detail_observations AS detail
+LEFT JOIN collection_observations AS collection
+  ON detail.tenant_id = collection.tenant_id
+ AND detail.project_id = collection.project_id
+ AND detail.time_entry_id = collection.time_entry_id
+ AND detail.direct_detail_source_run_id = collection.source_run_id

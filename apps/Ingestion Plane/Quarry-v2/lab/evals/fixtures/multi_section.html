@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Developer Changelog: May 2026</title>
+    <meta name="author" content="Platform Team">
+</head>
+<body>
+    <header>
+        <nav>
+            <a href="/">Blog</a>
+            <a href="/changelog">Changelog</a>
+            <a href="/docs">Docs</a>
+            <a href="/community">Community</a>
+        </nav>
+    </header>
+    <main>
+        <article>
+            <h1>Developer Changelog: May 2026</h1>
+            <p class="subtitle">A summary of new features, improvements, and breaking changes shipped this month.</p>
+
+            <section>
+                <h2>New Features</h2>
+                <p>We shipped three major features in May. The highlight is real-time collaboration on shared dashboards, allowing multiple team members to edit widgets simultaneously.</p>
+                <ul>
+                    <li>Real-time dashboard collaboration with conflict resolution</li>
+                    <li>Custom webhook destinations for alert routing</li>
+                    <li>CSV bulk import for configuration objects</li>
+                </ul>
+            </section>
+
+            <section>
+                <h2>Improvements</h2>
+                <p>Query performance received significant attention this cycle. P95 search latency dropped from 180ms to 95ms after index restructuring.</p>
+                <ul>
+                    <li>Search index rebuild reducing P95 latency by 47%</li>
+                    <li>Dashboard load time improved by 30% through lazy widget rendering</li>
+                    <li>API rate limit headers now include retry-after timestamps</li>
+                </ul>
+            </section>
+
+            <section>
+                <h2>Breaking Changes</h2>
+                <p>The v1 authentication endpoint has been removed after a six-month deprecation period. All integrations must migrate to the v2 OAuth flow.</p>
+                <ul>
+                    <li>Removed deprecated <code>/api/v1/auth</code> endpoint</li>
+                    <li>Renamed <code>team_id</code> to <code>workspace_id</code> in all API responses</li>
+                </ul>
+            </section>
+
+            <section>
+                <h2>Bug Fixes</h2>
+                <p>We resolved 14 bugs reported through the community tracker, including a critical timezone handling issue that caused incorrect scheduling.</p>
+                <ul>
+                    <li>Fixed timezone offset calculation for DST transitions</li>
+                    <li>Resolved memory leak in long-running WebSocket connections</li>
+                    <li>Corrected pagination cursor encoding for Unicode content</li>
+                </ul>
+            </section>
+        </article>
+    </main>
+    <aside>
+        <h3>Related Posts</h3>
+        <ul>
+            <li><a href="/changelog/april-2026">April 2026 Changelog</a></li>
+            <li><a href="/changelog/march-2026">March 2026 Changelog</a></li>
+        </ul>
+    </aside>
+    <footer>
+        <p>&copy; 2026 Platform Inc. All rights reserved.</p>
+        <a href="/privacy">Privacy Policy</a>
+        <a href="/terms">Terms of Use</a>
+    </footer>
+</body>
+</html>

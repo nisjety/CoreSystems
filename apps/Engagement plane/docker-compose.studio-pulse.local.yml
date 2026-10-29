@@ -1,0 +1,21 @@
+# Optional local read-only Pulse bridge. The base demo remains isolated unless
+# this overlay and the server-side Marketing key are explicitly supplied.
+services:
+  studio-demo:
+    environment:
+      STUDIO_MARKETING_CORE_KEY_FILE: /run/secrets/studio_marketing_core_key
+      STUDIO_MARKETING_CORE_URL: http://marketing-core:3165
+    secrets:
+      - studio_marketing_core_key
+    networks:
+      - default
+      - marketing-local-net
+
+secrets:
+  studio_marketing_core_key:
+    file: ${STUDIO_MARKETING_CORE_KEY_FILE:?set the approved Marketing Core key secret file path}
+
+networks:
+  marketing-local-net:
+    external: true
+    name: marketing-local_marketing-local-net

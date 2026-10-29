@@ -1,0 +1,621 @@
+package pg
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
+)
+
+const defaultMaxPage = 500
+
+// cursor is an opaque (created_at, id) pair for keyset pagination.
+// Encoded as base64("<created_at>|<id>"). Decoded filters rows where
+// (created_at, id) < (cursor.created_at, cursor.id) — newest first.
+type cursor struct {
+	CreatedAt int64
+	ID        string
+}
+
+func decodeCursor(s string) (*cursor, error) {
+	if s == "" {
+		return nil, nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("cursor: %w", err)
+	}
+	parts := strings.SplitN(string(raw), "|", 2)
+	if len(parts) != 2 {
+		return nil, errors.New("cursor: malformed")
+	}
+	c := &cursor{ID: parts[1]}
+	if _, err := fmt.Sscan(parts[0], &c.CreatedAt); err != nil {
+		return nil, fmt.Errorf("cursor ts: %w", err)
+	}
+	return c, nil
+}
+
+func encodeCursor(createdAt int64, id string) string {
+	return base64.RawURLEncoding.EncodeToString(
+		[]byte(fmt.Sprintf("%d|%s", createdAt, id)),
+	)
+}
+
+// ---- jobs -----------------------------------------------------------------
+
+type jobsStore struct{ pool *pgxpool.Pool }
+
+func (s *jobsStore) Create(j store.Job) error {
+	policy, _ := json.Marshal(j.Policy)
+	params, _ := json.Marshal(j.Params)
+	var sid *string
+	if j.ScheduleID != nil {
+		v := string(*j.ScheduleID)
+		sid = &v
+	}
+	_, err := s.pool.Exec(context.Background(),
+		`INSERT INTO jobs(id, kind, status, policy, params, schedule_id, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		string(j.ID), j.Kind, j.Status, policy, params, sid, j.CreatedAt)
+	return mapPgErr(err)
+}
+
+func (s *jobsStore) Get(id quarrycontracts.ID) (store.Job, bool) {
+	var (
+		j      store.Job
+		policy []byte
+		params []byte
+		sid    *string
+	)
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT id, kind, status, policy, params, schedule_id, created_at FROM jobs WHERE id=$1`,
+		string(id),
+	).Scan(&j.ID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt)
+	if err != nil {
+		return store.Job{}, false
+	}
+	_ = json.Unmarshal(policy, &j.Policy)
+	if len(params) > 0 {
+		_ = json.Unmarshal(params, &j.Params)
+	}
+	if sid != nil {
+		v := quarrycontracts.ID(*sid)
+		j.ScheduleID = &v
+	}
+	return j, true
+}
+
+func (s *jobsStore) List(limit int, cur string) ([]store.Job, string) {
+	limit = pageLimit(limit, defaultMaxPage)
+	c, _ := decodeCursor(cur)
+
+	q := `SELECT id, kind, status, policy, params, schedule_id, created_at FROM jobs`
+	args := []any{}
+	if c != nil {
+		q += ` WHERE (created_at, id) < ($1, $2)`
+		args = append(args, c.CreatedAt, c.ID)
+	}
+	q += ` ORDER BY created_at DESC, id DESC LIMIT ` + fmt.Sprint(limit+1)
+
+	rows, err := s.pool.Query(context.Background(), q, args...)
+	if err != nil {
+		return nil, ""
+	}
+	defer rows.Close()
+
+	out := make([]store.Job, 0, limit)
+	for rows.Next() {
+		var (
+			j      store.Job
+			policy []byte
+			params []byte
+			sid    *string
+		)
+		if err := rows.Scan(&j.ID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt); err != nil {
+			return nil, ""
+		}
+		_ = json.Unmarshal(policy, &j.Policy)
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &j.Params)
+		}
+		if sid != nil {
+			v := quarrycontracts.ID(*sid)
+			j.ScheduleID = &v
+		}
+		out = append(out, j)
+	}
+	next := ""
+	if len(out) > limit {
+		last := out[limit-1]
+		next = encodeCursor(last.CreatedAt, string(last.ID))
+		out = out[:limit]
+	}
+	return out, next
+}
+
+func (s *jobsStore) ListBySchedule(scheduleID quarrycontracts.ID, limit int, cur string) ([]store.Job, string) {
+	limit = pageLimit(limit, defaultMaxPage)
+	c, _ := decodeCursor(cur)
+
+	q := `SELECT id, kind, status, policy, params, schedule_id, created_at FROM jobs WHERE schedule_id = $1`
+	args := []any{string(scheduleID)}
+	if c != nil {
+		q += ` AND (created_at, id) < ($2, $3)`
+		args = append(args, c.CreatedAt, c.ID)
+	}
+	q += ` ORDER BY created_at DESC, id DESC LIMIT ` + fmt.Sprint(limit+1)
+
+	rows, err := s.pool.Query(context.Background(), q, args...)
+	if err != nil {
+		return nil, ""
+	}
+	defer rows.Close()
+
+	out := make([]store.Job, 0, limit)
+	for rows.Next() {
+		var (
+			j      store.Job
+			policy []byte
+			params []byte
+			sid    *string
+		)
+		if err := rows.Scan(&j.ID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt); err != nil {
+			return nil, ""
+		}
+		_ = json.Unmarshal(policy, &j.Policy)
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &j.Params)
+		}
+		if sid != nil {
+			v := quarrycontracts.ID(*sid)
+			j.ScheduleID = &v
+		}
+		out = append(out, j)
+	}
+	next := ""
+	if len(out) > limit {
+		last := out[limit-1]
+		next = encodeCursor(last.CreatedAt, string(last.ID))
+		out = out[:limit]
+	}
+	return out, next
+}
+
+func (s *jobsStore) Delete(id quarrycontracts.ID) error {
+	ct, err := s.pool.Exec(context.Background(), `DELETE FROM jobs WHERE id=$1`, string(id))
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// ---- stores (named stores) ------------------------------------------------
+
+type storesStore struct{ pool *pgxpool.Pool }
+
+func (s *storesStore) Create(v store.NamedStore) error {
+	_, err := s.pool.Exec(context.Background(),
+		`INSERT INTO stores(id, name, kind, created_at) VALUES ($1,$2,$3,$4)`,
+		string(v.ID), v.Name, v.Kind, v.CreatedAt)
+	return mapPgErr(err)
+}
+
+func (s *storesStore) Get(id quarrycontracts.ID) (store.NamedStore, bool) {
+	var v store.NamedStore
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT id, name, kind, created_at FROM stores WHERE id=$1`, string(id),
+	).Scan(&v.ID, &v.Name, &v.Kind, &v.CreatedAt)
+	if err != nil {
+		return store.NamedStore{}, false
+	}
+	return v, true
+}
+
+func (s *storesStore) List(limit int, cur string) ([]store.NamedStore, string) {
+	limit = pageLimit(limit, defaultMaxPage)
+	c, _ := decodeCursor(cur)
+	q := `SELECT id, name, kind, created_at FROM stores`
+	args := []any{}
+	if c != nil {
+		q += ` WHERE (created_at, id) < ($1, $2)`
+		args = append(args, c.CreatedAt, c.ID)
+	}
+	q += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT %d`, limit+1)
+	rows, err := s.pool.Query(context.Background(), q, args...)
+	if err != nil {
+		return nil, ""
+	}
+	defer rows.Close()
+	out := make([]store.NamedStore, 0, limit)
+	for rows.Next() {
+		var v store.NamedStore
+		if err := rows.Scan(&v.ID, &v.Name, &v.Kind, &v.CreatedAt); err != nil {
+			return nil, ""
+		}
+		out = append(out, v)
+	}
+	next := ""
+	if len(out) > limit {
+		last := out[limit-1]
+		next = encodeCursor(last.CreatedAt, string(last.ID))
+		out = out[:limit]
+	}
+	return out, next
+}
+
+func (s *storesStore) Delete(id quarrycontracts.ID) error {
+	ct, err := s.pool.Exec(context.Background(), `DELETE FROM stores WHERE id=$1`, string(id))
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// ---- snapshots ------------------------------------------------------------
+
+type snapshotsStore struct{ pool *pgxpool.Pool }
+
+func (s *snapshotsStore) Create(v store.Snapshot) error {
+	_, err := s.pool.Exec(context.Background(),
+		`INSERT INTO snapshots(id, run_id, bucket, created_at) VALUES ($1,$2,$3,$4)`,
+		string(v.ID), string(v.RunID), v.Bucket, v.CreatedAt)
+	return mapPgErr(err)
+}
+
+func (s *snapshotsStore) Get(id quarrycontracts.ID) (store.Snapshot, bool) {
+	var v store.Snapshot
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT id, run_id, bucket, created_at FROM snapshots WHERE id=$1`, string(id),
+	).Scan(&v.ID, &v.RunID, &v.Bucket, &v.CreatedAt)
+	if err != nil {
+		return store.Snapshot{}, false
+	}
+	return v, true
+}
+
+func (s *snapshotsStore) List(limit int, cur string) ([]store.Snapshot, string) {
+	limit = pageLimit(limit, defaultMaxPage)
+	c, _ := decodeCursor(cur)
+	q := `SELECT id, run_id, bucket, created_at FROM snapshots`
+	args := []any{}
+	if c != nil {
+		q += ` WHERE (created_at, id) < ($1, $2)`
+		args = append(args, c.CreatedAt, c.ID)
+	}
+	q += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT %d`, limit+1)
+	rows, err := s.pool.Query(context.Background(), q, args...)
+	if err != nil {
+		return nil, ""
+	}
+	defer rows.Close()
+	out := make([]store.Snapshot, 0, limit)
+	for rows.Next() {
+		var v store.Snapshot
+		if err := rows.Scan(&v.ID, &v.RunID, &v.Bucket, &v.CreatedAt); err != nil {
+			return nil, ""
+		}
+		out = append(out, v)
+	}
+	next := ""
+	if len(out) > limit {
+		last := out[limit-1]
+		next = encodeCursor(last.CreatedAt, string(last.ID))
+		out = out[:limit]
+	}
+	return out, next
+}
+
+func (s *snapshotsStore) Delete(id quarrycontracts.ID) error {
+	ct, err := s.pool.Exec(context.Background(), `DELETE FROM snapshots WHERE id=$1`, string(id))
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// ---- artifacts ------------------------------------------------------------
+
+type artifactsStore struct{ pool *pgxpool.Pool }
+
+func (s *artifactsStore) Create(v store.Artifact) error {
+	_, err := s.pool.Exec(context.Background(),
+		`INSERT INTO artifacts(id, run_id, kind, key, bytes, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6)`,
+		string(v.ID), string(v.RunID), v.Kind, v.Key, int64(v.Bytes), v.CreatedAt)
+	return mapPgErr(err)
+}
+
+func (s *artifactsStore) Get(id quarrycontracts.ID) (store.Artifact, bool) {
+	var (
+		v     store.Artifact
+		bytes int64
+	)
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT id, run_id, kind, key, bytes, created_at FROM artifacts WHERE id=$1`, string(id),
+	).Scan(&v.ID, &v.RunID, &v.Kind, &v.Key, &bytes, &v.CreatedAt)
+	if err != nil {
+		return store.Artifact{}, false
+	}
+	v.Bytes = uint64(bytes)
+	return v, true
+}
+
+func (s *artifactsStore) List(limit int, cur string) ([]store.Artifact, string) {
+	limit = pageLimit(limit, defaultMaxPage)
+	c, _ := decodeCursor(cur)
+	q := `SELECT id, run_id, kind, key, bytes, created_at FROM artifacts`
+	args := []any{}
+	if c != nil {
+		q += ` WHERE (created_at, id) < ($1, $2)`
+		args = append(args, c.CreatedAt, c.ID)
+	}
+	q += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT %d`, limit+1)
+	rows, err := s.pool.Query(context.Background(), q, args...)
+	if err != nil {
+		return nil, ""
+	}
+	defer rows.Close()
+	out := make([]store.Artifact, 0, limit)
+	for rows.Next() {
+		var (
+			v     store.Artifact
+			bytes int64
+		)
+		if err := rows.Scan(&v.ID, &v.RunID, &v.Kind, &v.Key, &bytes, &v.CreatedAt); err != nil {
+			return nil, ""
+		}
+		v.Bytes = uint64(bytes)
+		out = append(out, v)
+	}
+	next := ""
+	if len(out) > limit {
+		last := out[limit-1]
+		next = encodeCursor(last.CreatedAt, string(last.ID))
+		out = out[:limit]
+	}
+	return out, next
+}
+
+func (s *artifactsStore) Delete(id quarrycontracts.ID) error {
+	ct, err := s.pool.Exec(context.Background(), `DELETE FROM artifacts WHERE id=$1`, string(id))
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// ---- profiles -------------------------------------------------------------
+
+type profilesStore struct{ pool *pgxpool.Pool }
+
+func (s *profilesStore) Create(v store.BrowserProfile) error {
+	_, err := s.pool.Exec(context.Background(),
+		`INSERT INTO profiles(id, name, snapshot_uri, created_at) VALUES ($1,$2,$3,$4)`,
+		string(v.ID), v.Name, v.SnapshotURI, v.CreatedAt)
+	return mapPgErr(err)
+}
+
+func (s *profilesStore) Get(id quarrycontracts.ID) (store.BrowserProfile, bool) {
+	var v store.BrowserProfile
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT id, name, snapshot_uri, created_at FROM profiles WHERE id=$1`, string(id),
+	).Scan(&v.ID, &v.Name, &v.SnapshotURI, &v.CreatedAt)
+	if err != nil {
+		return store.BrowserProfile{}, false
+	}
+	return v, true
+}
+
+func (s *profilesStore) List(limit int, cur string) ([]store.BrowserProfile, string) {
+	limit = pageLimit(limit, defaultMaxPage)
+	c, _ := decodeCursor(cur)
+	q := `SELECT id, name, snapshot_uri, created_at FROM profiles`
+	args := []any{}
+	if c != nil {
+		q += ` WHERE (created_at, id) < ($1, $2)`
+		args = append(args, c.CreatedAt, c.ID)
+	}
+	q += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT %d`, limit+1)
+	rows, err := s.pool.Query(context.Background(), q, args...)
+	if err != nil {
+		return nil, ""
+	}
+	defer rows.Close()
+	out := make([]store.BrowserProfile, 0, limit)
+	for rows.Next() {
+		var v store.BrowserProfile
+		if err := rows.Scan(&v.ID, &v.Name, &v.SnapshotURI, &v.CreatedAt); err != nil {
+			return nil, ""
+		}
+		out = append(out, v)
+	}
+	next := ""
+	if len(out) > limit {
+		last := out[limit-1]
+		next = encodeCursor(last.CreatedAt, string(last.ID))
+		out = out[:limit]
+	}
+	return out, next
+}
+
+func (s *profilesStore) Delete(id quarrycontracts.ID) error {
+	ct, err := s.pool.Exec(context.Background(), `DELETE FROM profiles WHERE id=$1`, string(id))
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// ---- schedules ------------------------------------------------------------
+
+type schedulesStore struct{ pool *pgxpool.Pool }
+
+func (s *schedulesStore) Create(v store.Schedule) error {
+	_, err := s.pool.Exec(context.Background(),
+		`INSERT INTO schedules(id, cron, target_kind, target_ref, enabled, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6)`,
+		string(v.ID), v.Cron, v.TargetKind, v.TargetRef, v.Enabled, v.CreatedAt)
+	return mapPgErr(err)
+}
+
+func (s *schedulesStore) Get(id quarrycontracts.ID) (store.Schedule, bool) {
+	var v store.Schedule
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT id, cron, target_kind, target_ref, enabled, created_at
+		 FROM schedules WHERE id=$1`, string(id),
+	).Scan(&v.ID, &v.Cron, &v.TargetKind, &v.TargetRef, &v.Enabled, &v.CreatedAt)
+	if err != nil {
+		return store.Schedule{}, false
+	}
+	return v, true
+}
+
+func (s *schedulesStore) List(limit int, cur string) ([]store.Schedule, string) {
+	limit = pageLimit(limit, defaultMaxPage)
+	c, _ := decodeCursor(cur)
+	q := `SELECT id, cron, target_kind, target_ref, enabled, created_at FROM schedules`
+	args := []any{}
+	if c != nil {
+		q += ` WHERE (created_at, id) < ($1, $2)`
+		args = append(args, c.CreatedAt, c.ID)
+	}
+	q += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT %d`, limit+1)
+	rows, err := s.pool.Query(context.Background(), q, args...)
+	if err != nil {
+		return nil, ""
+	}
+	defer rows.Close()
+	out := make([]store.Schedule, 0, limit)
+	for rows.Next() {
+		var v store.Schedule
+		if err := rows.Scan(&v.ID, &v.Cron, &v.TargetKind, &v.TargetRef, &v.Enabled, &v.CreatedAt); err != nil {
+			return nil, ""
+		}
+		out = append(out, v)
+	}
+	next := ""
+	if len(out) > limit {
+		last := out[limit-1]
+		next = encodeCursor(last.CreatedAt, string(last.ID))
+		out = out[:limit]
+	}
+	return out, next
+}
+
+func (s *schedulesStore) Delete(id quarrycontracts.ID) error {
+	ct, err := s.pool.Exec(context.Background(), `DELETE FROM schedules WHERE id=$1`, string(id))
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *schedulesStore) UpdateEnabled(id quarrycontracts.ID, enabled bool) error {
+	ct, err := s.pool.Exec(context.Background(),
+		`UPDATE schedules SET enabled=$2 WHERE id=$1`, string(id), enabled)
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// ---- events ---------------------------------------------------------------
+
+type eventLog struct{ pool *pgxpool.Pool }
+
+func (l *eventLog) Append(evt quarrycontracts.Event) error {
+	payload, _ := json.Marshal(evt.Payload)
+	var runID, jobID *string
+	if evt.RunID != nil {
+		s := string(*evt.RunID)
+		runID = &s
+	}
+	if evt.JobID != nil {
+		s := string(*evt.JobID)
+		jobID = &s
+	}
+	_, err := l.pool.Exec(context.Background(),
+		`INSERT INTO events(event_id, run_id, job_id, type, ts, seq, payload, idempotency_key)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''))`,
+		string(evt.EventID), runID, jobID, string(evt.Type), evt.Timestamp,
+		int64(evt.Seq), payload, evt.IdempotencyKey)
+	return mapPgErr(err)
+}
+
+func (l *eventLog) ForRun(runID quarrycontracts.ID, afterSeq uint64, limit int) []quarrycontracts.Event {
+	return l.forField("run_id", string(runID), afterSeq, limit)
+}
+
+func (l *eventLog) ForJob(jobID quarrycontracts.ID, afterSeq uint64, limit int) []quarrycontracts.Event {
+	return l.forField("job_id", string(jobID), afterSeq, limit)
+}
+
+func (l *eventLog) forField(col, val string, afterSeq uint64, limit int) []quarrycontracts.Event {
+	limit = pageLimit(limit, defaultMaxPage)
+	q := fmt.Sprintf(
+		`SELECT event_id, run_id, job_id, type, ts, seq, payload, COALESCE(idempotency_key,'')
+		 FROM events WHERE %s=$1 AND seq > $2 ORDER BY seq ASC LIMIT $3`, col)
+	rows, err := l.pool.Query(context.Background(), q, val, int64(afterSeq), limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	out := make([]quarrycontracts.Event, 0, limit)
+	for rows.Next() {
+		var (
+			evt     quarrycontracts.Event
+			runID   *string
+			jobID   *string
+			payload []byte
+			seq     int64
+		)
+		if err := rows.Scan(&evt.EventID, &runID, &jobID, &evt.Type, &evt.Timestamp,
+			&seq, &payload, &evt.IdempotencyKey); err != nil {
+			return out
+		}
+		evt.Seq = uint64(seq)
+		if runID != nil {
+			id := quarrycontracts.ID(*runID)
+			evt.RunID = &id
+		}
+		if jobID != nil {
+			id := quarrycontracts.ID(*jobID)
+			evt.JobID = &id
+		}
+		if len(payload) > 0 {
+			_ = json.Unmarshal(payload, &evt.Payload)
+		}
+		out = append(out, evt)
+	}
+	return out
+}

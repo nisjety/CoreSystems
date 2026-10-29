@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "dw_staging_xero",
+  name: "attachment_metadata",
+  description: "Last-observed Accounting attachment-list metadata, excluding binary content; deletions are not reconciled."
+}

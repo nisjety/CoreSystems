@@ -1,0 +1,14 @@
+# Optional tenant authorization for Leads' shared Integration Core client.
+# Explicit sync enablement also requires the existing Leads entitlement gate.
+services:
+  leads-core:
+    environment:
+      INTEGRATION_CORE_TENANT_ORGANIZATION_ID: ${STUDIO_LEADS_INTEGRATION_ORGANIZATION_ID:?set the verified Leads organization}
+      INTEGRATION_CORE_TENANT_BEARER_TOKEN_FILE: /run/secrets/leads_integration_bearer
+      PROVIDER_LEAD_SYNC_ENABLED: ${STUDIO_LEADS_PROVIDER_SYNC_ENABLED:-false}
+    secrets:
+      - leads_integration_bearer
+
+secrets:
+  leads_integration_bearer:
+    file: ${STUDIO_LEADS_INTEGRATION_BEARER_FILE:?set an approved Leads bearer secret file path}

@@ -1,0 +1,29 @@
+{
+  "name": "TriodeLab - Digital Konsulent i Oslo",
+  "short_name": "TriodeLab",
+  "description": "Vi er et konsulentfirma som spesialiserer seg på digital transformasjon og teknisk rådgivning.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#000000",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/favicon-16x16.png",
+      "sizes": "16x16",
+      "type": "image/png"
+    },
+    {
+      "src": "/favicon-32x32.png",
+      "sizes": "32x32",
+      "type": "image/png"
+    },
+    {
+      "src": "/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    }
+  ],
+  "categories": ["business", "productivity"],
+  "lang": "nb-NO"
+} 

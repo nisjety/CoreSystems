@@ -1,0 +1,7 @@
+{
+  "tenant_id": "2b6e5cd6-6ce0-11ee-970e-025417856183",
+  "tenant_name": "Aquatiq AB",
+  "datamart_company_id": "4883732",
+  "status": "active",
+  "notes": "Registered in v1 scripts/add_tenants.py; DataMart company discovered with `vsv2 dm-companies` on 2026-10-01."
+}

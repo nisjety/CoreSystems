@@ -1,0 +1,29 @@
+name: verevon-studio-demo
+
+services:
+  studio-demo:
+    build:
+      context: ../Frontend Plane/verevonv3
+      dockerfile: Dockerfile.studio-demo
+    init: true
+    command: ["pnpm", "exec", "vite", "--config", "vite.studio-demo.config.ts", "--host", "0.0.0.0", "--port", "5174", "--strictPort"]
+    ports:
+      - "127.0.0.1:${STUDIO_DEMO_HOST_PORT:-5174}:5174"
+    environment:
+      STUDIO_DEMO_PUBLIC_PORT: ${STUDIO_DEMO_HOST_PORT:-5174}
+    volumes:
+      - ../Frontend Plane/verevonv3:/app
+      - studio-demo-node-modules:/app/node_modules
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:5174/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  studio-demo-node-modules:

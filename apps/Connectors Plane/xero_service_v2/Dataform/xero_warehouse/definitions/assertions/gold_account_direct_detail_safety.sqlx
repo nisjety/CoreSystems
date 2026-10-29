@@ -1,0 +1,11 @@
+config {
+  type: "assertion",
+  name: "xero_gold_account_direct_detail_safety",
+  schema: "dw_1_silver_xero_assertions",
+  description: "Gold account direct-detail evidence may only be reported when the retained direct response passed same-run reconciliation."
+}
+
+SELECT tenant_id, account_id, direct_detail_source_run_id
+FROM ${ref("xero_gold_finance", "dim_account")}
+WHERE has_direct_detail_evidence
+  AND is_direct_detail_reconciled IS NOT TRUE

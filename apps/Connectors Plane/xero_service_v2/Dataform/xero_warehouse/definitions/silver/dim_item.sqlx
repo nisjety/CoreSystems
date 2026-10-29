@@ -1,0 +1,15 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero items at tenant and item ID grain; inventory quantities retain source meaning.",
+  assertions: { nonNull: ["tenant_id", "item_id", "item_key"], uniqueKey: ["item_key"] }
+}
+
+SELECT CONCAT(tenant_id, '|', item_id) AS item_key,
+       tenant_id, item_id, record_id AS item_internal_id, item_code, item_name,
+       description, purchase_description, is_sold, is_purchased,
+       is_tracked_as_inventory, quantity_on_hand, total_cost_pool,
+       sales_unit_price, purchase_unit_price, sales_account_code,
+       cogs_account_code, sales_tax_type, purchase_tax_type,
+       updated_at, first_seen_at, synced_at
+FROM ${ref("dw_bronze_xero", "xero_items")}

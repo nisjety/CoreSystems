@@ -1,0 +1,32 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Xero bank transaction allocations; signed net measures are not the gross bank cash-flow total.",
+  assertions: { nonNull: ["tenant_id", "bank_transaction_id", "line_item_id", "bank_transaction_line_key"], uniqueKey: ["bank_transaction_line_key"] }
+}
+
+SELECT FARM_FINGERPRINT(l.tenant_id) AS company_key,
+       FARM_FINGERPRINT(CAST(l.transaction_date_local AS STRING)) AS date_key,
+       l.bank_transaction_line_key, l.bank_transaction_key,
+       l.tenant_id, l.bank_transaction_id, l.line_item_id,
+       l.transaction_type, l.status, l.is_deleted,
+       l.is_external_cash_flow, l.is_line_set_ambiguous,
+       l.bank_account_id, l.contact_id, l.account_id, l.account_code,
+       l.description, l.quantity, l.unit_amount, l.currency_code,
+       l.line_amount_raw, l.net_amount_in_currency AS source_net_amount_in_currency,
+       CASE WHEN l.status = 'AUTHORISED' AND NOT l.is_line_set_ambiguous
+                  AND l.currency_code IS NOT NULL AND l.transaction_type = 'SPEND'
+                  THEN -l.net_amount_in_currency
+            WHEN l.status = 'AUTHORISED' AND NOT l.is_line_set_ambiguous
+                  AND l.currency_code IS NOT NULL AND l.transaction_type = 'RECEIVE'
+                  THEN l.net_amount_in_currency
+            ELSE NULL END AS external_net_allocation_in_currency,
+       l.tax_amount AS source_vat_in_currency,
+       IF(l.tracking_category_1_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.tracking_category_1_id))) AS tracking_category_1_key,
+       IF(l.tracking_option_1_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.tracking_option_1_id))) AS tracking_option_1_key,
+       IF(l.tracking_category_2_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.tracking_category_2_id))) AS tracking_category_2_key,
+       IF(l.tracking_option_2_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(l.tenant_id, '|', l.tracking_option_2_id))) AS tracking_option_2_key,
+       l.tracking_category_1_id, l.tracking_option_1_id,
+       l.tracking_category_2_id, l.tracking_option_2_id,
+       'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_bank_transaction_line")} AS l

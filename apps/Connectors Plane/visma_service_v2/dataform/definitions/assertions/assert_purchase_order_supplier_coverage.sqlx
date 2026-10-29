@@ -1,0 +1,49 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_purchase_order_supplier_coverage",
+  description: "The suppliers of the purchase orders must be in the supplier dimension. Returns each tenant with at least 50 purchase orders and 20 suppliers where less than 95 % of the purchase order rows have their supplier in dim_supplier. All tenants are at 100 %; v1's check (assert_po_supplier_coverage_by_tenant) used 30 % because v1's feed lost suppliers.",
+  tags: ["assertion", "silver", "purchase_order"]
+}
+
+WITH po_supplier AS (
+  SELECT tenant_id, supplier_id, COUNT(*) AS po_rows
+  FROM ${ref("visma_silver", "fact_purchase_order")}
+  WHERE supplier_id IS NOT NULL
+  GROUP BY tenant_id, supplier_id
+),
+
+supplier_tenant AS (
+  SELECT DISTINCT tenant_id, supplier_id
+  FROM ${ref("visma_silver", "dim_supplier")}
+),
+
+coverage AS (
+  SELECT
+    p.tenant_id,
+    SUM(p.po_rows) AS total_po_rows,
+    SUM(IF(s.supplier_id IS NOT NULL, p.po_rows, 0)) AS matched_po_rows
+  FROM po_supplier AS p
+  LEFT JOIN supplier_tenant AS s
+    ON p.tenant_id = s.tenant_id
+   AND p.supplier_id = s.supplier_id
+  GROUP BY p.tenant_id
+),
+
+suppliers AS (
+  SELECT tenant_id, COUNT(DISTINCT supplier_id) AS supplier_count
+  FROM ${ref("visma_silver", "dim_supplier")}
+  GROUP BY tenant_id
+)
+
+SELECT
+  c.tenant_id,
+  c.total_po_rows,
+  c.matched_po_rows,
+  s.supplier_count,
+  SAFE_DIVIDE(c.matched_po_rows, c.total_po_rows) AS supplier_coverage
+FROM coverage AS c
+JOIN suppliers AS s ON s.tenant_id = c.tenant_id
+WHERE c.total_po_rows >= 50
+  AND s.supplier_count >= 20
+  AND SAFE_DIVIDE(c.matched_po_rows, c.total_po_rows) < 0.95

@@ -1,0 +1,10 @@
+# Wave 7: enable reqwest's HTTP/3 API surface.
+#
+# reqwest gates its `http3` feature behind `--cfg reqwest_unstable` so
+# experimental QUIC code doesn't leak into stable crates by accident.
+# We accept that contract for the optional `http3` feature on
+# `quarry-runtime`. The flag is harmless when the feature is off — it
+# only compiles the http3 code paths inside reqwest if the matching
+# feature is also enabled.
+[build]
+rustflags = ["--cfg=reqwest_unstable"]

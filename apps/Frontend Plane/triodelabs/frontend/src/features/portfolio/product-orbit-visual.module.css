@@ -1,0 +1,184 @@
+.stage {
+  --card-width: clamp(18rem, 42vw, 42rem);
+  --orbit-distance: clamp(12rem, 28vw, 28rem);
+  position: relative;
+  display: grid;
+  min-height: clamp(29rem, 64vw, 48rem);
+  place-items: center;
+  overflow: hidden;
+  isolation: isolate;
+  perspective: 1000px;
+}
+
+.orbit {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.trail {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--card-width);
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: 10px;
+  opacity: 0.45;
+  filter: blur(6px) brightness(0.64);
+  box-shadow: 0 18px 35px rgb(25 25 25 / 10%);
+  animation: orbit 20s linear infinite;
+}
+
+.trailImage {
+  object-fit: cover;
+  object-position: center;
+}
+
+.trailImage {
+  transform: scale(1.035);
+}
+
+.card {
+  position: relative;
+  z-index: 2;
+  display: block;
+  width: var(--card-width);
+  aspect-ratio: 4 / 3;
+  border-radius: 10px;
+  color: white;
+  box-shadow: 0 30px 65px rgb(22 22 22 / 20%);
+  transform-style: preserve-3d;
+  outline-offset: 10px;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.card:focus-visible {
+  outline: 2px solid #161616;
+}
+
+.media {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  background: #e9e7e1;
+}
+
+.coverImage,
+.previewVideo {
+  object-fit: cover;
+  object-position: center;
+  transform: scale(1);
+  transition: transform 650ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.previewVideo {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.previewVideo[data-playing="true"] {
+  opacity: 1;
+}
+
+.card:hover .coverImage,
+.card:focus-visible .coverImage,
+.card:hover .previewVideo,
+.card:focus-visible .previewVideo {
+  transform: scale(1.075);
+}
+
+.titleBadge,
+.actionBadge {
+  position: absolute;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  border-radius: 8px;
+  box-shadow: 0 10px 29px rgb(19 19 19 / 16%);
+  font-family: var(--font-manrope), sans-serif;
+  font-weight: 600;
+  transform: translateZ(55px);
+}
+
+.titleBadge {
+  top: -1.15rem;
+  right: -1.15rem;
+  padding: 0.7rem 0.95rem;
+  font-size: clamp(0.95rem, 1.3vw, 1.2rem);
+}
+
+.actionBadge {
+  bottom: -1.15rem;
+  left: 0.9rem;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid rgb(22 22 22 / 12%);
+  background: rgb(255 255 255 / 96%);
+  color: #161616;
+  font-size: clamp(0.8rem, 1vw, 1rem);
+}
+
+@keyframes orbit {
+  0% {
+    transform: translate(-50%, -50%)
+      translateX(calc(-1 * var(--orbit-distance))) translateY(1.2rem)
+      scale(0.52);
+    opacity: 0.55;
+  }
+
+  25% {
+    transform: translate(-50%, -50%) translateY(-4.5rem) scale(0.22);
+    opacity: 0.3;
+  }
+
+  50% {
+    transform: translate(-50%, -50%) translateX(var(--orbit-distance))
+      translateY(1.2rem) scale(0.52);
+    opacity: 0.55;
+  }
+
+  75% {
+    transform: translate(-50%, -50%) translateY(4.5rem) scale(0.22);
+    opacity: 0.3;
+  }
+
+  100% {
+    transform: translate(-50%, -50%)
+      translateX(calc(-1 * var(--orbit-distance))) translateY(1.2rem)
+      scale(0.52);
+    opacity: 0.55;
+  }
+}
+
+@media (max-width: 639px) {
+  .stage {
+    --card-width: 76vw;
+    --orbit-distance: 42vw;
+    min-height: 28rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trail {
+    animation: none;
+  }
+
+  .trail:nth-child(odd) {
+    transform: translate(calc(-50% - var(--orbit-distance)), -50%) scale(0.4);
+  }
+
+  .trail:nth-child(even) {
+    transform: translate(calc(-50% + var(--orbit-distance)), -50%) scale(0.4);
+  }
+
+  .coverImage,
+  .previewVideo {
+    transition: none;
+  }
+}

@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "dw_staging_xero",
+  name: "accounting_get_responses",
+  description: "Append-only raw Accounting GET JSON responses and GCS pointers. Grain: tenant_id, operation_id, run_id."
+}

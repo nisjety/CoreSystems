@@ -1,0 +1,12 @@
+-- P2-2: parent-child chunking, chunking half of D13 (the quantization half
+-- shipped separately in embedding-engine-rs::qdrant_writer). Distinct from
+-- the pre-existing `parent_chunk_id` column, which tracks re-crawl LINEAGE
+-- ("this chunk replaced that chunk") and is unrelated to retrieval-time
+-- context expansion — reusing it here would conflate two different
+-- concepts under one name.
+--
+-- Nullable, no backfill: only chunks produced by a build with
+-- INDEX_ENGINE_PARENT_CHUNK_SIZE set will ever have this populated (the
+-- feature defaults to off), and there is no source data to backfill it from
+-- for chunks that already exist.
+ALTER TABLE knowledge_units ADD COLUMN IF NOT EXISTS parent_window_text TEXT;

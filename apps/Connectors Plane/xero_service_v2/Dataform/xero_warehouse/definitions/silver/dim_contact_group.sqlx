@@ -1,0 +1,18 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero contact groups. A group is a source segmentation label, not a financial business unit.",
+  assertions: { nonNull: ["tenant_id", "contact_group_id", "contact_group_key"], uniqueKey: ["contact_group_key"] }
+}
+
+SELECT
+  CONCAT(tenant_id, '|', contact_group_id) AS contact_group_key,
+  tenant_id,
+  contact_group_id,
+  COALESCE(group_name, name) AS contact_group_name,
+  status,
+  is_active,
+  member_count AS source_member_count,
+  first_seen_at,
+  synced_at
+FROM ${ref("dw_bronze_xero", "xero_contact_groups")}

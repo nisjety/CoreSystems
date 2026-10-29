@@ -1,0 +1,353 @@
+import { createAuthMiddleware } from 'better-auth/api';
+import type { BetterAuthPlugin } from 'better-auth';
+
+/**
+ * Minimal core-publish surface the audit plugin needs. Satisfied by
+ * DirectNatsService (the LOCAL control-plane bus → controlplane-nats, where
+ * audit-core's primary subscription listens). Audit deliberately uses the local
+ * bus, not the shared verevon-nats bus (which carries cross-plane domain/ACL
+ * events), so it never depends on the shared bus being up.
+ */
+interface AuditNatsPublisher {
+  publishAuditDurable(
+    subject: string,
+    payload: Record<string, unknown>,
+  ): Promise<{ stream: string; seq: number }>;
+}
+
+// Audit event types for Sprint 4
+export interface AuditEvent {
+  id?: string;
+  userId?: string;
+  sessionId?: string;
+  action: string;
+  resource: string;
+  details: Record<string, unknown>;
+  ipAddress?: string;
+  userAgent?: string;
+  timestamp: string;
+  success: boolean;
+  errorMessage?: string;
+}
+
+/**
+ * audit-core AuditEvent schema (verevon.audit.v2.control.auth-core.<event>)
+ * org_id, plane, and event are REQUIRED fields — omit the publish when org_id is absent.
+ */
+interface VerevonAuditEvent {
+  occurred_at: string;
+  event_id: string;
+  org_id: string;
+  user_id?: string;
+  actor_role?: string;
+  plane: string;
+  event: string;
+  subject?: string;
+  resource_id?: string;
+  outcome: 'ok' | 'denied' | 'error';
+  details?: Record<string, unknown>;
+  request_id?: string;
+  ip_address?: string;
+  user_agent?: string;
+}
+
+// Module-level singleton — set by setAuditNatsPublisher() called from auth-service.initializer
+let auditNats: AuditNatsPublisher | null = null;
+
+export function setAuditNatsPublisher(svc: AuditNatsPublisher | null): void {
+  auditNats = svc;
+}
+
+/**
+ * Publish to verevon.audit.v2.control.auth-core.<event> over the LOCAL control-plane bus
+ * (controlplane-nats), only when org_id is known (audit-core rejects events
+ * without it). Core publish matches audit-core's core QueueSubscribe.
+ */
+export async function publishVerevonAuditDurable(
+  evt: VerevonAuditEvent,
+): Promise<void> {
+  if (!auditNats) {
+    throw new Error('Durable audit transport unavailable');
+  }
+  const subject = `verevon.audit.v2.control.auth-core.${evt.event}`;
+  await auditNats.publishAuditDurable(subject, {
+    ...evt,
+    plane: 'control',
+    producer: 'auth-core',
+  });
+}
+
+// Dev-only fallback: when NATS is unconfigured the event can't reach
+// audit-core, so we at least surface it on stdout. When NATS IS configured
+// this is a no-op — the durable record goes to the Auth Core v2 subject.
+function logAuditEvent(event: AuditEvent): void {
+  if (auditNats) return;
+  console.log('[AUDIT:dev-fallback]', JSON.stringify(event, null, 2));
+}
+
+/**
+ * Resolve the active org from the Better Auth session. audit-core REQUIRES
+ * org_id, so events without an active org are dropped at publish time.
+ */
+function activeOrgFrom(ctx: {
+  context: { session?: unknown };
+}): string | undefined {
+  const session = ctx.context.session as
+    | { activeOrganizationId?: string }
+    | undefined;
+  return session?.activeOrganizationId;
+}
+
+// Create audit plugin with simplified implementation
+export function auditPlugin(): BetterAuthPlugin {
+  return {
+    id: 'audit',
+    hooks: {
+      // After hooks for successful events
+      after: [
+        // Sign-in events
+        {
+          matcher: (context) => {
+            const path = context.path ?? '';
+            return (
+              path === '/sign-in/email' ||
+              path === '/sign-in/oauth' ||
+              path.startsWith('/oauth/')
+            );
+          },
+          handler: createAuthMiddleware(async (ctx) => {
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+            const user = ctx.context.user;
+
+            const session = ctx.context.newSession;
+
+            if (user && session) {
+              const method = ctx.path.includes('oauth') ? 'oauth' : 'email';
+              const provider = ctx.path.includes('oauth')
+                ? ctx.path.split('/').pop()
+                : 'email';
+              const ipAddress =
+                ctx.request?.headers.get('x-forwarded-for') ||
+                ctx.request?.headers.get('x-real-ip') ||
+                'unknown';
+              const userAgent =
+                ctx.request?.headers.get('user-agent') || 'unknown';
+
+              logAuditEvent({
+                // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+                userId: user.id,
+                sessionId: session.session?.id || 'unknown',
+                action: 'SIGN_IN',
+                resource: 'authentication',
+                details: {
+                  method,
+                  provider,
+                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+                  userEmail: user.email,
+                },
+                ipAddress,
+                userAgent,
+                timestamp: new Date().toISOString(),
+                success: true,
+              });
+
+              // Durable audit — no-ops when no active org is selected.
+              const orgId = activeOrgFrom(ctx);
+              if (orgId) {
+                const durableSession = session.session as
+                  | { id?: unknown; createdAt?: unknown }
+                  | undefined;
+                const sessionId = durableSession?.id;
+                const sessionCreatedAt = durableSession?.createdAt;
+                if (
+                  typeof sessionId !== 'string' ||
+                  sessionId.length === 0 ||
+                  (typeof sessionCreatedAt !== 'string' &&
+                    typeof sessionCreatedAt !== 'number' &&
+                    !(sessionCreatedAt instanceof Date))
+                ) {
+                  throw new Error('Sign-in has no stable audit identity');
+                }
+                await publishVerevonAuditDurable({
+                  occurred_at: new Date(sessionCreatedAt).toISOString(),
+                  event_id: `session:${sessionId}:sign_in`,
+                  org_id: orgId,
+                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+                  user_id: user.id as string,
+                  plane: 'control',
+                  event: 'sign_in',
+                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+                  subject: user.email as string,
+                  outcome: 'ok',
+                  details: { method, provider },
+                  ip_address: ipAddress,
+                  user_agent: userAgent,
+                });
+              }
+
+              // Ensure async compliance for middleware
+              await Promise.resolve();
+            }
+          }),
+        },
+
+        // Two-Factor Authentication events
+        {
+          matcher: (context) => {
+            const path = context.path ?? '';
+            return (
+              path === '/two-factor/enable' ||
+              path === '/two-factor/disable' ||
+              path === '/two-factor/verify'
+            );
+          },
+          handler: createAuthMiddleware(async (ctx) => {
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+            const user = ctx.context.user;
+            const action = ctx.path.split('/').pop()?.toUpperCase();
+
+            if (user && action) {
+              const ipAddress =
+                ctx.request?.headers.get('x-forwarded-for') ||
+                ctx.request?.headers.get('x-real-ip') ||
+                'unknown';
+              const userAgent =
+                ctx.request?.headers.get('user-agent') || 'unknown';
+
+              logAuditEvent({
+                // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+                userId: user.id,
+                action: `2FA_${action}`,
+                resource: 'two_factor',
+                details: {
+                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+                  method: ctx.body?.method || 'totp',
+                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+                  userEmail: user.email,
+                },
+                ipAddress,
+                userAgent,
+                timestamp: new Date().toISOString(),
+                success: true,
+              });
+
+              // Better Auth exposes no immutable mutation id for these hooks.
+              // Durable publication stays disabled until the mutation is written
+              // to an Auth-owned outbox; assigning a request-time id here would
+              // defeat JetStream retry de-duplication.
+
+              // Ensure async compliance for middleware
+              await Promise.resolve();
+            }
+          }),
+        },
+
+        // Session revocation events
+        {
+          matcher: (context) => {
+            const path = context.path ?? '';
+            return (
+              path === '/revoke-sessions' ||
+              path === '/revoke-other-sessions' ||
+              path.includes('/revoke-session')
+            );
+          },
+          handler: createAuthMiddleware(async (ctx) => {
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+            const user = ctx.context.user;
+
+            if (user) {
+              const ipAddress =
+                ctx.request?.headers.get('x-forwarded-for') ||
+                ctx.request?.headers.get('x-real-ip') ||
+                'unknown';
+              const userAgent =
+                ctx.request?.headers.get('user-agent') || 'unknown';
+              const revokeType = ctx.path.includes('other')
+                ? 'others'
+                : ctx.path.includes('sessions')
+                  ? 'all'
+                  : 'single';
+
+              logAuditEvent({
+                // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+                userId: user.id,
+                action: 'SESSION_REVOKE',
+                resource: 'session',
+                details: {
+                  type: revokeType,
+                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+                  userEmail: user.email,
+                },
+                ipAddress,
+                userAgent,
+                timestamp: new Date().toISOString(),
+                success: true,
+              });
+
+              // Better Auth's bulk/single revoke after-hooks expose no immutable
+              // mutation id. A durable Auth outbox must own this event before it
+              // can safely use the audit v2 de-duplication contract.
+
+              // Ensure async compliance for middleware
+              await Promise.resolve();
+            }
+          }),
+        },
+      ],
+
+      // Before hooks for validation and attempt logging
+      before: [
+        // General authentication attempt logging
+        {
+          matcher: (context) => {
+            const path = context.path ?? '';
+            return (
+              path === '/sign-in/email' ||
+              path === '/sign-up/email' ||
+              path.startsWith('/oauth/') ||
+              path.includes('verify') ||
+              path.includes('two-factor')
+            );
+          },
+          handler: createAuthMiddleware(async (ctx) => {
+            // Log authentication attempts (success will be logged in after hooks)
+            const action = ctx.path.includes('sign-in')
+              ? 'SIGN_IN_ATTEMPT'
+              : ctx.path.includes('sign-up')
+                ? 'SIGN_UP_ATTEMPT'
+                : ctx.path.includes('oauth')
+                  ? 'OAUTH_ATTEMPT'
+                  : ctx.path.includes('verify')
+                    ? 'VERIFY_ATTEMPT'
+                    : '2FA_ATTEMPT';
+
+            logAuditEvent({
+              action,
+              resource: 'authentication',
+              details: {
+                // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+                email: ctx.body?.email,
+                provider: ctx.path.includes('oauth')
+                  ? ctx.path.split('/').pop()
+                  : // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+                    ctx.body?.provider || 'email',
+                path: ctx.path,
+              },
+              ipAddress:
+                ctx.request?.headers.get('x-forwarded-for') ||
+                ctx.request?.headers.get('x-real-ip') ||
+                'unknown',
+              userAgent: ctx.request?.headers.get('user-agent') || 'unknown',
+              timestamp: new Date().toISOString(),
+              success: false, // Will be updated to true in after hook if successful
+            });
+
+            // Ensure async compliance for middleware
+            await Promise.resolve();
+          }),
+        },
+      ],
+    },
+  };
+}

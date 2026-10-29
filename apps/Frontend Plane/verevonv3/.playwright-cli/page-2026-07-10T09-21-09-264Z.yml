@@ -1,0 +1,66 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - link "Gå til hjem" [ref=e7] [cursor=pointer]:
+          - /url: /dashboard
+          - text: V
+        - generic [ref=e8]:
+          - button "Gå tilbake" [ref=e9] [cursor=pointer]
+          - button "Gå fremover" [ref=e12] [cursor=pointer]
+        - generic [ref=e15]:
+          - button "Workspace Free" [ref=e18] [cursor=pointer]:
+            - generic [ref=e19]: Workspace
+            - strong [ref=e20]: Free
+          - link "Oversikt" [ref=e23] [cursor=pointer]:
+            - /url: /dashboard
+          - link "Hjem" [ref=e26] [cursor=pointer]:
+            - /url: /dashboard
+      - button "Åpne kunnskapssøk" [ref=e28] [cursor=pointer]:
+        - generic [ref=e32]: Søk i kunnskapsbasen
+        - generic [ref=e33]: /
+        - generic [ref=e34]: CMD+K
+      - generic [ref=e36]:
+        - button "Bytt mørk modus" [ref=e38] [cursor=pointer]
+        - button "Bytt til English" [ref=e47] [cursor=pointer]:
+          - generic [ref=e48]: "NO"
+        - button "Åpne AI-assistent" [ref=e55] [cursor=pointer]
+        - button "0 uleste meldinger" [ref=e60] [cursor=pointer]
+        - button "0 uleste varsler" [ref=e64] [cursor=pointer]
+        - button "Kalender" [ref=e68] [cursor=pointer]
+        - button "Åpne profilmeny" [ref=e72] [cursor=pointer]:
+          - generic [ref=e73]: W
+  - complementary "Primærnavigasjon" [ref=e74]:
+    - generic [ref=e76]:
+      - button "Utvid sidefelt" [ref=e78] [cursor=pointer]
+      - navigation "Arbeidsområdeseksjoner" [ref=e82]:
+        - generic [ref=e83]:
+          - link "Oversikt" [ref=e84] [cursor=pointer]:
+            - /url: /dashboard
+          - link "Chat" [ref=e87] [cursor=pointer]:
+            - /url: /chat
+          - link "Studio" [ref=e90] [cursor=pointer]:
+            - /url: /studio
+          - link "Innboks" [ref=e93] [cursor=pointer]:
+            - /url: /inbox
+          - link "Saker" [ref=e97] [cursor=pointer]:
+            - /url: /tickets
+          - link "Sosialt" [ref=e101] [cursor=pointer]:
+            - /url: /social
+          - link "Agenter" [ref=e104] [cursor=pointer]:
+            - /url: /agents
+          - link "Innhenting" [ref=e108] [cursor=pointer]:
+            - /url: /ingestions
+          - link "Kunnskap" [ref=e116] [cursor=pointer]:
+            - /url: /knowledge
+          - link "Innsikt" [ref=e119] [cursor=pointer]:
+            - /url: /insights
+      - generic [ref=e122]:
+        - link "Konto" [ref=e124] [cursor=pointer]:
+          - /url: /account
+        - link "Innstillinger" [ref=e129] [cursor=pointer]:
+          - /url: /settings
+        - button "Søk" [ref=e133] [cursor=pointer]
+  - main [ref=e137]:
+    - status [ref=e139]:
+      - generic [ref=e141]: Loading…

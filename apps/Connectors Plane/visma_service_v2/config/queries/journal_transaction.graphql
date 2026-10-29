@@ -1,0 +1,73 @@
+query JournalTransactions(
+  $lastId: String,
+  $accountId: Int,
+  $updatedInDataMart: DateTime,
+  $pageSize: Int! = 5000
+) {
+  journalTransactions(
+    lastId: $lastId,
+    accountId: $accountId,
+    updatedInDataMart: $updatedInDataMart,
+    pageSize: $pageSize
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    tranId
+    branchId
+    ledgerId
+    batchNbr
+    tranType
+    accountId
+    finPeriodId
+    tranDate
+    refNbr
+    lineNbr
+    debitAmt
+    creditAmt
+    debitTotal
+    creditTotal
+    curyId
+    currencyId
+    curyDebitAmt
+    curyCreditAmt
+    amount
+    lineAmount
+    curyAmount
+    lineCuryAmount
+    subaccountId
+    tranDesc
+    supplierId
+    customerId
+    uom
+    inventoryId
+    projectId
+    taskId
+    reclassBatchNbr
+    isReclassReverse
+    reclassSourceTranBatchNbr
+    reclassSourceTranLineNbr
+    reclassSourceTranModule
+    reconRefNbr
+    reconDate
+    reconDescription
+    releasedUserId
+    reconHide
+    batchBranchId
+    tranCode
+    batchDescription
+    autoReverse
+    autoReverseCopy
+    postedDateTime
+    quantity
+    transactionCodeDescription
+    lastModifiedDateTime
+    createdInDataMartDateTime
+    module
+    attachments {
+      name
+      fileId
+      lastRevisionId
+    }
+  }
+}

@@ -1,0 +1,6 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+expense_receipts,,1,0,succeeded,13337,13337,13337,1,0,13337,14952,313922,
+fixed_asset_classes,,1,0,succeeded,23,23,23,1,0,23,14985,520,
+inventory_items,,1,0,succeeded,7252,7252,7252,73,0,52,14840,14799,2026-09-29 16:04:40.387+00
+project_account_groups,,1,0,succeeded,250,250,250,1,0,250,14832,1399,
+supplier_invoices,,1,0,succeeded,11512,11512,11512,116,0,12,14393,10314,2026-09-29 15:40:21.91+00

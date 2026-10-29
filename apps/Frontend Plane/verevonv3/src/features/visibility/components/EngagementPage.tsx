@@ -1,0 +1,5 @@
+import { A } from '@solidjs/router'
+import { Gauge, Gavel, ArrowUpRight } from 'lucide-solid'
+import { useI18n } from '@/shared/i18n'
+import './visibility-tools.css'
+export default function EngagementPage(){const {tr}=useI18n();return <div class="visibility-tools engagement-home"><header><span class="visibility-eyebrow">{tr('Arbeidsområder','Workspaces')}</span><h1>{tr('Engasjement','Engagement')}</h1><p>{tr('Velg arbeidsområdet du vil fortsette i.','Choose the workspace you want to continue in.')}</p></header><nav aria-label={tr('Arbeidsområder i Engasjement','Engagement workspaces')} class="engagement-home__links"><A href="/engagement/visibility"><Gauge size={25}/><h2>{tr('Synlighet','Visibility')}</h2><p>{tr('Søkeanalyse, nettstedskvalitet og forbedringer.','Search analysis, website quality and improvements.')}</p><ArrowUpRight size={19}/></A><A href="/anbud"><Gavel size={25}/><h2>{tr('Anbud','Tenders')}</h2><p>{tr('Kunngjøringer, kontraktsradar og oppfølging.','Notices, contract radar and follow-up.')}</p><ArrowUpRight size={19}/></A></nav></div>}

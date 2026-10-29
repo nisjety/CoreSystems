@@ -1,0 +1,32 @@
+# §16.4.3 chaos test stack — toxiproxy interposed between DPv2 services
+# and their dependencies. Run alongside the main docker-compose.yml; the
+# chaos toxiproxy listens on host port 8474 for failure injection.
+#
+# Pattern: each backing service is reachable inside the network via
+# `tx-<name>` DNS alias; DPv2 service configs point at tx-postgres,
+# tx-nats, tx-qdrant, tx-dragonfly instead of the direct names.
+
+services:
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    container_name: dpv2-chaos-toxiproxy
+    ports:
+      - "8474:8474" # HTTP control plane
+      - "15432:15432" # tx-postgres listener
+      - "14222:14222" # tx-nats listener
+      - "16333:16333" # tx-qdrant listener
+      - "16379:16379" # tx-dragonfly listener
+    networks:
+      - coresystem-local
+    healthcheck:
+      # toxiproxy-cli ships in the image; `list` hits the :8474 control plane,
+      # so a 0 exit confirms the chaos proxy is up and ready for injection.
+      test: ["CMD", "/toxiproxy-cli", "list"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+networks:
+  coresystem-local:
+    external: true

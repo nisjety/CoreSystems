@@ -1,0 +1,37 @@
+name: xero-mcp
+
+services:
+  mcp:
+    image: aquatiq/xero-mcp:2026-10-07
+    pull_policy: never
+    container_name: aquatiq-xero-mcp
+    user: "10001:10001"
+    command: ["--transport", "http", "--env-file", "/run/secrets/server.env"]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    tmpfs:
+      - /tmp:rw,nosuid,noexec,size=16m
+    volumes:
+      - ./secrets/server.env:/run/secrets/server.env:ro
+      - xero_mcp_data:/app/out
+    networks:
+      - internal
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  xero_mcp_data:
+
+networks:
+  internal:
+    external: true

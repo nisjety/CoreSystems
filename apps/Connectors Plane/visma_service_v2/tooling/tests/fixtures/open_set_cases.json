@@ -1,0 +1,148 @@
+{
+  "about": "What `open_set: true` needs of an endpoint config, as cases both validators must answer the same way: `open_set_problem` in tooling/src/vsv2_tooling/config_validate.py (tested in tooling/tests/test_open_set_config.py) and `EndpointDefinition::open_set_problem` in core/crates/vsv2-orchestrator/src/registry.rs (tested there). Each case starts from the real config named in `base`, replaces the keys in `set`, deletes the keys in `remove`, and says what the answer is: null, or the reason (the Rust text has \"endpoint '<name>': \" in front of it). A rule changed on one side and not the other fails a test on the side that was not changed once this file is updated.",
+  "base": "customer_invoices",
+  "cases": [
+    {
+      "name": "the real customer_invoices config fits",
+      "problem": null
+    },
+    {
+      "name": "a comma-separated key of top-level fields fits",
+      "set": { "primary_key": "documentType, referenceNumber" },
+      "problem": null
+    },
+    {
+      "name": "a composite key of top-level fields fits",
+      "set": { "primary_key": ["documentType", "referenceNumber"] },
+      "problem": null
+    },
+    {
+      "name": "a trailing slash on the path is fine",
+      "set": { "api_endpoint": "/v1/customerinvoice/" },
+      "problem": null
+    },
+    {
+      "name": "without the flag nothing is checked",
+      "set": { "open_set": false, "tier": 3 },
+      "problem": null
+    },
+    {
+      "name": "a config that does not mention the flag is not checked",
+      "remove": ["open_set", "tier"],
+      "problem": null
+    },
+    {
+      "name": "a source other than erp_rest",
+      "set": { "source": "datamart_graphql" },
+      "problem": "open_set needs source erp_rest"
+    },
+    {
+      "name": "no api_endpoint",
+      "remove": ["api_endpoint"],
+      "problem": "open_set needs an api_endpoint without placeholders or a query string"
+    },
+    {
+      "name": "a blank api_endpoint",
+      "set": { "api_endpoint": "   " },
+      "problem": "open_set needs an api_endpoint without placeholders or a query string"
+    },
+    {
+      "name": "a placeholder in the path",
+      "set": { "api_endpoint": "/v1/customerinvoice/{referenceNumber}" },
+      "problem": "open_set needs an api_endpoint without placeholders or a query string"
+    },
+    {
+      "name": "a brace that is not a well-formed placeholder",
+      "set": { "api_endpoint": "/v1/customerinvoice/{" },
+      "problem": "open_set needs an api_endpoint without placeholders or a query string"
+    },
+    {
+      "name": "a query string in the path",
+      "set": { "api_endpoint": "/v1/customerinvoice?status=Open" },
+      "problem": "open_set needs an api_endpoint without placeholders or a query string"
+    },
+    {
+      "name": "a pagination profile with a zero-based page index",
+      "set": { "pagination_profile": "salesorder_page_index" },
+      "problem": "open_set needs pagination_profile finance_page_number"
+    },
+    {
+      "name": "no pagination",
+      "set": { "pagination_profile": "none" },
+      "problem": "open_set needs pagination_profile finance_page_number"
+    },
+    {
+      "name": "tier 2",
+      "set": { "tier": 2 },
+      "problem": "open_set needs tier 1: only the hourly pass runs it"
+    },
+    {
+      "name": "no tier",
+      "remove": ["tier"],
+      "problem": "open_set needs tier 1: only the hourly pass runs it"
+    },
+    {
+      "name": "a partitioned endpoint",
+      "set": {
+        "partitioning": {
+          "dimensions": [
+            { "query_param": "ledger", "source_endpoint": "ledgers", "source_path": "ledgerId" }
+          ]
+        }
+      },
+      "problem": "open_set needs an endpoint that is not partitioned or read by period"
+    },
+    {
+      "name": "an endpoint read by financial period",
+      "set": { "period_scan": { "first_period": "202301", "query_params": ["periodId"] } },
+      "problem": "open_set needs an endpoint that is not partitioned or read by period"
+    },
+    {
+      "name": "a dotted key field",
+      "set": { "primary_key": "customer.number" },
+      "problem": "open_set needs a primary key of top-level fields (no dots, tenant_id or _partition_key)"
+    },
+    {
+      "name": "tenant_id as the key",
+      "set": { "primary_key": "tenant_id" },
+      "problem": "open_set needs a primary key of top-level fields (no dots, tenant_id or _partition_key)"
+    },
+    {
+      "name": "tenant_id in a composite key",
+      "set": { "primary_key": ["tenant_id", "referenceNumber"] },
+      "problem": "open_set needs a primary key of top-level fields (no dots, tenant_id or _partition_key)"
+    },
+    {
+      "name": "_partition_key in a composite key",
+      "set": { "primary_key": ["documentType", "_partition_key"] },
+      "problem": "open_set needs a primary key of top-level fields (no dots, tenant_id or _partition_key)"
+    },
+    {
+      "name": "a key that names no field",
+      "set": { "primary_key": " , " },
+      "problem": "open_set needs a primary key of top-level fields (no dots, tenant_id or _partition_key)"
+    },
+    {
+      "name": "the source is named before the tier when both are wrong",
+      "set": { "source": "datamart_graphql", "tier": 2 },
+      "problem": "open_set needs source erp_rest"
+    },
+    {
+      "name": "the tier is named before the partitioning when both are wrong",
+      "set": {
+        "tier": 2,
+        "partitioning": {
+          "dimensions": [
+            { "query_param": "ledger", "source_endpoint": "ledgers", "source_path": "ledgerId" }
+          ]
+        }
+      },
+      "problem": "open_set needs tier 1: only the hourly pass runs it"
+    },
+    {
+      "name": "the path is named before the key when both are wrong",
+      "set": { "api_endpoint": "/v1/customerinvoice?a=b", "primary_key": "a.b" },
+      "problem": "open_set needs an api_endpoint without placeholders or a query string"
+    }
+  ]
+}

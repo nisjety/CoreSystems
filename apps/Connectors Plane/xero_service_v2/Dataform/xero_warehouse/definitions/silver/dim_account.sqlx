@@ -1,0 +1,83 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero account dimension, keeping archived accounts visible.",
+  assertions: {
+    nonNull: ["tenant_id", "account_id", "account_key"],
+    uniqueKey: ["account_key"]
+  }
+}
+
+WITH current_classification AS (
+  SELECT *
+  FROM ${ref("dw_1_silver_xero", "dim_account_classification_history")}
+  WHERE is_current_classification
+), direct_detail_quality AS (
+SELECT
+  tenant_id,
+  account_id,
+  direct_detail_observed_at,
+  direct_detail_source_run_id,
+  is_direct_detail_reconciled
+FROM ${ref("dw_1_silver_xero", "audit_account_direct_detail_reconciliation")}
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY tenant_id, account_id
+  ORDER BY direct_detail_observed_at DESC, direct_detail_source_run_id DESC,
+           direct_detail_source_version_id DESC
+) = 1
+)
+
+SELECT current_classification.account_classification_history_key,
+       current_classification.account_key,
+       current_classification.tenant_id,
+       current_classification.account_id,
+       current_classification.account_internal_id,
+       current_classification.account_code,
+       current_classification.account_name,
+       current_classification.account_description,
+       current_classification.account_type,
+       current_classification.account_class,
+       current_classification.status,
+       current_classification.is_archived,
+       current_classification.is_active,
+       current_classification.tax_type,
+       current_classification.reporting_code,
+       current_classification.reporting_name,
+       current_classification.source_bs_pl,
+       current_classification.source_fsli_1,
+       current_classification.source_fsli_2,
+       current_classification.source_fsli_3,
+       current_classification.ebitda_flag,
+       current_classification.net_income_flag,
+       current_classification.cash_flow_1,
+       current_classification.cash_flow_2,
+       current_classification.cash_flow_3,
+       current_classification.working_capital_flag,
+       current_classification.capex_flag,
+       current_classification.intercompany_flag,
+       current_classification.account_mapping_id,
+       current_classification.account_mapping_source,
+       current_classification.account_mapping_version,
+       current_classification.mapping_valid_from,
+       current_classification.mapping_valid_to,
+       current_classification.mapping_approved_at,
+       current_classification.source_updated_at AS updated_at,
+       current_classification.valid_from_observed_at AS synced_at,
+       current_classification.first_seen_at,
+       current_classification.source_version_id AS version_id,
+       current_classification.bs_pl,
+       current_classification.fsli_1,
+       current_classification.account_mapping_method,
+       current_classification.is_financial_statement_classification_complete,
+       staging.record_id IS NULL AS is_missing_from_staging,
+       direct_detail.account_id IS NOT NULL AS has_direct_detail_evidence,
+       direct_detail.is_direct_detail_reconciled,
+       direct_detail.direct_detail_observed_at,
+       direct_detail.direct_detail_source_run_id
+FROM current_classification
+LEFT JOIN ${ref("dw_staging_xero", "accounts")} AS staging
+  ON current_classification.tenant_id = staging.tenant_id
+ AND current_classification.account_internal_id = staging.record_id
+LEFT JOIN direct_detail_quality AS direct_detail
+  ON current_classification.tenant_id = direct_detail.tenant_id
+ AND current_classification.account_internal_id = direct_detail.account_id

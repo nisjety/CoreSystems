@@ -1,0 +1,35 @@
+# Apply with marketing-bearer.studio.yml after Google account consent exists.
+services:
+  marketing-core:
+    environment:
+      GOOGLE_CONNECTION_ID: ${STUDIO_MARKETING_GOOGLE_CONNECTION_ID:?set the authorized Google connection ID}
+      GOOGLE_GSC_PROPERTY: ${STUDIO_MARKETING_GSC_PROPERTY:-}
+      INTEGRATION_BEARER_TOKEN_FILE: /run/marketing-bearer/token
+      MARKETING_ORGANIZATION_ID: ${STUDIO_MARKETING_INTEGRATION_ORGANIZATION_ID:?set the verified Marketing organization}
+      MARKETING_WEBSITES_FILE: /var/lib/marketing/websites.json
+      MARKETING_INITIAL_SITE: ${STUDIO_MARKETING_INITIAL_SITE:-}
+    volumes:
+      - marketing-integration-bearer:/run/marketing-bearer:ro
+      - marketing-websites:/var/lib/marketing
+    depends_on:
+      marketing-bearer-refresh:
+        condition: service_healthy
+      marketing-websites-init:
+        condition: service_completed_successfully
+
+  marketing-websites-init:
+    image: alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+    profiles: ["marketing"]
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
+    command: ["sh", "-ec", "chown 100:101 /var/lib/marketing && chmod 0700 /var/lib/marketing"]
+    volumes:
+      - marketing-websites:/var/lib/marketing
+
+volumes:
+  marketing-websites:
+    name: ${STUDIO_MARKETING_DATA_VOLUME:-engagement-plane_marketing-websites}

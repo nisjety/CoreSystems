@@ -1,0 +1,1 @@
+function e(){return Promise.reject(Error(`Diagrammer er ikke med i demoen.`))}var t={initialize:()=>void 0,render:e,parse:e,run:async()=>void 0,init:async()=>void 0,contentLoaded:()=>void 0},n=t.initialize,r=t.render,i=t.parse,a=t.run,o=t.init,s=t.contentLoaded;export{s as contentLoaded,t as default,o as init,n as initialize,i as parse,r as render,a as run};

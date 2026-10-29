@@ -1,0 +1,30 @@
+{
+  "endpoint_name": "purchase_receipts",
+  "bigquery_table": "visma_purchase_receipts",
+  "primary_key": "receiptNbr",
+  "source": "erp_rest",
+  "api_method": "get_purchase_receipts",
+  "api_endpoint": "/v2/PurchaseReceipt",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "receiptNbr",
+    "lastModifiedDateTime"
+  ],
+  "datamart": {
+    "ready": false,
+    "pilot_override": false,
+    "query_file": "config/queries/purchase_receipt.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "erp_rest"
+  },
+  "notes": "Tracks goods receiving from purchase orders; critical for inventory receipt processing and three-way matching (PO→Receipt→Invoice).",
+  "default_query": {
+    "expandNote": "true"
+  },
+  "tier": 1
+}

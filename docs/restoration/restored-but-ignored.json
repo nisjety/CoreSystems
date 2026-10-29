@@ -1,0 +1,5 @@
+[
+  "apps/Connectors Plane/currency_service/.claude/settings.local.json",
+  "apps/Connectors Plane/xero_service_v2/.claude/settings.local.json",
+  "apps/Frontend Plane/triodelabs/backend/.env"
+]

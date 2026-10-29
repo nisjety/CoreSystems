@@ -1,0 +1,20 @@
+# Opt-in Search Console read path for the unified Studio Plane stack.
+# Use only with a previously authorized Integration Core connection and a
+# mounted, org-scoped bearer file. Never put the bearer value in an env file.
+services:
+  marketing-core:
+    environment:
+      INTEGRATION_CORE_URL: http://integration-api:3026
+      GOOGLE_CONNECTION_ID: ${STUDIO_MARKETING_GOOGLE_CONNECTION_ID:?set a verified Google connection ID}
+      GOOGLE_GSC_PROPERTY: ${STUDIO_MARKETING_GSC_PROPERTY:-}
+      INTEGRATION_BEARER_TOKEN_FILE: /run/secrets/studio_marketing_integration_bearer
+    secrets:
+      - source: studio_marketing_integration_bearer
+        target: studio_marketing_integration_bearer
+    networks:
+      - engagement-net
+      - inter-plane-bus
+
+secrets:
+  studio_marketing_integration_bearer:
+    file: ${STUDIO_MARKETING_INTEGRATION_BEARER_FILE:?set an approved bearer secret file path}

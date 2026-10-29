@@ -1,0 +1,10 @@
+tenant,name,endpoint,source,status,records,written,seconds,min_remaining,error,finished
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,project_tasks,erp_rest,ok,240,240,42,14884,,2026-10-01T01:35:22Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,packaging_types,erp_rest,ok,1,1,0,14883,,2026-10-01T01:35:22Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,project_tasks,erp_rest,ok,354,354,56,14885,,2026-10-01T01:35:37Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,warehouses,erp_rest,ok,2,2,0,14884,,2026-10-01T01:35:37Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,cash_transactions,erp_rest,ok,278,278,4,14881,,2026-10-01T01:35:42Z
+f630d6b0-5566-11ee-960c-025417856183,Aquatiq Food Factory AS,project_budgets,erp_rest,ok,2056,2056,8,14860,,2026-10-01T01:35:51Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,project_tasks,erp_rest,ok,6469,6469,344,14234,,2026-10-01T01:40:24Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,accounts,erp_rest,ok,417,417,1,14233,,2026-10-01T01:40:25Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,general_ledger_transactions,erp_rest,ok,120417,120417,328,14111,,2026-10-01T01:45:53Z

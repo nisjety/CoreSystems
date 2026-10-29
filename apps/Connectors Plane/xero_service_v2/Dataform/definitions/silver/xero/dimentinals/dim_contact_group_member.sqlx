@@ -1,0 +1,30 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  name: "dim_contact_group_member",
+  description: "Silver: current Xero group membership from group-detail snapshots. Grain: one row per tenant, group, and contact.",
+  tags: ["silver", "xero", "dimension"]
+}
+
+WITH current_groups AS (
+  SELECT tenant_id, record_id, synced_at, contact_group_id, name
+  FROM ${ref("dw_staging_xero", "contact_groups")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, record_id
+    ORDER BY synced_at DESC
+  ) = 1
+)
+
+SELECT
+  s.tenant_id,
+  s.synced_at,
+  COALESCE(s.contact_group_id, h.contact_group_id) AS contact_group_id,
+  s.contact_id,
+  s.contact_name,
+  h.name AS contact_group_name,
+  'xero' AS _source
+FROM ${ref("dw_staging_xero", "contact_group_member_snapshots")} AS s
+JOIN current_groups AS h
+  ON s.tenant_id = h.tenant_id
+ AND s.record_id = h.record_id
+ AND s.synced_at = h.synced_at

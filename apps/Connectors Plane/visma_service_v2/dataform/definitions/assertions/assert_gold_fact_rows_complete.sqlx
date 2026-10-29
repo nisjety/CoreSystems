@@ -1,0 +1,290 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_gold_fact_rows_complete",
+  description: "Every gold fact (and the sales and purchase order dimensions, and the two Power BI tables that hold one row per silver row) must hold exactly the rows of the silver fact it is built from. Returns one row per gold table and tenant where the number of rows differs. Gold joins its dimensions with LEFT JOINs, so a row can only be lost by a filter, or gained by a dimension that is not unique on the join key.",
+  tags: ["assertion", "gold", "fact"]
+}
+
+WITH silver AS (
+  SELECT
+    'fact_customer_credit_note' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_customer_credit_note")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT
+    'fact_customer_invoice' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_customer_invoice")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT
+    'fact_customer_invoice_line' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_customer_invoice_line")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT
+    'fact_customer_payment' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_customer_payment")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT
+    'fact_fixed_asset_transaction' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_fixed_asset_transaction")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT
+    'fact_general_ledger' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_general_ledger")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT
+    'fact_general_ledger_balance' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_general_ledger_balance")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT
+    'fact_inventory_movement' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_inventory_movement")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT
+    'fact_inventory_movement_line' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_inventory_movement_line")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT
+    'fact_project_transaction_line' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_project_transaction_line")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT
+    'fact_supplier_invoice' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_supplier_invoice")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT
+    'fact_supplier_invoice_line' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_supplier_invoice_line")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT
+    'fact_supplier_payment' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_supplier_payment")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT
+    'fact_purchase_order' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_purchase_order")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT
+    'fact_purchase_order_line' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_purchase_order_line")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT
+    'fact_sales_order' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_sales_order")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT
+    'fact_sales_order_line' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_sales_order_line")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT
+    'fact_shipment' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_shipment")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT
+    'fact_shipment_line' AS silver_model,
+    tenant_id,
+    FARM_FINGERPRINT(CAST(tenant_id AS STRING)) AS company_key,
+    COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_shipment_line")}
+  GROUP BY tenant_id
+),
+
+mapping AS (
+  SELECT silver_model, gold_model
+  FROM UNNEST([
+    STRUCT('fact_customer_credit_note' AS silver_model, 'visma_gold_finance.fact_customer_credit_note' AS gold_model),
+    STRUCT('fact_customer_invoice' AS silver_model, 'visma_gold_finance.fact_customer_invoice' AS gold_model),
+    STRUCT('fact_customer_invoice_line' AS silver_model, 'visma_gold_finance.fact_customer_invoice_line' AS gold_model),
+    STRUCT('fact_customer_payment' AS silver_model, 'visma_gold_finance.fact_customer_payment' AS gold_model),
+    STRUCT('fact_fixed_asset_transaction' AS silver_model, 'visma_gold_finance.fact_fixed_asset_transaction' AS gold_model),
+    STRUCT('fact_general_ledger' AS silver_model, 'visma_gold_finance.fact_general_ledger' AS gold_model),
+    STRUCT('fact_general_ledger' AS silver_model, 'visma_datamart.BI_FinanceTable' AS gold_model),
+    STRUCT('fact_general_ledger_balance' AS silver_model, 'visma_gold_finance.fact_general_ledger_balance' AS gold_model),
+    STRUCT('fact_inventory_movement' AS silver_model, 'visma_gold_finance.fact_inventory_movement' AS gold_model),
+    STRUCT('fact_inventory_movement_line' AS silver_model, 'visma_gold_finance.fact_inventory_movement_line' AS gold_model),
+    STRUCT('fact_project_transaction_line' AS silver_model, 'visma_gold_finance.fact_project_portfolio_line' AS gold_model),
+    STRUCT('fact_supplier_invoice' AS silver_model, 'visma_gold_finance.fact_supplier_invoice' AS gold_model),
+    STRUCT('fact_supplier_invoice_line' AS silver_model, 'visma_gold_finance.fact_supplier_invoice_line' AS gold_model),
+    STRUCT('fact_supplier_payment' AS silver_model, 'visma_gold_finance.fact_supplier_payment' AS gold_model),
+    STRUCT('fact_purchase_order' AS silver_model, 'visma_gold_sales.dim_purchase_order' AS gold_model),
+    STRUCT('fact_purchase_order_line' AS silver_model, 'visma_gold_sales.fact_purchase_order_line' AS gold_model),
+    STRUCT('fact_sales_order' AS silver_model, 'visma_gold_sales.dim_sales_order' AS gold_model),
+    STRUCT('fact_sales_order_line' AS silver_model, 'visma_gold_sales.fact_sales_order_line' AS gold_model),
+    STRUCT('fact_sales_order_line' AS silver_model, 'visma_datamart.BI_SalesOrder' AS gold_model),
+    STRUCT('fact_shipment' AS silver_model, 'visma_gold_sales.dim_shipment' AS gold_model),
+    STRUCT('fact_shipment_line' AS silver_model, 'visma_gold_sales.fact_shipment_detail_line' AS gold_model)
+  ])
+),
+
+expected AS (
+  SELECT mapping.gold_model, silver.tenant_id, silver.company_key, silver.silver_rows
+  FROM silver
+  INNER JOIN mapping ON silver.silver_model = mapping.silver_model
+),
+
+gold AS (
+  SELECT 'visma_gold_finance.fact_customer_credit_note' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_finance", "fact_customer_credit_note")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_gold_finance.fact_customer_invoice' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_finance", "fact_customer_invoice")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_gold_finance.fact_customer_invoice_line' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_finance", "fact_customer_invoice_line")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_gold_finance.fact_customer_payment' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_finance", "fact_customer_payment")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_gold_finance.fact_fixed_asset_transaction' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_finance", "fact_fixed_asset_transaction")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_gold_finance.fact_general_ledger' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_finance", "fact_general_ledger")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_datamart.BI_FinanceTable' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_datamart", "BI_FinanceTable")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_gold_finance.fact_general_ledger_balance' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_finance", "fact_general_ledger_balance")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_gold_finance.fact_inventory_movement' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_finance", "fact_inventory_movement")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_gold_finance.fact_inventory_movement_line' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_finance", "fact_inventory_movement_line")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_gold_finance.fact_project_portfolio_line' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_finance", "fact_project_portfolio_line")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_gold_finance.fact_supplier_invoice' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_finance", "fact_supplier_invoice")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_gold_finance.fact_supplier_invoice_line' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_finance", "fact_supplier_invoice_line")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_gold_finance.fact_supplier_payment' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_finance", "fact_supplier_payment")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_gold_sales.dim_purchase_order' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_sales", "dim_purchase_order")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_gold_sales.fact_purchase_order_line' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_sales", "fact_purchase_order_line")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_gold_sales.dim_sales_order' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_sales", "dim_sales_order")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_gold_sales.fact_sales_order_line' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_sales", "fact_sales_order_line")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_datamart.BI_SalesOrder' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_datamart", "BI_SalesOrder")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_gold_sales.dim_shipment' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_sales", "dim_shipment")}
+  GROUP BY company_key
+  UNION ALL
+  SELECT 'visma_gold_sales.fact_shipment_detail_line' AS gold_model, company_key, COUNT(*) AS gold_rows
+  FROM ${ref("visma_gold_sales", "fact_shipment_detail_line")}
+  GROUP BY company_key
+)
+
+SELECT
+  COALESCE(expected.gold_model, gold.gold_model) AS gold_model,
+  expected.tenant_id,
+  COALESCE(silver_rows, 0) AS silver_rows,
+  COALESCE(gold_rows, 0) AS gold_rows
+FROM expected
+FULL OUTER JOIN gold
+  ON expected.gold_model = gold.gold_model AND expected.company_key = gold.company_key
+WHERE COALESCE(silver_rows, 0) != COALESCE(gold_rows, 0)
