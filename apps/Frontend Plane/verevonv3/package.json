@@ -25,7 +25,7 @@
     "@quarry/client": "file:../../Ingestion Plane/Quarry-v2/sdks/typescript",
     "@solidjs/router": "^1.0.0",
     "@tanstack/ai": "^0.44.0",
-    "@tanstack/ai-client": "^0.23.2",
+    "@tanstack/ai-client": "^1.0.0",
     "@tanstack/ai-solid": "^0.16.2",
     "@tanstack/solid-query": "^5.101.4",
     "clsx": "^2.1.1",
