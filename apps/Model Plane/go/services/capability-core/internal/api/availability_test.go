@@ -177,6 +177,7 @@ func TestGenericGlobalHealthAllowlistIsExactlyTheExecutionOwnedRuntimes(t *testi
 		"cap.retrieval.query":    {},
 		"cap.tool.http":          {},
 		"cap.workspace.read":     {},
+		"cap.workspace.write":    {},
 	}
 	for capabilityID := range want {
 		if _, present := genericGlobalHealthCapabilityIDs[capabilityID]; !present {

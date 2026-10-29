@@ -83,6 +83,12 @@ var reasonCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,127}$`)
 //       are configured AND WORKSPACE_TOOLS is switched on, so an instance that does
 //       not offer the tools cannot report that it does.
 //
+//   cap.workspace.write                      the WS24-S4 per-run overlay write tools
+//       (`workspace_edit`, `workspace_put`) change the run's own copy of the Space
+//       tree, and no other run sees the change. Added 2026-10-29. The reporter
+//       attests it only while WORKSPACE_TOOLS is `all` and the stores are configured,
+//       so an instance that does not offer the writes cannot report that it does.
+//
 // Everything with effects or an owner elsewhere stays OFF this list on purpose:
 // cap.tool.provider.execute, cap.tool.social.publish, cap.tool.shipping.book,
 // cap.browser.open and cap.tool.ticket.create (see
@@ -107,6 +113,7 @@ var genericGlobalHealthCapabilityIDs = map[string]struct{}{
 	"cap.retrieval.query": {},
 	"cap.tool.http":       {},
 	"cap.workspace.read":  {},
+	"cap.workspace.write": {},
 }
 
 type availabilityRequest struct {

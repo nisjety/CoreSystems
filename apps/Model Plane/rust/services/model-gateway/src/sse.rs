@@ -3082,6 +3082,11 @@ pub async fn invoke_stream_sse(
             req_id.clone(),
         )
         .with_timing(timing.clone())
+        // The turn's connector selection reaches the Ask loop's read tool (WS23-S5).
+        .with_connector_turn(crate::tool_loop::connector_reads::ConnectorTurn::new(
+            connector_ids.clone(),
+            retrieval_scope.is_auto() && !conversation_only,
+        ))
         .buffering(stream_buffers.clone(), buffer_key.clone(), seq);
 
         // Grounding's citations were already sent on the wire above (chat-

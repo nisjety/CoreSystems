@@ -738,6 +738,10 @@ services:
       # unreachable from inside this container; execution-core's own agentic
       # tool reaches the same service via its separate SHIPPING_CORE_URL_EXEC.
       SHIPPING_CORE_URL: ${SHIPPING_CORE_URL:-http://shipping-core:8080}
+      # WS23-S5: Ask-mode connector reads (read_provider_action) for the connections the person selected, with citations
+      # and no body text in history. Off by default; only the literal `true`. Reads go to integration-corev2.
+      CONNECTOR_ASK_READS_ENABLED: ${CONNECTOR_ASK_READS_ENABLED:-false}
+      INTEGRATION_COREV2_URL: ${INTEGRATION_COREV2_URL:-http://integration-api:3026}
       # information-core (Application Plane weather/traffic/news aggregator,
       # wraps Yr/met.no) — backs the plain-chat `get_weather` builtin. Without
       # this the gateway falls back to http://information-core:3190, which is
@@ -1476,9 +1480,9 @@ services:
       # space:processes before any of them can actually start.
       # See apps/Frontend Plane/verevonv3/docs/S4_2_PROCESS_REGISTRY_DESIGN_2026-09-13.md §3.1.
       EXECUTION_CORE_PROCESS_HOST: ${EXECUTION_CORE_PROCESS_HOST:-}
-      # WS24-S3: read-only workspace tools for Space Do runs. `off` by default; only `read` or `all` turns them on (`all`
-      # offers the same read set until WS24-S4 adds writes), and cap.workspace.read stays unattested until then. ZDR and
-      # non-Space runs never get them.
+      # WS24-S3/S4: workspace tools for Space Do runs. `off` by default; `read` offers the read tools, `all` also the
+      # per-run overlay writes (workspace_edit, workspace_put). cap.workspace.read and cap.workspace.write stay
+      # unattested until then. ZDR and non-Space runs never get them; plan mode refuses the writes.
       WORKSPACE_TOOLS: ${WORKSPACE_TOOLS:-off}
       # WS26-S7: Do-mode tool results ask model-gateway ScreenContent for the same tighten-only verdict chat gets. Off by
       # default; only the literal `true`. A refused, slow or mismatched answer keeps the local verdict; ZDR runs never ask.

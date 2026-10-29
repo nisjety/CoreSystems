@@ -106,7 +106,7 @@ GOLDENS=(
   # (MP_UPDATE_GOLDEN=1 cargo test -p mp-contracts zdr_refusal), never written by hand.
   # Every refusal code the matrix can expect must be in it (check_schema passes it to
   # the loader with --refusals). The SPA's own copy is vendored by Z-05b.
-  "apps/Model Plane/api/contracts/zdr-refusals.json|15b12d17d34c49270889ce7a3b5fc66471bce3646499888ef7e7ee2cc1178cf1"
+  "apps/Model Plane/api/contracts/zdr-refusals.json|a666f355c80c7ae59c109e26a64198b3129332b1db8fae24dad0455308fa017f"
 
   # WS25-S7: the org agent policy schema. AUTHORED (not generated), read by mp-contracts and by
   # capability-core's org agent policy API.

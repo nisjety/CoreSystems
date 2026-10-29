@@ -337,6 +337,10 @@ pub const FEATURES: &[Feature] = &[
         key: "connector_read",
         label: "connected-app reads",
     },
+    Feature {
+        key: "message_versions",
+        label: "message versions",
+    },
 ];
 
 /// The catalogue entry for `code`, if it is a catalogue code.

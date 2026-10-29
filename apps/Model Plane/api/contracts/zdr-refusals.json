@@ -196,6 +196,10 @@
     {
       "key": "connector_read",
       "label_en": "connected-app reads"
+    },
+    {
+      "key": "message_versions",
+      "label_en": "message versions"
     }
   ],
   "generated_by": "mp-contracts zdr_refusal tests (MP_UPDATE_GOLDEN=1)",
