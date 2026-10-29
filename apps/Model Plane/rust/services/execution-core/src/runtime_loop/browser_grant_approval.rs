@@ -12,7 +12,10 @@
 //!
 //! So the lift needs all of: the `browser_agent` tool; an `ask` from the
 //! high-risk floor itself (`risk_level`) on `cap.browser.open`, whose signed
-//! evidence verified; a broker-validated derived run grant owned by the user the
+//! evidence verified with the policy source inside the signature in every gate
+//! mode (`ask_evidence_verified`, see `verify_ask`; capability-core reports a
+//! stored `ask` policy as `tool_policy_ask` even over the risk-level ask); a
+//! broker-validated derived run grant owned by the user the
 //! run acts for; and the tool input naming this run. Anything less keeps the
 //! ask. It never lifts a deny, another capability, another browser tool, an ask
 //! from an approval floor or a stored policy, or the hook and permission gates

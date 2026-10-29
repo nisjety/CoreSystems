@@ -63,7 +63,7 @@ func TestDecideWithPoliciesRelaxAndTighten(t *testing.T) {
 			name:       "an org ask beats a user allow",
 			capability: mcpCapability(models.RiskHigh), base: askBase(), binding: mcpBinding(models.SideEffectExternalWrite),
 			policies: []ToolPolicy{policyOf(org, ToolPolicyAsk, ""), policyOf(user, ToolPolicyAllow, digestA)},
-			want:     DecisionAsk, wantSource: PolicySourceRiskLevel,
+			want:     DecisionAsk, wantSource: PolicySourceToolPolicyAsk,
 		},
 		{
 			name:       "an org never beats a user allow",
@@ -81,7 +81,7 @@ func TestDecideWithPoliciesRelaxAndTighten(t *testing.T) {
 			name:       "a user ask stands under an org allow",
 			capability: mcpCapability(models.RiskHigh), base: askBase(), binding: mcpBinding(models.SideEffectExternalWrite),
 			policies: []ToolPolicy{policyOf(org, ToolPolicyAllow, digestA), policyOf(user, ToolPolicyAsk, "")},
-			want:     DecisionAsk, wantSource: PolicySourceRiskLevel,
+			want:     DecisionAsk, wantSource: PolicySourceToolPolicyAsk,
 		},
 		{
 			name:       "a changed definition demotes an allow to an ask",
@@ -155,6 +155,25 @@ func TestDecideWithPoliciesRelaxAndTighten(t *testing.T) {
 			want:     DecisionAsk, wantSource: PolicySourceRiskLevel,
 		},
 		{
+			name:       "an org ask over a high-risk built-in ask is reported as the stored policy",
+			capability: builtinCapability(models.RiskHigh), base: askBase(),
+			binding:  &ToolBinding{ToolName: "browser_agent", SideEffectClass: models.SideEffectExternalWrite, ApprovalFloor: models.ApprovalFloorNone},
+			policies: []ToolPolicy{policyOf(org, ToolPolicyAsk, "")},
+			want:     DecisionAsk, wantSource: PolicySourceToolPolicyAsk,
+		},
+		{
+			name:       "a user ask over a high-risk tool-less ask is reported as the stored policy",
+			capability: builtinCapability(models.RiskHigh), base: askBase(),
+			policies: []ToolPolicy{policyOf(user, ToolPolicyAsk, "")},
+			want:     DecisionAsk, wantSource: PolicySourceToolPolicyAsk,
+		},
+		{
+			name:       "a decision outside the vocabulary over a high-risk ask is reported as the stored policy",
+			capability: builtinCapability(models.RiskHigh), base: askBase(),
+			policies: []ToolPolicy{policyOf(user, "maybe", "")},
+			want:     DecisionAsk, wantSource: PolicySourceToolPolicyAsk,
+		},
+		{
 			name:       "an ask turns a low-risk allow into an ask",
 			capability: builtinCapability(models.RiskLow), base: allowBase(),
 			binding:  &ToolBinding{ToolName: "web_fetch", SideEffectClass: models.SideEffectRead, ApprovalFloor: models.ApprovalFloorNone},
@@ -217,6 +236,20 @@ func TestDecideWithPoliciesRelaxAndTighten(t *testing.T) {
 				t.Fatalf("got %s/%s (%s), want %s/%s", got.Decision, got.PolicySource, got.Reason, tt.want, tt.wantSource)
 			}
 		})
+	}
+}
+
+// A stored ask over the risk-level ask keeps the base reason and budget and only
+// names itself as the source, without touching the base.
+func TestDecideWithPoliciesTagsAStoredAskOverARiskAsk(t *testing.T) {
+	base := askBase()
+	base.BudgetContext = "tokens=1"
+	got := DecideWithPolicies(base, builtinCapability(models.RiskHigh), nil, []ToolPolicy{policyOf(ToolPolicyScopeOrg, ToolPolicyAsk, "")})
+	if got.Decision != DecisionAsk || got.PolicySource != PolicySourceToolPolicyAsk || got.Reason != base.Reason || got.BudgetContext != "tokens=1" {
+		t.Fatalf("got %+v", got)
+	}
+	if base.PolicySource != PolicySourceRiskLevel {
+		t.Fatalf("the base was mutated: %+v", base)
 	}
 }
 
