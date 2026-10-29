@@ -19,6 +19,7 @@ use mp_contracts::model_plane::v1::{
     managed_run_lifecycle_server::{ManagedRunLifecycle, ManagedRunLifecycleServer},
     memory_service_server::MemoryServiceServer,
     message_search_server::MessageSearchServer,
+    message_tree_service_server::MessageTreeServiceServer,
     orchestration_core_service_server::OrchestrationCoreServiceServer,
     routing_policy_server::RoutingPolicyServer,
     run_service_server::RunServiceServer,
@@ -177,34 +178,68 @@ fn clamp_conversation_page_limit(limit: u32) -> i64 {
 }
 
 /// One stored turn as the transcript reads it: id, role, content, persona,
-/// metadata and author.
-type ConversationRow = (
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<serde_json::Value>,
-    Option<String>,
-);
+/// metadata and author, and where it sits in the message tree (WS17 S8).
+#[derive(sqlx::FromRow)]
+struct ConversationRow {
+    id: String,
+    role: String,
+    content: String,
+    agent_name: Option<String>,
+    metadata: Option<serde_json::Value>,
+    author_subject_id: Option<String>,
+    parent_message_id: Option<String>,
+    sibling_ordinal: i32,
+    sibling_count: i64,
+    on_active_path: bool,
+    /// The thread has a message tree, so its turns carry their place in it.
+    versioned: bool,
+}
 
-fn session_message_from_row(
-    (message_id, role, content, agent_name, metadata, author_subject_id): ConversationRow,
-) -> pb::SessionMessage {
+/// The sibling count of a turn, read where the tree is read: a thread that has never been
+/// versioned, on a read that did not ask for inactive turns, answers 0 and skips the count.
+/// The count includes inactive siblings on purpose: it is how many versions a turn has.
+const SIBLING_COUNT_SQL: &str = "CASE WHEN $6 OR t.active_leaf_message_id IS NOT NULL THEN \
+    (CASE WHEN m.parent_message_id IS NULL \
+        THEN (SELECT COUNT(*) FROM messages AS s WHERE s.thread_id = m.thread_id AND s.parent_message_id IS NULL) \
+        ELSE (SELECT COUNT(*) FROM messages AS s WHERE s.thread_id = m.thread_id AND s.parent_message_id = m.parent_message_id) END) \
+    ELSE 0 END";
+
+fn session_message_from_row(row: ConversationRow, include_inactive: bool) -> pb::SessionMessage {
+    // The tree fields are sent only where they mean something: a versioned thread, or a read that
+    // asked for inactive turns. Every other transcript read keeps its exact shape.
+    let tree = include_inactive || row.versioned;
     pb::SessionMessage {
-        message_id,
-        role,
-        content,
-        agent_name: agent_name.unwrap_or_default(),
-        author_subject_id: author_subject_id.unwrap_or_default(),
+        message_id: row.id,
+        role: row.role,
+        content: row.content,
+        agent_name: row.agent_name.unwrap_or_default(),
+        author_subject_id: row.author_subject_id.unwrap_or_default(),
         // `{}` is the column default for every turn written before
         // metadata was persisted; send None rather than an empty
         // Struct so the caller can tell "no evidence recorded" from
         // "evidence recorded and empty".
-        metadata: metadata
+        metadata: row
+            .metadata
             .filter(|value| !matches!(value, serde_json::Value::Null))
             .filter(|value| value.as_object().is_none_or(|map| !map.is_empty()))
             .as_ref()
             .and_then(json_to_struct),
+        parent_message_id: if tree {
+            row.parent_message_id.unwrap_or_default()
+        } else {
+            String::new()
+        },
+        sibling_ordinal: if tree {
+            u32::try_from(row.sibling_ordinal).unwrap_or(0)
+        } else {
+            0
+        },
+        sibling_count: if tree {
+            u32::try_from(row.sibling_count).unwrap_or(u32::MAX)
+        } else {
+            0
+        },
+        on_active_path: tree && row.on_active_path,
     }
 }
 
@@ -252,7 +287,8 @@ async fn conversation_cursor_sequence(
 /// The newest `fetch` turns of a thread strictly before `before_sequence` (all
 /// of them when `None`), newest first. The org join and the audience ceiling sit
 /// in the same WHERE as the unpaged read, so a page never shows a turn that read
-/// would hide.
+/// would hide. Only the active path is read unless `include_inactive` is set, so a
+/// turn on another branch reaches a transcript only when the caller asks for it.
 async fn conversation_page_rows(
     pool: &PgPool,
     org_id: &str,
@@ -260,9 +296,12 @@ async fn conversation_page_rows(
     audience_ceiling: Option<i64>,
     before_sequence: Option<i64>,
     fetch: i64,
+    include_inactive: bool,
 ) -> Result<Vec<ConversationRow>, Status> {
-    sqlx::query_as::<_, ConversationRow>(
-        "SELECT m.id::text, m.role, m.content, m.agent_name, m.metadata, m.author_subject_id
+    let sql = format!(
+        "SELECT m.id::text AS id, m.role, m.content, m.agent_name, m.metadata, m.author_subject_id,
+                m.parent_message_id, m.sibling_ordinal, ({}) AS sibling_count,
+                m.on_active_path, (t.active_leaf_message_id IS NOT NULL) AS versioned
          FROM messages m
          JOIN threads t ON t.id = m.thread_id
          WHERE m.thread_id = $1 AND t.org_id = $2
@@ -270,20 +309,24 @@ async fn conversation_page_rows(
                 OR m.recipient_audience_revision IS NULL
                 OR m.recipient_audience_revision <= $3)
            AND ($4::BIGINT IS NULL OR m.sequence < $4)
+           AND ($6 OR m.on_active_path)
          ORDER BY m.sequence DESC
          LIMIT $5",
-    )
-    .bind(thread_id)
-    .bind(org_id)
-    .bind(audience_ceiling)
-    .bind(before_sequence)
-    .bind(fetch)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| {
-        warn!(error = %error, "list_conversation page failed");
-        Status::internal(error.to_string())
-    })
+        SIBLING_COUNT_SQL
+    );
+    sqlx::query_as::<_, ConversationRow>(&sql)
+        .bind(thread_id)
+        .bind(org_id)
+        .bind(audience_ceiling)
+        .bind(before_sequence)
+        .bind(fetch)
+        .bind(include_inactive)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| {
+            warn!(error = %error, "list_conversation page failed");
+            Status::internal(error.to_string())
+        })
 }
 
 /// The paged transcript read (WS09 S8): the newest `limit` turns before the
@@ -315,12 +358,16 @@ async fn conversation_page_response(
         audience_ceiling,
         before_sequence,
         limit + 1,
+        req.include_inactive,
     )
     .await?;
     let page_size = usize::try_from(limit).unwrap_or(usize::MAX);
     let (page, has_more) = conversation_tail_page(rows, page_size);
     Ok(Response::new(pb::ListConversationResponse {
-        messages: page.into_iter().map(session_message_from_row).collect(),
+        messages: page
+            .into_iter()
+            .map(|row| session_message_from_row(row, req.include_inactive))
+            .collect(),
         has_more,
     }))
 }
@@ -544,7 +591,7 @@ fn authorize_dataplane<T>(
     Ok(request)
 }
 
-async fn authorize_thread_owner(
+pub(crate) async fn authorize_thread_owner(
     pool: &PgPool,
     caller: &VerifiedIdentity,
     thread_id: &str,
@@ -3394,12 +3441,13 @@ pub(crate) async fn append_message_in_tx(
                 // A scoped create is verified before the thread exists, so its
                 // first user message may be inserted by the same Gateway flow.
                 // Every later append must carry a newly-issued append decision.
-                let (message_count,): (i64,) =
-                    sqlx::query_as("SELECT COUNT(*) FROM messages WHERE thread_id = $1")
-                        .bind(&req.thread_id)
-                        .fetch_one(&mut **tx)
-                        .await
-                        .map_err(|e| Status::internal(e.to_string()))?;
+                let (message_count,): (i64,) = sqlx::query_as(
+                    "SELECT COUNT(*) FROM messages WHERE thread_id = $1 AND on_active_path",
+                )
+                .bind(&req.thread_id)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
                 if message_count != 0 {
                     return Err(Status::permission_denied(
                         "a fresh Control Space append decision is required",
@@ -3414,7 +3462,7 @@ pub(crate) async fn append_message_in_tx(
                 // Control-verified authority refs. Every other unscoped
                 // append into a Space thread stays denied.
                 let last_role: Option<(String,)> = sqlx::query_as(
-                    "SELECT role FROM messages WHERE thread_id = $1 ORDER BY sequence DESC LIMIT 1",
+                    "SELECT role FROM messages WHERE thread_id = $1 AND on_active_path ORDER BY sequence DESC LIMIT 1",
                 )
                 .bind(&req.thread_id)
                 .fetch_optional(&mut **tx)
@@ -3536,6 +3584,16 @@ pub(crate) async fn append_message_in_tx(
         }
     }
 
+    // The message tree (WS17 S8): with the switch on, the turn continues the thread's leaf. The leaf
+    // is read here, under the thread lock and before the insert, so the turn is not counted among
+    // its own siblings. A Space thread and a thread with a waived run keep no tree.
+    let tree_leaf =
+        if crate::message_tree::tree_applies(tx, &req.thread_id, thread.2.is_some()).await? {
+            Some(crate::message_tree::current_leaf(tx, &req.thread_id).await?)
+        } else {
+            None
+        };
+
     let row: (i64, Option<String>, Option<String>, Option<i64>, Option<String>, Option<i64>, Option<String>) = sqlx::query_as(
         "INSERT INTO messages
          (id, thread_id, role, content, created_at, agent_name, metadata, space_id, recipient_audience_ref,
@@ -3569,6 +3627,10 @@ pub(crate) async fn append_message_in_tx(
             .execute(&mut **tx)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+    }
+
+    if let Some(leaf) = tree_leaf {
+        crate::message_tree::record_append(tx, &req.thread_id, &msg_id, leaf.as_deref()).await?;
     }
 
     // The list's paging key, written in the same transaction as the message so
@@ -5930,7 +5992,7 @@ async fn load_thread_messages(
          FROM (
              SELECT role, content, sequence
              FROM messages
-             WHERE thread_id = $1
+             WHERE thread_id = $1 AND on_active_path
              ORDER BY sequence DESC
              LIMIT $2
          ) recent
@@ -7746,29 +7808,24 @@ impl SessionCore for SessionService {
             if req.limit > 0 {
                 return conversation_page_response(&self.pool, &req, audience_ceiling).await;
             }
-            let rows: Vec<ConversationRow> = sqlx::query_as(
-                // `m.id` is selected so a caller can name one earlier turn
-                // durably (message pinning). It was always in the table; this
-                // read simply never returned it.
-                "SELECT m.id::text, m.role, m.content, m.agent_name, m.metadata, m.author_subject_id
-                 FROM messages m
-                 JOIN threads t ON t.id = m.thread_id
-                 WHERE m.thread_id = $1 AND t.org_id = $2
-                   AND ($3::BIGINT IS NULL
-                        OR m.recipient_audience_revision IS NULL
-                        OR m.recipient_audience_revision <= $3)
-                 ORDER BY m.sequence",
+            // The unpaged read is the newest page with no bound, put back in conversation order.
+            // One query serves both reads, so the active-path filter and the tree columns cannot
+            // drift apart between them.
+            let mut rows = conversation_page_rows(
+                &self.pool,
+                &req.org_id,
+                &req.thread_id,
+                audience_ceiling,
+                None,
+                i64::MAX,
+                req.include_inactive,
             )
-                .bind(&req.thread_id)
-                .bind(&req.org_id)
-                .bind(audience_ceiling)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| {
-                    warn!(error = %e, "list_thread_messages failed");
-                    Status::internal(e.to_string())
-                })?;
-            let messages = rows.into_iter().map(session_message_from_row).collect();
+            .await?;
+            rows.reverse();
+            let messages = rows
+                .into_iter()
+                .map(|row| session_message_from_row(row, req.include_inactive))
+                .collect();
             Ok(Response::new(pb::ListConversationResponse {
                 messages,
                 has_more: false,
@@ -7900,14 +7957,14 @@ impl SessionCore for SessionService {
                  LEFT JOIN LATERAL (
                     SELECT content
                     FROM messages
-                    WHERE thread_id = page.id AND role = 'user'
+                    WHERE thread_id = page.id AND role = 'user' AND on_active_path
                     ORDER BY sequence ASC
                     LIMIT 1
                  ) first_user ON TRUE
                  LEFT JOIN LATERAL (
                     SELECT content
                     FROM messages
-                    WHERE thread_id = page.id
+                    WHERE thread_id = page.id AND on_active_path
                     ORDER BY sequence DESC
                     LIMIT 1
                  ) last_message ON TRUE
@@ -9774,6 +9831,7 @@ pub async fn serve(
         pool: pool.clone(),
         enabled: crate::message_search::message_search_enabled(),
     };
+    let message_tree = crate::message_tree::MessageTreeGrpc { pool: pool.clone() };
 
     let session = SessionService {
         pool,
@@ -9817,6 +9875,10 @@ pub async fn serve(
         ))
         .add_service(MessageSearchServer::with_interceptor(
             message_search,
+            auth.clone(),
+        ))
+        .add_service(MessageTreeServiceServer::with_interceptor(
+            message_tree,
             auth.clone(),
         ))
         .add_service(LearningGovernanceServiceServer::with_interceptor(
@@ -20213,6 +20275,62 @@ mod conversation_page_db_tests {
         cleanup(&pool, &[thread.as_str()]).await;
     }
 
+    /// WS17 S8: a thread that was never versioned reads exactly as before. Every turn is
+    /// on the active path, and no tree field is sent.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn list_conversation_default_equals_legacy_for_unversioned_threads() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("conv-legacy-{suffix}");
+        let thread = format!("conv-legacy-thread-{suffix}");
+        seed_turns(&pool, &org, "legacy", &thread, 3).await;
+        let svc = service(pool.clone());
+
+        let unpaged = read(&svc, &org, "legacy", &thread, 0, "")
+            .await
+            .expect("unpaged read");
+        assert_eq!(contents(&unpaged), ["turn 0", "turn 1", "turn 2"]);
+        for message in &unpaged.messages {
+            assert!(
+                message.parent_message_id.is_empty(),
+                "a legacy turn has no parent"
+            );
+            assert_eq!(message.sibling_count, 0, "a legacy turn has no siblings");
+            assert!(
+                !message.on_active_path,
+                "the tree fields are not sent on a legacy read"
+            );
+        }
+
+        cleanup(&pool, &[thread.as_str()]).await;
+    }
+
+    /// WS17 S8: context assembly reads the active path. A turn on another branch never
+    /// reaches the model's window.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn context_assembly_ignores_inactive_branch() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("ctx-branch-{suffix}");
+        let thread = format!("ctx-branch-thread-{suffix}");
+        let ids = seed_turns(&pool, &org, "ctx", &thread, 3).await;
+        sqlx::query("UPDATE messages SET on_active_path = FALSE WHERE id = $1")
+            .bind(&ids[1])
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let window = load_thread_messages(&pool, &thread)
+            .await
+            .expect("context window");
+        let shown: Vec<&str> = window.iter().map(|(_, content)| content.as_str()).collect();
+        assert_eq!(shown, ["turn 0", "turn 2"]);
+
+        cleanup(&pool, &[thread.as_str()]).await;
+    }
+
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a disposable Postgres"]
     async fn list_conversation_pages_refuses_a_cursor_outside_the_thread_against_real_pg() {
@@ -20285,10 +20403,10 @@ mod conversation_page_db_tests {
 
         // A reader whose decision was issued at revision 2 never sees revision 3,
         // and a turn with no snapshot is visible as it always was.
-        let page = conversation_page_rows(&pool, &org, &thread, Some(2), None, 10)
+        let page = conversation_page_rows(&pool, &org, &thread, Some(2), None, 10, false)
             .await
             .expect("ceiling page");
-        let seen: Vec<&str> = page.iter().map(|row| row.0.as_str()).collect();
+        let seen: Vec<&str> = page.iter().map(|row| row.id.as_str()).collect();
         assert_eq!(seen, [legacy.as_str(), mid.as_str(), early.as_str()]);
 
         // A hidden turn is no cursor for that reader, exactly as an unknown id is not.
@@ -20301,7 +20419,7 @@ mod conversation_page_db_tests {
             .expect("a visible turn is a cursor");
 
         // The owner's unfiltered read sees all four turns.
-        let owner = conversation_page_rows(&pool, &org, &thread, None, None, 10)
+        let owner = conversation_page_rows(&pool, &org, &thread, None, None, 10, false)
             .await
             .expect("owner page");
         assert_eq!(owner.len(), 4);

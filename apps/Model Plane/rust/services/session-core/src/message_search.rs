@@ -7,6 +7,9 @@
 //! unscoped threads, skips every thread that holds a zero-retention or waived run, and
 //! is refused to a zero-retention credential.
 //!
+//! Both purposes read the active path only (WS17 S8): a turn on an inactive branch is not
+//! part of the conversation the owner sees, so search never returns one.
+//!
 //! `SESSION_CORE_MESSAGE_SEARCH_ENABLED` gates the query path only. Migration 0055
 //! builds the index whether or not the switch is on, so enabling search needs no
 //! migration.
@@ -60,6 +63,7 @@ WITH candidates AS (
     FROM messages m
     JOIN threads t ON t.id = m.thread_id
     WHERE m.role IN ('user', 'assistant')
+      AND m.on_active_path
       AND to_tsvector('simple', left(m.content, 65536)) @@ to_tsquery('simple', $3)
       AND t.org_id = $1
       AND (CASE WHEN $5::BIGINT IS NULL

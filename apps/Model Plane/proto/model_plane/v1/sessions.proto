@@ -270,6 +270,20 @@ service MessageSearch {
   rpc SearchMessages(SearchMessagesRequest) returns (SearchMessagesResponse);
 }
 
+// MessageTreeService: moves a thread's active leaf between the branches of its message
+// tree (WS17 S8). A separate service, as MessageSearch is, so that SessionCore and
+// every mock of it stay source-compatible.
+service MessageTreeService {
+  // Make a branch of the thread the active one. A target on the active path is a
+  // rewind: the leaf becomes the target and nothing is deleted. Any other target is
+  // a version switch: the leaf becomes the newest turn beneath it, so the chosen
+  // branch shows its own continuation. Owner only, with `session:write`. Refused
+  // for a Space thread, a thread that holds a waived run and a thread with a queued
+  // or running run. Refused with unavailable `message_versions_disabled` while
+  // SESSION_CORE_MESSAGE_VERSIONS_ENABLED is not `true`.
+  rpc SetActiveLeaf(SetActiveLeafRequest) returns (SetActiveLeafResponse);
+}
+
 // LearningGovernanceService: the owner's decisions on what Verevon learned from their
 // conversations (WS07 S8). A separate service, as MessageSearch is, so that
 // SessionCore and every mock of it stay source-compatible. Every RPC is the
@@ -1087,6 +1101,10 @@ message ListConversationRequest {
   // must name a message in this thread that the caller may read; a foreign,
   // hidden or unknown id is refused the same way.
   string before_message_id = 7;
+  // Also return the turns of the branches the thread's leaf is not on, each with
+  // `on_active_path = false` (WS17 S8). Off, the read is the active path only, and
+  // every prompt, learning and Dreaming reader leaves it off.
+  bool include_inactive = 8;
 }
 
 // One conversation turn. Named SessionMessage (not ThreadMessage, which the
@@ -1118,6 +1136,20 @@ message SessionMessage {
   // agent_name) and on rows written before authorship was recorded. A reader
   // must render an empty value as an unnamed author, never as itself.
   string author_subject_id = 6;
+
+  // The message tree (WS17 S8). Set only when the thread is versioned or the read
+  // asked for inactive turns, so every other read is unchanged. `parent_message_id`
+  // is empty for the first turn of a thread. `sibling_ordinal` is this turn's
+  // 1-based place among the turns that share its parent, and `sibling_count` is how
+  // many share it.
+  string parent_message_id = 7;
+  // This turn's 1-based place among the turns that share its parent.
+  uint32 sibling_ordinal = 8;
+  // How many turns share its parent, this one included.
+  uint32 sibling_count = 9;
+  // True when the turn is on the active path: the chain from the first turn to the
+  // thread's active leaf. Only inactive turns are read with `include_inactive`.
+  bool on_active_path = 10;
 }
 
 message ListConversationResponse {
@@ -1884,4 +1916,29 @@ message ListLearningLedgerResponse {
   // Why the memory entries were left out, as MemoryControls.reason spells it;
   // empty when they were not.
   string memory_skip_reason = 3;
+}
+
+// --- MessageTreeService (WS17 S8) ---
+
+// A move of a thread's active leaf: the turn the caller picked, and the leaf it last saw.
+message SetActiveLeafRequest {
+  // Required. The owning org.
+  string org_id = 1;
+  // Required. The thread whose active branch moves.
+  string thread_id = 2;
+  // Required. The turn the caller selected: on the active path it is a rewind,
+  // anywhere else a version switch (see MessageTreeService.SetActiveLeaf).
+  string target_message_id = 3;
+  // The active leaf the caller last saw. The move lands only while it is still the
+  // leaf, and is otherwise refused with aborted `active_leaf_stale`. Empty names a
+  // thread with no turns.
+  string expected_leaf_message_id = 4;
+}
+
+// Where the active leaf landed, and the active path up to it.
+message SetActiveLeafResponse {
+  // The active leaf after the move: the target, or the newest turn beneath it.
+  string active_leaf_message_id = 1;
+  // The turns of the active path, oldest first.
+  repeated string active_path = 2;
 }

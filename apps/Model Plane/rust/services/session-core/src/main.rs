@@ -30,6 +30,7 @@ mod memory_grounding;
 mod memory_grpc;
 mod write_policy;
 mod message_search;
+mod message_tree;
 mod nats;
 mod nats_connection;
 mod orchestration_grpc;

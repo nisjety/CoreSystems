@@ -133,4 +133,13 @@ print("ok: search found the probe thread once, highlight markers present")
 echo "== plan check: the search predicate uses the content index"
 psql "${PROOF_DATABASE_URL}" -q -c "EXPLAIN (ANALYZE, BUFFERS) SELECT m.id FROM messages m WHERE m.role IN ('user', 'assistant') AND to_tsvector('simple', left(m.content, 65536)) @@ to_tsquery('simple', '${PROOF_TOKEN}':*)"
 
-echo "PASS: WS17 S1-S3 history proof (${PROOF_PREFIX})"
+echo "== WS17 S8: the message tree columns exist and the probe thread holds no tree"
+# Database-only, so it needs no gateway bearer. The branch and rewind proof goes through the
+# gateway route with a session bearer and is run separately.
+tree_columns="$(psql "${PROOF_DATABASE_URL}" -tA -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM information_schema.columns WHERE (table_name = 'messages' AND column_name IN ('parent_message_id', 'sibling_ordinal', 'on_active_path')) OR (table_name = 'threads' AND column_name = 'active_leaf_message_id')")"
+[ "${tree_columns}" = "4" ] || { echo "FAIL: message tree columns missing (found ${tree_columns} of 4)" >&2; exit 1; }
+tree_free="$(psql "${PROOF_DATABASE_URL}" -tA -v ON_ERROR_STOP=1 -c "SELECT (SELECT active_leaf_message_id IS NULL FROM threads WHERE id = '${probe_id}') AND NOT EXISTS (SELECT 1 FROM messages WHERE thread_id = '${probe_id}' AND (parent_message_id IS NOT NULL OR NOT on_active_path))")"
+[ "${tree_free}" = "t" ] || { echo "FAIL: the probe thread holds message tree data it was never given" >&2; exit 1; }
+echo "ok: the tree columns exist and the probe thread holds no tree"
+
+echo "PASS: WS17 S1-S3 and S8 history proof (${PROOF_PREFIX})"

@@ -1314,6 +1314,7 @@ async fn load_pending_messages(
          FROM messages m \
          JOIN threads t ON t.id = m.thread_id \
          WHERE m.role IN ('user', 'assistant') \
+           AND m.on_active_path \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND m.created_at <= c.extract_after) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND c.memory_state <> 'on' AND $2) \
            AND (NOT $2 OR t.memory_resumed_at IS NULL OR m.created_at > t.memory_resumed_at) \
@@ -1381,6 +1382,7 @@ async fn load_preceding_context(
          FROM messages m \
          JOIN threads t ON t.id = m.thread_id \
          WHERE m.thread_id = $1 \
+           AND m.on_active_path \
            AND m.role IN ('user', 'assistant') \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND m.created_at <= c.extract_after) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND c.memory_state <> 'on' AND $4) \
@@ -2976,6 +2978,37 @@ mod tests {
         let slots = existing_slots(&pool, &org, "user-a", &thread).await;
         assert_eq!(slots.user, ["tool_use"]);
         assert_eq!(slots.thread, ["project_context"]);
+    }
+
+    /// WS17 S8: Dreaming mines the active path only. A turn on another branch is never pending,
+    /// so it never reaches an extractor or a memory. Needs a disposable Postgres.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn dreaming_ignores_inactive_branch() {
+        let pool = disposable_pool().await;
+        let org = format!("inactive-branch-{}", new_ulid());
+        let thread = seed_thread(&pool, &org, "user-a").await;
+        let (active, inactive) = (new_ulid(), new_ulid());
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, on_active_path) \
+             VALUES ($1, $2, 'user', 'Jeg heter Ima.', TRUE), \
+                    ($3, $2, 'user', 'Jeg heter Kari.', FALSE)",
+        )
+        .bind(&active)
+        .bind(&thread)
+        .bind(&inactive)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let pending: Vec<String> = load_pending_messages(&pool, 100_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.thread_id == thread)
+            .map(|message| message.message_id)
+            .collect();
+        assert_eq!(pending, vec![active]);
     }
 
     /// D1-570: Dreaming neither reads nor is shown what a thread said while it was off, once the

@@ -2248,6 +2248,130 @@ var MessageSearch_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
+	MessageTreeService_SetActiveLeaf_FullMethodName = "/model_plane.v1.MessageTreeService/SetActiveLeaf"
+)
+
+// MessageTreeServiceClient is the client API for MessageTreeService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// MessageTreeService: moves a thread's active leaf between the branches of its message
+// tree (WS17 S8). A separate service, as MessageSearch is, so that SessionCore and
+// every mock of it stay source-compatible.
+type MessageTreeServiceClient interface {
+	// Make a branch of the thread the active one. A target on the active path is a
+	// rewind: the leaf becomes the target and nothing is deleted. Any other target is
+	// a version switch: the leaf becomes the newest turn beneath it, so the chosen
+	// branch shows its own continuation. Owner only, with `session:write`. Refused
+	// for a Space thread, a thread that holds a waived run and a thread with a queued
+	// or running run. Refused with unavailable `message_versions_disabled` while
+	// SESSION_CORE_MESSAGE_VERSIONS_ENABLED is not `true`.
+	SetActiveLeaf(ctx context.Context, in *SetActiveLeafRequest, opts ...grpc.CallOption) (*SetActiveLeafResponse, error)
+}
+
+type messageTreeServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewMessageTreeServiceClient(cc grpc.ClientConnInterface) MessageTreeServiceClient {
+	return &messageTreeServiceClient{cc}
+}
+
+func (c *messageTreeServiceClient) SetActiveLeaf(ctx context.Context, in *SetActiveLeafRequest, opts ...grpc.CallOption) (*SetActiveLeafResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetActiveLeafResponse)
+	err := c.cc.Invoke(ctx, MessageTreeService_SetActiveLeaf_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// MessageTreeServiceServer is the server API for MessageTreeService service.
+// All implementations must embed UnimplementedMessageTreeServiceServer
+// for forward compatibility.
+//
+// MessageTreeService: moves a thread's active leaf between the branches of its message
+// tree (WS17 S8). A separate service, as MessageSearch is, so that SessionCore and
+// every mock of it stay source-compatible.
+type MessageTreeServiceServer interface {
+	// Make a branch of the thread the active one. A target on the active path is a
+	// rewind: the leaf becomes the target and nothing is deleted. Any other target is
+	// a version switch: the leaf becomes the newest turn beneath it, so the chosen
+	// branch shows its own continuation. Owner only, with `session:write`. Refused
+	// for a Space thread, a thread that holds a waived run and a thread with a queued
+	// or running run. Refused with unavailable `message_versions_disabled` while
+	// SESSION_CORE_MESSAGE_VERSIONS_ENABLED is not `true`.
+	SetActiveLeaf(context.Context, *SetActiveLeafRequest) (*SetActiveLeafResponse, error)
+	mustEmbedUnimplementedMessageTreeServiceServer()
+}
+
+// UnimplementedMessageTreeServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedMessageTreeServiceServer struct{}
+
+func (UnimplementedMessageTreeServiceServer) SetActiveLeaf(context.Context, *SetActiveLeafRequest) (*SetActiveLeafResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetActiveLeaf not implemented")
+}
+func (UnimplementedMessageTreeServiceServer) mustEmbedUnimplementedMessageTreeServiceServer() {}
+func (UnimplementedMessageTreeServiceServer) testEmbeddedByValue()                            {}
+
+// UnsafeMessageTreeServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to MessageTreeServiceServer will
+// result in compilation errors.
+type UnsafeMessageTreeServiceServer interface {
+	mustEmbedUnimplementedMessageTreeServiceServer()
+}
+
+func RegisterMessageTreeServiceServer(s grpc.ServiceRegistrar, srv MessageTreeServiceServer) {
+	// If the following call panics, it indicates UnimplementedMessageTreeServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&MessageTreeService_ServiceDesc, srv)
+}
+
+func _MessageTreeService_SetActiveLeaf_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetActiveLeafRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MessageTreeServiceServer).SetActiveLeaf(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MessageTreeService_SetActiveLeaf_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MessageTreeServiceServer).SetActiveLeaf(ctx, req.(*SetActiveLeafRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// MessageTreeService_ServiceDesc is the grpc.ServiceDesc for MessageTreeService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var MessageTreeService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.MessageTreeService",
+	HandlerType: (*MessageTreeServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "SetActiveLeaf",
+			Handler:    _MessageTreeService_SetActiveLeaf_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/sessions.proto",
+}
+
+const (
 	LearningGovernanceService_DecideSkillProposal_FullMethodName = "/model_plane.v1.LearningGovernanceService/DecideSkillProposal"
 	LearningGovernanceService_UndoLearningEntry_FullMethodName   = "/model_plane.v1.LearningGovernanceService/UndoLearningEntry"
 	LearningGovernanceService_ListLearningLedger_FullMethodName  = "/model_plane.v1.LearningGovernanceService/ListLearningLedger"

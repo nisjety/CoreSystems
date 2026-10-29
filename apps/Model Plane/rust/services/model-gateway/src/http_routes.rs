@@ -242,6 +242,8 @@ pub fn build_router_with_readiness(
             post(prepare_mail_task_thread_for_gateway_bff),
         )
         .route("/v1/threads/:thread_id/messages", get(list_thread_messages))
+        // Move a thread's active branch: a version switch or a rewind (build plan WS17 S8).
+        .route("/v1/threads/:thread_id/branch", post(branch_thread))
         // Read-only replay of Session Core's canonical event log. The route
         // exposes envelope metadata only; Any payload bytes remain inside the
         // owning plane and cannot become an accidental browser data channel.
@@ -9487,6 +9489,25 @@ struct ThreadMessage {
     /// persisted, or for paths that ground nothing.
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     metadata: Option<serde_json::Map<String, Value>>,
+    /// Where this turn sits among the versions of its position (WS17 S8). Present
+    /// only on a versioned thread, so every other transcript keeps its shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<ThreadMessageVersion>,
+}
+
+/// A turn's place in the message tree, as the version switcher reads it.
+#[derive(Debug, Serialize)]
+struct ThreadMessageVersion {
+    /// The turn this one continues. Empty for the first turn of a thread.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    parent_message_id: String,
+    /// 1-based place among the turns that share the parent.
+    sibling_ordinal: u32,
+    /// How many turns share the parent, this one included.
+    sibling_count: u32,
+    /// Whether this turn is on the active path. Only a read with `include_inactive`
+    /// (or a versioned thread) ever says false.
+    on_active_path: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -9497,6 +9518,10 @@ struct ListThreadMessagesResponse {
     /// page. Absent on the unpaged read, which stays byte-identical.
     #[serde(skip_serializing_if = "Option::is_none")]
     has_more: Option<bool>,
+    /// Set only when this gateway runs with message versions on (WS17 S8), so the
+    /// client can offer the version switcher. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    versions_enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -10287,6 +10312,15 @@ struct ThreadMessagesQuery {
 /// Caps the tail page `GET /v1/threads/{id}/messages` serves. Operators set
 /// `MODEL_GATEWAY_THREAD_MESSAGES_MAX_LIMIT`; anything that is not a whole number
 /// from 1 to 200 keeps the default, so a typo never changes the page size.
+/// The gateway's copy of the message-version switch (WS17 S8). Session Core enforces it; the gateway
+/// reads its own copy to report `versions_enabled` and to refuse a branch move before it crosses the
+/// wire. The deploy sets the two together. Read by the strict parser the other switches share.
+const MESSAGE_VERSIONS_ENV: &str = "MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED";
+
+fn message_versions_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(MESSAGE_VERSIONS_ENV).ok().as_deref())
+}
+
 const THREAD_MESSAGES_MAX_LIMIT_ENV: &str = "MODEL_GATEWAY_THREAD_MESSAGES_MAX_LIMIT";
 const THREAD_MESSAGES_DEFAULT_MAX_LIMIT: u32 = 200;
 
@@ -10348,6 +10382,9 @@ async fn list_thread_messages(
                 space_id: query.space_id.unwrap_or_default(),
                 space_read_decision_ref: query.space_read_decision_ref.unwrap_or_default(),
                 space_read_decision_token: query.space_read_decision_token.unwrap_or_default(),
+                // The transcript a client shows is the active path; turns on other
+                // branches are not read through this route.
+                include_inactive: false,
                 limit,
                 before_message_id: before,
             },
@@ -10376,6 +10413,12 @@ async fn list_thread_messages(
                         _ => None,
                     },
                 ),
+                version: (m.sibling_count > 0).then(|| ThreadMessageVersion {
+                    parent_message_id: m.parent_message_id,
+                    sibling_ordinal: m.sibling_ordinal,
+                    sibling_count: m.sibling_count,
+                    on_active_path: m.on_active_path,
+                }),
             })
             .collect();
 
@@ -10383,7 +10426,108 @@ async fn list_thread_messages(
         thread_id: trimmed.to_owned(),
         messages,
         has_more,
+        versions_enabled: message_versions_enabled().then_some(true),
     }))
+}
+
+/// The body of a branch move: the turn the user picked and the leaf they last saw.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BranchThreadBody {
+    /// On the active path this is a rewind; anywhere else a version switch.
+    target_message_id: String,
+    /// The leaf the client last displayed. A move against a newer leaf is refused with
+    /// 409 `active_leaf_stale`, so the client reloads before it moves again.
+    expected_leaf_message_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BranchThreadResponse {
+    thread_id: String,
+    active_leaf_message_id: String,
+    active_path: Vec<String>,
+}
+
+/// Move a thread's active branch (WS17 S8). A ZDR caller is refused before anything is
+/// written, and Session Core decides the rest: the leaf moves only while the expected
+/// leaf is still the leaf, and a Space thread, a waived thread or a thread with a run in
+/// flight keeps no versions.
+async fn branch_thread(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(thread_id): Path<String>,
+    Json(body): Json<BranchThreadBody>,
+) -> Result<Json<BranchThreadResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::SetActiveLeafRequest;
+
+    require_non_zdr_durable_mutation(&claims)?;
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "thread_id is required"})),
+        ));
+    }
+    if !message_versions_enabled() {
+        return Err(history_versions_disabled());
+    }
+    let response = state
+        .message_tree_client
+        .clone()
+        .set_active_leaf(authenticated_session_request(
+            SetActiveLeafRequest {
+                org_id: claims.org_id.clone(),
+                thread_id: thread_id.to_owned(),
+                target_message_id: body.target_message_id,
+                expected_leaf_message_id: body.expected_leaf_message_id,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| branch_thread_error(&error))?
+        .into_inner();
+
+    Ok(Json(BranchThreadResponse {
+        thread_id: thread_id.to_owned(),
+        active_leaf_message_id: response.active_leaf_message_id,
+        active_path: response.active_path,
+    }))
+}
+
+/// Session Core's refusals of a branch move, as the typed codes the client acts on. A stale
+/// leaf is a conflict to reload from; any other refusal keeps the session error mapping.
+fn branch_thread_error(error: &tonic::Status) -> HttpJsonError {
+    match error.code() {
+        tonic::Code::Aborted => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": {
+                "code": "active_leaf_stale",
+                "message": "the thread moved on; reload it and try again",
+            }})),
+        ),
+        tonic::Code::FailedPrecondition => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": {
+                "code": "history_branch_refused",
+                "message": error.message(),
+            }})),
+        ),
+        tonic::Code::Unavailable if error.message() == "message_versions_disabled" => {
+            history_versions_disabled()
+        }
+        _ => session_thread_error("session-core set_active_leaf failed", error),
+    }
+}
+
+fn history_versions_disabled() -> HttpJsonError {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": {
+            "code": "history_versions_disabled",
+            "message": "message versions are not enabled on this deployment",
+        }})),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -15540,6 +15684,7 @@ mod thread_messages_page_tests {
             thread_id: "thread-1".to_owned(),
             messages: Vec::new(),
             has_more: None,
+            versions_enabled: None,
         })
         .expect("the response serialises");
         assert_eq!(
@@ -15554,8 +15699,95 @@ mod thread_messages_page_tests {
             thread_id: "thread-1".to_owned(),
             messages: Vec::new(),
             has_more: Some(false),
+            versions_enabled: None,
         })
         .expect("the response serialises");
         assert_eq!(body["has_more"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn a_transcript_without_versions_keeps_its_shape() {
+        // The version fields appear only with a versioned thread or the switch on, so an
+        // unversioned transcript is the same bytes it was before the message tree.
+        let body = serde_json::to_value(ListThreadMessagesResponse {
+            thread_id: "thread-1".to_owned(),
+            messages: vec![ThreadMessage {
+                message_id: "m1".to_owned(),
+                role: "user".to_owned(),
+                content: "hi".to_owned(),
+                agent_name: String::new(),
+                author_subject_id: String::new(),
+                metadata: None,
+                version: None,
+            }],
+            has_more: None,
+            versions_enabled: None,
+        })
+        .expect("the response serialises");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "thread_id": "thread-1",
+                "messages": [{"message_id": "m1", "role": "user", "content": "hi"}],
+            })
+        );
+    }
+
+    #[test]
+    fn a_versioned_turn_says_where_it_sits_among_its_versions() {
+        let body = serde_json::to_value(ThreadMessage {
+            message_id: "m2".to_owned(),
+            role: "assistant".to_owned(),
+            content: "answer".to_owned(),
+            agent_name: String::new(),
+            author_subject_id: String::new(),
+            metadata: None,
+            version: Some(ThreadMessageVersion {
+                parent_message_id: "m1".to_owned(),
+                sibling_ordinal: 2,
+                sibling_count: 3,
+                on_active_path: false,
+            }),
+        })
+        .expect("the turn serialises");
+        assert_eq!(
+            body["version"],
+            serde_json::json!({
+                "parent_message_id": "m1",
+                "sibling_ordinal": 2,
+                "sibling_count": 3,
+                "on_active_path": false,
+            })
+        );
+    }
+
+    #[test]
+    fn a_branch_refusal_maps_to_the_code_the_client_acts_on() {
+        let stale = branch_thread_error(&tonic::Status::aborted("active_leaf_stale"));
+        assert_eq!(stale.0, StatusCode::CONFLICT);
+        assert_eq!(stale.1 .0["error"]["code"], "active_leaf_stale");
+
+        let disabled =
+            branch_thread_error(&tonic::Status::unavailable("message_versions_disabled"));
+        assert_eq!(disabled.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(disabled.1 .0["error"]["code"], "history_versions_disabled");
+
+        let busy = branch_thread_error(&tonic::Status::failed_precondition(
+            "active_run_blocks_switch",
+        ));
+        assert_eq!(busy.0, StatusCode::CONFLICT);
+        assert_eq!(busy.1 .0["error"]["code"], "history_branch_refused");
+    }
+
+    #[test]
+    fn the_gateway_reports_versions_only_when_its_switch_is_on() {
+        let body = serde_json::to_value(ListThreadMessagesResponse {
+            thread_id: "thread-1".to_owned(),
+            messages: Vec::new(),
+            has_more: None,
+            versions_enabled: Some(true),
+        })
+        .expect("the response serialises");
+        assert_eq!(body["versions_enabled"], serde_json::json!(true));
     }
 }
