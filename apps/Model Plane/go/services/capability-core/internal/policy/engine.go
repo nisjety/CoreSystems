@@ -262,7 +262,13 @@ const relaxedBudget = "tokens=10000,cost_usd=0.50"
 //
 // Tightening applies to every row: any `never` denies, and any `ask` turns an
 // allow into an ask, whichever scope set it, so an org `never` beats a person's
-// `allow` and a person's `ask` stands under an org `allow`. Relaxing is narrower:
+// `allow` and a person's `ask` stands under an org `allow`. A stored `ask` (or a
+// decision outside the vocabulary) over a decision that is already an ask is
+// reported as `tool_policy_ask` too, keeping the base reason and budget: the
+// signed policy source then says a person or org asked for the pause on
+// purpose, so no consumer can mistake it for the risk-level floor alone. A
+// stale `allow` demoted to an ask is not such a request and leaves the base
+// source as it is. Relaxing is narrower:
 // an `allow` turns the risk-level ask of an `mcp_tool` row into an allow only
 // when the tool's class and floor are within what the policy's scope may relax
 // (CanRelax) and the policy is pinned to the definition the registry pins now. An
@@ -275,13 +281,15 @@ func DecideWithPolicies(base *Result, capEntry *models.Capability, binding *Tool
 		return result
 	}
 	relaxable := capEntry != nil && capEntry.Kind == models.KindMCPTool && binding != nil
-	var never, ask, allow bool
+	// storedAsk is an explicit request for a pause; ask also covers a stale allow.
+	var never, ask, storedAsk, allow bool
 	for _, p := range policies {
 		switch p.Decision {
 		case ToolPolicyNever:
 			never = true
 		case ToolPolicyAsk:
 			ask = true
+			storedAsk = true
 		case ToolPolicyAllow:
 			if !relaxable || !CanRelax(p.ScopeKind, binding.SideEffectClass, binding.ApprovalFloor) {
 				continue
@@ -294,6 +302,7 @@ func DecideWithPolicies(base *Result, capEntry *models.Capability, binding *Tool
 		default:
 			// A decision outside the vocabulary can only add a pause.
 			ask = true
+			storedAsk = true
 		}
 	}
 	switch {
@@ -302,6 +311,11 @@ func DecideWithPolicies(base *Result, capEntry *models.Capability, binding *Tool
 	case ask:
 		if result.Decision == DecisionAllow {
 			return &Result{Decision: DecisionAsk, Reason: PolicySourceToolPolicyAsk, PolicySource: PolicySourceToolPolicyAsk}
+		}
+		if storedAsk && result.Decision == DecisionAsk {
+			tagged := *result
+			tagged.PolicySource = PolicySourceToolPolicyAsk
+			return &tagged
 		}
 	case allow:
 		if result.Decision == DecisionAsk && result.PolicySource == PolicySourceRiskLevel {

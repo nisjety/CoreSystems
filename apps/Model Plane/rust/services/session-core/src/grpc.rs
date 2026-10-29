@@ -5143,6 +5143,66 @@ async fn insert_or_replay_step(
     })
 }
 
+/// The plan-step status for a `CompleteStep` status Session Core recognises.
+///
+/// Execution Core's step outcomes beyond the proto's "completed", "failed" and
+/// "skipped" (`permission_denied`, `timed_out`, `resource_exhausted`,
+/// `aborted`) are all finished-without-success, so they read as `failed`.
+fn known_plan_step_status(status: &str) -> Option<&'static str> {
+    match status {
+        "completed" => Some("done"),
+        "failed" | "permission_denied" | "timed_out" | "resource_exhausted" | "aborted" => {
+            Some("failed")
+        }
+        "skipped" => Some("skipped"),
+        "awaiting_approval" => Some("awaiting_approval"),
+        _ => None,
+    }
+}
+
+/// The plan-step status `CompleteStep` writes. A step that reached this call
+/// has already finished, so an unrecognised status never reads as running: it
+/// is `failed` when an error was reported and `done` otherwise.
+fn plan_step_status(status: &str, error: &str) -> &'static str {
+    known_plan_step_status(status).unwrap_or(if error.trim().is_empty() {
+        "done"
+    } else {
+        "failed"
+    })
+}
+
+#[cfg(test)]
+mod plan_step_status_tests {
+    use super::{known_plan_step_status, plan_step_status};
+
+    #[test]
+    fn complete_step_statuses_map_to_finished_plan_step_statuses() {
+        for (status, error, expected) in [
+            ("completed", "", "done"),
+            ("failed", "boom", "failed"),
+            ("skipped", "", "skipped"),
+            ("awaiting_approval", "", "awaiting_approval"),
+            ("permission_denied", "x", "failed"),
+            ("permission_denied", "", "failed"),
+            ("timed_out", "", "failed"),
+            ("resource_exhausted", "", "failed"),
+            ("aborted", "", "failed"),
+            // Unknown values fall back on whether an error was reported.
+            ("something_new", "", "done"),
+            ("something_new", "  ", "done"),
+            ("something_new", "x", "failed"),
+        ] {
+            assert_eq!(
+                plan_step_status(status, error),
+                expected,
+                "{status:?} {error:?}"
+            );
+        }
+        assert_eq!(known_plan_step_status("permission_denied"), Some("failed"));
+        assert_eq!(known_plan_step_status("something_new"), None);
+    }
+}
+
 /// Record a terminal run event (`RUN_COMPLETED` / `RUN_FAILED`) and flip the
 /// run's status, within the caller's open transaction. `causation_event_id` is
 /// the `STEP_COMPLETED` event that drove the terminal transition.
@@ -5336,25 +5396,15 @@ async fn complete_step_inner(
         // showed four perpetually-running steps for work that had failed.
         // Fall back on whether an error was reported, and log the unknown value
         // so contract drift is visible rather than silently mislabelled.
-        let mapped = match req.status.as_str() {
-            "completed" => "done",
-            "failed" => "failed",
-            "skipped" => "skipped",
-            "awaiting_approval" => "awaiting_approval",
-            other => {
-                tracing::warn!(
-                    status = %other,
-                    run_id = %req.run_id,
-                    step_id = %req.step_id,
-                    "unrecognised CompleteStep status; classifying by error presence"
-                );
-                if req.error.trim().is_empty() {
-                    "done"
-                } else {
-                    "failed"
-                }
-            }
-        };
+        if known_plan_step_status(&req.status).is_none() {
+            tracing::warn!(
+                status = %req.status,
+                run_id = %req.run_id,
+                step_id = %req.step_id,
+                "unrecognised CompleteStep status; classifying by error presence"
+            );
+        }
+        let mapped = plan_step_status(&req.status, &req.error);
         match crate::orchestration_store::append_plan_step(
             pool,
             &pstep_id,

@@ -6368,6 +6368,10 @@ mod capability_binding_contract {
                 "cap.tool.ticket.create",
                 "conversation-core capabilityhealth reporter",
             ),
+            (
+                "cap.browser.open",
+                "browser-broker capability health reporter",
+            ),
         ];
 
         const UNATTESTED_BASELINE: &[&str] = &[
@@ -6377,7 +6381,6 @@ mod capability_binding_contract {
             "cap.tool.social.publish",
             "cap.tool.provider.read",
             "cap.tool.provider.execute",
-            "cap.browser.open",
             "cap.skill.summarize",
             "cap.agent.lineage.read",
         ];

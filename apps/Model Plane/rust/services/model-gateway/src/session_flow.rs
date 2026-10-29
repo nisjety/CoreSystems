@@ -1601,17 +1601,83 @@ pub async fn terminalize_browser_agent_run_authenticated(
     }
     let (outcome, failure_code) = match terminal {
         BrowserAgentTerminal::Completed => (TerminalOutcome::Completed, ""),
-        BrowserAgentTerminal::Failed(_) => (TerminalOutcome::Failed, "browser_failed"),
+        BrowserAgentTerminal::Failed(classified) => {
+            // The classified code only: the step's error text is not logged,
+            // because the browser loop's reasons can carry URLs.
+            tracing::warn!(
+                run_id = %run.run_id,
+                failure_code = classified,
+                "browser-agent run failed"
+            );
+            (
+                TerminalOutcome::Failed,
+                browser_terminal_failure_code(classified),
+            )
+        }
     };
-    record_gateway_managed_terminal_outcome(
-        state,
-        &run.run_id,
-        &run.org_id,
-        ManagedRunSource::GatewayBrowser,
-        outcome,
-        failure_code,
-    )
+    record_browser_terminal_with_fallback(failure_code, |code| {
+        record_gateway_managed_terminal_outcome(
+            state,
+            &run.run_id,
+            &run.org_id,
+            ManagedRunSource::GatewayBrowser,
+            outcome,
+            code,
+        )
+    })
     .await
+}
+
+/// The generic durable code for a failed browser-agent run, and the one every
+/// Session Core build accepts.
+const BROWSER_FAILED_CODE: &str = "browser_failed";
+
+/// Map the browser endpoint's classified failure (`browser_run.rs`
+/// `classify_browser_execution_status`) to the durable, allowlisted
+/// `failure_code` on the terminal receipt. Must stay within
+/// `terminalization::ALLOWED_FAILURE_CODES` in Session Core and the matching
+/// CHECK on `managed_run_terminalization_outbox` (migration 0069).
+fn browser_terminal_failure_code(classified: &str) -> &'static str {
+    match classified {
+        "browser_agent_permission_denied" => "browser_permission_denied",
+        "browser_agent_timed_out" => "browser_timed_out",
+        "browser_agent_resource_exhausted" => "browser_resource_exhausted",
+        _ => BROWSER_FAILED_CODE,
+    }
+}
+
+/// Record a browser terminal receipt, falling back once to `browser_failed`
+/// when Session Core refuses a specific code with `InvalidArgument`.
+///
+/// A Session Core build older than migration 0069 does not know the specific
+/// browser codes and rejects them before any database access, so the retry
+/// cannot double-write; it only makes a gateway-before-session-core deploy
+/// order harmless. Any other failure, and any refusal of `browser_failed`
+/// itself, is returned unchanged.
+async fn record_browser_terminal_with_fallback<F, Fut>(
+    failure_code: &'static str,
+    mut record: F,
+) -> Result<()>
+where
+    F: FnMut(&'static str) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    match record(failure_code).await {
+        Err(error)
+            if !failure_code.is_empty()
+                && failure_code != BROWSER_FAILED_CODE
+                && error
+                    .downcast_ref::<tonic::Status>()
+                    .is_some_and(|status| status.code() == Code::InvalidArgument) =>
+        {
+            tracing::warn!(
+                failure_code,
+                "session-core refused the browser failure code; recording browser_failed instead"
+            );
+            record(BROWSER_FAILED_CODE).await
+        }
+        other => other,
+    }
 }
 
 /// Mark a run cancelled through Session Core's authoritative run lifecycle
@@ -2712,5 +2778,92 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.contains("full-goal-blake3:"));
         assert!(second.contains("full-goal-blake3:"));
+    }
+
+    #[test]
+    fn a_classified_browser_failure_keeps_its_durable_code() {
+        for (classified, durable) in [
+            (
+                "browser_agent_permission_denied",
+                "browser_permission_denied",
+            ),
+            ("browser_agent_timed_out", "browser_timed_out"),
+            (
+                "browser_agent_resource_exhausted",
+                "browser_resource_exhausted",
+            ),
+            ("browser_agent_failed", "browser_failed"),
+            ("browser_agent_something_new", "browser_failed"),
+            ("", "browser_failed"),
+        ] {
+            assert_eq!(
+                super::browser_terminal_failure_code(classified),
+                durable,
+                "{classified}"
+            );
+        }
+    }
+
+    fn refused(code: tonic::Code) -> anyhow::Error {
+        use anyhow::Context as _;
+        Err::<(), _>(tonic::Status::new(code, "x"))
+            .context("session-core managed terminal receipt failed")
+            .unwrap_err()
+    }
+
+    /// A Session Core that predates the specific browser codes answers
+    /// InvalidArgument; the receipt is retried exactly once as browser_failed.
+    #[tokio::test]
+    async fn an_unknown_browser_code_is_retried_once_as_browser_failed() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&calls);
+        super::record_browser_terminal_with_fallback("browser_permission_denied", |code| {
+            seen.lock().unwrap().push(code);
+            let result = if code == "browser_failed" {
+                Ok(())
+            } else {
+                Err(refused(tonic::Code::InvalidArgument))
+            };
+            async move { result }
+        })
+        .await
+        .expect("the browser_failed retry succeeds");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["browser_permission_denied", "browser_failed"]
+        );
+    }
+
+    /// Only InvalidArgument on a specific code is retried: other failures, a
+    /// refused browser_failed, and a completed receipt are returned as is.
+    #[tokio::test]
+    async fn the_browser_code_fallback_retries_nothing_else() {
+        for (code, status) in [
+            ("browser_timed_out", tonic::Code::Unavailable),
+            ("browser_resource_exhausted", tonic::Code::PermissionDenied),
+            ("browser_failed", tonic::Code::InvalidArgument),
+            ("", tonic::Code::InvalidArgument),
+        ] {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let seen = Arc::clone(&calls);
+            let outcome = super::record_browser_terminal_with_fallback(code, |sent| {
+                seen.lock().unwrap().push(sent);
+                let result = Err(refused(status));
+                async move { result }
+            })
+            .await;
+            assert!(outcome.is_err(), "{code} {status:?}");
+            assert_eq!(*calls.lock().unwrap(), vec![code], "{code} {status:?}");
+        }
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&calls);
+        super::record_browser_terminal_with_fallback("browser_permission_denied", |sent| {
+            seen.lock().unwrap().push(sent);
+            async move { Ok(()) }
+        })
+        .await
+        .expect("an accepted specific code is recorded once");
+        assert_eq!(*calls.lock().unwrap(), vec!["browser_permission_denied"]);
     }
 }

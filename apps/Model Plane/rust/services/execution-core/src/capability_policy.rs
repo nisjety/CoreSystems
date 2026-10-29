@@ -47,6 +47,18 @@ pub struct CapabilityEvaluation {
     /// still be the one capability-core just decided on.
     pub side_effect_class: String,
     pub approval_floor: String,
+    /// The capability the call was bound to, as this process resolved it (never
+    /// what the response claims); empty from a policy that does not say.
+    pub capability_id: String,
+    /// capability-core's reason for the decision, verbatim; empty from a policy
+    /// that does not say. A deny logs it only once it passes a slug check.
+    pub reason: String,
+    /// Whether an `ask` carried decision evidence that verifies for exactly this
+    /// call, by the same check an `allow` must pass. A failed check is not an
+    /// error: the ask still parks the step; it only means nothing may stand in for
+    /// the approval (`runtime_loop::browser_grant_approval`). False for allow and
+    /// deny.
+    pub ask_evidence_verified: bool,
 }
 
 impl CapabilityEvaluation {
@@ -63,6 +75,11 @@ impl CapabilityEvaluation {
             policy_source: String::new(),
             side_effect_class: String::new(),
             approval_floor: String::new(),
+            capability_id: String::new(),
+            reason: String::new(),
+            // Mirrors `evidence_verified`: a policy with no wire proof is trusted
+            // as a whole or not at all.
+            ask_evidence_verified: true,
         }
     }
 }
@@ -268,16 +285,24 @@ impl CapabilityPolicy for GrpcCapabilityPolicy {
             .evaluate_response(tool_name, run_id, org_id, user_id)
             .await?;
         let evaluation = map_capability_response(&response)?;
+        let call = EvidenceCall {
+            tool_name,
+            run_id,
+            org_id,
+            user_id,
+            capability_id: &binding.capability_id,
+            registry: binding.registry.as_ref(),
+            gate: self.gate,
+        };
+        // An `ask` is checked too, but never refused for failing: it parks the
+        // step either way. Only a verified ask may later be satisfied by a
+        // broker-validated browser run grant, so it is held to the strict
+        // check whatever the gate mode (see `verify_ask`).
+        let ask_evidence_verified = evaluation.decision == CapabilityDecision::Ask
+            && self
+                .decision_verifier
+                .verify_ask(&response.decision_evidence, &response, &call);
         if evaluation.decision == CapabilityDecision::Allow {
-            let call = EvidenceCall {
-                tool_name,
-                run_id,
-                org_id,
-                user_id,
-                capability_id: &binding.capability_id,
-                registry: binding.registry.as_ref(),
-                gate: self.gate,
-            };
             if !self
                 .decision_verifier
                 .verify(&response.decision_evidence, &response, &call)
@@ -292,6 +317,8 @@ impl CapabilityPolicy for GrpcCapabilityPolicy {
         Ok(CapabilityEvaluation {
             evidence_verified: evaluation.decision != CapabilityDecision::Allow
                 || self.decision_verifier.is_configured(),
+            capability_id: binding.capability_id.clone(),
+            ask_evidence_verified,
             ..evaluation
         })
     }
@@ -1012,6 +1039,11 @@ fn map_capability_response(
         policy_source: response.policy_source.clone(),
         side_effect_class: response.side_effect_class.clone(),
         approval_floor: response.approval_floor.clone(),
+        // The binding is the caller's, not the response's: set by
+        // `evaluate_tool_call`.
+        capability_id: String::new(),
+        reason: response.reason.clone(),
+        ask_evidence_verified: false,
     })
 }
 
@@ -1067,12 +1099,43 @@ impl DecisionEvidenceVerifier {
         response: &EvaluatePolicyResponse,
         call: &EvidenceCall<'_>,
     ) -> bool {
-        let Some(key) = &self.key else {
+        self.verified_claims(evidence, response, call).is_some()
+    }
+
+    /// `verify` for an `ask` that a browser run grant may later satisfy. On top
+    /// of `verify`, the signed v2 claims must bind what the lift relies on, in
+    /// every gate mode: the policy source (so a stored tool-policy ask can never
+    /// pass as the risk-level floor), and the tool and user exactly as this
+    /// process named them in the request (empty while the gate is off, because
+    /// the request does not name them then). `verify` alone skips these checks
+    /// under `Off` and only counts a mismatch under `Shadow`.
+    fn verify_ask(
+        &self,
+        evidence: &str,
+        response: &EvaluatePolicyResponse,
+        call: &EvidenceCall<'_>,
+    ) -> bool {
+        let Some(claims) = self.verified_claims(evidence, response, call) else {
             return false;
         };
+        let named = call.gate != ToolClassGate::Off;
+        claims.v == "2"
+            && claims.policy_source == response.policy_source
+            && claims.tool_name == if named { call.tool_name } else { "" }
+            && claims.user_id == if named { call.user_id } else { "" }
+    }
+
+    /// The claims of evidence that passes `verify`, or `None`.
+    fn verified_claims(
+        &self,
+        evidence: &str,
+        response: &EvaluatePolicyResponse,
+        call: &EvidenceCall<'_>,
+    ) -> Option<DecisionClaims> {
+        let key = self.key.as_ref()?;
         let parts: Vec<&str> = evidence.split('.').collect();
         if parts.len() != 3 {
-            return false;
+            return None;
         }
         let decode = |part: &str| {
             base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -1082,19 +1145,15 @@ impl DecisionEvidenceVerifier {
         let (Some(header), Some(payload), Some(signature)) =
             (decode(parts[0]), decode(parts[1]), decode(parts[2]))
         else {
-            return false;
+            return None;
         };
         #[derive(Deserialize)]
         struct Header {
             alg: String,
             typ: String,
         }
-        let Ok(header) = serde_json::from_slice::<Header>(&header) else {
-            return false;
-        };
-        let Ok(claims) = serde_json::from_slice::<DecisionClaims>(&payload) else {
-            return false;
-        };
+        let header = serde_json::from_slice::<Header>(&header).ok()?;
+        let claims = serde_json::from_slice::<DecisionClaims>(&payload).ok()?;
         if header.alg != "EdDSA"
             || header.typ != "model-plane.capability-decision+jws"
             || !matches!(claims.v.as_str(), "1" | "2")
@@ -1112,18 +1171,16 @@ impl DecisionEvidenceVerifier {
             || claims.exp < now_unix()
             || claims.exp - claims.iat > 90
         {
-            return false;
+            return None;
         }
-        let Ok(signature) = Signature::from_slice(&signature) else {
-            return false;
-        };
+        let signature = Signature::from_slice(&signature).ok()?;
         if key
             .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &signature)
             .is_err()
         {
-            return false;
+            return None;
         }
-        Self::version_accepts(&claims, response, call)
+        Self::version_accepts(&claims, response, call).then_some(claims)
     }
 
     /// The part of verification the gate controls. `Off` is the legacy tuple and
@@ -2592,6 +2649,17 @@ mod tests {
         /// When set, the evidence is signed for this tool name instead of the one
         /// asked about: a replay of another tool's decision.
         signed_for_tool: Mutex<Option<String>>,
+        /// The decision the stand-in answers; `allow` when unset.
+        decision: Mutex<Option<String>>,
+        /// When set, the evidence names this decision instead of the one answered.
+        signed_decision: Mutex<Option<String>>,
+        /// When set, the evidence names this run instead of the one asked about.
+        signed_for_run: Mutex<Option<String>>,
+        /// When set, the evidence names this policy source instead of the one
+        /// answered: a response rewritten in transit.
+        signed_policy_source: Mutex<Option<String>>,
+        /// When set, the evidence carries this claim-set version instead of "2".
+        signed_version: Mutex<Option<String>>,
     }
 
     struct MockCapabilityCore {
@@ -2642,7 +2710,13 @@ mod tests {
                 None => ("read".to_owned(), "none".to_owned(), String::new()),
             };
             let mut response = EvaluatePolicyResponse {
-                decision: "allow".to_owned(),
+                decision: self
+                    .state
+                    .decision
+                    .lock()
+                    .expect("decision lock")
+                    .clone()
+                    .unwrap_or_else(|| "allow".to_owned()),
                 reason: "ok".to_owned(),
                 budget_context: "budget".to_owned(),
                 decision_id: "decision-1".to_owned(),
@@ -2660,28 +2734,56 @@ mod tests {
                 .expect("override lock")
                 .clone()
                 .unwrap_or_else(|| request.tool_name.clone());
+            let signed_decision = self
+                .state
+                .signed_decision
+                .lock()
+                .expect("signed decision lock")
+                .clone()
+                .unwrap_or_else(|| response.decision.clone());
+            let signed_run = self
+                .state
+                .signed_for_run
+                .lock()
+                .expect("signed run lock")
+                .clone()
+                .unwrap_or_else(|| request.run_id.clone());
+            let signed_source = self
+                .state
+                .signed_policy_source
+                .lock()
+                .expect("signed source lock")
+                .clone()
+                .unwrap_or_else(|| response.policy_source.clone());
+            let signed_version = self
+                .state
+                .signed_version
+                .lock()
+                .expect("signed version lock")
+                .clone()
+                .unwrap_or_else(|| "2".to_owned());
             let now = now_unix();
             response.decision_evidence = sign_json(
                 &self.key,
                 &serde_json::json!({
-                    "v": "2",
+                    "v": signed_version,
                     "iat": now - 1,
                     "exp": now + 30,
                     "decision_id": response.decision_id,
                     "capability_id": request.capability_id,
                     "capability_version": response.capability_version,
                     "org_id": request.org_id,
-                    "run_id": request.run_id,
+                    "run_id": signed_run,
                     "agent_id": request.agent_id,
                     "scope": request.scope,
-                    "decision": response.decision,
+                    "decision": signed_decision,
                     "reason": response.reason,
                     "budget_context": response.budget_context,
                     "user_id": request.user_id,
                     "tool_name": signed_tool,
                     "side_effect_class": response.side_effect_class,
                     "approval_floor": response.approval_floor,
-                    "policy_source": response.policy_source,
+                    "policy_source": signed_source,
                     "tool_digest": response.tool_digest,
                 }),
             );
@@ -2804,6 +2906,155 @@ mod tests {
 
     fn denied(result: Result<CapabilityEvaluation, Status>) -> Status {
         result.expect_err("the call must be refused")
+    }
+
+    fn ask_from(state: &MockState) {
+        *state.decision.lock().expect("decision lock") = Some("ask".to_owned());
+    }
+
+    #[tokio::test]
+    async fn a_correctly_signed_ask_is_marked_verified_and_names_its_capability() {
+        for gate in ALL_GATES {
+            let (policy, state) = harness(gate).await;
+            ask_from(&state);
+            let evaluation = policy
+                .evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a")
+                .await
+                .expect("an ask is an evaluation, not an error");
+            assert_eq!(evaluation.decision, CapabilityDecision::Ask, "{gate:?}");
+            assert!(evaluation.ask_evidence_verified, "{gate:?}");
+            assert_eq!(evaluation.capability_id, "cap.browser.open", "{gate:?}");
+            assert_eq!(evaluation.reason, "ok", "{gate:?}");
+            assert_eq!(evaluation.policy_source, "risk_level", "{gate:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tampered_ask_is_still_an_ask_but_never_verified() {
+        // Another run's decision, or a decision that does not say `ask`, is not
+        // evidence for this ask. Neither is refused: the step parks either way.
+        let (policy, state) = harness(ToolClassGate::Enforce).await;
+        ask_from(&state);
+        *state.signed_for_run.lock().unwrap() = Some("run-b".to_owned());
+        let evaluation = policy
+            .evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a")
+            .await
+            .expect("a tampered ask still evaluates");
+        assert_eq!(evaluation.decision, CapabilityDecision::Ask);
+        assert!(!evaluation.ask_evidence_verified, "replayed run");
+
+        let (policy, state) = harness(ToolClassGate::Enforce).await;
+        ask_from(&state);
+        *state.signed_decision.lock().unwrap() = Some("allow".to_owned());
+        let evaluation = policy
+            .evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a")
+            .await
+            .expect("a tampered ask still evaluates");
+        assert_eq!(evaluation.decision, CapabilityDecision::Ask);
+        assert!(!evaluation.ask_evidence_verified, "tampered decision");
+    }
+
+    #[tokio::test]
+    async fn an_ask_is_verified_only_when_its_signed_claims_bind_the_policy_source() {
+        // The response says `risk_level` but the signature covers a stored
+        // tool-policy ask: a rewritten response must not pass as the risk-level
+        // floor, in any gate mode, including `Off` where `verify` skips v2 claims.
+        for gate in ALL_GATES {
+            let (policy, state) = harness(gate).await;
+            ask_from(&state);
+            *state.signed_policy_source.lock().unwrap() = Some("tool_policy_ask".to_owned());
+            let evaluation = policy
+                .evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a")
+                .await
+                .expect("a rewritten ask still evaluates");
+            assert_eq!(evaluation.decision, CapabilityDecision::Ask, "{gate:?}");
+            assert_eq!(evaluation.policy_source, "risk_level", "{gate:?}");
+            assert!(!evaluation.ask_evidence_verified, "{gate:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ask_needs_v2_claims_and_the_tool_it_was_asked_for_in_every_gate_mode() {
+        // A v1 claim set carries no policy source, so it never verifies an ask,
+        // although `verify` accepts it with the gate off.
+        for gate in ALL_GATES {
+            let (policy, state) = harness(gate).await;
+            ask_from(&state);
+            *state.signed_version.lock().unwrap() = Some("1".to_owned());
+            let evaluation = policy
+                .evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a")
+                .await
+                .expect("a v1 ask still evaluates");
+            assert!(!evaluation.ask_evidence_verified, "{gate:?}");
+        }
+        // Under `Shadow` a decision for another tool is only counted by `verify`;
+        // for an ask it is not evidence. Under `Off` the request names no tool, so
+        // evidence naming one was not made for this request either.
+        for gate in ALL_GATES {
+            let (policy, state) = harness(gate).await;
+            ask_from(&state);
+            *state.signed_for_tool.lock().unwrap() = Some("browser.act".to_owned());
+            let evaluation = policy
+                .evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a")
+                .await
+                .expect("a replayed ask still evaluates");
+            assert!(!evaluation.ask_evidence_verified, "{gate:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn without_a_verification_key_an_ask_is_never_verified() {
+        let (mut policy, state) = harness(ToolClassGate::Off).await;
+        policy.decision_verifier = DecisionEvidenceVerifier::disabled_for_test();
+        ask_from(&state);
+        let evaluation = policy
+            .evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a")
+            .await
+            .expect("an ask is an evaluation");
+        assert_eq!(evaluation.decision, CapabilityDecision::Ask);
+        assert!(!evaluation.ask_evidence_verified);
+    }
+
+    #[tokio::test]
+    async fn an_allow_signed_for_another_run_is_still_refused() {
+        let (policy, state) = harness(ToolClassGate::Off).await;
+        *state.signed_for_run.lock().unwrap() = Some("run-b".to_owned());
+        let error = denied(
+            policy
+                .evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a")
+                .await,
+        );
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert!(error.message().contains("invalid decision evidence"));
+    }
+
+    #[tokio::test]
+    async fn allow_and_deny_are_never_ask_verified() {
+        let (policy, _state) = harness(ToolClassGate::Off).await;
+        let allow = policy
+            .evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a")
+            .await
+            .expect("allow");
+        assert_eq!(allow.decision, CapabilityDecision::Allow);
+        assert!(allow.evidence_verified);
+        assert!(!allow.ask_evidence_verified);
+
+        let (policy, state) = harness(ToolClassGate::Off).await;
+        *state.decision.lock().unwrap() = Some("deny".to_owned());
+        let deny = policy
+            .evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a")
+            .await
+            .expect("deny");
+        assert_eq!(deny.decision, CapabilityDecision::Deny);
+        assert!(!deny.ask_evidence_verified);
+        assert_eq!(deny.capability_id, "cap.browser.open");
+    }
+
+    #[test]
+    fn a_local_policy_is_trusted_for_an_ask_as_it_is_for_an_allow() {
+        let evaluation = CapabilityEvaluation::unverified(CapabilityDecision::Ask);
+        assert!(evaluation.evidence_verified);
+        assert!(evaluation.ask_evidence_verified);
     }
 
     #[tokio::test]

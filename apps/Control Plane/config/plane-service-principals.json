@@ -1,4 +1,26 @@
 {
+  "browser-broker": {
+    "audiences": [
+      "capability-core"
+    ],
+    "consumerEnv": "BROWSER_BROKER_SERVICE_API_KEY",
+    "orgIds": [
+      "global"
+    ],
+    "retentionByAudience": {
+      "capability-core": "persistent"
+    },
+    "scopes": [
+      "capability:browser:health:write",
+      "capability:read"
+    ],
+    "scopesByAudience": {
+      "capability-core": [
+        "capability:browser:health:write",
+        "capability:read"
+      ]
+    }
+  },
   "capability-core": {
     "tenancy": "directory",
     "audiences": [

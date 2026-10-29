@@ -1989,6 +1989,18 @@ services:
       # inside this URL). ZDR grants are never written here (X-2): they stay in
       # memory, so the broker stays one replica.
       DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
+      # cap.browser.open health (internal/healthattest). The broker owns the
+      # browser runtime, so it alone attests the capability to capability-core,
+      # on POST /api/v1/capabilities/browser/health, as service:browser-broker
+      # (Control Plane principal row "browser-broker", consumerEnv below). It
+      # probes its grant store and quarry-edge's /ready every 60 s (clamped to
+      # 15-150 s by BROWSER_BROKER_HEALTH_ATTEST_INTERVAL_SECONDS). An empty
+      # service key turns attestation off and the broker still boots; the row
+      # then lapses to health_attestation_stale and the browser stays denied.
+      CAPABILITY_CORE_HTTP_URL: http://capability-core:8085
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      BROWSER_BROKER_SERVICE_API_KEY: ${BROWSER_BROKER_SERVICE_API_KEY:-}
+      BROWSER_BROKER_QUARRY_READY_URL: ${BROWSER_BROKER_QUARRY_READY_URL:-${QUARRY_EDGE_URL:-http://quarry-edge:8082}/ready}
     # The entrypoint's migrations need postgres, so wait for it to be healthy;
     # otherwise a first boot before it answers fails and restarts the container.
     depends_on:

@@ -18,6 +18,7 @@ const (
 	// deployment-name suffix, which would accept an ambiguous principal.
 	ExecutionCoreServiceID    = "service:execution-core"
 	ConversationCoreServiceID = "service:conversation-core"
+	BrowserBrokerServiceID    = "service:browser-broker"
 
 	ReadScope  = "capability:read"
 	WriteScope = "capability:write"
@@ -40,6 +41,11 @@ const (
 	// owner-action readiness reporter. It cannot mutate the normal catalog or
 	// attest any capability other than the ticket adapter.
 	OwnerActionHealthWriteScope = "capability:owner-action:health:write"
+	// BrowserHealthWriteScope is held only by browser-broker's readiness
+	// reporter. It cannot write the catalog or attest any capability other
+	// than cap.browser.open, whose runtime (grants and the Quarry validation
+	// path) the broker owns.
+	BrowserHealthWriteScope = "capability:browser:health:write"
 	// SpaceDeletionScope is held only by the Control-coordinated deletion
 	// workload. It permits the narrow internal cancellation adapter below; it
 	// is intentionally not interchangeable with general capability writes.
@@ -95,6 +101,14 @@ func AuthorizeHTTP(principal authctx.Principal, request *http.Request) error {
 		if request.Method == http.MethodPost && principal.PrincipalType == "service" &&
 			principal.ActorID == ConversationCoreServiceID && principal.OrganizationID == "global" &&
 			principal.HasScope(OwnerActionHealthWriteScope) {
+			return nil
+		}
+		return errDenied
+	}
+	if request.URL.Path == "/api/v1/capabilities/browser/health" {
+		if request.Method == http.MethodPost && principal.PrincipalType == "service" &&
+			principal.ActorID == BrowserBrokerServiceID && principal.OrganizationID == "global" &&
+			principal.HasScope(BrowserHealthWriteScope) {
 			return nil
 		}
 		return errDenied
