@@ -763,6 +763,14 @@ async fn execute_step_inner(
     if tool_name == READ_PROVIDER_ACTION_TOOL && sandbox.is_some() {
         return StepOutcome::failed("read_provider_action is not available in a Space room");
     }
+    // A write reaches only a connected account the person selected for this turn (WS23-S8). It is
+    // refused before the permission gate is asked, so no approval is raised for a send the person
+    // never offered to make from that account.
+    if write_outside_turn_scope(tool_name, tool_input, connector_scope) {
+        return StepOutcome::failed(
+            "connection_not_in_scope: this connected account was not selected for this turn",
+        );
+    }
     // Workspace tools copy a Space's files to this host and take a durable lease, so none runs
     // under zero data retention or on a waived route, nor one the switch does not admit: the writes
     // need `all` (WS24-S3, WS24-S4). Refused before the capability gate is asked, as MCP is.
@@ -2207,6 +2215,23 @@ fn connection_selected(connector_scope: &[String], connection_id: &str) -> bool 
     connector_scope.iter().any(|selected| selected == connection_id)
 }
 
+/// Whether a provider write would reach a connected account the person did not select for this
+/// turn (WS23-S8). A turn that selected none is not bound here, so its writes are the ones they
+/// were before the turn scope existed, and each still waits for a grant. Once a selection exists,
+/// a write that names no connection is outside it.
+fn write_outside_turn_scope(tool_name: &str, tool_input: &str, connector_scope: &[String]) -> bool {
+    if tool_name != EXECUTE_PROVIDER_ACTION_TOOL || connector_scope.is_empty() {
+        return false;
+    }
+    let connection = serde_json::from_str::<serde_json::Value>(tool_input)
+        .ok()
+        .and_then(|input| input.get("connection_id")?.as_str().map(str::to_owned));
+    match connection {
+        Some(connection) => !connection_selected(connector_scope, &connection),
+        None => true,
+    }
+}
+
 /// `read_provider_action` tool — one read on a connected account the user selected for this turn
 /// (WS23-S3). Read-only by construction: the schema has no body, the operation is checked against
 /// the contract's reads, and the token is `integration:read`. The result is framed and screened at
@@ -2340,6 +2365,13 @@ async fn execute_provider_action(
     // treated as writes (fail safe — see `integration_tools::operation_is_write`).
     let is_write = crate::integration_tools::operation_is_write(&input.operation).unwrap_or(true);
     let approval_ref = if is_write {
+        // The write is attested to the person who approves it, so a run with no acting user has
+        // no one to approve it and sends nothing (WS23-S8).
+        if user_id.trim().is_empty() {
+            return tool_error(
+                "provider write blocked: this run has no acting user to approve it".to_owned(),
+            );
+        }
         match resolve_write_approval(
             session_channel.as_ref(),
             org_id,
@@ -2450,7 +2482,7 @@ async fn resolve_write_approval(
                 requested_of: org_id.to_owned(),
                 org_id: org_id.to_owned(),
                 user_id: user_id.to_owned(),
-                reason: format!("provider write '{operation}' requires approval"),
+                reason: write_approval_reason(operation, tool_input),
                 expires_in_seconds: 3600,
                 client_approval_id: String::new(),
                 idempotency_key: format!("{run_id}:{step_id}"),
@@ -2502,6 +2534,19 @@ async fn resolve_write_approval(
                 })?;
         }
         Ok(approval.id)
+    }
+}
+
+/// The reason a provider write's approval carries (WS23-S8). A mail send says what the send would
+/// do, so the person decides on its recipients and subject; any other write names its operation,
+/// as it always did. The words are scrubbed here and nowhere else copies them.
+fn write_approval_reason(operation: &str, tool_input: &str) -> String {
+    let reason = format!("provider write '{operation}' requires approval");
+    match crate::integration_tools::provider_effect_summary(tool_input) {
+        Some(summary) => {
+            crate::scrub::scrub_string(&format!("{reason}: the agent would {summary}"))
+        }
+        None => reason,
     }
 }
 
@@ -2619,6 +2664,65 @@ mod connector_tool_tests {
         assert!(!connection_selected(&scope, "conn-b"));
         assert!(!connection_selected(&scope, ""), "an empty id is never selected");
         assert!(!connection_selected(&[], "conn-a"), "an empty selection selects nothing");
+    }
+
+    /// A write to a connection the turn did not select is refused before the capability gate, so
+    /// no approval is raised for it (WS23-S8). Reaching the gate would panic.
+    #[tokio::test]
+    async fn a_write_outside_the_turn_scope_is_refused_before_the_capability_gate() {
+        let input = r#"{"connection_id":"conn-b","operation":"gmail.send","body":{"to":"a@x.example","subject":"s","bodyText":"t"}}"#;
+        let selected = vec!["conn-a".to_owned()];
+        let out = execute_step_inner(
+            EXECUTE_PROVIDER_ACTION_TOOL, input, "ask", "", "org-1", "user-1", "run-1", "step-1", "",
+            None, None, None, false, false, 0, None, None, None, &NoPolicy, None, None, None, None,
+            None, true, &selected,
+        )
+        .await;
+        assert_eq!(out.status, "failed");
+        assert!(out.error.contains("connection_not_in_scope"), "{}", out.error);
+    }
+
+    #[test]
+    fn a_write_is_outside_the_turn_scope_only_once_the_turn_selected_connections() {
+        let selected = vec!["conn-a".to_owned()];
+        let other = r#"{"connection_id":"conn-b","operation":"gmail.send"}"#;
+        let own = r#"{"connection_id":"conn-a","operation":"gmail.send"}"#;
+        let unnamed = r#"{"operation":"gmail.send"}"#;
+        assert!(write_outside_turn_scope(EXECUTE_PROVIDER_ACTION_TOOL, other, &selected));
+        assert!(!write_outside_turn_scope(EXECUTE_PROVIDER_ACTION_TOOL, own, &selected));
+        assert!(
+            !write_outside_turn_scope(EXECUTE_PROVIDER_ACTION_TOOL, other, &[]),
+            "a turn that selected nothing is not bound here"
+        );
+        assert!(
+            write_outside_turn_scope(EXECUTE_PROVIDER_ACTION_TOOL, unnamed, &selected),
+            "a write that names no connection is outside a selection"
+        );
+        assert!(write_outside_turn_scope(EXECUTE_PROVIDER_ACTION_TOOL, "not json", &selected));
+        assert!(
+            !write_outside_turn_scope("read_provider_action", other, &selected),
+            "the read tool has its own check"
+        );
+    }
+
+    /// A write is attested to the person who approves it, so a run with no acting user sends
+    /// nothing and raises no approval (WS23-S8).
+    #[tokio::test]
+    async fn a_provider_write_with_no_acting_user_is_refused_before_any_approval() {
+        let input = r#"{"connection_id":"conn-a","operation":"gmail.send","body":{"to":"a@x.example"}}"#;
+        let out = execute_provider_action(
+            input,
+            "org-1",
+            "",
+            "run-1",
+            "step-1",
+            "ask",
+            None,
+            Some("bearer"),
+        )
+        .await;
+        let error = out.error.expect("a write with no acting user is refused");
+        assert!(error.contains("no acting user"), "{error}");
     }
 }
 

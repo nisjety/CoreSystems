@@ -372,6 +372,12 @@ impl IntegrationActionsClient {
         if operation.trim().is_empty() {
             return Err("execute_provider_action requires operation".to_owned());
         }
+        // A write is attested to the person who approved it, so an approved write with no acting
+        // user has no one to bind to and goes nowhere (WS23-S8).
+        let is_write = approval_ref.is_some_and(|approval| !approval.trim().is_empty());
+        if is_write && actor_id.trim().is_empty() {
+            return Err("execute_provider_action requires the acting user for a write".to_owned());
+        }
         if let Some(approval) = approval_ref {
             if !approval.trim().is_empty() {
                 if !body.is_object() {
@@ -1193,6 +1199,120 @@ pub fn operation_is_write(operation: &str) -> Option<bool> {
     None
 }
 
+/// Most recipients an approval names before it says how many more there are.
+const SUMMARY_RECIPIENTS: usize = 10;
+/// Most characters of a mail's subject an approval shows.
+const SUMMARY_SUBJECT_CHARS: usize = 200;
+/// Most characters of a mail's opening an approval shows.
+const SUMMARY_OPENING_CHARS: usize = 120;
+
+/// What a provider write would do, in words that follow "The agent would" (WS23-S8). Defined for a
+/// mail send only, and read the way integration-corev2 reads the send: the recipients in `body.to`
+/// (a comma-separated string or a list), the subject, and the first 120 characters of the
+/// plain-text body. `None` for every other operation and for an input that does not parse.
+///
+/// The caller keeps these words in the approval's reason and nowhere else. That reason is scrubbed,
+/// and no audit row, outbox event or log line repeats it.
+#[must_use]
+pub fn provider_effect_summary(tool_input: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        operation: String,
+        #[serde(default)]
+        body: Value,
+    }
+    let input: Input = serde_json::from_str(tool_input).ok()?;
+    if !is_mail_send(&input.operation) {
+        return None;
+    }
+    let recipients = mail_recipients(input.body.get("to"));
+    let mut summary = String::from("send an email to ");
+    if recipients.is_empty() {
+        summary.push_str("no one");
+    } else {
+        let shown: Vec<&str> = recipients
+            .iter()
+            .take(SUMMARY_RECIPIENTS)
+            .map(String::as_str)
+            .collect();
+        summary.push_str(&shown.join(", "));
+        if recipients.len() > SUMMARY_RECIPIENTS {
+            let _ = write!(
+                summary,
+                " and {} more",
+                recipients.len() - SUMMARY_RECIPIENTS
+            );
+        }
+    }
+    match input
+        .body
+        .get("subject")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|subject| !subject.is_empty())
+    {
+        Some(subject) => {
+            let _ = write!(
+                summary,
+                " with the subject '{}'",
+                one_line(subject, SUMMARY_SUBJECT_CHARS)
+            );
+        }
+        None => summary.push_str(" with no subject"),
+    }
+    if let Some(text) = input
+        .body
+        .get("bodyText")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        let _ = write!(
+            summary,
+            "; it opens '{}'",
+            one_line(text, SUMMARY_OPENING_CHARS)
+        );
+    }
+    Some(summary)
+}
+
+/// Whether an operation sends a mail, under the names integration-corev2 gates for approval.
+fn is_mail_send(operation: &str) -> bool {
+    matches!(
+        operation.trim().to_ascii_lowercase().as_str(),
+        "gmail.send" | "google.gmail.send" | "mail.send" | "microsoft.mail.send"
+    )
+}
+
+/// The recipients a mail send reaches, split as integration-corev2 splits them: a string on commas,
+/// or each string item of a list.
+fn mail_recipients(to: Option<&Value>) -> Vec<String> {
+    let raw: Vec<&str> = match to {
+        Some(Value::String(list)) => list.split(',').collect(),
+        Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    raw.into_iter()
+        .map(str::trim)
+        .filter(|recipient| !recipient.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The first `max` characters of `text` on one line, marked when cut. A line break becomes a
+/// space, so a summary never spans lines in an approval.
+fn one_line(text: &str, max: usize) -> String {
+    let mut line: String = text
+        .chars()
+        .take(max)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if text.chars().count() > max {
+        line.push('…');
+    }
+    line
+}
+
 fn render_provider_actions(connections: &[ConnectionSummary]) -> String {
     if connections.is_empty() {
         return "No provider connections exist for this organization yet. Connect a provider \
@@ -1666,6 +1786,86 @@ mod tests {
             shape_read("drive.file.content", &exported, &doc).status,
             ReadStatus::Ok
         );
+    }
+
+    fn mail_input(operation: &str, body: &Value) -> String {
+        serde_json::json!({
+            "connection_id": "conn-1",
+            "operation": operation,
+            "body": body,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_mail_send_summary_names_its_recipients_subject_and_a_120_char_opening() {
+        let text = "x".repeat(200);
+        let body = serde_json::json!({
+            "to": ["alice@example.com", "bob@example.com"],
+            "subject": "Status",
+            "bodyText": text,
+        });
+        let summary = provider_effect_summary(&mail_input("gmail.send", &body))
+            .expect("a mail send has a summary");
+        assert_eq!(
+            summary,
+            format!(
+                "send an email to alice@example.com, bob@example.com with the subject 'Status'; it opens '{}…'",
+                "x".repeat(120)
+            )
+        );
+    }
+
+    #[test]
+    fn a_recipient_string_is_split_on_commas_as_the_gateway_splits_it() {
+        let body = serde_json::json!({
+            "to": " a@x.example ,b@y.example, ",
+            "subject": "Hi",
+            "bodyText": "Hei",
+        });
+        assert_eq!(
+            provider_effect_summary(&mail_input("mail.send", &body)).as_deref(),
+            Some("send an email to a@x.example, b@y.example with the subject 'Hi'; it opens 'Hei'")
+        );
+    }
+
+    #[test]
+    fn a_summary_says_what_is_missing_and_how_many_recipients_it_leaves_out() {
+        let many: Vec<String> = (0..12).map(|n| format!("p{n}@x.example")).collect();
+        let body = serde_json::json!({ "to": many, "bodyText": "line one\nline two" });
+        let summary = provider_effect_summary(&mail_input("microsoft.mail.send", &body))
+            .expect("a mail send has a summary");
+        assert!(summary.starts_with("send an email to p0@x.example, p1@x.example"));
+        assert!(summary.contains("p9@x.example and 2 more with no subject"));
+        assert!(
+            summary.ends_with("; it opens 'line one line two'"),
+            "a line break is shown as a space: {summary}"
+        );
+        let nobody = serde_json::json!({ "subject": "s" });
+        assert_eq!(
+            provider_effect_summary(&mail_input("gmail.send", &nobody)).as_deref(),
+            Some("send an email to no one with the subject 's'")
+        );
+    }
+
+    #[test]
+    fn only_a_mail_send_has_an_effect_summary() {
+        let body = serde_json::json!({ "to": "a@x.example", "subject": "s", "bodyText": "t" });
+        for operation in [
+            "message.send",
+            "pages.post",
+            "posts.create",
+            "gmail.messages",
+            "mail.messages",
+            "drive.file.content",
+        ] {
+            assert_eq!(
+                provider_effect_summary(&mail_input(operation, &body)),
+                None,
+                "{operation} is not a mail send"
+            );
+        }
+        assert_eq!(provider_effect_summary("not json"), None);
     }
 
     async fn mount_org_token(auth_core: &MockServer) {

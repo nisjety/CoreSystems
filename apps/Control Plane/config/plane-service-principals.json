@@ -274,11 +274,13 @@
     },
     "scopes": [
       "integration:read",
+      "integration:write",
       "shipping:read"
     ],
     "scopesByAudience": {
       "ingestion": [
         "integration:read",
+        "integration:write",
         "shipping:read"
       ]
     },

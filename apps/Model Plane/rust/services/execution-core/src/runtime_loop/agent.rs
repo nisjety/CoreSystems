@@ -7096,6 +7096,25 @@ pub(crate) fn approval_reason_for_with(
     format!("tool '{tool_name}' requires approval")
 }
 
+/// [`approval_reason_for_with`], with what a mail send would do said for a provider write that is
+/// one (WS23-S8). The person decides on its recipients and subject, so the approval reads as the
+/// send it would make. The words are scrubbed here, and the pause keeps them in the approval's
+/// reason only.
+pub(crate) fn approval_reason_for_call(
+    gate: crate::permission::RunGate<'_>,
+    tool_name: &str,
+    tool_input: &str,
+) -> String {
+    if tool_name == super::EXECUTE_PROVIDER_ACTION_TOOL {
+        if let Some(summary) = crate::integration_tools::provider_effect_summary(tool_input) {
+            return crate::scrub::scrub_string(&format!(
+                "The agent would {summary}. Approve to let it send."
+            ));
+        }
+    }
+    approval_reason_for_with(gate, tool_name)
+}
+
 /// [`approval_kind_for_with`] with the gate off: the name-only answer, for a fixture
 /// that has no run to read a view from.
 #[cfg(test)]
@@ -7280,7 +7299,7 @@ async fn pause_for_approval(
             requested_of: req.org_id.clone(),
             org_id: req.org_id.clone(),
             user_id: req.user_id.clone(),
-            reason: approval_reason_for_with(gate, tool_name),
+            reason: approval_reason_for_call(gate, tool_name, tool_input),
             expires_in_seconds: 3600,
             // Let session-core mint the durable approval id (matrix §4.1).
             client_approval_id: String::new(),
@@ -16485,6 +16504,107 @@ mod tests {
         assert_eq!(cause.code, "provider_write");
         assert_eq!(cause.action_key, "execute_provider_action:message.send");
         assert_eq!(approval.idempotency_key, "run_test:tool_1_pa-1");
+        assert!(
+            r.decisions.is_empty(),
+            "a pause grants nothing on a human's behalf"
+        );
+    }
+
+    /// A mail send's approval reason names its recipients and subject, and the scrubber takes out a
+    /// credential the body carries. Any other provider write keeps the reason it always had (WS23-S8).
+    #[test]
+    fn a_mail_send_approval_reason_names_its_recipients_and_subject_and_scrubs_secrets() {
+        let gate = crate::permission::RunGate::with_gate(
+            crate::capability_policy::ToolClassGate::Off,
+            "",
+            "",
+        );
+        let mail = r#"{"connection_id":"c1","operation":"gmail.send","body":{"to":["alice@example.com"],"subject":"Status","bodyText":"Hei, Bearer abc.def-secret-token er rett"}}"#;
+        let reason = approval_reason_for_call(gate, "execute_provider_action", mail);
+        assert!(
+            reason.starts_with(
+                "The agent would send an email to alice@example.com with the subject 'Status'"
+            ),
+            "{reason}"
+        );
+        assert!(reason.ends_with("Approve to let it send."), "{reason}");
+        assert!(
+            !reason.contains("abc.def-secret-token"),
+            "a credential in the body is scrubbed: {reason}"
+        );
+
+        let chat = r#"{"connection_id":"c1","operation":"message.send","body":{"text":"hi"}}"#;
+        assert_eq!(
+            approval_reason_for_call(gate, "execute_provider_action", chat),
+            "tool 'execute_provider_action' requires approval"
+        );
+        assert_eq!(
+            approval_reason_for_call(gate, "read_provider_action", mail),
+            "tool 'read_provider_action' requires approval",
+            "only the provider write's own tool carries the send"
+        );
+    }
+
+    /// Under `ask` a mail send pauses for a decision that names its recipient and subject, and the
+    /// run decides nothing on the person's behalf (WS23-S8).
+    #[tokio::test]
+    async fn an_ask_posture_mail_send_pauses_naming_its_recipient_and_subject() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![Scripted::ToolCalls {
+            content: String::new(),
+            calls: vec![pb::ToolCall {
+                id: "pm-1".to_owned(),
+                name: "execute_provider_action".to_owned(),
+                arguments_json: r#"{"connection_id":"c1","operation":"gmail.send","body":{"to":["alice@example.com"],"subject":"Status","bodyText":"Hei"}}"#
+                    .to_owned(),
+            }],
+        }])
+        .await;
+        let state = crate::state::StateStore::new();
+        let tools = vec![pb::ToolDefinition {
+            name: "execute_provider_action".to_owned(),
+            description: "Run one provider operation.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+
+        let mut req = sample_request();
+        req.mode = "ask".to_owned();
+        let resp = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            &plain_caller(),
+            req,
+            tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("a mail send under ask must pause the run");
+        assert_eq!(resp.status, "awaiting_approval");
+
+        let r = rec.lock().unwrap();
+        assert_eq!(r.approval_requests.len(), 1, "exactly one approval created");
+        let approval = &r.approval_requests[0];
+        assert_eq!(approval.kind, pb::ApprovalKind::Destructive as i32);
+        assert!(
+            approval.reason.contains("alice@example.com") && approval.reason.contains("'Status'"),
+            "the decision names the recipient and subject: {}",
+            approval.reason
+        );
+        let cause = approval.cause.as_ref().expect("the pause states its cause");
+        assert_eq!(cause.code, "provider_write");
         assert!(
             r.decisions.is_empty(),
             "a pause grants nothing on a human's behalf"
