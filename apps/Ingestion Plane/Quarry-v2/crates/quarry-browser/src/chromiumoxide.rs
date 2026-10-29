@@ -1153,7 +1153,8 @@ impl ChromiumoxideDriver {
         session.lease.session_affinity_key.clone()
     }
 
-    /// Browser navigation is permitted only after both halves of Quarry's
+    /// Browser navigation (and opening any page, SC4 D1's placeholder tab too)
+    /// is permitted only after both halves of Quarry's
     /// egress boundary are present: the DNS-pinning transport provider and a
     /// session-scoped host policy. Keeping this invariant in the driver
     /// prevents a new caller from accidentally treating CDP's URL guard as a
@@ -4398,6 +4399,9 @@ impl BrowserDriver for ChromiumoxideDriver {
         if let Some(pin) = session.tab_pin() {
             return Err(pinned_tab_closed_error(pin));
         }
+        // Every path that opens a page requires the pinned proxy and an installed egress
+        // policy, also this one whose page loads nothing (see `require_configured_egress`).
+        self.require_configured_egress(session).await?;
         let (tab_id, page) = self
             .open_tab_page(session, None, FirstNavigation::Placeholder, true, None)
             .await?;
@@ -7377,6 +7381,44 @@ mod tests {
         assert_eq!(loss_reason(&error), "session_not_open", "{error:?}");
         assert_eq!(driver.book().slot(SLOT).unwrap().pages, 0);
         assert_eq!(driver.launch_count(), 0);
+    }
+
+    /// SC4 D1 review: the placeholder tab `ensure_page` opens is a page like any other, so
+    /// it needs both halves of the egress boundary (the pinned proxy and the session's
+    /// installed policy), as `goto` and `open_tab` do; a refusal opens no tab and launches
+    /// no browser. On the D1 code it opened the tab without either.
+    #[tokio::test]
+    async fn a_placeholder_tab_needs_the_pinned_proxy_and_an_egress_policy() {
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(Arc::new(StubEgressProvider))
+            .with_pool_config(quiet_pool());
+        driver.book().admit(
+            "placeholder-egress",
+            Duration::from_secs(30),
+            Instant::now(),
+        );
+        let session = bare_session("placeholder-egress");
+        let error = driver
+            .ensure_page(&session)
+            .await
+            .expect_err("no installed egress policy");
+        assert_eq!(error.code, ErrorCode::SecurityBlocked, "{error:?}");
+        assert_eq!(driver.book().slot(SLOT).unwrap().pages, 0);
+        assert_eq!(driver.launch_count(), 0);
+
+        let unpinned = ChromiumoxideDriver::new().with_pool_config(quiet_pool());
+        unpinned.book().admit(
+            "placeholder-egress",
+            Duration::from_secs(30),
+            Instant::now(),
+        );
+        let error = unpinned
+            .ensure_page(&session)
+            .await
+            .expect_err("no pinned egress proxy");
+        assert_eq!(error.code, ErrorCode::Unsupported, "{error:?}");
+        assert_eq!(unpinned.book().slot(SLOT).unwrap().pages, 0);
+        assert_eq!(unpinned.launch_count(), 0);
     }
 
     /// An egress authority whose endpoint fails for the probe's key only, so

@@ -1682,11 +1682,15 @@ fn action_requires_atomic_target(action: &AgentAction) -> bool {
 }
 
 /// SC4 D1: the actions that only read the page as it is (a wait, a capture). They observe
-/// a session with no page yet on a blank tab (`BrowserDriver::ensure_page`).
+/// a session with no page yet on a blank tab (`BrowserDriver::ensure_page`). The edge's
+/// passive reads (`tab_ledger::is_passive`): a `wait_for` waits on that blank tab as on
+/// any page; its snapshot forms reach the runner here as a `WaitFor` (and need a snapshot,
+/// so a page, before that).
 fn action_only_observes(action: &AgentAction) -> bool {
     matches!(
         action,
         AgentAction::Wait { .. }
+            | AgentAction::WaitFor { .. }
             | AgentAction::Screenshot { .. }
             | AgentAction::Pdf
             | AgentAction::GetContent
@@ -3932,6 +3936,22 @@ mod tests {
             .unwrap_or_else(|error| panic!("{action:?}: {error:?}"));
             assert_eq!(ensured(&driver), 1, "{action:?}");
         }
+        // A `wait_for` is a read too (this driver cannot wait, so the step itself fails
+        // after the page is given).
+        let driver = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            ..Default::default()
+        });
+        let _ = observe(
+            driver.clone(),
+            AgentAction::WaitFor {
+                selector: "body".into(),
+                timeout_ms: 0,
+            },
+            &mut ObservationContext::default(),
+        )
+        .await;
+        assert_eq!(ensured(&driver), 1, "wait_for");
         for action in [
             AgentAction::Navigate {
                 url: "https://example.com/".into(),

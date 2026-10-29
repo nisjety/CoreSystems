@@ -395,3 +395,37 @@ async fn a_fresh_runs_first_wait_observes_a_blank_tab() {
         ]
     );
 }
+
+/// SC4 D1 review: a `wait_for` is a read like a wait (the edge's passive reads), so a fresh
+/// run's first `wait_for` waits on the blank tab (`body` is there on `about:blank`) instead
+/// of failing `no_current_page`; nothing is navigated and the checkpoint keeps no URL.
+#[tokio::test]
+async fn a_fresh_runs_first_wait_for_waits_on_a_blank_tab() {
+    let edge = Edge::start(RunLimits::default()).await;
+    edge.driver.model_pages();
+    let person = member_token();
+    let run = edge.start_run(&person, run_on_example_test()).await;
+
+    edge.driver.set_page_url(Some("about:blank"));
+    let wait_for = edge
+        .step(
+            &person,
+            &run,
+            json!({ "type": "wait_for", "selector": "body", "timeout_ms": 1000 }),
+            Some("agent"),
+        )
+        .await;
+    assert_eq!(wait_for.status, 200, "{}", wait_for.body);
+    assert_eq!(wait_for.data()["url"], "about:blank", "{}", wait_for.body);
+    assert_eq!(edge.driver.ensure_page_calls(), 1);
+    assert_eq!(
+        edge.driver.goto_entered(),
+        0,
+        "a wait_for navigates nowhere"
+    );
+    assert_eq!(checkpoint(&edge, &run).await.current_url, "");
+    assert_eq!(
+        outcomes(&edge, &person, &run).await,
+        vec![("wait_for".to_owned(), "completed".to_owned())]
+    );
+}

@@ -523,6 +523,20 @@ impl BrowserDriver for RecordingDriver {
         Err(QuarryError::unsupported_action("native_page_projection"))
     }
 
+    /// Unsupported, as before; under `model_pages` it waits on the page it has (the
+    /// selector is there at once) and a session with no page answers `no_current_page`.
+    async fn wait_for(
+        &self,
+        session: &BrowserSession,
+        _selector: &str,
+        _timeout_ms: u32,
+    ) -> QuarryResult<()> {
+        if !self.model_pages.load(Ordering::SeqCst) {
+            return Err(QuarryError::unsupported_action("wait_for"));
+        }
+        self.refuse_without_page(session)
+    }
+
     async fn screenshot(&self, _session: &BrowserSession, _full_page: bool) -> QuarryResult<Bytes> {
         Ok(Bytes::from_static(b"\x89PNG recorded"))
     }

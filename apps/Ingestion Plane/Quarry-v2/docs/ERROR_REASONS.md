@@ -99,7 +99,7 @@ All of these are `retryable: false`: repeating the call cannot help, the caller 
 |---|---|
 | `session_reaped` | the driver's idle reaper closed the session (idle past `max(2 x lease ttl, QUARRY_BROWSER_SESSION_IDLE_S)` or older than `max(2 x ttl, QUARRY_BROWSER_SESSION_MAX_AGE_S)`); remembered for 10 minutes |
 | `browser_process_lost` | the Chromium process the session lived in exited or crashed; the next `acquire` launches a new one. Remembered for 10 minutes |
-| `no_current_page` | the session is open but has no page yet (call `goto` or open a tab first). An agent step that only reads the page (`wait`, `screenshot`, `pdf`, `get_content`) no longer gets it: it observes a blank placeholder tab (200, `url` `about:blank`; SC4 D1). An acting step (click, type, ...) still does |
+| `no_current_page` | the session is open but has no page yet (call `goto` or open a tab first). An agent step that only reads the page (`wait`, `wait_for`, `screenshot`, `pdf`, `get_content`) no longer gets it: it observes a blank placeholder tab (200, `url` `about:blank`; SC4 D1). An acting step (click, type, ...) still does |
 | `session_not_open` | the driver does not hold this session (released, or never acquired) |
 
 ## 503 on `GET /ready`: `browser_unhealthy` (WS3.F)
