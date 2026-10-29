@@ -34,6 +34,10 @@ use crate::{
     state::AppState,
 };
 
+// Declared here, as sse.rs declares its own helpers, so this slice stays inside the files it owns.
+#[path = "connector_reads.rs"]
+pub mod connector_reads;
+
 /// Default max tool rounds before forcing a final, tool-free answer.
 ///
 /// Deliberately generous: a real MCP server is *self-describing*, so a single
@@ -487,6 +491,9 @@ fn authored_artifact_events(
 /// Keep the displayed result factual and concise while retaining the complete
 /// tool contract for the next model decision.
 fn public_tool_output(outcome: &ToolOutcome, source_checked: bool, norwegian: bool) -> String {
+    if outcome.error.is_none() && outcome.name == mp_contracts::provider_reads::READ_TOOL_NAME {
+        return connector_reads::public_summary(&outcome.output);
+    }
     if outcome.error.is_none() && source_checked {
         return if norwegian { "Utkastet er klart for gjennomgang i Resultat." }
             else { "The draft is ready for review in Result." }.to_owned();
@@ -755,7 +762,9 @@ fn recall_memory_output(items: Vec<serde_json::Value>, skip_reason: &str) -> Str
 /// until the inline loop has a continuation contract of its own.
 #[must_use]
 pub(crate) fn inline_tool_allowed(name: &str) -> bool {
-    !matches!(name, "save_memory" | "browser_agent")
+    // A provider write leaves through execution-core's approval path. The Ask loop reads a connected
+    // account and never writes one (WS23-S5).
+    !matches!(name, "save_memory" | "browser_agent" | "execute_provider_action")
         && !name.starts_with("mcp__")
         && name != "mcp_call"
         && name != "mcp_catalog"
@@ -2780,7 +2789,7 @@ pub async fn dispatch_tool(
         conversation, data_plane_bearer, execution_bearer, inference_bearer,
         session_bearer, capability_bearer, zdr, sovereign_required,
         allow_paid_providers, call, ingestion_bearer, sandbox_bearer, None,
-        data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(), None,
+        data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(), None, None,
     ).await
 }
 
@@ -2973,6 +2982,8 @@ async fn dispatch_tool_with_cost(
     // The loop's call budget for the inline injection pass (WS26-S6). `None` where no
     // inline pass can run: a direct dispatch, or a web call with no inference bearer.
     classifier_budget: Option<&crate::semantic_screening::ClassifierBudget>,
+    // The turn's connected-account selection, when the connected-app read is offered (WS23-S5).
+    connector: Option<&connector_reads::ConnectorTurn>,
 ) -> ToolOutcome {
     if !inline_tool_allowed(&call.name) {
         return err_outcome(
@@ -3901,6 +3912,20 @@ async fn dispatch_tool_with_cost(
             )
             .await
         }
+        // The connected-account read (WS23-S5): offered only on a turn the person selected accounts for, and
+        // refused here again whenever the turn does not admit it.
+        mp_contracts::provider_reads::READ_TOOL_NAME => {
+            connector_reads::read_outcome(
+                state,
+                connector,
+                zdr,
+                !space_id.is_empty(),
+                ingestion_bearer,
+                capability_bearer,
+                call,
+            )
+            .await
+        }
         // Knowledge-base RAG — searches the org's OWN ingested documents via
         // Data Plane v2 retrieval (canonical owner). org-scoped: `org_id` is the
         // verified request org, never model input, so a tool call can't read
@@ -4659,6 +4684,8 @@ async fn dispatch_audited_tool(
     data_plane_mode: Option<String>,
     attachments: &crate::turn_attachments::ValidatedAttachments,
     classifier_budget: Option<&crate::semantic_screening::ClassifierBudget>,
+    // The turn's connected-account selection, when the connected-app read is offered (WS23-S5).
+    connector: Option<&connector_reads::ConnectorTurn>,
 ) -> Result<ToolOutcome, &'static str> {
     if session_bearer.is_empty() {
         return Err("tool audit credential unavailable");
@@ -4727,6 +4754,7 @@ async fn dispatch_audited_tool(
                 data_plane_mode.clone(),
                 attachments,
                 classifier_budget,
+                connector,
             )
             .await;
             let should_retry = attempt < crate::tool_retry::MAX_TOOL_ATTEMPTS
@@ -4872,6 +4900,8 @@ pub(crate) async fn dispatch_web_tool_audited(
         // unreachable from this path.
         &crate::turn_attachments::ValidatedAttachments::none(),
         None,
+        // Web tools only: the connected-app read is never reached from this path.
+        None,
     )
     .await
 }
@@ -4936,6 +4966,10 @@ const ORG_CLASS_TOOLS: &[&str] = &[
     "result_query",
 ];
 
+/// The connected-account half: a connected account is read only under `RetrievalScope::Auto` (WS23-S5,
+/// DEC-26), so a source-filtered turn never sees the read.
+const CONNECTOR_CLASS_TOOLS: &[&str] = &[mp_contracts::provider_reads::READ_TOOL_NAME];
+
 /// Whether `name` may be offered under a per-turn `RetrievalScope`
 /// (chat-wave2 scope spec §2.3), the same enforcement chokepoint
 /// `conversation_tool_allowed` uses: `tool_defs.retain(...)` right after
@@ -4947,14 +4981,29 @@ pub fn tool_allowed_for_retrieval_scope(name: &str, scope: crate::normalize::Ret
     use crate::normalize::RetrievalScope;
     match scope {
         RetrievalScope::Auto => true,
-        RetrievalScope::KnowledgeOnly => !WEB_CLASS_TOOLS.contains(&name),
-        RetrievalScope::WebOnly => !ORG_CLASS_TOOLS.contains(&name),
+        RetrievalScope::KnowledgeOnly => {
+            !WEB_CLASS_TOOLS.contains(&name) && !CONNECTOR_CLASS_TOOLS.contains(&name)
+        }
+        RetrievalScope::WebOnly => {
+            !ORG_CLASS_TOOLS.contains(&name) && !CONNECTOR_CLASS_TOOLS.contains(&name)
+        }
     }
 }
 
 fn tools_for_artifact_state(tools: &[ToolDefinition], has_artifacts: bool) -> Vec<ToolDefinition> {
     tools.iter().filter(|tool| has_artifacts || !matches!(tool.name.as_str(), "read_artifact" | "update_artifact"))
         .cloned().collect()
+}
+
+/// The connected-account read's place in a turn's tool set (WS23-S5). A client's copy of the name is
+/// dropped, and the server's own definition is added last, so the cached prefix holds. It is added only on
+/// a turn that [`connector_reads::offered`] admits.
+fn tools_for_connector_scope(mut tools: Vec<ToolDefinition>, offered: bool) -> Vec<ToolDefinition> {
+    tools.retain(|tool| tool.name != mp_contracts::provider_reads::READ_TOOL_NAME);
+    if offered {
+        tools.push(connector_reads::tool_definition());
+    }
+    tools
 }
 
 /// Whether a loaded history carries a compaction marker — the gate for
@@ -6045,6 +6094,8 @@ pub async fn run_forced_web_search_for_model(
         &crate::turn_attachments::ValidatedAttachments::none(),
         // No inline pass here: the forced search passes an empty inference bearer, and
         // `assess_external_payload` runs the inline pass only with one.
+        None,
+        // A forced web search reads no connected account.
         None,
     )
     .await?;
@@ -7319,6 +7370,17 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         let (files, bytes) = attachments.summary();
         tracing::info!(%request_id, files, bytes, "attached files staged for code_interpreter");
     }
+    // The connected-account read is offered on a turn the person selected accounts for (WS23-S5). The
+    // selection rides on the live sink, as the turn's clock does, so a caller without a sink offers nothing.
+    let connector_turn = sink.and_then(crate::sse_events::RichEventSink::connector_turn);
+    let connector_offered = connector_reads::offered(
+        connector_reads::enabled(),
+        zdr,
+        !space_id.is_empty(),
+        connector_turn,
+    );
+    let tools = tools_for_connector_scope(tools, connector_offered);
+    let connector_turn = connector_turn.filter(|_| connector_offered);
     // The turn's clock rides on the live sink; a caller without one (tests,
     // other routes) times nothing.
     let timing = sink.and_then(crate::sse_events::RichEventSink::timing);
@@ -8176,6 +8238,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     data_plane_mode_ref.clone(),
                     attachments,
                     Some(classifier_budget_ref),
+                    connector_turn,
                 )
                 .await
             },
@@ -8340,6 +8403,11 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     error: outcome.error.clone(),
                 })
                 .await;
+            // A connected-account read's sources, and its parking for `result_query`, once the result is shown
+            // (WS23-S5). The parking happens off ZDR only, as it always does.
+            for source in connector_reads::settle(&mut outcome, state, org_id, user_id, zdr) {
+                events.push(source).await;
+            }
             // A reduced knowledge search says so to the user at the point its result is shown (Z-41b).
             for notice_event in retrieval_notice_events(&outcome) {
                 events.push(notice_event).await;
@@ -15026,5 +15094,75 @@ mod tests {
         };
         let request = Box::pin(first_decision_request(head, Some(plan))).await;
         assert_eq!(request.prompt_tiers, None);
+    }
+}
+
+#[cfg(test)]
+mod connector_scope_tests {
+    use super::*;
+    use mp_contracts::provider_reads::{read_tool_parameters_json, READ_TOOL_NAME};
+
+    fn client_copy() -> ToolDefinition {
+        ToolDefinition {
+            name: READ_TOOL_NAME.to_owned(),
+            description: "a client's own description".to_owned(),
+            parameters_json: r#"{"type":"object"}"#.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_loop_drops_a_client_copy_and_offers_only_the_offered_read() {
+        let other = ToolDefinition {
+            name: "count_words".to_owned(),
+            description: String::new(),
+            parameters_json: "{}".to_owned(),
+        };
+        let closed = tools_for_connector_scope(vec![client_copy(), other.clone()], false);
+        assert!(closed.iter().all(|tool| tool.name != READ_TOOL_NAME));
+        let open = tools_for_connector_scope(vec![client_copy(), other], true);
+        let reads: Vec<&ToolDefinition> = open
+            .iter()
+            .filter(|tool| tool.name == READ_TOOL_NAME)
+            .collect();
+        assert_eq!(reads.len(), 1, "one read, the server's own");
+        assert_eq!(reads[0].parameters_json, read_tool_parameters_json());
+        assert_eq!(
+            open.last().map(|tool| tool.name.as_str()),
+            Some(READ_TOOL_NAME),
+            "the read is appended last"
+        );
+    }
+
+    #[test]
+    fn connector_read_is_allowed_only_under_auto() {
+        use crate::normalize::RetrievalScope;
+        assert!(tool_allowed_for_retrieval_scope(READ_TOOL_NAME, RetrievalScope::Auto));
+        assert!(!tool_allowed_for_retrieval_scope(
+            READ_TOOL_NAME,
+            RetrievalScope::KnowledgeOnly
+        ));
+        assert!(!tool_allowed_for_retrieval_scope(
+            READ_TOOL_NAME,
+            RetrievalScope::WebOnly
+        ));
+    }
+
+    #[test]
+    fn inline_loop_still_denies_mcp_and_writes() {
+        for name in [
+            "mcp__github__create_issue",
+            "mcp__srv__a__b",
+            "mcp_call",
+            "mcp_catalog",
+            "save_memory",
+            "browser_agent",
+            "execute_provider_action",
+        ] {
+            assert!(!inline_tool_allowed(name), "{name} must stay out of the Ask loop");
+        }
+        assert!(
+            inline_tool_allowed(READ_TOOL_NAME),
+            "the one connected-account read is dispatchable"
+        );
     }
 }

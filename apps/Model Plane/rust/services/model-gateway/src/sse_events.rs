@@ -225,7 +225,8 @@ pub enum ChatEvent {
         /// never inferred client-side — so a `knowledge_only`/`web_only`
         /// turn's receipt and Sources panel can show, and the server can
         /// defensively reject, a citation whose family disagrees with the
-        /// turn's active retrieval scope.
+        /// turn's active retrieval scope. `"connector"` marks a connected account's read (WS23-S5): listed
+        /// as a source, never numbered, and carrying metadata only.
         origin: String,
     },
     /// Per-turn retrieval-source filter transparency frame (chat-wave2 scope
@@ -946,6 +947,9 @@ pub struct RichEventSink {
     /// The turn's clock, shared the same way, so the tool loop and the draft
     /// checks it runs can time their calls without new parameters.
     timing: Option<crate::turn_timing::TurnTiming>,
+    /// The connected accounts the person selected for this turn (WS23-S5), read by the Ask loop's
+    /// connected-app read. It rides here as the clock does, so the loop takes no new parameter.
+    connector_turn: Option<crate::tool_loop::connector_reads::ConnectorTurn>,
     /// The stream's resume buffer and its shared frame cursor, when the caller
     /// attached them. Tool calls, tool results and steps used to go out on the
     /// live channel only, so a reload during the tool phase, source review or
@@ -1067,6 +1071,7 @@ impl RichEventSink {
             artifacts: std::sync::Arc::default(),
             overhead: std::sync::Arc::default(),
             timing: None,
+            connector_turn: None,
             resume: None,
             subscription_failure: std::sync::Mutex::new(None),
         }
@@ -1117,6 +1122,22 @@ impl RichEventSink {
     #[must_use]
     pub fn timing(&self) -> Option<&crate::turn_timing::TurnTiming> {
         self.timing.as_ref()
+    }
+
+    /// Attach the connected accounts this turn selected (WS23-S5).
+    #[must_use]
+    pub fn with_connector_turn(
+        mut self,
+        turn: crate::tool_loop::connector_reads::ConnectorTurn,
+    ) -> Self {
+        self.connector_turn = Some(turn);
+        self
+    }
+
+    /// The turn's connected-account selection, when the route attached one.
+    #[must_use]
+    pub fn connector_turn(&self) -> Option<&crate::tool_loop::connector_reads::ConnectorTurn> {
+        self.connector_turn.as_ref()
     }
 
     /// Buffer every frame this sink sends for resume, under the stream's own
@@ -2910,5 +2931,43 @@ mod payload_contract {
              --lib sse_event_payload_golden, refresh its .sha256 pin and the SPA's vendored copy, and \
              update the pinned digest in scripts/tests/zdr-contract-sync.test.sh."
         );
+    }
+}
+
+#[cfg(test)]
+mod connector_turn_tests {
+    use super::*;
+    use crate::tool_loop::connector_reads::ConnectorTurn;
+
+    /// The selection rides on the sink, and a connected-account source is recorded with its origin and
+    /// no number, so the turn's evidence never gives it a number another source could share.
+    #[tokio::test]
+    async fn a_connector_citation_is_recorded_unnumbered_on_the_turn_sink() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let sink = RichEventSink::new(tx, Vec::new(), "req-1".to_owned()).with_connector_turn(
+            ConnectorTurn::new(vec!["conn_1".to_owned()], true),
+        );
+        assert_eq!(
+            sink.connector_turn().map(|turn| turn.selection.clone()),
+            Some(vec!["conn_1".to_owned()])
+        );
+        sink.emit(ChatEvent::Citation {
+            id: "conn-0123456789abcdef".to_owned(),
+            title: "Invoice 42".to_owned(),
+            url: String::new(),
+            snippet: "Ada · 2026-10-28".to_owned(),
+            source_group_id: "connector:microsoft".to_owned(),
+            source_group_label: Some("Microsoft 365".to_owned()),
+            number: None,
+            claim_id: None,
+            start: None,
+            end: None,
+            origin: "connector".to_owned(),
+        })
+        .await;
+        let recorded = sink.recorded_citations();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].origin, "connector");
+        assert_eq!(recorded[0].number, None);
     }
 }
