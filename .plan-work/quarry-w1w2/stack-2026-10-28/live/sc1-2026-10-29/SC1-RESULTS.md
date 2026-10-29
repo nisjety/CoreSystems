@@ -44,3 +44,28 @@
   - the wrapper legs the page cannot reach (A1 to A3, A5a to A5c, A6)
   - A.7, which needs a second account
   - the restart check, which needs a TTL of at least 300 s
+
+## Leg C re-run after the Model Plane fix (2026-10-29 18:47Z)
+
+The fix is on branch `mp-browser-cap`, based on 0b5d2b7b6 (the live image base), commits 9c9cede2c..246f79bda. It changes three things:
+- The browser-broker attests `cap.browser.open` as its owner.
+- A broker-validated derived run grant satisfies the risk-level ask, for `browser_agent` only.
+- Denies are logged, and the replay now carries terminal events.
+
+It was deployed to live dev; see MPCAP-DEPLOY.md.
+
+| Row | Result | Evidence |
+|---|---|---|
+| C.1 session | PASS | 200 in 2018 ms |
+| C.2 AI run | PASS | 200 in 967 ms, run `01M64FSW5T9XKFFRED6Y5X9091` |
+| C.3 run events | PASS | Replay over 2 polls: BROWSER_ACTION_DECIDED, then 3 × BROWSER_ACTION_DISPATCHED and 3 × BROWSER_OBSERVATION_RECEIVED (all `success`), then RUN_FAILED with `browser_resource_exhausted`. The run used up its `maxSteps: 3` budget; that is a budget end, not a refusal. execution-core logged "high-risk capability ask satisfied by a broker-validated browser run grant", then "browser-agent loop started". |
+| C.4 widening | PASS | 403 "browser grant is not authorized" in 173 ms |
+| C.5 stop and close | PASS | stop 200; both closes 200 |
+| Host log scan, C window 18:47:15-18:47:40Z | PASS | 0 refusal lines and 0 lines with the host name in gateway, model-gateway, execution-core, browser-broker, quarry-edge and capability-core |
+
+**SC1 page side:** legs A, A.6, B and C all PASS.
+
+**Still not run:**
+- the wrapper legs the page cannot reach (A1 to A3, A5a to A5c, A6)
+- A.7, which needs a second account
+- the restart check, which needs a TTL of at least 300 s
