@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/triodelab/integration-corev2/internal/config"
 	"github.com/triodelab/integration-corev2/internal/store"
@@ -1238,5 +1239,209 @@ func TestGoogleDriveFileContentAGenuineForbiddenStaysAReconnect(t *testing.T) {
 	_, err := runDriveOp(service, "google", "drive.file.content", map[string]any{"fileId": "f", "mimeType": "application/pdf"})
 	if _, isAuth := AsProviderAuthError(err); !isAuth {
 		t.Fatalf("error = %v, want the credential rejection kept for a real scope failure", err)
+	}
+}
+
+// --- All four read sources, both providers: the result envelope ------------------
+
+// readListEnvelopeCase is one listing on one provider, answered by a single page
+// of one row. The provider puts its next page under nextKey: a Graph link, which
+// the service replays when it names the Graph host ({host} stands for the test
+// server) and refuses when it names another, or a Google token, which is passed
+// on unchanged. The calendar wraps the token it hands back, so wrapped is set.
+type readListEnvelopeCase struct {
+	name      string
+	graph     bool
+	operation string
+	params    map[string]any
+	rowKey    string
+	nextKey   string
+	row       map[string]any
+	next      string
+	refused   string
+	wrapped   bool
+}
+
+var readListEnvelopeCases = []readListEnvelopeCase{
+	{
+		name: "outlook mail", graph: true, operation: "mail.messages",
+		params: map[string]any{"folder": "inbox"},
+		rowKey: "value", nextKey: "@odata.nextLink",
+		row:     map[string]any{"id": "m1", "subject": "Invoice"},
+		next:    "https://{host}/v1.0/me/mailFolders('inbox')/messages?$top=10&$skip=10",
+		refused: "https://evil.example/v1.0/me/messages?$skip=10",
+	},
+	{
+		name: "gmail messages", operation: "gmail.messages",
+		rowKey: "messages", nextKey: "nextPageToken",
+		row:  map[string]any{"id": "g1", "threadId": "t1"},
+		next: "tok-2",
+	},
+	{
+		name: "outlook calendar", graph: true, operation: "calendar.events",
+		rowKey: "value", nextKey: "@odata.nextLink",
+		row:     graphEventFixture("e1", "Standup", nil),
+		next:    "https://{host}/v1.0/me/calendarView?startDateTime=2026-10-01T00%3A00%3A00Z&endDateTime=2026-10-15T00%3A00%3A00Z&$skip=10",
+		refused: "https://evil.example/v1.0/me/calendarView?$skip=10",
+		wrapped: true,
+	},
+	{
+		name: "google calendar", operation: "calendar.events",
+		rowKey: "items", nextKey: "nextPageToken",
+		row:     map[string]any{"id": "e1", "summary": "Standup"},
+		next:    "tok-2",
+		refused: strings.Repeat("x", calendarTokenMaxProvider+1),
+		wrapped: true,
+	},
+	{
+		name: "onedrive files", graph: true, operation: "drive.files",
+		rowKey: "value", nextKey: "@odata.nextLink",
+		row:     map[string]any{"id": "d1", "name": "Plan.docx"},
+		next:    "https://{host}/v1.0/me/drive/root/children?$skiptoken=page2",
+		refused: "https://evil.example/v1.0/me/drive/root/children?$skiptoken=page2",
+	},
+	{
+		name: "google drive files", operation: "drive.files",
+		rowKey: "files", nextKey: "nextPageToken",
+		row:  map[string]any{"id": "f1", "name": "Plan.docx"},
+		next: "tok-2",
+	},
+	{
+		name: "sharepoint sites", graph: true, operation: "sharepoint.sites",
+		rowKey: "value", nextKey: "@odata.nextLink",
+		row:     map[string]any{"id": "contoso.sharepoint.com,1,2", "displayName": "Team"},
+		next:    "https://{host}/v1.0/sites?search=*&$skiptoken=page2",
+		refused: "https://evil.example/v1.0/sites?search=*&$skiptoken=page2",
+	},
+	{
+		name: "sharepoint libraries", graph: true, operation: "sharepoint.drives",
+		params: map[string]any{"siteId": "contoso.sharepoint.com,1,2"},
+		rowKey: "value", nextKey: "@odata.nextLink",
+		row:     map[string]any{"id": "b!lib", "name": "Documents"},
+		next:    "https://{host}/v1.0/sites/contoso.sharepoint.com,1,2/drives?$skiptoken=page2",
+		refused: "https://evil.example/v1.0/sites/contoso.sharepoint.com,1,2/drives?$skiptoken=page2",
+	},
+}
+
+// serveReadListEnvelope runs c against one provider whose single page hands
+// next back. It returns the payload and the host the provider answered on.
+func serveReadListEnvelope(t *testing.T, c readListEnvelopeCase, next string) (map[string]any, string) {
+	t.Helper()
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		page := map[string]any{c.rowKey: []any{c.row}}
+		if next != "" {
+			page[c.nextKey] = strings.ReplaceAll(next, "{host}", r.Host)
+		}
+		driveJSON(w, page)
+	}
+	provider, host := "google", ""
+	var service *Service
+	if c.graph {
+		var server *httptest.Server
+		service, server = newDriveGraphService(t, handler)
+		provider, host = "microsoft", strings.TrimPrefix(server.URL, "https://")
+	} else {
+		service = newDriveGoogleService(t, handler)
+	}
+	service.now = func() time.Time { return calendarTestNow }
+	return mustRunDriveOp(t, service, provider, c.operation, c.params), host
+}
+
+// TestReadSourcesListEnvelopeIsTheSameAcrossProviders pins how every listing of
+// the four read sources ends, on both providers: a list with no next page
+// carries neither a nextPageToken nor moreAvailable; a next page that can be
+// replayed is a nextPageToken; and a next page that cannot be replayed is
+// moreAvailable with no token, so a cut-short list is never read as one that
+// ended. Each listing's own choice of moreAvailable beside a token is pinned by
+// its own tests.
+func TestReadSourcesListEnvelopeIsTheSameAcrossProviders(t *testing.T) {
+	for _, c := range readListEnvelopeCases {
+		t.Run(c.name+" last page", func(t *testing.T) {
+			payload, _ := serveReadListEnvelope(t, c, "")
+			if rows, _ := payload[c.rowKey].([]any); len(rows) != 1 {
+				t.Fatalf("%s = %#v, want the one provider row", c.rowKey, payload[c.rowKey])
+			}
+			if _, present := payload["nextPageToken"]; present {
+				t.Fatalf("nextPageToken = %#v on the last page", payload["nextPageToken"])
+			}
+			if _, present := payload["moreAvailable"]; present {
+				t.Fatalf("moreAvailable set on the last page: %#v", payload)
+			}
+		})
+		t.Run(c.name+" replayable next page", func(t *testing.T) {
+			payload, host := serveReadListEnvelope(t, c, c.next)
+			if rows, _ := payload[c.rowKey].([]any); len(rows) != 1 {
+				t.Fatalf("%s = %#v, want the one provider row", c.rowKey, payload[c.rowKey])
+			}
+			token, _ := payload["nextPageToken"].(string)
+			if c.wrapped {
+				if !strings.HasPrefix(token, calendarTokenPrefix) {
+					t.Fatalf("nextPageToken = %q, want the calendar's own wrapped token", token)
+				}
+				return
+			}
+			if want := strings.ReplaceAll(c.next, "{host}", host); token != want {
+				t.Fatalf("nextPageToken = %q, want the provider's next page %q", token, want)
+			}
+		})
+		if c.refused == "" {
+			continue
+		}
+		t.Run(c.name+" refused next page", func(t *testing.T) {
+			payload, _ := serveReadListEnvelope(t, c, c.refused)
+			if rows, _ := payload[c.rowKey].([]any); len(rows) != 1 {
+				t.Fatalf("%s = %#v, want the one provider row", c.rowKey, payload[c.rowKey])
+			}
+			if token, present := payload["nextPageToken"]; present {
+				t.Fatalf("nextPageToken = %#v for a next page that cannot be replayed", token)
+			}
+			if payload["moreAvailable"] != true {
+				t.Fatalf("moreAvailable = %v, want true so the caller can tell the list is cut short", payload["moreAvailable"])
+			}
+		})
+	}
+}
+
+// TestReadSourcesContentEnvelopeIsTheSameAcrossProviders pins the keys a binary
+// file read returns on both providers: the bytes as base64, the bare mime type,
+// the size and whether the content was cut. A binary read carries no
+// export_extension, which only an export of a Docs Editors file adds.
+func TestReadSourcesContentEnvelopeIsTheSameAcrossProviders(t *testing.T) {
+	const body = "%PDF-1.7 plan"
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		_, _ = w.Write([]byte(body))
+	}
+	graphService, _ := newDriveGraphService(t, handler)
+	googleService := newDriveGoogleService(t, handler)
+	tests := []struct {
+		name     string
+		service  *Service
+		provider string
+		params   map[string]any
+	}{
+		{"microsoft", graphService, "microsoft", map[string]any{"itemId": "01ABC"}},
+		{"google", googleService, "google", map[string]any{"fileId": "f1", "mimeType": "application/pdf"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := mustRunDriveOp(t, tt.service, tt.provider, "drive.file.content", tt.params)
+			decoded, err := base64.StdEncoding.DecodeString(stringFromAny(payload["content_base64"]))
+			if err != nil || string(decoded) != body {
+				t.Fatalf("content_base64 decodes to %q (err %v), want the provider's bytes", decoded, err)
+			}
+			if payload["mime_type"] != "application/pdf" {
+				t.Fatalf("mime_type = %#v, want application/pdf", payload["mime_type"])
+			}
+			if payload["size"] != int64(len(body)) {
+				t.Fatalf("size = %#v, want %d", payload["size"], len(body))
+			}
+			if payload["truncated"] != false {
+				t.Fatalf("truncated = %#v, want false", payload["truncated"])
+			}
+			if _, present := payload["export_extension"]; present {
+				t.Fatalf("export_extension set for a binary read: %#v", payload)
+			}
+		})
 	}
 }
