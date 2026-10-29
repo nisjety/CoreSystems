@@ -212,13 +212,17 @@ pub(crate) fn is_startable_source(source: pb::ManagedRunSource) -> bool {
 }
 
 /// Must stay in sync with the `failure_code` CHECK on
-/// `managed_run_terminalization_outbox` (migration 0015, widened by 0033). A
+/// `managed_run_terminalization_outbox` (migration 0015, widened by 0033 and
+/// 0069). A
 /// code missing here is rejected before any database access; one missing from
 /// the CHECK fails the write instead, so both lists move together.
 /// `outcome_unknown` is deliberately absent: it is set only by reconciliation,
 /// never submitted by a caller.
 const ALLOWED_FAILURE_CODES: &[&str] = &[
     "browser_failed",
+    "browser_permission_denied",
+    "browser_resource_exhausted",
+    "browser_timed_out",
     "dispatch_rejected",
     "dispatch_unreachable",
     "execution_failed",
@@ -2640,6 +2644,88 @@ mod tests {
             validate_terminal_outcome(pb::TerminalOutcome::Failed, "outcome_unknown").is_err(),
             "outcome_unknown is set by reconciliation only, never submitted by a caller"
         );
+    }
+
+    /// Gateway keeps the classified browser failure instead of collapsing it to
+    /// `browser_failed`, so each specific code must clear the allowlist too.
+    #[test]
+    fn the_classified_browser_failure_codes_are_allowlisted() {
+        for code in [
+            "browser_failed",
+            "browser_permission_denied",
+            "browser_resource_exhausted",
+            "browser_timed_out",
+        ] {
+            assert_eq!(
+                validate_terminal_outcome(pb::TerminalOutcome::Failed, code)
+                    .unwrap_or_else(|error| panic!("{code} must be allowlisted: {error}")),
+                ManagedOutcome::Failed(code)
+            );
+        }
+        assert!(
+            validate_terminal_outcome(
+                pb::TerminalOutcome::Failed,
+                "browser_agent_permission_denied"
+            )
+            .is_err(),
+            "the gateway's internal classification is not a durable code"
+        );
+    }
+
+    /// The allowlist and the CHECK move together: every allowlisted code, plus
+    /// the reconciliation-only `outcome_unknown`, is in migration 0069, and its
+    /// revert restores exactly the 0033 list.
+    #[test]
+    fn migration_0069_check_matches_the_allowlist_and_its_revert_restores_0033() {
+        let up = include_str!("../migrations/0069_browser_failure_codes.sql");
+        let down = include_str!("../migrations/revert/0069_browser_failure_codes.down.sql");
+        // Only the CHECK clause counts: the revert's comment names the new codes.
+        let check = |sql: &'static str| {
+            sql.split_once("CHECK (")
+                .expect("the migration re-adds the CHECK")
+                .1
+        };
+        let (up_check, down_check) = (check(up), check(down));
+        let quoted = |code: &str| format!("'{code}'");
+        for code in super::ALLOWED_FAILURE_CODES
+            .iter()
+            .copied()
+            .chain(["outcome_unknown"])
+        {
+            assert!(up_check.contains(&quoted(code)), "0069 must accept {code}");
+        }
+        for code in [
+            "browser_failed",
+            "dispatch_rejected",
+            "dispatch_unreachable",
+            "execution_failed",
+            "inference_failed",
+            "outcome_unknown",
+            "provider_timeout",
+            "provider_unavailable",
+        ] {
+            assert!(
+                down_check.contains(&quoted(code)),
+                "the revert must keep {code}"
+            );
+        }
+        for code in [
+            "browser_permission_denied",
+            "browser_resource_exhausted",
+            "browser_timed_out",
+        ] {
+            assert!(
+                !down_check.contains(&quoted(code)),
+                "the revert must drop {code}"
+            );
+        }
+        for sql in [up, down] {
+            assert!(sql.contains(
+                "DROP CONSTRAINT IF EXISTS managed_run_terminalization_outbox_failure_code_check"
+            ));
+            assert!(sql
+                .contains("ADD CONSTRAINT managed_run_terminalization_outbox_failure_code_check"));
+        }
     }
 
     #[test]

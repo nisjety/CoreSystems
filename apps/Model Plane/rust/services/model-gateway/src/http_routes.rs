@@ -1577,12 +1577,13 @@ struct ReplayRunEventsResponse {
     truncated: bool,
 }
 
-/// Read the persisted, safe browser-agent event projection for one run.
+/// Read the persisted, safe browser-agent event projection for one run, plus
+/// the run's terminal marker.
 ///
 /// The run lookup first proves ownership and gives us the owning thread. The
-/// canonical ReplayThread RPC then supplies envelope + JSON payloads; only the
-/// browser event types persisted by Session Core are selected, and the payload
-/// is required to name the requested run before it can leave this boundary.
+/// canonical ReplayThread RPC then supplies envelope + JSON payloads; see
+/// [`project_run_replay_event`] for what is selected and what leaves this
+/// boundary. A terminal entry (`terminal: true`) lets a client stop polling.
 async fn replay_run_events(
     State(state): State<AppState>,
     Extension(_claims): Extension<Claims>,
@@ -1648,35 +1649,9 @@ async fn replay_run_events(
     {
         raw_count += 1;
         next_event_id = Some(event.event_id.clone());
-        let event_type = EventType::try_from(event.event_type)
-            .map(|kind| kind.as_str_name().to_owned())
-            .unwrap_or_else(|_| "EVENT_TYPE_UNSPECIFIED".to_owned());
-        if !matches!(
-            event_type.as_str(),
-            "EVENT_TYPE_BROWSER_ACTION_DISPATCHED"
-                | "EVENT_TYPE_BROWSER_OBSERVATION_RECEIVED"
-                | "EVENT_TYPE_BROWSER_RUN_PAUSED"
-                | "EVENT_TYPE_BROWSER_RUN_RESUMED"
-                | "EVENT_TYPE_BROWSER_ACTION_APPROVAL_REQUIRED"
-                | "EVENT_TYPE_BROWSER_ACTION_DECIDED"
-                | "EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED"
-        ) {
-            continue;
+        if let Some(projection) = project_run_replay_event(trimmed, event) {
+            events.push(projection);
         }
-        let payload = event
-            .payload
-            .as_ref()
-            .and_then(|value| serde_json::from_slice::<Value>(&value.value).ok());
-        let Some(payload) = payload else { continue };
-        if payload.get("run_id").and_then(Value::as_str) != Some(trimmed) {
-            continue;
-        }
-        events.push(DurableRunEventProjection {
-            at: event.ts.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
-            event_id: event.event_id,
-            event_type,
-            payload,
-        });
     }
 
     Ok(Json(ReplayRunEventsResponse {
@@ -1685,6 +1660,114 @@ async fn replay_run_events(
         next_event_id,
         truncated: raw_count >= limit as usize,
     }))
+}
+
+/// `type_url` of Session Core's `RUN_CANCELLED` row. Session Core has no enum
+/// value for that row, so it replays as `EVENT_TYPE_UNSPECIFIED` and only the
+/// payload discriminator identifies it (as in `durable_thread_event_type`).
+const RUN_CANCELLED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunCancelled";
+
+/// The terminal status an event records for its run, if it is a terminal event.
+fn run_terminal_status(event_type: &str, event: &Event) -> Option<&'static str> {
+    let type_url = event
+        .payload
+        .as_ref()
+        .map(|payload| payload.type_url.as_str())
+        .unwrap_or_default();
+    if type_url == RUN_CANCELLED_TYPE_URL || event_type == "EVENT_TYPE_RUN_CANCELLED" {
+        return Some("cancelled");
+    }
+    match event_type {
+        "EVENT_TYPE_RUN_COMPLETED" => Some("completed"),
+        "EVENT_TYPE_RUN_FAILED" => Some("failed"),
+        _ => None,
+    }
+}
+
+/// A durable failure code fit to leave this boundary: `^[a-z][a-z0-9_]{0,63}$`.
+fn is_failure_code_slug(code: &str) -> bool {
+    let mut bytes = code.bytes();
+    bytes.next().is_some_and(|first| first.is_ascii_lowercase())
+        && code.len() <= 64
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// Project one replayed thread event for `run_id`, or `None` when it does not
+/// belong in the run's replay.
+///
+/// - Browser events: only the browser event types persisted by Session Core,
+///   and only when the payload names the requested run.
+/// - The run's terminal event (`RUN_COMPLETED`, `RUN_FAILED`, `RUN_CANCELLED`):
+///   only when the envelope names the run (`resource_ref` `run:{id}` or the
+///   `correlation_id`; the managed `RUN_FAILED` payload carries no run id).
+///   The raw payload never leaves: it can hold `error` text, a cancellation
+///   `reason` and `cancelled_by`. The projection is
+///   `{run_id, terminal: true, status, failure_code?}`, with `failure_code`
+///   only when it is a slug.
+fn project_run_replay_event(run_id: &str, event: Event) -> Option<DurableRunEventProjection> {
+    let event_type = EventType::try_from(event.event_type)
+        .map(|kind| kind.as_str_name().to_owned())
+        .unwrap_or_else(|_| "EVENT_TYPE_UNSPECIFIED".to_owned());
+    if let Some(status) = run_terminal_status(&event_type, &event) {
+        if event.resource_ref != format!("run:{run_id}") && event.correlation_id != run_id {
+            return None;
+        }
+        let failure_code = event
+            .payload
+            .as_ref()
+            .and_then(|value| serde_json::from_slice::<Value>(&value.value).ok())
+            .and_then(|payload| {
+                payload
+                    .get("failure_code")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .filter(|code| is_failure_code_slug(code));
+        let mut payload = json!({
+            "run_id": run_id,
+            "terminal": true,
+            "status": status,
+        });
+        if let Some(code) = failure_code {
+            payload["failure_code"] = Value::String(code);
+        }
+        let event_type = match status {
+            "completed" => "EVENT_TYPE_RUN_COMPLETED",
+            "failed" => "EVENT_TYPE_RUN_FAILED",
+            _ => "EVENT_TYPE_RUN_CANCELLED",
+        };
+        return Some(DurableRunEventProjection {
+            at: event.ts.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+            event_id: event.event_id,
+            event_type: event_type.to_owned(),
+            payload,
+        });
+    }
+    if !matches!(
+        event_type.as_str(),
+        "EVENT_TYPE_BROWSER_ACTION_DISPATCHED"
+            | "EVENT_TYPE_BROWSER_OBSERVATION_RECEIVED"
+            | "EVENT_TYPE_BROWSER_RUN_PAUSED"
+            | "EVENT_TYPE_BROWSER_RUN_RESUMED"
+            | "EVENT_TYPE_BROWSER_ACTION_APPROVAL_REQUIRED"
+            | "EVENT_TYPE_BROWSER_ACTION_DECIDED"
+            | "EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED"
+    ) {
+        return None;
+    }
+    let payload = event
+        .payload
+        .as_ref()
+        .and_then(|value| serde_json::from_slice::<Value>(&value.value).ok())?;
+    if payload.get("run_id").and_then(Value::as_str) != Some(run_id) {
+        return None;
+    }
+    Some(DurableRunEventProjection {
+        at: event.ts.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        event_id: event.event_id,
+        event_type,
+        payload,
+    })
 }
 
 // ============================================================================
@@ -15228,5 +15311,215 @@ mod thread_messages_page_tests {
         })
         .expect("the response serialises");
         assert_eq!(body["has_more"], serde_json::json!(false));
+    }
+}
+
+#[cfg(test)]
+mod run_replay_projection_tests {
+    use super::*;
+
+    fn event(
+        event_type: i32,
+        resource_ref: &str,
+        correlation_id: &str,
+        type_url: &str,
+        payload: &str,
+    ) -> Event {
+        Event {
+            event_id: "evt-1".to_owned(),
+            event_type,
+            resource_ref: resource_ref.to_owned(),
+            correlation_id: correlation_id.to_owned(),
+            payload: Some(prost_types::Any {
+                type_url: type_url.to_owned(),
+                value: payload.as_bytes().to_vec(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    const RUN_TERMINAL: &str = "type.googleapis.com/model_plane.v1.RunTerminal";
+
+    #[test]
+    fn a_managed_run_failed_is_projected_exactly() {
+        let projected = project_run_replay_event(
+            "run-1",
+            event(
+                EventType::RunFailed as i32,
+                "run:run-1",
+                "run-1",
+                RUN_TERMINAL,
+                r#"{"failure_code":"browser_permission_denied"}"#,
+            ),
+        )
+        .expect("the run's own RUN_FAILED is replayed");
+        assert_eq!(projected.event_type, "EVENT_TYPE_RUN_FAILED");
+        assert_eq!(projected.event_id, "evt-1");
+        assert_eq!(
+            projected.payload,
+            json!({
+                "run_id": "run-1",
+                "terminal": true,
+                "status": "failed",
+                "failure_code": "browser_permission_denied",
+            })
+        );
+    }
+
+    #[test]
+    fn a_legacy_run_failed_never_carries_its_error_text() {
+        let projected = project_run_replay_event(
+            "run-1",
+            event(
+                EventType::RunFailed as i32,
+                "run:run-1",
+                "",
+                RUN_TERMINAL,
+                r#"{"error":"permission denied by policy at https://secret.example/path"}"#,
+            ),
+        )
+        .expect("bound by resource_ref");
+        assert_eq!(
+            projected.payload,
+            json!({ "run_id": "run-1", "terminal": true, "status": "failed" })
+        );
+    }
+
+    #[test]
+    fn a_run_completed_is_projected_without_a_failure_code() {
+        let projected = project_run_replay_event(
+            "run-1",
+            event(
+                EventType::RunCompleted as i32,
+                "",
+                "run-1",
+                RUN_TERMINAL,
+                "{}",
+            ),
+        )
+        .expect("bound by correlation_id");
+        assert_eq!(projected.event_type, "EVENT_TYPE_RUN_COMPLETED");
+        assert_eq!(
+            projected.payload,
+            json!({ "run_id": "run-1", "terminal": true, "status": "completed" })
+        );
+    }
+
+    #[test]
+    fn a_run_cancelled_is_found_by_its_type_url_and_leaks_nothing() {
+        let projected = project_run_replay_event(
+            "run-1",
+            event(
+                EventType::Unspecified as i32,
+                "run:run-1",
+                "run-1",
+                RUN_CANCELLED_TYPE_URL,
+                r#"{"run_id":"run-1","reason":"user said: stop https://x.example","cancelled_by":"user-7"}"#,
+            ),
+        )
+        .expect("RUN_CANCELLED is replayed");
+        assert_eq!(projected.event_type, "EVENT_TYPE_RUN_CANCELLED");
+        assert_eq!(
+            projected.payload,
+            json!({ "run_id": "run-1", "terminal": true, "status": "cancelled" })
+        );
+    }
+
+    #[test]
+    fn another_runs_terminal_event_is_excluded() {
+        for (kind, type_url) in [
+            (EventType::RunFailed as i32, RUN_TERMINAL),
+            (EventType::RunCompleted as i32, RUN_TERMINAL),
+            (EventType::Unspecified as i32, RUN_CANCELLED_TYPE_URL),
+        ] {
+            // The payload naming run-1 does not bind it: only the envelope does.
+            let other = event(
+                kind,
+                "run:run-2",
+                "run-2",
+                type_url,
+                r#"{"run_id":"run-1"}"#,
+            );
+            assert!(project_run_replay_event("run-1", other).is_none(), "{kind}");
+        }
+        // A prefix of the requested id is not the run either.
+        let prefix = event(
+            EventType::RunFailed as i32,
+            "run:run-10",
+            "run-10",
+            RUN_TERMINAL,
+            "{}",
+        );
+        assert!(project_run_replay_event("run-1", prefix).is_none());
+    }
+
+    #[test]
+    fn a_non_slug_failure_code_is_dropped() {
+        for code in [
+            "Browser_failed",
+            "browser failed",
+            "1browser",
+            "browser-failed",
+            "",
+            "browser_failed: https://secret.example",
+        ] {
+            let payload = json!({ "failure_code": code }).to_string();
+            let projected = project_run_replay_event(
+                "run-1",
+                event(
+                    EventType::RunFailed as i32,
+                    "run:run-1",
+                    "run-1",
+                    RUN_TERMINAL,
+                    &payload,
+                ),
+            )
+            .expect("the terminal marker is still replayed");
+            assert!(projected.payload.get("failure_code").is_none(), "{code:?}");
+            assert_eq!(projected.payload["status"], "failed");
+        }
+        let long = "a".repeat(65);
+        assert!(!is_failure_code_slug(&long));
+        assert!(is_failure_code_slug(&"a".repeat(64)));
+        assert!(is_failure_code_slug("browser_timed_out"));
+    }
+
+    #[test]
+    fn browser_events_are_unchanged() {
+        let payload = r#"{"run_id":"run-1","action":"navigate","decision":"granted"}"#;
+        let projected = project_run_replay_event(
+            "run-1",
+            event(
+                EventType::BrowserActionDispatched as i32,
+                "",
+                "",
+                "type.googleapis.com/model_plane.v1.BrowserActionDispatched",
+                payload,
+            ),
+        )
+        .expect("a browser event naming the run is replayed");
+        assert_eq!(projected.event_type, "EVENT_TYPE_BROWSER_ACTION_DISPATCHED");
+        assert_eq!(
+            projected.payload,
+            serde_json::from_str::<Value>(payload).unwrap()
+        );
+
+        let other_run = event(
+            EventType::BrowserActionDispatched as i32,
+            "run:run-1",
+            "run-1",
+            "",
+            r#"{"run_id":"run-2"}"#,
+        );
+        assert!(project_run_replay_event("run-1", other_run).is_none());
+
+        let unrelated = event(
+            EventType::RunStarted as i32,
+            "run:run-1",
+            "run-1",
+            "",
+            r#"{"run_id":"run-1"}"#,
+        );
+        assert!(project_run_replay_event("run-1", unrelated).is_none());
     }
 }
