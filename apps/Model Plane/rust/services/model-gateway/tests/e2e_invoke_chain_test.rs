@@ -4240,7 +4240,11 @@ async fn invoke_stream_reports_the_cost_basis_of_its_route() {
         let usage: serde_json::Value = serde_json::from_str(data).expect("usage payload is JSON");
         assert_eq!(usage["cost_basis"], basis, "{usage}");
         assert_eq!(usage["cost_usd"], cost, "{usage}");
-        assert_eq!(usage["input_tokens"], 3, "the counts stay real: {usage}");
+        // The frame is cumulative over the turn (WS27-S2, D7): the answer stream's 3 input tokens
+        // plus two 1-token overhead calls. The ledger envelope below stays answer-only while
+        // MODEL_GATEWAY_TURN_USAGE_COMPLETE is off.
+        assert_eq!(usage["input_tokens"], 5, "the counts stay real: {usage}");
+        assert_eq!(usage["calls"], 3, "{usage}");
 
         let Some((_, envelope)) = publisher
             .drain()

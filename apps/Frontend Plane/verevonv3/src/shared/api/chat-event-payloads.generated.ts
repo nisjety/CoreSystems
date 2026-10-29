@@ -184,8 +184,10 @@ export type ChatEventPayloads = {
   usage: {
     cache_read_tokens?: number
     cache_write_tokens?: number
+    calls: number
     confidence: number | null
     cost_basis?: string
+    cost_by_category?: Record<string, unknown>
     cost_usd: number | null
     input_tokens: number
     latency_ms: number
@@ -195,6 +197,7 @@ export type ChatEventPayloads = {
     residency?: string
     retention_class?: string
     retention_reason?: string
+    unpriced_calls: number
   }
   /** Rust variants: Verification. */
   verification: {

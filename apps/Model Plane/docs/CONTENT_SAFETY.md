@@ -91,6 +91,19 @@ A stub in place of the payload. It names the tool, the trust class, the source w
 
 A withheld payload is never parked for later reads, and the payload is not stored.
 
+## Do mode (WS26-S7)
+
+A Do run's tool results (execution-core) get the same tighten-only verdict as chat by asking model-gateway's `ScreenContent` RPC.
+
+- The switch is `CONTENT_SAFETY_SCREEN_RPC` on execution-core (default off, only the literal `true`). The gateway side follows the same switches as chat: with `CONTENT_SAFETY_SEMANTIC_INLINE` off, the answer is the deterministic verdict and nothing is withheld.
+- execution-core asks for every external result whose local scan covered the full payload, clean or flagged, so a deterministic flag can still be withheld under `enforce`. The gateway spends no classifier call on a result that is not clean.
+- Only a service identity may call `ScreenContent`. A ZDR run never asks, and the gateway skips the classifier for a ZDR request instead of refusing it.
+- The verdict carries the BLAKE3 hash of the bytes it screened, and execution-core drops a verdict whose hash does not match what it sent.
+- A refused, slow, unreachable or mismatched answer keeps the local verdict (fail open). `fail_mode: degraded` is not applied on the Do side in that case.
+- A withheld result is replaced by the stub before it is rendered for the model, and the step is marked tainted (`mp_exec_screening_taint_total`).
+
+Known gaps: Do runs carry no inference credential, so the classifier budget from Do is zero and a paraphrased injection is not caught on the Do path yet. A ZDR Do run never asks, so under `enforce` a locally flagged web result is framed but not withheld, unlike chat's ZDR path. Both need a decision before `enforce` is used for Do.
+
 ## Rollout
 
 - The default is `frame`. Nothing changes for any org until these switches are set.

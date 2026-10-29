@@ -855,6 +855,12 @@
           ],
           "presence": "optional"
         },
+        "calls": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
         "confidence": {
           "types": [
             "null",
@@ -865,6 +871,12 @@
         "cost_basis": {
           "types": [
             "string"
+          ],
+          "presence": "optional"
+        },
+        "cost_by_category": {
+          "types": [
+            "object"
           ],
           "presence": "optional"
         },
@@ -922,6 +934,12 @@
             "string"
           ],
           "presence": "optional"
+        },
+        "unpriced_calls": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
         }
       }
     },

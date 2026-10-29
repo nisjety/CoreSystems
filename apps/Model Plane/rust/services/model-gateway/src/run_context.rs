@@ -520,6 +520,7 @@ async fn load_history(
             space_id: String::new(),
             space_read_decision_ref: String::new(),
             space_read_decision_token: String::new(),
+            include_inactive: false,
             // Unpaged (WS09-S8): the whole conversation in sequence order.
             limit: 0,
             before_message_id: String::new(),

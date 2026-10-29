@@ -318,11 +318,17 @@ services:
       # WS19-S7: the skill_file tool reads a matched skill's bundle from capability-core. Off by default; only the literal
       # `true` turns it on. A skill has a bundle only once an admin uploaded one (SKILL_BUNDLES_ENABLED on capability-core).
       SKILL_FILE_TOOL_ENABLED: ${SKILL_FILE_TOOL_ENABLED:-false}
+      # WS19-S9: first-party Office skills (docx, xlsx, pptx, pdf) listed for every org. Off by default; only the literal
+      # `true` turns it on.
+      BUILTIN_OFFICE_SKILLS_ENABLED: ${BUILTIN_OFFICE_SKILLS_ENABLED:-false}
       # WS04-S6: durable send receipts (client_message_id on a send, dedupe in session-core, ids on the queued_input
       # delivery event). On by default since the WS04-S9 proof; only the literal `true` turns it on. Deploy order:
       # session-core (migration 0052) first, then model-gateway, then the BFF and frontend. Roll back with false plus a
       # restart.
       MODEL_GATEWAY_SEND_RECEIPTS: ${MODEL_GATEWAY_SEND_RECEIPTS:-true}
+      # WS17-S8: message versions (branch and rewind). Off by default; set it together with
+      # SESSION_CORE_MESSAGE_VERSIONS_ENABLED on session-core.
+      MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED: ${MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED:-false}
       # WS04-S5: a mirror in Redis/Dragonfly that holds ids only (run_id, skill ids, 24 h), so a turn streamed on one
       # replica can be rated on another. On by default since the WS04-S9 proof; only the literal `true` turns it on.
       # Dragonfly eviction degrades to the single-replica behaviour.
@@ -357,6 +363,9 @@ services:
       # WS27-S5: a ZDR answer's usage frame states its cost in-stream, numbers only, nothing stored (no ledger row, no usage
       # envelope). Off by default; only the literal `true` turns it on. Turning it on is an owner call (DEC-18(d)).
       MODEL_GATEWAY_ZDR_STREAM_COST: ${MODEL_GATEWAY_ZDR_STREAM_COST:-false}
+      # WS27-S2: a turn's usage frame and ledger rows count every tool round and the overhead calls, with run_id. Off by
+      # default; only the literal `true`. Billing attribution (DEC-18, WS27-D5) must be confirmed before it is turned on.
+      MODEL_GATEWAY_TURN_USAGE_COMPLETE: ${MODEL_GATEWAY_TURN_USAGE_COMPLETE:-false}
       # WS04-S4: read the plan grant from session-core so a Do run started on another replica carries the rung. On by default
       # since the WS04-S9 proof; only the literal `true` turns it on. Deploy session-core first so migration 0050 has applied;
       # false keeps the in-memory grants (kept as the rollback path).
@@ -908,6 +917,10 @@ services:
       # WS17-S3: the conversation search query path (SearchMessages). Off by default; the index itself is built
       # by migration 0055 either way.
       SESSION_CORE_MESSAGE_SEARCH_ENABLED: ${SESSION_CORE_MESSAGE_SEARCH_ENABLED:-false}
+      # WS17-S8: the persisted message tree (versions, branch and rewind). Off by default; set it together with
+      # MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED on model-gateway. Build the 0061 indexes CONCURRENTLY first on a
+      # populated messages table.
+      SESSION_CORE_MESSAGE_VERSIONS_ENABLED: ${SESSION_CORE_MESSAGE_VERSIONS_ENABLED:-false}
       # WS13-S3: the approval decision audit event and its provenance record. Off by default.
       APPROVAL_AUDIT_EVENTS_ENABLED: ${APPROVAL_AUDIT_EVENTS_ENABLED:-false}
       # WS03-S8: park a crashed run instead of ending it (needs park recovery and the fold store on). Off by
@@ -1467,6 +1480,9 @@ services:
       # offers the same read set until WS24-S4 adds writes), and cap.workspace.read stays unattested until then. ZDR and
       # non-Space runs never get them.
       WORKSPACE_TOOLS: ${WORKSPACE_TOOLS:-off}
+      # WS26-S7: Do-mode tool results ask model-gateway ScreenContent for the same tighten-only verdict chat gets. Off by
+      # default; only the literal `true`. A refused, slow or mismatched answer keeps the local verdict; ZDR runs never ask.
+      CONTENT_SAFETY_SCREEN_RPC: ${CONTENT_SAFETY_SCREEN_RPC:-false}
       # Feature-gates QuarryAgentClient::from_env() (browser_agent loop) — the
       # env var this block's QUARRY_EDGE_URL comment already promises but that
       # was never actually wired here (Phase 2, found live: run_browser_agent_loop
