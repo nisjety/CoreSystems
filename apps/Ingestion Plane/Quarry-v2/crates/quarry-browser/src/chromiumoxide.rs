@@ -1281,6 +1281,7 @@ impl ChromiumoxideDriver {
         &self,
         session: &BrowserSession,
         url: Option<&str>,
+        first_navigation: FirstNavigation,
         activate: bool,
         egress_policy: Option<BrowserEgressPolicy>,
     ) -> QuarryResult<(String, Page)> {
@@ -1594,10 +1595,16 @@ impl ChromiumoxideDriver {
                 .or_default()
                 .profile_restore = Some(report.summary());
         }
-        if initial_url != "about:blank" {
+        // Where the tab is when it is committed. A caller-driven first navigation runs
+        // after the commit, so the tab is there for it to keep on a TIMEOUT.
+        let committed_url = match first_navigation {
+            FirstNavigation::InAttach => initial_url,
+            FirstNavigation::ByCaller => "about:blank",
+        };
+        if committed_url != "about:blank" {
             // No recovery here: a tab whose first navigation fails is closed by the
             // attach guard, abandoned navigation and all.
-            goto_within(&page, initial_url, deadline(Op::Navigate)).await?;
+            goto_within(&page, committed_url, deadline(Op::Navigate)).await?;
         }
         install_popup_bridge(&page).await?;
 
@@ -1620,7 +1627,7 @@ impl ChromiumoxideDriver {
             page: page.clone(),
             admission,
             title_hint: None,
-            url_hint: Some(initial_url.to_owned()),
+            url_hint: Some(committed_url.to_owned()),
         });
         // A background open keeps the active tab. A session with none yet
         // activates the new tab, so it always has a tab to act on.
@@ -2299,6 +2306,19 @@ fn chromium_launch_dirs_in(root: &Path) -> std::io::Result<ChromiumLaunchDirs> {
         user_data,
         crash_dumps,
     })
+}
+
+/// Who navigates a new tab to the URL `open_tab_page` is given. Either way the URL plans
+/// the profile restore of the context's first tab and enters the origin journal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FirstNavigation {
+    /// The attach, before the tab is committed: a tab whose navigation fails is closed
+    /// and the caller gets no tab (`open_tab`, which answers with the tab it made).
+    InAttach,
+    /// The caller, once the tab is committed on `about:blank`: a navigation that times
+    /// out leaves the tab as any later one does, readable and drained at the next `goto`
+    /// (SC4 T4b, a run's first step).
+    ByCaller,
 }
 
 /// `page.goto(url)` within `limit` (the `Op::Navigate` entry in production). A
@@ -3911,38 +3931,54 @@ impl BrowserDriver for ChromiumoxideDriver {
                 if let Some(pin) = session.tab_pin() {
                     return Err(pinned_tab_closed_error(pin));
                 }
-                let (tab_id, page) = self.open_tab_page(session, Some(url), true, None).await?;
+                // SC4 T4b: the tab is committed before its first navigation, which then
+                // takes the path below like any other, TIMEOUT recovery included.
+                // Inside the attach a timed-out navigation closed the tab, and the
+                // run's next step found no page at all.
+                let (tab_id, page) = self
+                    .open_tab_page(session, Some(url), FirstNavigation::ByCaller, true, None)
+                    .await?;
                 (tab_id, page, true)
             }
         };
 
         let session_key = Self::session_key(session);
-        if !created {
-            // SC4 T3: a navigation that timed out on this tab earlier is still the
-            // library's current one; clear it first or this one queues behind it.
-            let abandoned = self
-                .abandoned_navigations
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(page.target_id());
-            if abandoned {
-                drain_abandoned_navigation(&page, deadline(Op::NavigateRecovery)).await;
+        // SC4 T3: a navigation that timed out on this tab earlier is still the
+        // library's current one; clear it first or this one queues behind it.
+        let abandoned = self
+            .abandoned_navigations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(page.target_id());
+        if abandoned {
+            drain_abandoned_navigation(&page, deadline(Op::NavigateRecovery)).await;
+        }
+        #[allow(unused_mut)]
+        let (mut target, mut limit) = (url, deadline(Op::Navigate));
+        #[cfg(test)]
+        let detour = self
+            .hooks
+            .goto_detour
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        #[cfg(test)]
+        {
+            if let Some((detour_url, bound)) = detour.as_ref() {
+                (target, limit) = (detour_url.as_str(), *bound);
+                // The fixture host does not resolve, which the tab's Fetch guard refuses.
+                with_deadline(Op::TabAttach, async {
+                    page.execute(
+                        ::chromiumoxide::cdp::browser_protocol::fetch::DisableParams::default(),
+                    )
+                    .await
+                    .map_err(|e| QuarryError::new(ErrorCode::Internal, e.to_string()))
+                })
+                .await?;
             }
-            #[allow(unused_mut)]
-            let (mut target, mut limit) = (url, deadline(Op::Navigate));
-            #[cfg(test)]
-            let detour = self
-                .hooks
-                .goto_detour
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone();
-            #[cfg(test)]
-            {
-                if let Some((detour_url, bound)) = detour.as_ref() {
-                    (target, limit) = (detour_url.as_str(), *bound);
-                }
-            }
+        }
+        // A tab opened for `about:blank` is there already.
+        if !(created && target == "about:blank") {
             if let Err(error) = goto_within(&page, target, limit).await {
                 // SC4 T3: the abandoned navigation still loads (no read answers until
                 // it stops) and still holds the library's queue. Stop it before the
@@ -4713,6 +4749,7 @@ impl BrowserDriver for ChromiumoxideDriver {
             .open_tab_page(
                 session,
                 options.url.as_deref(),
+                FirstNavigation::InAttach,
                 options.activate,
                 options.egress_policy,
             )
@@ -5522,9 +5559,9 @@ struct TestHooks {
     goto_hold: AtomicBool,
     goto_reached: tokio::sync::Notify,
     goto_resume: tokio::sync::Notify,
-    /// `goto` on an open tab navigates here within this bound instead, past the URL
-    /// guard: a live test reaches a fixture host the guard refuses without waiting
-    /// out the shipped navigate deadline.
+    /// `goto` navigates here within this bound instead (a tab it opens too), past the
+    /// URL guard and the tab's Fetch guard: a live test reaches a fixture host the
+    /// guards refuse without waiting out the shipped navigate deadline.
     goto_detour: std::sync::Mutex<Option<(String, Duration)>>,
     /// The same for `close_tab`, between taking the tab out of the session's
     /// pages and giving its page back to the slot book.
@@ -8068,6 +8105,102 @@ mod tests {
         }
         *driver.hooks.goto_detour.lock().unwrap() = None;
         driver.release(session).await.expect("release");
+        driver.shutdown().await;
+        proxy_task.abort();
+    }
+
+    /// SC4 T4b: the same two hangs as a run's first step, on a session with no tab yet.
+    /// The `goto` opens the tab and its navigation ends in the typed TIMEOUT; the tab
+    /// stays, so the next step reads it at once (`about:blank` when the document never
+    /// arrived, the held page when only its image hangs) and the next navigation goes
+    /// straight through. Before the fix the attach closed the tab with its timed-out
+    /// navigation, and every read after it answered `no_current_page`.
+    #[tokio::test]
+    async fn a_first_step_goto_that_hangs_keeps_its_tab_and_the_next_step_answers() {
+        if !live_enabled() {
+            return;
+        }
+        let (endpoint, proxy_task) = fixture_proxy().await;
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(Arc::new(FixtureProxyProvider(endpoint)))
+            .with_pool_config(quiet_pool());
+        let detour = |path: &str, bound: Duration| {
+            *driver.hooks.goto_detour.lock().unwrap() =
+                Some((format!("http://sc4.fixture.test{path}"), bound));
+        };
+        // A warm browser: the step below still attaches, but only a context and a tab.
+        let warm = live_session_sized(&driver, "sc4-first-warm", None, "warm").await;
+        driver.release(warm).await.expect("release");
+
+        for (hang, kept) in [("/slow.html", None), ("/loaded.html", Some("sc4-loaded"))] {
+            let key = format!("sc4-first{}", hang.replace(['/', '.'], "-"));
+            let session = driver
+                .acquire(&make_lease_with_key(&key))
+                .await
+                .expect("acquire");
+            driver
+                .configure_egress_policy(&session, BrowserEgressPolicy::deny_all())
+                .await
+                .expect("install deny-all egress policy");
+            assert!(driver.list_tabs(&session).await.expect("tabs").is_empty());
+
+            let limit = Duration::from_millis(1500);
+            detour(hang, limit);
+            let started = Instant::now();
+            let error = driver.goto(&session, "about:blank").await.unwrap_err();
+            let waited = started.elapsed();
+            assert_eq!(error.code, ErrorCode::Timeout, "{hang}: {error:?}");
+            let details = error.details.clone().expect("details");
+            assert_eq!(details["op"], "navigate", "{hang}");
+            assert_eq!(details["deadline_ms"], 1500, "{hang}");
+            assert_eq!(details["effect"], "unknown", "{hang}");
+            assert!(!format!("{error:?}").contains("fixture"), "{error:?}");
+            eprintln!("first-step attach, timeout and recovery took {waited:?} for {hang}");
+            // The attach is in the step too: up to about 11 s (a cold browser) under the
+            // full live suite, against the shipped 25 s deadline and the 30 s queue.
+            assert!(
+                waited < limit + Duration::from_secs(12),
+                "{hang}: {waited:?}"
+            );
+
+            let started = Instant::now();
+            let tabs = driver.list_tabs(&session).await.expect("tabs");
+            assert_eq!(tabs.len(), 1, "{hang}: the tab stays: {tabs:?}");
+            assert!(tabs[0].active, "{hang}: {tabs:?}");
+            driver
+                .native_page_projection(&session)
+                .await
+                .expect("the accessibility tree answers after the timeout");
+            let html = page_html(&driver, &session).await;
+            match kept {
+                Some(marker) => {
+                    assert!(
+                        html.contains(marker),
+                        "{hang}: the tab keeps {marker}: {html}"
+                    );
+                    assert_eq!(tabs[0].title.as_deref(), Some(marker), "{hang}");
+                }
+                None => assert!(!html.contains("sc4-"), "{hang}: still blank: {html}"),
+            }
+            let read = started.elapsed();
+            eprintln!("first-step reads took {read:?} after {hang}");
+            detour("/next.html", Duration::from_secs(5));
+            driver
+                .goto(&session, "about:blank")
+                .await
+                .expect("the next navigation is not queued behind the abandoned one");
+            assert!(
+                page_html(&driver, &session).await.contains("sc4-next-page"),
+                "{hang}"
+            );
+            let next_step = started.elapsed();
+            eprintln!("first-step next step took {next_step:?} after {hang}");
+            // As in the test above: about 0.1 s alone, against about 28 s of queue.
+            assert!(read < Duration::from_secs(5), "{hang}: {read:?}");
+            assert!(next_step < Duration::from_secs(8), "{hang}: {next_step:?}");
+            *driver.hooks.goto_detour.lock().unwrap() = None;
+            driver.release(session).await.expect("release");
+        }
         driver.shutdown().await;
         proxy_task.abort();
     }

@@ -48,7 +48,7 @@ A browser operation that did not finish inside its deadline (`crates/quarry-brow
 | `effect` | `none` | the operation cannot have changed the page: a read or a teardown. `retryable` is true |
 | `effect` | `unknown` | the operation may have changed the page (`navigate`, `evaluate`, `input`, `native_action`): look at the page before repeating it. `retryable` is false |
 
-After a `navigate` timeout the load is stopped and the page can be read at once: the tab is on the slow page if its document had arrived, and still on the page it had before if not (SC4). On an agent step the timeout can also come from the observation read after the action (`evaluate`, `content`, `ax_snapshot`); its `effect` is then the step's: `unknown` (`retryable` false) after an action that can change the page, `none` (`retryable` true) after a wait or a read-only action.
+After a `navigate` timeout the load is stopped and the page can be read at once: the tab is on the slow page if its document had arrived, and still on the page it had before if not (SC4); after a timeout on a run's first `navigate` the tab is kept the same way, on `about:blank` if the document had not arrived (SC4 T4b). On an agent step the timeout can also come from the observation read after the action (`evaluate`, `content`, `ax_snapshot`); its `effect` is then the step's: `unknown` (`retryable` false) after an action that can change the page, `none` (`retryable` true) after a wait or a read-only action.
 
 ## 415 `UNSUPPORTED_MEDIA` on `POST /v1/scrape`
 
