@@ -76,6 +76,9 @@ pub(crate) struct ExecutionService {
     /// lease-release path, which stops a lease's children before the
     /// workspace is uploaded; the tools that start one arrive in step 5.
     process_host: Option<Arc<crate::process_host::ProcessHost>>,
+    /// Bundle reads for `code_interpreter` skill mounts (WS19-S8). Absent when their
+    /// configuration is, and a step that names mounts then fails closed.
+    skill_bundles: Option<Arc<crate::skill_mounts::GrpcSkillBundleSource>>,
 }
 
 #[tonic::async_trait]
@@ -143,6 +146,7 @@ impl ExecutionService {
         cas_client: Option<CasClient>,
         backend_id: String,
         sandbox_tokens: Arc<crate::sandbox_lease::SandboxManagerTokenProvider>,
+        skill_bundles: Option<Arc<crate::skill_mounts::GrpcSkillBundleSource>>,
     ) -> Self {
         let ownership = Arc::new(SessionCoreRunOwnershipResolver {
             channel: session_channel.clone(),
@@ -175,6 +179,7 @@ impl ExecutionService {
             backend_id,
             sandbox_tokens,
             process_host,
+            skill_bundles,
         }
     }
 
@@ -599,6 +604,8 @@ impl ExecutionService {
                 inference_bearer.to_owned(),
                 self.capability_policy.as_ref(),
                 self.terminal_tokens.as_ref(),
+                None,
+                // A scheduled run never carries a browser bearer (WS20).
                 None,
                 self.capability_client.as_ref(),
                 &self.sandbox_manager_client,
@@ -1392,6 +1399,20 @@ impl ExecutionCore for ExecutionService {
             &req,
             req.zdr || caller.zdr || caller.zdr_waiver.is_some(),
         )?;
+        // Holds the run's skill tree for the length of this call, so the code_interpreter arm
+        // can bind it. A step that names no mounts, as every step does while
+        // SKILL_BUNDLE_MOUNT_ENABLED is off, reads nothing and holds nothing.
+        let _skill_mounts = crate::skill_mounts::stage_for_step(
+            &req.org_id,
+            &req.run_id,
+            &req.tool_name,
+            &req.skill_mounts,
+            req.zdr || caller.zdr || caller.zdr_waiver.is_some(),
+            self.skill_bundles
+                .as_deref()
+                .map(|source| source as &dyn crate::skill_mounts::SkillBundleSource),
+        )
+        .await?;
         // Resolve the opaque JSON grant id with BrowserBroker only after the
         // signed caller and durable run owner are authorized. The resulting
         // immutable policy is passed to the runtime; raw tool JSON cannot
@@ -1754,6 +1775,14 @@ impl ExecutionCore for ExecutionService {
                     .await?,
             )
         };
+        // The browser bearer names the user's broker grants, so it is read only while the Do
+        // loop's browser tools are switched on (WS21-S2). With the switch off the header is never
+        // verified and the run is the one it was before.
+        let browser_bearer = if runtime_loop::agent::do_browser_enabled() {
+            self.auth.authenticate_run_browser(&request, &caller).await?
+        } else {
+            None
+        };
         let mut req = request.into_inner();
         caller.authorize(&req.org_id, Some(&req.user_id))?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
@@ -1795,6 +1824,9 @@ impl ExecutionCore for ExecutionService {
             self.capability_policy.as_ref(),
             self.terminal_tokens.as_ref(),
             sandbox_bearer
+                .as_ref()
+                .map(|bearer| bearer.as_str().to_owned()),
+            browser_bearer
                 .as_ref()
                 .map(|bearer| bearer.as_str().to_owned()),
             self.capability_client.as_ref(),
@@ -1874,6 +1906,14 @@ pub async fn serve(
     let capability_url = std::env::var("CAPABILITY_CORE_ADDR")
         .unwrap_or_else(|_| "http://capability-core:9097".to_owned());
     let capability_channel = lazy_bounded_channel(capability_url)?;
+    let skill_bundles =
+        match crate::skill_mounts::GrpcSkillBundleSource::from_env(capability_channel.clone()) {
+            Ok(source) => Some(Arc::new(source)),
+            Err(error) => {
+                warn!(%error, "skill bundle source unavailable; skill mounts fail closed");
+                None
+            }
+        };
     let capability_policy = Arc::new(crate::capability_policy::GrpcCapabilityPolicy::from_env(
         capability_channel,
     )?);
@@ -1937,6 +1977,7 @@ pub async fn serve(
         cas_client,
         backend_id,
         sandbox_tokens,
+        skill_bundles,
     )
     .await
 }
@@ -1959,6 +2000,7 @@ async fn serve_with_listener(
     cas_client: Option<CasClient>,
     backend_id: String,
     sandbox_tokens: Arc<crate::sandbox_lease::SandboxManagerTokenProvider>,
+    skill_bundles: Option<Arc<crate::skill_mounts::GrpcSkillBundleSource>>,
 ) -> anyhow::Result<()> {
     let session_channel = lazy_bounded_channel(session_url)?;
     let inference_channel = lazy_bounded_channel(inference_url)?;
@@ -1985,6 +2027,7 @@ async fn serve_with_listener(
                 cas_client,
                 backend_id,
                 sandbox_tokens,
+                skill_bundles,
             ))
             .max_decoding_message_size(request_decoding_limit_bytes()),
         )
@@ -2686,6 +2729,7 @@ mod auth_tests {
                     "test-service-secret-at-least-32-bytes",
                 ),
             ),
+            None,
         ));
 
         tokio::time::timeout(std::time::Duration::from_secs(2), async {

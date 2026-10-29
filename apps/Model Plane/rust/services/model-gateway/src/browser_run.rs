@@ -1231,6 +1231,8 @@ async fn browser_run_start_inner(
             space_id: String::new(),
             // browser_agent reads no attached files.
             attachments: Vec::new(),
+            // Only code_interpreter steps mount skill bundles.
+            skill_mounts: Vec::new(),
         });
         let authorization = format!("Bearer {}", execution_bearer.as_str())
             .parse()

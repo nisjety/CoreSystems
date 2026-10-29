@@ -44,6 +44,7 @@ pub(crate) mod scheduled_step_decision;
 pub mod scrub;
 mod session_terminal_auth;
 pub mod shipping_tools;
+pub mod skill_mounts;
 pub mod social_tools;
 pub mod state;
 pub mod subagent;

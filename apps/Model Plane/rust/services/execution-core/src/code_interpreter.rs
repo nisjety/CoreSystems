@@ -32,6 +32,9 @@
 //! cannot add or change them. They arrive from the request that carries the step
 //! ([`crate::run_inputs`]) and appear read-only under `attachments/`.
 //!
+//! Skill bundles the turn's matched skills carry are bound read-only at `/skills` when the
+//! call holds them ([`crate::skill_mounts`]); the model names none of them.
+//!
 //! Output JSON:
 //! `{"stdout":"…","stderr":"…","exit_code":0,"files":[{"name","mime","bytes","content_b64"}]}`
 //! where an over-cap file is still listed, with `"truncated":true` and an empty
@@ -92,6 +95,13 @@ const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Ceiling on the total content returned by one call (16 `MiB`).
 const MAX_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Where a turn's skill bundles are bound read-only inside the sandbox (WS19-S8). The image
+/// creates this directory as an empty mount point (WS19-S4), so the bind never has to create
+/// one on the read-only root.
+pub const SKILLS_MOUNT: &str = "/skills";
+/// The same name without the leading slash. A `files_in` entry may not take it.
+pub const SKILLS_DIR: &str = "skills";
 
 /// Padding-tolerant decoder for `content_b64`. Model- and gateway-produced
 /// base64 is routinely line-wrapped and occasionally unpadded; both are still
@@ -286,6 +296,7 @@ fn validate_input_name(raw: &str, language: Language) -> Result<String, String> 
         || name == TEMP_SUBDIR
         || name == MPL_CONFIG_SUBDIR
         || name.eq_ignore_ascii_case(ATTACHMENTS_DIR)
+        || name.eq_ignore_ascii_case(SKILLS_DIR)
     {
         return Err(format!(
             "files_in name '{name}' is reserved by the sandbox workspace; rename the input file"
@@ -529,6 +540,29 @@ pub async fn run(
     .await
 }
 
+/// [`run`] with the turn's skill bundles: `skills`, when present, is the host directory a
+/// `crate::skill_mounts` tree was written to, bound read-only at [`SKILLS_MOUNT`] for the
+/// call. `None` is exactly [`run`].
+pub async fn run_with_skills(
+    tool_input: &str,
+    run_id: &str,
+    step_id: &str,
+    workspace_root: Option<&Path>,
+    ro_inputs: Option<Arc<InputSet>>,
+    skills: Option<&Path>,
+) -> Result<String, String> {
+    run_staged_with_skills(
+        tool_input,
+        run_id,
+        step_id,
+        workspace_root,
+        ro_inputs,
+        skills,
+        executor::code_exec_timeout(),
+    )
+    .await
+}
+
 /// [`run`] with an injected deadline — the testable seam (env mutation is
 /// forbidden in this crate, so tests pass the timeout instead of setting it).
 #[cfg(test)]
@@ -551,16 +585,38 @@ async fn run_staged(
     ro_inputs: Option<Arc<InputSet>>,
     timeout: Duration,
 ) -> Result<String, String> {
+    run_staged_with_skills(
+        tool_input,
+        run_id,
+        step_id,
+        workspace_root,
+        ro_inputs,
+        None,
+        timeout,
+    )
+    .await
+}
+
+/// [`run_staged`] with the turn's skill bundles (WS19-S8), bound read-only at [`SKILLS_MOUNT`].
+async fn run_staged_with_skills(
+    tool_input: &str,
+    run_id: &str,
+    step_id: &str,
+    workspace_root: Option<&Path>,
+    ro_inputs: Option<Arc<InputSet>>,
+    skills: Option<&Path>,
+    timeout: Duration,
+) -> Result<String, String> {
     let mut request = parse_request(tool_input)?;
     request.ro_inputs = ro_inputs;
 
     if let Some(root) = workspace_root {
-        return run_in_root(&request, root, timeout, true).await;
+        return run_in_root(&request, root, timeout, true, skills).await;
     }
 
     let workspace = Workspace::create(run_id, step_id)
         .map_err(|error| format!("code_interpreter could not create its workspace: {error}"))?;
-    run_in_root(&request, workspace.path(), timeout, false).await
+    run_in_root(&request, workspace.path(), timeout, false, skills).await
     // `workspace` drops here — and on every `?` above — removing the directory.
 }
 
@@ -579,6 +635,7 @@ async fn run_in_root(
     root: &Path,
     timeout: Duration,
     persistent: bool,
+    skills: Option<&Path>,
 ) -> Result<String, String> {
     let pre_call_baseline = if persistent {
         snapshot_file_hashes(root)
@@ -626,10 +683,15 @@ async fn run_in_root(
         Some(set) => StagedInputs::stage(root, set)?,
         None => None,
     };
-    let ro_binds: Vec<(PathBuf, PathBuf)> = staged_inputs
+    let mut ro_binds: Vec<(PathBuf, PathBuf)> = staged_inputs
         .iter()
         .map(|inputs| (inputs.dir.clone(), inputs.dir.clone()))
         .collect();
+    // The turn's skill bundles, read-only at `/skills` (WS19-S8). Like the attached files they
+    // are bound after the writable root, so a writable root can never shadow them.
+    if let Some(skills) = skills {
+        ro_binds.push((skills.to_path_buf(), PathBuf::from(SKILLS_MOUNT)));
+    }
 
     // WorkspaceWrite over exactly one root, network off. The writable bind comes
     // before the read-only binds in the bwrap argv and after the read-only
@@ -764,7 +826,7 @@ fn remove_staged_dir(dir: &Path) {
 }
 
 #[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+pub(crate) fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
 }
@@ -772,7 +834,7 @@ fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
 /// There are no unix permission bits to set; staging is refused on such a host
 /// before anything is written (see [`StagedInputs::stage`]).
 #[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
+pub(crate) fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -1619,9 +1681,52 @@ mod tests {
         assert_eq!(stdout.matches("ERRNO True").count(), 2, "EROFS for both: {stdout}");
     }
 
+    /// A skill bundle is readable at `/skills` and not writable there. The file is left
+    /// writable on purpose, so the refusal can only come from the read-only bind. Needs the
+    /// `/skills` mount point the image creates.
+    #[tokio::test]
+    async fn a_skill_bundle_is_readable_at_skills_and_not_writable() {
+        if !python3_available() || !Path::new(SKILLS_MOUNT).is_dir() {
+            eprintln!("skipping: python3, the OS sandbox or the /skills mount point is unavailable");
+            return;
+        }
+        let tree = std::env::temp_dir().join(format!("skills-test-{}", mp_ids::new_ulid()));
+        let file = tree.join("docs").join("SKILL.md");
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("tree");
+        std::fs::write(&file, b"bundle text").expect("bundle file");
+        set_mode(&file, 0o644).expect("writable for the test");
+        let code = [
+            "import errno",
+            "print(open('/skills/docs/SKILL.md').read())",
+            "try:",
+            "    open('/skills/docs/SKILL.md', 'w').write('x')",
+            "    print('WROTE')",
+            "except OSError as error:",
+            "    print('ERRNO', error.errno == errno.EROFS)",
+        ]
+        .join("\n");
+        let output = run_staged_with_skills(
+            &serde_json::json!({"code": code}).to_string(),
+            "run-skills-read",
+            "step-1",
+            None,
+            None,
+            Some(tree.as_path()),
+            Duration::from_secs(60),
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(&tree);
+        let output = output.expect("code_interpreter call");
+        let result: serde_json::Value = serde_json::from_str(&output).expect("result is JSON");
+        let stdout = result["stdout"].as_str().unwrap_or_default();
+        assert!(stdout.contains("bundle text"), "the bundle is readable: {stdout}");
+        assert!(!stdout.contains("WROTE"), "a write got through: {stdout}");
+        assert!(stdout.contains("ERRNO True"), "EROFS at /skills: {stdout}");
+    }
+
     #[test]
     fn attachments_name_is_reserved_for_files_in() {
-        for name in ["attachments", "Attachments"] {
+        for name in ["attachments", "Attachments", "skills", "SKILLS"] {
             let input = serde_json::json!({
                 "code": "print(1)",
                 "files_in": [{ "name": name, "content_b64": "" }],

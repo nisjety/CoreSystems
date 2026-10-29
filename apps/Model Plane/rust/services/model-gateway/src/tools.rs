@@ -22,7 +22,8 @@ use tracing::warn;
 
 use mp_contracts::model_plane::v1::{
     ExecuteStepRequest, RemoteTriggerRequest, RemoteTriggerResponse, RunAttachment,
-    SendMessageRequest, SendMessageResponse, SleepRequest, SleepResponse, SyntheticOutputRequest,
+    SendMessageRequest, SendMessageResponse, SkillMount, SleepRequest, SleepResponse,
+    SyntheticOutputRequest,
     SyntheticOutputResponse, WebSearchRequest, WebSearchResponse, WebSearchResult,
 };
 
@@ -183,6 +184,9 @@ pub async fn handle_code_interpreter(
     // deliberately no way to name one in `files_in` or anywhere else the model
     // writes. Empty on every turn without files.
     attachments: &[RunAttachment],
+    // The `/skills` mounts of the turn's matched skills (WS19-S8). Derived by the gateway from the
+    // turn's own matches, never from the model's arguments; empty on every turn without them.
+    skill_mounts: &[SkillMount],
 ) -> Result<String, String> {
     if code.trim().is_empty() {
         return Err("code_interpreter requires non-empty 'code'".to_owned());
@@ -191,6 +195,9 @@ pub async fn handle_code_interpreter(
     // them too, this stops them leaving the gateway at all.
     if zdr && !attachments.is_empty() {
         return Err("attached files cannot be given to the sandbox on a zero-retention turn".to_owned());
+    }
+    if zdr && !skill_mounts.is_empty() {
+        return Err("skill bundles cannot be mounted on a zero-retention turn".to_owned());
     }
     let language = normalize_code_language(language)?;
     let mut tool_input = serde_json::json!({ "language": language, "code": code });
@@ -227,6 +234,7 @@ pub async fn handle_code_interpreter(
         min_privacy_tier: mp_contracts::model_plane::v1::PrivacyTier::Unspecified as i32,
         space_id: space_id.to_owned(),
         attachments: attachments.to_vec(),
+        skill_mounts: skill_mounts.to_vec(),
     });
     request.metadata_mut().insert(
         "authorization",
@@ -2017,6 +2025,7 @@ mod tests {
                 "print(open('attachments/data.csv').read())",
                 files_in,
                 attachments.run_attachments(),
+                &[],
             )
             .await
         }

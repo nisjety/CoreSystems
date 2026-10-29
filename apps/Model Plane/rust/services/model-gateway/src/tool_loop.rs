@@ -16,7 +16,8 @@ use chrono::{Datelike, Utc};
 use mp_contracts::dataplane::retrieval_v2::RetrieveRequest;
 use mp_contracts::model_plane::v1::{
     ChatMessage, FinalizeToolActionRequest, InferRequest, PromptTierPlan,
-    ReserveToolActionRequest, SearchMemoryRequest, ToolCall, ToolDefinition,
+    ReserveToolActionRequest, SearchMemoryRequest, SkillBundleSummary, SkillMount, ToolCall,
+    ToolDefinition,
 };
 use mp_contracts::office_verification::{OfficeKind, OfficeVerification, VerificationLevel};
 use mp_events::publisher::EventPublisher;
@@ -2789,7 +2790,7 @@ pub async fn dispatch_tool(
         conversation, data_plane_bearer, execution_bearer, inference_bearer,
         session_bearer, capability_bearer, zdr, sovereign_required,
         allow_paid_providers, call, ingestion_bearer, sandbox_bearer, None,
-        data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(), None, None,
+        data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(), &[], None, None,
     ).await
 }
 
@@ -2954,6 +2955,147 @@ async fn skill_file_outcome(
     }
 }
 
+/// The switch for the `/skills` mount of a turn's skill bundles (WS19-S8). Read here, in the
+/// gateway, and only the literal `true` enables it: a bundle is named in a request only while it
+/// is on, and execution-core honours the field only when it is present.
+const SKILL_BUNDLE_MOUNT_ENV: &str = "SKILL_BUNDLE_MOUNT_ENABLED";
+
+/// Most bundles one turn mounts. The gateway injects at most three skills a turn.
+const MAX_SKILL_MOUNTS: usize = 3;
+
+/// Mount names execution-core refuses, because the sandbox already gives them a meaning. Kept in
+/// step with `skill_mounts::RESERVED_NAMES` there, so a skill that would be refused takes no name.
+const RESERVED_MOUNT_NAMES: [&str; 2] = ["skills", "attachments"];
+
+/// Whether `raw` (the value of [`SKILL_BUNDLE_MOUNT_ENV`], if set) is the literal on-word.
+#[must_use]
+fn skill_bundle_mounts_enabled_from(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+fn skill_bundle_mounts_enabled() -> bool {
+    skill_bundle_mounts_enabled_from(std::env::var(SKILL_BUNDLE_MOUNT_ENV).ok().as_deref())
+}
+
+/// The directory a skill's bundle is mounted under: its name, lowercased, with every run of other
+/// characters turned into one `-`, at most 48 bytes. `None` when nothing is left, or when the name
+/// is reserved, so a skill never takes a name that would refuse the whole call.
+#[must_use]
+fn mount_name_for(skill_name: &str) -> Option<String> {
+    let mut name = String::new();
+    for character in skill_name.trim().chars() {
+        if character.is_ascii_alphanumeric() {
+            name.push(character.to_ascii_lowercase());
+        } else if !name.is_empty() && !name.ends_with('-') {
+            name.push('-');
+        }
+    }
+    name.truncate(48);
+    while name.ends_with('-') {
+        name.pop();
+    }
+    if name.is_empty() || RESERVED_MOUNT_NAMES.contains(&name.as_str()) {
+        return None;
+    }
+    Some(name)
+}
+
+/// Whether `value` is a lowercase hex SHA-256, the spelling every digest in a bundle uses.
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// The mounts for the turn's skills that have a bundle, in injection order, at most
+/// [`MAX_SKILL_MOUNTS`]. Only the skills the turn matched can appear: `matched` is the turn's own
+/// record and `bundles` is capability-core's answer about those skills, so a bundle the turn did not
+/// match is never mounted, whatever the model asked for.
+#[must_use]
+fn skill_mounts_from_bundles(
+    matched: &[(String, String)],
+    bundles: &[SkillBundleSummary],
+) -> Vec<SkillMount> {
+    let mut mounts: Vec<SkillMount> = Vec::new();
+    for (skill_id, skill_name) in matched {
+        if mounts.len() == MAX_SKILL_MOUNTS {
+            break;
+        }
+        let Some(bundle) = bundles.iter().find(|bundle| &bundle.skill_id == skill_id) else {
+            continue;
+        };
+        let Some(name) = mount_name_for(skill_name) else {
+            continue;
+        };
+        if !is_sha256_hex(&bundle.manifest_sha256) || mounts.iter().any(|mount| mount.name == name) {
+            continue;
+        }
+        mounts.push(SkillMount {
+            skill_id: skill_id.clone(),
+            name,
+            manifest_sha256: bundle.manifest_sha256.clone(),
+        });
+    }
+    mounts
+}
+
+/// The `/skills` mounts a turn's `code_interpreter` calls carry (WS19-S8): the bundles of the skills
+/// the turn injected, read once for the turn from the record the gateway wrote before the loop
+/// started. Empty while the switch is off (no call is made), under zero retention, without a
+/// capability credential, or when no injected skill has a bundle.
+///
+/// Advisory like the rest of skill injection: a failed read costs the mounts, never the turn.
+async fn skill_mounts_for_turn(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    user_id: &str,
+    capability_bearer: Option<&str>,
+    zdr: bool,
+) -> Vec<SkillMount> {
+    use mp_contracts::model_plane::v1::{GetSkillRequest, ListSkillBundlesRequest};
+
+    if zdr || !skill_bundle_mounts_enabled() {
+        return Vec::new();
+    }
+    let Some(bearer) = capability_bearer.filter(|bearer| !bearer.trim().is_empty()) else {
+        return Vec::new();
+    };
+    let Some(record) = crate::chat_turn_registry::global().lookup(request_id) else {
+        return Vec::new();
+    };
+    if record.org_id != org_id || record.user_id != user_id {
+        return Vec::new();
+    }
+    let mut matched: Vec<(String, String)> = Vec::new();
+    for skill_id in &record.skill_ids {
+        let request = GetSkillRequest {
+            request_id: String::new(),
+            org_id: org_id.to_owned(),
+            skill_id: skill_id.clone(),
+        };
+        let found = crate::skills::handle_get_skill(&state.skills, request, &state.ownership, user_id)
+            .ok()
+            .and_then(|response| response.skill);
+        if let Some(skill) = found {
+            matched.push((skill.id, skill.name));
+        }
+    }
+    if matched.is_empty() {
+        return Vec::new();
+    }
+    let skill_ids: Vec<String> = matched.iter().map(|(id, _)| id.clone()).collect();
+    let request = with_authorization(ListSkillBundlesRequest { skill_ids }, bearer);
+    match state.capability_client.clone().list_skill_bundles(request).await {
+        Ok(response) => skill_mounts_from_bundles(&matched, &response.into_inner().bundles),
+        Err(status) => {
+            tracing::warn!(code = ?status.code(), %org_id, "skill mounts: bundle listing failed");
+            Vec::new()
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn dispatch_tool_with_cost(
     state: &AppState,
@@ -2979,6 +3121,8 @@ async fn dispatch_tool_with_cost(
     data_plane_mode: Option<String>,
     // The turn's validated attached files; read by `code_interpreter` only.
     attachments: &crate::turn_attachments::ValidatedAttachments,
+    // The `/skills` mounts of the turn's matched skills; read by `code_interpreter` only (WS19-S8).
+    skill_mounts: &[SkillMount],
     // The loop's call budget for the inline injection pass (WS26-S6). `None` where no
     // inline pass can run: a direct dispatch, or a web call with no inference bearer.
     classifier_budget: Option<&crate::semantic_screening::ClassifierBudget>,
@@ -3067,6 +3211,7 @@ async fn dispatch_tool_with_cost(
                 &code,
                 files_in.as_ref(),
                 attachments.run_attachments(),
+                skill_mounts,
             )
             .await
             {
@@ -4683,6 +4828,7 @@ async fn dispatch_audited_tool(
     read_deadline: Option<tokio::time::Instant>,
     data_plane_mode: Option<String>,
     attachments: &crate::turn_attachments::ValidatedAttachments,
+    skill_mounts: &[SkillMount],
     classifier_budget: Option<&crate::semantic_screening::ClassifierBudget>,
     // The turn's connected-account selection, when the connected-app read is offered (WS23-S5).
     connector: Option<&connector_reads::ConnectorTurn>,
@@ -4753,6 +4899,7 @@ async fn dispatch_audited_tool(
                 cost_bearer,
                 data_plane_mode.clone(),
                 attachments,
+                skill_mounts,
                 classifier_budget,
                 connector,
             )
@@ -4899,6 +5046,8 @@ pub(crate) async fn dispatch_web_tool_audited(
         // Web tools only: code_interpreter, the sole reader of attached files, is
         // unreachable from this path.
         &crate::turn_attachments::ValidatedAttachments::none(),
+        // Web tools only: no skill bundle is mounted from this path either.
+        &[],
         None,
         // Web tools only: the connected-app read is never reached from this path.
         None,
@@ -6092,6 +6241,8 @@ pub async fn run_forced_web_search_for_model(
         data_plane_mode,
         // A forced `web_search` only: no sandbox call is reachable from here.
         &crate::turn_attachments::ValidatedAttachments::none(),
+        // A forced web search mounts no skill bundle.
+        &[],
         // No inline pass here: the forced search passes an empty inference bearer, and
         // `assess_external_payload` runs the inline pass only with one.
         None,
@@ -7359,6 +7510,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     // property of the turn, and a value re-derived per round is a value that can
     // disagree with itself mid-turn.
     let allow_paid_providers = paid_providers_allowed(requested_model, zdr);
+    // The turn's `/skills` mounts, read once for the turn (WS19-S8). The model names none of them.
+    let skill_mounts =
+        skill_mounts_for_turn(state, request_id, org_id, user_id, capability_bearer, zdr).await;
     // A turn with attached files tells the model, in the tool's own description,
     // where `code_interpreter` finds them. Only that tool, only on such a turn:
     // every other turn offers the unchanged definition.
@@ -8185,6 +8339,8 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         let data_plane_mode_ref = &data_plane_mode;
         // The same, for the turn's classifier budget: each per-call future copies the reference.
         let classifier_budget_ref = &classifier_budget;
+        // The same, for the turn's skill mounts: each per-call future copies the reference.
+        let skill_mounts_ref = &skill_mounts;
         let dispatched = futures::future::join_all(prepared.into_iter().map(
             |(call, is_duplicate, is_truncated)| async move {
                 if !offered_tools.iter().any(|tool| tool.name == call.name) {
@@ -8237,6 +8393,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     validation_deadline.filter(|_| stops_at_validation_deadline(&call.name)),
                     data_plane_mode_ref.clone(),
                     attachments,
+                    skill_mounts_ref,
                     Some(classifier_budget_ref),
                     connector_turn,
                 )
@@ -15164,5 +15321,92 @@ mod connector_scope_tests {
             inline_tool_allowed(READ_TOOL_NAME),
             "the one connected-account read is dispatchable"
         );
+    }
+}
+
+#[cfg(test)]
+mod skill_mount_tests {
+    use super::*;
+
+    const DIGEST_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DIGEST_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn bundle(skill_id: &str, digest: &str) -> SkillBundleSummary {
+        SkillBundleSummary {
+            skill_id: skill_id.to_owned(),
+            manifest_sha256: digest.to_owned(),
+            file_count: 2,
+            total_bytes: 10,
+            created_by: "admin".to_owned(),
+            created_at: "2026-10-01T00:00:00Z".to_owned(),
+        }
+    }
+
+    fn matched(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(id, name)| ((*id).to_owned(), (*name).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn skill_mounts_come_from_matched_skills_only() {
+        let turn = matched(&[("skill-a", "Deploy Runbook")]);
+        // skill-c has a bundle, but the turn did not match it, so it is never mounted.
+        let bundles = [bundle("skill-c", DIGEST_B), bundle("skill-a", DIGEST_A)];
+        assert_eq!(
+            skill_mounts_from_bundles(&turn, &bundles),
+            vec![SkillMount {
+                skill_id: "skill-a".to_owned(),
+                name: "deploy-runbook".to_owned(),
+                manifest_sha256: DIGEST_A.to_owned(),
+            }]
+        );
+        assert!(skill_mounts_from_bundles(&turn, &[bundle("skill-c", DIGEST_B)]).is_empty());
+    }
+
+    #[test]
+    fn a_mount_name_is_a_slug_and_a_reserved_name_is_never_mounted() {
+        assert_eq!(mount_name_for("Deploy Runbook!!").as_deref(), Some("deploy-runbook"));
+        assert_eq!(mount_name_for("  Budget_2026  ").as_deref(), Some("budget-2026"));
+        assert_eq!(mount_name_for("Skills"), None);
+        assert_eq!(mount_name_for("Attachments"), None);
+        assert_eq!(mount_name_for("!!!"), None);
+        let long = "a".repeat(80);
+        assert_eq!(mount_name_for(&long).map(|name| name.len()), Some(48));
+    }
+
+    #[test]
+    fn mounts_are_capped_deduplicated_and_digest_checked() {
+        let turn = matched(&[
+            ("s1", "Docx"),
+            ("s2", "Docx"),
+            ("s3", "Xlsx"),
+            ("s4", "Pdf"),
+            ("s5", "Slides"),
+        ]);
+        let bundles = [
+            bundle("s1", DIGEST_A),
+            bundle("s2", DIGEST_B),
+            bundle("s3", DIGEST_B),
+            bundle("s4", DIGEST_B),
+            bundle("s5", DIGEST_A),
+        ];
+        let names: Vec<String> = skill_mounts_from_bundles(&turn, &bundles)
+            .into_iter()
+            .map(|mount| mount.name)
+            .collect();
+        // The second "Docx" repeats a name and is skipped; the cap of three ends the list.
+        assert_eq!(names, ["docx", "xlsx", "pdf"]);
+        let malformed = [bundle("s1", "not-a-digest")];
+        assert!(skill_mounts_from_bundles(&matched(&[("s1", "Docx")]), &malformed).is_empty());
+    }
+
+    #[test]
+    fn the_switch_is_read_strictly() {
+        assert!(skill_bundle_mounts_enabled_from(Some("true")));
+        for raw in [None, Some(""), Some("True"), Some(" true"), Some("1"), Some("yes")] {
+            assert!(!skill_bundle_mounts_enabled_from(raw), "{raw:?}");
+        }
     }
 }

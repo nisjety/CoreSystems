@@ -953,6 +953,13 @@ async fn execute_step_inner(
         } else {
             None
         };
+        // The skill tree the step's mounts bind, read under the same rule as the attachments: a
+        // delegated child mounts none.
+        let skill_tree = if read_run_inputs {
+            crate::skill_mounts::global().get(org_id, run_id)
+        } else {
+            None
+        };
         // A Space run's code may write the Space tree, so it holds the run's workspace exclusively
         // for the call: no workspace read or edit of this run interleaves with it (WS24-S4). The call
         // can run to its timeout, and the exclusion is as long as that. A run with no Space has no tree.
@@ -967,6 +974,9 @@ async fn execute_step_inner(
             step_id,
             workspace_root.as_deref(),
             ro_inputs,
+            skill_tree
+                .as_deref()
+                .map(crate::skill_mounts::SkillTree::path),
         )
         .await
     } else if crate::process_tools::is_process_tool(tool_name) {
@@ -1291,9 +1301,17 @@ async fn execute_code_interpreter(
     step_id: &str,
     workspace_root: Option<&Path>,
     ro_inputs: Option<std::sync::Arc<crate::run_inputs::InputSet>>,
+    skills: Option<&Path>,
 ) -> tool_bridge::ToolExecution {
-    match crate::code_interpreter::run(tool_input, run_id, step_id, workspace_root, ro_inputs)
-        .await
+    match crate::code_interpreter::run_with_skills(
+        tool_input,
+        run_id,
+        step_id,
+        workspace_root,
+        ro_inputs,
+        skills,
+    )
+    .await
     {
         Ok(output) => tool_bridge::ToolExecution {
             output,

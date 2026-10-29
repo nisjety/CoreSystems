@@ -492,6 +492,13 @@ message ExecuteStepRequest {
   // nor alter an entry. Empty = nothing staged, which is today's behaviour. A
   // zero-retention step refuses a non-empty list at the boundary.
   repeated RunAttachment attachments = 12;
+
+  // Bundles of the skills this turn matched that have one, mounted read-only at
+  // /skills/<name> for this call (WS19-S8). The gateway derives them from the turn's
+  // own matches, never from the model's arguments; at most three. Field 13 is
+  // ExecuteStepRequest.thread_id (WS22-S2). A zero-retention step refuses a
+  // non-empty list at the boundary.
+  repeated SkillMount skill_mounts = 14;
 }
 
 // RunAttachmentKind — what a staged run input is.
@@ -522,6 +529,22 @@ message RunAttachment {
   // The file bytes.
   bytes content = 6;
   RunAttachmentKind kind = 7;
+}
+
+// SkillMount — one skill bundle to mount read-only for one call (WS19-S8). The
+// bytes are not carried: execution-core fetches each bundle from capability-core by
+// skill id and checks every digest against the manifest digest named here.
+message SkillMount {
+  // The org's skill whose bundle this is.
+  string skill_id = 1;
+
+  // Directory name under /skills/ inside the sandbox: lowercase ASCII letters,
+  // digits, '-' and '_', at most 48 bytes. Validated, never sanitized.
+  string name = 2;
+
+  // Lowercase hex SHA-256 of the bundle manifest the gateway read. The receiver
+  // refuses a bundle whose manifest digest differs.
+  string manifest_sha256 = 3;
 }
 
 // ExecuteStepResponse — result of a single step execution.
