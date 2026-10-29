@@ -3784,6 +3784,7 @@ async fn dispatch_tool_with_cost(
                     space_id: String::new(),
                     space_read_decision_ref: String::new(),
                     space_read_decision_token: String::new(),
+                    include_inactive: false,
                     // Unpaged (WS09-S8): the whole conversation in sequence order.
                     limit: 0,
                     before_message_id: String::new(),
@@ -5332,6 +5333,37 @@ pub struct ToolRounds {
     pub document_tool_failures: u32,
     /// Web citations emitted this turn (Sources-tab entries from `web_search`).
     pub web_citations: u32,
+    /// The provider calls of this phase that the turn's usage counts, in the order
+    /// they ran: each tool-decision round, then each artifact check. Priced by the
+    /// caller, which holds the catalogue. A call that failed reports no tokens and
+    /// is absent.
+    pub usage: Vec<crate::usage_meter::CallUsage>,
+}
+
+/// The usage of one provider call the tool phase made, as the provider reported
+/// it. The basis is the route's, or the serving provider's once it has answered.
+pub(crate) fn metered_call(
+    phase: crate::usage_meter::CallPhase,
+    response: &mp_contracts::model_plane::v1::InferResponse,
+    model: &str,
+    provider_hint: &str,
+    subscription_connection_id: &str,
+) -> crate::usage_meter::CallUsage {
+    crate::usage_meter::CallUsage {
+        phase,
+        model: if response.model_used.trim().is_empty() {
+            model.to_owned()
+        } else {
+            response.model_used.clone()
+        },
+        provider: response.provider_used.clone(),
+        basis: crate::pricing::CostBasis::of_route(provider_hint, subscription_connection_id)
+            .served_by(&response.provider_used),
+        input: i64::from(response.input_tokens),
+        output: i64::from(response.output_tokens),
+        cache_read: i64::from(response.cache_read_input_tokens),
+        cache_write: i64::from(response.cache_creation_input_tokens),
+    }
 }
 
 /// Keep tool selection from drafting an answer that this phase discards. This
@@ -6087,6 +6119,8 @@ pub async fn run_forced_web_search_for_model(
         tool_failures: u32::from(!forced_search_succeeded),
         document_tool_failures: 0,
         web_citations,
+        // A web lookup, not a model call: the search client bills no tokens.
+        usage: Vec::new(),
     })
 }
 
@@ -7309,6 +7343,8 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     let mut tool_failures: u32 = 0;
     let mut document_tool_failures: u32 = 0;
     let mut web_citations: u32 = 0;
+    // Every provider call this phase makes that the turn's usage counts.
+    let mut usage: Vec<crate::usage_meter::CallUsage> = Vec::new();
     let mut events = match sink {
         Some(sink) => ToolEvents::Live(sink),
         None => ToolEvents::Buffered(Vec::new()),
@@ -7745,6 +7781,15 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             (resp, Some(round))
         };
 
+        // The round's tokens are the provider's own counts. The route guard above has
+        // already accepted the answer, so a round a wrong provider answered is not billed.
+        usage.push(metered_call(
+            crate::usage_meter::CallPhase::ToolRound,
+            &resp,
+            model,
+            provider_hint,
+            subscription_connection_id,
+        ));
         let truncated_call_was_finish = resp.tool_calls.last().is_some_and(|call| call.name == FINISH_TOOL_PHASE);
         let finish_proposed = resp.tool_calls.iter().any(|call| call.name == FINISH_TOOL_PHASE);
         let phase_finished = take_tool_phase_signal(&mut resp.tool_calls);
@@ -7936,16 +7981,31 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             // an earlier round's own, never-durably-committed review.
             let prior_review = before.as_deref()
                 .and_then(|_| state.artifact_review_base.prior_review(thread_id, &resolved_id));
+            // Every review or repair candidate that answered is a billed overhead call. It is
+            // kept even when the check is cut short, because its tokens were spent.
+            let check_usage: std::sync::Mutex<Vec<crate::usage_meter::CallUsage>> = std::sync::Mutex::new(Vec::new());
             let checked = crate::source_validation::check_artifact(settings, source_context.as_ref(), &request, &turn_question,
                 before.as_deref(), prior_review.as_ref(), &content, |request| {
                     let mut client = state.inference_client.clone();
                     // Classified by the id the review/repair code minted.
                     let call = check_clock.as_ref().map(|clock| clock.call(&request.request_id));
                     let request = with_authorization(request, inference_bearer);
+                    let check_usage = &check_usage;
                     async move {
                         let response = crate::result_validation::infer_candidate(&mut client, request).await;
                         if let Some(call) = call {
                             call.finish_response(&response);
+                        }
+                        if let Ok(answered) = &response {
+                            if let Ok(mut recorded) = check_usage.lock() {
+                                recorded.push(metered_call(
+                                    crate::usage_meter::CallPhase::Overhead,
+                                    answered,
+                                    model,
+                                    provider_hint,
+                                    subscription_connection_id,
+                                ));
+                            }
                         }
                         response
                     }
@@ -7985,6 +8045,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     Some(_) => "failed",
                 });
             }
+            usage.extend(check_usage.into_inner().unwrap_or_default());
             let (content, review) = checked?;
             if let Some(timing) = timing {
                 timing.mark(crate::turn_timing::Mark::FirstValidated);
@@ -8415,6 +8476,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         tool_failures,
         document_tool_failures,
         web_citations,
+        usage,
     })
 }
 
@@ -11189,6 +11251,7 @@ mod tests {
             tool_failures: 0,
             document_tool_failures: 0,
             web_citations: 0,
+            usage: Vec::new(),
         };
         assert_eq!(rounds.resolved_model.as_deref(), Some("claude-sonnet-4-6"));
     }

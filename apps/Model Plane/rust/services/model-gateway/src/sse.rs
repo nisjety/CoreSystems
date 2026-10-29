@@ -3241,6 +3241,8 @@ pub async fn invoke_stream_sse(
         // (population, prices, news, recent years) gets a guaranteed up-front
         // search; every other query keeps web_search in the loop's tool set
         // and the model decides whether the answer needs fresh data.
+        // Every provider call of the tool phase that the turn's usage counts.
+        let mut tool_usage: Vec<crate::usage_meter::CallUsage> = Vec::new();
         if web_search_signal
             && !deep_research_ran
             && tool_defs.iter().any(|tool| tool.name == "web_search")
@@ -3302,6 +3304,7 @@ pub async fn invoke_stream_sse(
             turn_evidence.tool_failures += forced.tool_failures;
             turn_evidence.web_citations += forced.web_citations;
             messages = forced.messages;
+            tool_usage.extend(forced.usage);
             // web_search deliberately STAYS in the loop. It used to be
             // withheld here, which capped a forced turn at exactly one search:
             // when the first query missed the figure — "hvor mange innbyggere
@@ -3453,6 +3456,7 @@ pub async fn invoke_stream_sse(
             turn_evidence.web_citations += rounds.web_citations;
             document_tool_failures = rounds.document_tool_failures;
             messages = rounds.messages;
+            tool_usage.extend(rounds.usage);
             last_round_tools = rounds.last_round_tools;
             // Intent modes retain their resolved model. A subscription remains
             // pinned to the selected model and connection throughout the turn.
@@ -3601,6 +3605,8 @@ pub async fn invoke_stream_sse(
         // word-range candidates time their own calls below.
         let mut answer_call = (artifact_completion.is_none() && word_range.is_none())
             .then(|| timing.call(crate::turn_timing::Phase::AnswerStream));
+        // A synthetic artifact answer makes no provider call, so it adds no call to the turn.
+        let answer_provider_call = artifact_completion.is_none();
         let mut length_retries: usize = 0;
         let stream: Option<std::pin::Pin<Box<dyn Stream<Item = Result<mp_contracts::model_plane::v1::InferChunk, tonic::Status>> + Send>>> =
         if let Some((summary, mut receipt)) = artifact_completion {
@@ -3878,6 +3884,7 @@ pub async fn invoke_stream_sse(
                 &timing,
                 head_summary.as_ref(),
                 retention_class,
+                &tool_usage,
             )
             .await;
             finish_stream_registrations(&cancels, &queued_inputs, &req_id);
@@ -4161,6 +4168,17 @@ pub async fn invoke_stream_sse(
                     } else {
                         chunk.model_used.clone()
                     };
+                    // The answer as the turn's usage counts it; a synthetic answer made no call.
+                    let answer_call = answer_provider_call.then(|| crate::usage_meter::CallUsage {
+                        phase: crate::usage_meter::CallPhase::Answer,
+                        model: model_used.clone(),
+                        provider: provider_used.clone(),
+                        basis: cost_basis,
+                        input: i64::from(input_tokens),
+                        output: i64::from(output_tokens),
+                        cache_read: i64::from(cache_read_tokens),
+                        cache_write: i64::from(cache_creation_tokens),
+                    });
                     let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
                     // inference-core sets this ONLY when the provider connection
                     // broke before any proper termination signal arrived — a
@@ -4362,6 +4380,7 @@ pub async fn invoke_stream_sse(
                                         &snippets,
                                         &inference_bearer,
                                         effective_zdr,
+                                        &sink,
                                     )
                                     .await;
                                     timing.provider_interval(judge_started, 1);
@@ -4476,6 +4495,7 @@ pub async fn invoke_stream_sse(
                                     &snippets,
                                     &inference_bearer,
                                     effective_zdr,
+                                    &sink,
                                 )
                                 .await;
                                 timing.provider_interval(judge_started, 1);
@@ -4519,6 +4539,7 @@ pub async fn invoke_stream_sse(
                                 output_tokens.try_into().unwrap_or(i32::MAX),
                                 &inference_bearer,
                                 effective_zdr,
+                                &sink,
                             )
                             .await;
                             // One call per sample; a failed sample ends the set.
@@ -4970,6 +4991,31 @@ pub async fn invoke_stream_sse(
                         cache_creation_tokens,
                         cost_basis,
                     );
+                    // Read only now: the verification pass above records its judge and resample
+                    // calls, and a read before it would leave them out of the rows and the total.
+                    let overhead = sink.overhead_usage();
+                    // Under the switch, every call of the turn other than its answer gets a ledger row
+                    // of its own and the chat rows name the run, so the run endpoint sums the turn.
+                    if turn_usage_complete_switch() {
+                        let calls: Vec<&crate::usage_meter::CallUsage> =
+                            tool_usage.iter().chain(overhead.iter()).collect();
+                        for row in turn_call_rows(
+                            &req_id,
+                            &session_run_for_terminal.run_id,
+                            &org_clone,
+                            &user_clone,
+                            min_privacy_tier_wire,
+                            &calls,
+                        ) {
+                            if let Err(e) = publisher
+                                .publish(&subjects::usage_subject(&org_clone), &row)
+                                .await
+                            {
+                                tracing::warn!(error = %e, "failed to publish a turn call's USAGE_ENVELOPE");
+                            }
+                        }
+                        usage_envelope.payload["run_id"] = json!(session_run_for_terminal.run_id);
+                    }
                     // A summary as of now, beside the unchanged `latency_ms`.
                     usage_envelope.payload["timing"] = timing.summary();
                     if let Some(reason) = cache_telemetry::miss_reason_for_turn(
@@ -5009,16 +5055,9 @@ pub async fn invoke_stream_sse(
                     // prices (`CostBasis`). Phase 7 B6 — confidence is a heuristic
                     // answer-quality score over the real completion (grounded =
                     // carried citations).
-                    let cost_usd = pricing
-                        .cost_usd_for(
-                            cost_basis,
-                            &model_used,
-                            i64::from(input_tokens),
-                            i64::from(output_tokens),
-                            i64::from(cache_read_tokens),
-                            i64::from(cache_creation_tokens),
-                        )
-                        .await;
+                    // The turn's total: every call of the tool phase, the overhead calls and the answer.
+                    let turn = turn_usage(&pricing, &tool_usage, &overhead, answer_call.clone()).await;
+                    let cost_usd = frame_cost_usd(&turn);
                     // Evidence is COUNTED, not a boolean: tool successes/failures
                     // and web citations were accumulated as the turn ran, and KB
                     // citations + session-core assembly grounding join here. The
@@ -5090,16 +5129,19 @@ pub async fn invoke_stream_sse(
                         .await;
                     }
                     let usage_event = crate::sse_events::ChatEvent::Usage {
-                        cache_read_tokens: cache_read_tokens,
-                        cache_write_tokens: cache_creation_tokens,
-                        input_tokens,
-                        output_tokens,
+                        cache_read_tokens: saturating_u32(turn.cache_read),
+                        cache_write_tokens: saturating_u32(turn.cache_write),
+                        input_tokens: saturating_u32(turn.input),
+                        output_tokens: saturating_u32(turn.output),
                         cost_usd,
-                        cost_basis: Some(cost_basis),
+                        cost_basis: turn.basis,
                         latency_ms,
                         confidence,
                         served_by,
                         retention_class,
+                        calls: turn.calls,
+                        unpriced_calls: turn.unpriced_calls,
+                        cost_by_category: turn.by_category,
                     };
                     emit_and_buffer(
                         &tx,
@@ -6316,6 +6358,7 @@ async fn load_recent_thread_messages(
             space_id: String::new(),
             space_read_decision_ref: String::new(),
             space_read_decision_token: String::new(),
+            include_inactive: false,
             // Unpaged (WS09-S8): the whole conversation in sequence order.
             limit: 0,
             before_message_id: String::new(),
@@ -7556,6 +7599,8 @@ async fn run_infer_fallback(
     head_summary: Option<&crate::compaction::NewHeadSummary>,
     // How the answer's content is retained, stated on its usage frame.
     retention_class: Option<crate::sse_events::RetentionClass>,
+    // The tool phase's provider calls, which the fallback answer's total includes.
+    tool_usage: &[crate::usage_meter::CallUsage],
 ) {
     let publisher = state.publisher.clone();
     let buffers = state.stream_buffers.clone();
@@ -7988,6 +8033,26 @@ async fn run_infer_fallback(
                 cache_creation_tokens,
                 cost_basis,
             );
+            // Under the switch, the tool phase's calls get ledger rows of their own and the row names the run.
+            if turn_usage_complete_switch() {
+                let calls: Vec<&crate::usage_meter::CallUsage> = tool_usage.iter().collect();
+                for row in turn_call_rows(
+                    request_id,
+                    &run.run_id,
+                    org_id,
+                    user_id,
+                    min_privacy_tier,
+                    &calls,
+                ) {
+                    if let Err(e) = publisher
+                        .publish(&subjects::usage_subject(org_id), &row)
+                        .await
+                    {
+                        tracing::warn!(error = %e, "failed to publish a turn call's USAGE_ENVELOPE");
+                    }
+                }
+                usage.payload["run_id"] = json!(run.run_id);
+            }
             usage.payload["timing"] = timing.summary();
             if let Some(reason) = cache_telemetry::miss_reason_for_turn(
                 cache_prefix.filter(|_| cost_basis != crate::pricing::CostBasis::Subscription),
@@ -8008,25 +8073,32 @@ async fn run_infer_fallback(
             // source as the durable ledger); `None` only when unreachable, and
             // never a list price on a subscription turn.
             // Phase 7 B6 — confidence is the heuristic answer-quality score.
-            let cost_usd = state
-                .pricing
-                .cost_usd_for(
-                    cost_basis,
-                    &model_used,
-                    i64::from(input_tokens),
-                    i64::from(output_tokens),
-                    i64::from(cache_read_tokens),
-                    i64::from(cache_creation_tokens),
-                )
-                .await;
+            // The turn's total: the tool phase's calls and this answer, which made one call.
+            let turn = turn_usage(
+                &state.pricing,
+                tool_usage,
+                &[],
+                Some(crate::usage_meter::CallUsage {
+                    phase: crate::usage_meter::CallPhase::Answer,
+                    model: model_used.clone(),
+                    provider: resp.provider_used.clone(),
+                    basis: cost_basis,
+                    input: i64::from(input_tokens),
+                    output: i64::from(output_tokens),
+                    cache_read: i64::from(cache_read_tokens),
+                    cache_write: i64::from(cache_creation_tokens),
+                }),
+            )
+            .await;
+            let cost_usd = frame_cost_usd(&turn);
             // Scored above, before the persist.
             let usage_event = crate::sse_events::ChatEvent::Usage {
-                cache_read_tokens: cache_read_tokens,
-                cache_write_tokens: cache_creation_tokens,
-                input_tokens,
-                output_tokens,
+                cache_read_tokens: saturating_u32(turn.cache_read),
+                cache_write_tokens: saturating_u32(turn.cache_write),
+                input_tokens: saturating_u32(turn.input),
+                output_tokens: saturating_u32(turn.output),
                 cost_usd,
-                cost_basis: Some(cost_basis),
+                cost_basis: turn.basis,
                 latency_ms,
                 confidence,
                 // From the unary response this fallback answered with, under
@@ -8037,6 +8109,9 @@ async fn run_infer_fallback(
                     min_privacy_tier,
                 ),
                 retention_class,
+                calls: turn.calls,
+                unpriced_calls: turn.unpriced_calls,
+                cost_by_category: turn.by_category,
             };
             // Buffered like the chunks around it, so a resumed fallback turn
             // replays its tokens, latency, confidence and cost basis too.
@@ -8751,6 +8826,7 @@ async fn read_latest_assistant(
             space_id: String::new(),
             space_read_decision_ref: String::new(),
             space_read_decision_token: String::new(),
+            include_inactive: false,
             // Unpaged (WS09-S8): the whole conversation in sequence order.
             limit: 0,
             before_message_id: String::new(),
@@ -8825,6 +8901,8 @@ struct StatedCost {
     /// The answer's cost in USD; `None` when its model's price is unknown.
     usd: Option<f64>,
     basis: crate::pricing::CostBasis,
+    /// The parts of `usd`, present exactly when `usd` is a priced total.
+    by_category: Option<crate::pricing::CategoryCost>,
 }
 
 /// The privacy floor a persistence-free turn enforced: the caller's own minimum
@@ -9105,6 +9183,7 @@ async fn judge_sources(
     snippets: &[String],
     inference_bearer: &VerifiedInferenceBearer,
     zdr: bool,
+    sink: &crate::sse_events::RichEventSink,
 ) -> crate::verification::SourceVerdict {
     use crate::verification::SourceVerdict;
     if snippets.is_empty() {
@@ -9120,7 +9199,17 @@ async fn judge_sources(
     )
     .await;
     match response {
-        Ok(Ok(resp)) => crate::verification::parse_verdict(&resp.into_inner().content),
+        Ok(Ok(resp)) => {
+            let resp = resp.into_inner();
+            sink.record_overhead(crate::tool_loop::metered_call(
+                crate::usage_meter::CallPhase::Overhead,
+                &resp,
+                &route.model,
+                &route.provider_hint,
+                &route.subscription_connection_id,
+            ));
+            crate::verification::parse_verdict(&resp.content)
+        }
         Ok(Err(error)) => {
             tracing::debug!(%error, %request_id, "source judge failed; treating as unconfirmed");
             SourceVerdict::Unrelated
@@ -9152,6 +9241,7 @@ async fn resample_answer(
     max_tokens: i32,
     inference_bearer: &VerifiedInferenceBearer,
     zdr: bool,
+    sink: &crate::sse_events::RichEventSink,
 ) -> Vec<String> {
     let mut samples = Vec::new();
     for index in 0..crate::verification::SELF_CONSISTENCY_SAMPLES {
@@ -9182,7 +9272,19 @@ async fn resample_answer(
         request.metadata_mut().insert("cache-control", "no-store".parse().expect("static metadata"));
         let response = tokio::time::timeout(VERIFICATION_JUDGE_TIMEOUT, client.infer(request)).await;
         match response {
-            Ok(Ok(resp)) => samples.push(resp.into_inner().content),
+            Ok(Ok(resp)) => {
+                let resp = resp.into_inner();
+                // Recorded as each draw answers: a failed draw ends the set, but the draws
+                // that answered before it were billed.
+                sink.record_overhead(crate::tool_loop::metered_call(
+                    crate::usage_meter::CallPhase::Overhead,
+                    &resp,
+                    model,
+                    &route.provider_hint,
+                    &route.subscription_connection_id,
+                ));
+                samples.push(resp.content);
+            }
             _ => {
                 tracing::debug!(%request_id, "resample failed; skipping self-consistency");
                 return Vec::new();
@@ -9658,6 +9760,7 @@ async fn zdr_stated_cost(
     StatedCost {
         usd: priced.usd,
         basis,
+        by_category: priced.by_category,
     }
 }
 
@@ -9803,15 +9906,17 @@ fn zdr_answer_stream(
     // tier the call was made under. It carries counts and provenance only, never
     // content. The cost and the cache counts it was priced from are stated only when
     // the cost switch priced this answer; persisting a ZDR turn's cost is DEF-Z-06b.
-    let (cost_usd, cost_basis, cache_read_tokens, cache_write_tokens) = match stated_cost {
-        Some(stated) => (
-            stated.usd,
-            Some(stated.basis),
-            answer.cache_read_tokens,
-            answer.cache_write_tokens,
-        ),
-        None => (None, None, 0, 0),
-    };
+    let (cost_usd, cost_basis, cache_read_tokens, cache_write_tokens, cost_by_category) =
+        match stated_cost {
+            Some(stated) => (
+                stated.usd,
+                Some(stated.basis),
+                answer.cache_read_tokens,
+                answer.cache_write_tokens,
+                stated.by_category,
+            ),
+            None => (None, None, 0, 0, None),
+        };
     let usage = crate::sse_events::ChatEvent::Usage {
         cache_read_tokens,
         cache_write_tokens,
@@ -9827,6 +9932,10 @@ fn zdr_answer_stream(
             zdr_enforced_floor(min_privacy_tier),
         ),
         retention_class: Some(crate::sse_events::RetentionClass::Zdr),
+        // The one call a ZDR turn makes. A cost that is not stated is a call the total does not cover.
+        calls: 1,
+        unpriced_calls: u32::from(cost_usd.is_none()),
+        cost_by_category,
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -12269,6 +12378,10 @@ fn agentic_run_stream(
             cost_usd: None,
             // Nor its basis: no price is established here.
             cost_basis: None,
+            // Every round of the run is a call whose price is not established here.
+            calls: run_usage.inference_rounds,
+            unpriced_calls: run_usage.inference_rounds,
+            cost_by_category: None,
             latency_ms,
             confidence: crate::confidence::score(
                 &final_text,
@@ -12407,6 +12520,106 @@ const AGENT_USAGE_ENVELOPE_ENV: &str = "MODEL_GATEWAY_AGENT_USAGE_ENVELOPE";
 
 fn agent_usage_envelope_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
     lookup(AGENT_USAGE_ENVELOPE_ENV).as_deref() == Some("true")
+}
+
+/// Switch for a chat turn's own ledger rows (WS27 S2): one row for each tool-decision round
+/// and overhead call, and the run id on every chat row. Only the literal `true` enables it,
+/// and it is read per turn, so a restart is not needed to turn it off.
+const TURN_USAGE_COMPLETE_ENV: &str = "MODEL_GATEWAY_TURN_USAGE_COMPLETE";
+
+fn turn_usage_complete_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+    lookup(TURN_USAGE_COMPLETE_ENV).as_deref() == Some("true")
+}
+
+/// The switch as this process's environment states it. Both turn paths read it through here, so
+/// the handler itself reads no environment.
+fn turn_usage_complete_switch() -> bool {
+    turn_usage_complete_enabled(&|key| std::env::var(key).ok())
+}
+
+/// The turn's usage as one meter: every call of the tool phase, the overhead calls beside the
+/// answer, then the answer when it made a provider call of its own. The catalogue is read once,
+/// so every call is priced against the same rates.
+async fn turn_usage(
+    pricing: &crate::pricing::PricingCache,
+    tool_calls: &[crate::usage_meter::CallUsage],
+    overhead: &[crate::usage_meter::CallUsage],
+    answer: Option<crate::usage_meter::CallUsage>,
+) -> crate::usage_meter::Snapshot {
+    let rates = pricing.snapshot().await;
+    let mut meter = crate::usage_meter::UsageMeter::default();
+    for call in tool_calls.iter().chain(overhead) {
+        meter.record(call, &rates.priced(call.basis, &call.model, call.legs()));
+    }
+    match answer {
+        Some(call) => meter.record(&call, &rates.priced(call.basis, &call.model, call.legs())),
+        None => meter.snapshot(),
+    }
+}
+
+/// The cost a usage frame states: the metered total, `0.0` for a turn the subscription carried
+/// (older clients read that field), or null when a metered call's price is unknown.
+fn frame_cost_usd(turn: &crate::usage_meter::Snapshot) -> Option<f64> {
+    turn.cost_usd
+        .or_else(|| (turn.basis == Some(crate::pricing::CostBasis::Subscription)).then_some(0.0))
+}
+
+/// The ledger rows of a turn's calls other than its answer, one per call and stamped with the
+/// turn's run, so cost-core's run endpoint sums the whole turn. A tool-decision round is keyed
+/// `-r{n}` and an overhead call `-o{n}`, so a retry keys every row identically.
+fn turn_call_rows(
+    request_id: &str,
+    run_id: &str,
+    org_id: &str,
+    user_id: &str,
+    min_privacy_tier: i32,
+    calls: &[&crate::usage_meter::CallUsage],
+) -> Vec<Envelope> {
+    let mut rounds = 0usize;
+    let mut overhead = 0usize;
+    let mut rows = Vec::new();
+    for call in calls {
+        let (tag, index) = match call.phase {
+            crate::usage_meter::CallPhase::ToolRound => {
+                rounds += 1;
+                ('r', rounds)
+            }
+            crate::usage_meter::CallPhase::Overhead => {
+                overhead += 1;
+                ('o', overhead)
+            }
+            // The answer keeps its own row, and the agent's rounds are another path's.
+            crate::usage_meter::CallPhase::Answer | crate::usage_meter::CallPhase::AgentRound => {
+                continue;
+            }
+        };
+        let mut row = build_usage_envelope(
+            request_id,
+            org_id,
+            user_id,
+            &call.model,
+            ledger_tokens(call.input),
+            ledger_tokens(call.output),
+            // Per-call latency is not measured; the turn's latency rides on its answer row.
+            0,
+            min_privacy_tier,
+            call.provider.clone(),
+            // No residency is reported for a call other than the answer, and none is guessed.
+            String::new(),
+            ledger_tokens(call.cache_read),
+            ledger_tokens(call.cache_write),
+            call.basis,
+        );
+        row.idempotency_key = format!("{request_id}-USAGE_ENVELOPE-{tag}{index}");
+        row.payload["run_id"] = json!(run_id);
+        rows.push(row);
+    }
+    rows
+}
+
+/// A token count as a ledger field: a negative count is nothing, an overflowing one the maximum.
+fn ledger_tokens(tokens: i64) -> u32 {
+    u32::try_from(tokens.max(0)).unwrap_or(u32::MAX)
 }
 
 fn saturating_u32(tokens: u64) -> u32 {
@@ -13089,6 +13302,7 @@ mod tests {
         agent_persona_message, agent_subscription_failure, authored_instructions_message,
         build_stream_envelope,
         build_usage_envelope, classify_agentic_run_outcome, dispatch_never_reached_execution_core,
+        frame_cost_usd, turn_call_rows, turn_usage, turn_usage_complete_enabled,
         approved_plan_is_for, format_approved_plan_block, is_confirmed_agent_dispatch_rejection,
         latest_proposed_plan, orchestration_event_to_step_update, sanitize_follow_up_suggestions,
         sanitize_thread_title, stream_ended_with_no_content, AgenticRunOutcome, PlanState,
@@ -14113,6 +14327,210 @@ mod tests {
         assert!(env.idempotency_key.contains("req-ABC"));
         // resource_ref ties the event to the request, not a random id.
         assert!(env.resource_ref.contains("req-ABC"));
+    }
+
+    /// Rates for the turn tests: `mock` at 1 and 2 USD per million input and output tokens.
+    async fn turn_test_pricing(server: &wiremock::MockServer) -> crate::pricing::PricingCache {
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/pricing"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "rates": [
+                    { "model": "default", "input_per_million": 3.0, "output_per_million": 15.0 },
+                    { "model": "mock", "input_per_million": 1.0, "output_per_million": 2.0 },
+                ],
+            })))
+            .mount(server)
+            .await;
+        crate::pricing::PricingCache::new(Some(server.uri()), reqwest::Client::new())
+    }
+
+    fn turn_call(
+        phase: crate::usage_meter::CallPhase,
+        model: &str,
+        basis: crate::pricing::CostBasis,
+        input: i64,
+        output: i64,
+    ) -> crate::usage_meter::CallUsage {
+        crate::usage_meter::CallUsage {
+            phase,
+            model: model.to_owned(),
+            provider: String::new(),
+            basis,
+            input,
+            output,
+            cache_read: 0,
+            cache_write: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_turn_totals_every_call_it_made_once() {
+        use crate::pricing::CostBasis::Metered;
+        use crate::usage_meter::CallPhase::{Answer, Overhead, ToolRound};
+        let server = wiremock::MockServer::start().await;
+        let pricing = turn_test_pricing(&server).await;
+        let rounds = [turn_call(ToolRound, "mock", Metered, 1_000, 100)];
+        let overhead = [turn_call(Overhead, "mock", Metered, 500, 50)];
+        let turn = turn_usage(
+            &pricing,
+            &rounds,
+            &overhead,
+            Some(turn_call(Answer, "mock", Metered, 42, 7)),
+        )
+        .await;
+        assert_eq!((turn.calls, turn.unpriced_calls), (3, 0));
+        assert_eq!((turn.input, turn.output), (1_542, 157));
+        let want = (1_542.0 * 1.0 + 157.0 * 2.0) / 1_000_000.0;
+        let cost = frame_cost_usd(&turn).expect("every call is priced");
+        assert!((cost - want).abs() < 1e-12, "got {cost}, want {want}");
+        let parts = turn.by_category.expect("a priced total states its parts");
+        assert!((parts.total() - want).abs() < 1e-12);
+    }
+
+    #[tokio::test]
+    async fn one_unpriced_call_nulls_the_turn_total_and_is_counted() {
+        use crate::pricing::CostBasis::Metered;
+        use crate::usage_meter::CallPhase::{Answer, ToolRound};
+        let server = wiremock::MockServer::start().await;
+        let pricing = turn_test_pricing(&server).await;
+        let rounds = [turn_call(ToolRound, "mock", Metered, 1_000, 100)];
+        let turn = turn_usage(
+            &pricing,
+            &rounds,
+            &[],
+            Some(turn_call(Answer, "a-model-the-catalogue-does-not-list", Metered, 42, 7)),
+        )
+        .await;
+        assert_eq!((turn.calls, turn.unpriced_calls), (2, 1));
+        assert_eq!(frame_cost_usd(&turn), None, "never a partial sum");
+        assert_eq!(turn.by_category, None);
+    }
+
+    #[tokio::test]
+    async fn a_subscription_turn_keeps_its_zero_cost_and_states_no_breakdown() {
+        use crate::pricing::CostBasis::Subscription;
+        use crate::usage_meter::CallPhase::Answer;
+        let server = wiremock::MockServer::start().await;
+        let pricing = turn_test_pricing(&server).await;
+        let turn = turn_usage(
+            &pricing,
+            &[],
+            &[],
+            Some(turn_call(Answer, "mock", Subscription, 42, 7)),
+        )
+        .await;
+        assert_eq!((turn.calls, turn.unpriced_calls), (1, 0));
+        assert_eq!(frame_cost_usd(&turn), Some(0.0), "included in the subscription, read as 0.0");
+        assert_eq!(turn.by_category, None);
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_made_no_call_adds_nothing_to_the_turn() {
+        let server = wiremock::MockServer::start().await;
+        let pricing = turn_test_pricing(&server).await;
+        let turn = turn_usage(&pricing, &[], &[], None).await;
+        assert_eq!((turn.calls, turn.input, turn.output), (0, 0, 0));
+        assert_eq!(frame_cost_usd(&turn), None);
+    }
+
+    #[tokio::test]
+    async fn overhead_calls_are_recorded_once() {
+        use crate::pricing::CostBasis::Metered;
+        use crate::usage_meter::CallPhase::{Answer, Overhead, ToolRound};
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let sink = crate::sse_events::RichEventSink::new(tx, Vec::new(), "req-overhead".to_owned());
+        // The site that made the call names its phase wrongly; the sink corrects it.
+        sink.record_overhead(turn_call(ToolRound, "mock", Metered, 500, 50));
+        let recorded = sink.overhead_usage();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].phase, Overhead);
+        let server = wiremock::MockServer::start().await;
+        let pricing = turn_test_pricing(&server).await;
+        let turn = turn_usage(
+            &pricing,
+            &[],
+            &recorded,
+            Some(turn_call(Answer, "mock", Metered, 42, 7)),
+        )
+        .await;
+        assert_eq!(turn.calls, 2, "the overhead call and the answer, each once");
+    }
+
+    /// A judge or resample call the verification pass records reaches the turn's frame and its
+    /// ledger row under its own key, with its own tokens and price.
+    #[tokio::test]
+    async fn a_recorded_overhead_call_reaches_the_frame_and_its_row() {
+        use crate::pricing::CostBasis::Metered;
+        use crate::usage_meter::CallPhase::{Answer, Overhead};
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let sink = crate::sse_events::RichEventSink::new(tx, Vec::new(), "req-judge".to_owned());
+        sink.record_overhead(turn_call(Overhead, "mock", Metered, 500, 50));
+        let overhead = sink.overhead_usage();
+        let server = wiremock::MockServer::start().await;
+        let pricing = turn_test_pricing(&server).await;
+        let turn = turn_usage(
+            &pricing,
+            &[],
+            &overhead,
+            Some(turn_call(Answer, "mock", Metered, 42, 7)),
+        )
+        .await;
+        assert_eq!((turn.calls, turn.input, turn.output), (2, 542, 57));
+        let want = (542.0 * 1.0 + 57.0 * 2.0) / 1_000_000.0;
+        let cost = frame_cost_usd(&turn).expect("both calls are priced");
+        assert!((cost - want).abs() < 1e-12, "got {cost}, want {want}");
+
+        let calls: Vec<&crate::usage_meter::CallUsage> = overhead.iter().collect();
+        let rows = turn_call_rows("req-judge", "run-judge", "org_test", "user_test", 0, &calls);
+        assert_eq!(rows.len(), 1, "the overhead call has a row of its own");
+        assert_eq!(rows[0].idempotency_key, "req-judge-USAGE_ENVELOPE-o1");
+        assert_eq!(rows[0].payload["input_tokens"], 500);
+        assert_eq!(rows[0].payload["output_tokens"], 50);
+    }
+
+    #[test]
+    fn the_turn_switch_is_on_only_for_the_literal_true() {
+        let with = |value: Option<&str>| {
+            let value = value.map(str::to_owned);
+            turn_usage_complete_enabled(&|key| {
+                assert_eq!(key, "MODEL_GATEWAY_TURN_USAGE_COMPLETE");
+                value.clone()
+            })
+        };
+        assert!(with(Some("true")));
+        for off in [None, Some(""), Some("1"), Some("TRUE"), Some(" true"), Some("false")] {
+            assert!(!with(off), "{off:?} must not enable it");
+        }
+    }
+
+    #[test]
+    fn call_rows_are_keyed_per_round_and_per_overhead_call_and_name_the_run() {
+        use crate::pricing::CostBasis::Metered;
+        use crate::usage_meter::CallPhase::{Answer, Overhead, ToolRound};
+        let first = turn_call(ToolRound, "mock", Metered, 1_000, 100);
+        let second = turn_call(ToolRound, "mock", Metered, 900, 90);
+        let check = turn_call(Overhead, "mock", Metered, 500, 50);
+        let answer = turn_call(Answer, "mock", Metered, 42, 7);
+        let rows = turn_call_rows(
+            "req-rows",
+            "run-rows",
+            "org_test",
+            "user_test",
+            0,
+            &[&first, &second, &check, &answer],
+        );
+        let keys: Vec<&str> = rows.iter().map(|row| row.idempotency_key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "req-rows-USAGE_ENVELOPE-r1",
+                "req-rows-USAGE_ENVELOPE-r2",
+                "req-rows-USAGE_ENVELOPE-o1",
+            ],
+            "the answer keeps its own row and is not listed here"
+        );
+        assert!(rows.iter().all(|row| row.payload["run_id"] == "run-rows"));
+        assert_eq!(rows[0].payload["input_tokens"], 1_000);
     }
 
     #[test]
@@ -16146,6 +16564,7 @@ mod zdr_provenance_tests {
         assert_eq!(
             keys,
             [
+                "calls",
                 "confidence",
                 "cost_usd",
                 "input_tokens",
@@ -16155,6 +16574,7 @@ mod zdr_provenance_tests {
                 "provider_used",
                 "residency",
                 "retention_class",
+                "unpriced_calls",
             ]
         );
     }
@@ -16316,6 +16736,7 @@ mod zdr_provenance_tests {
         let stated = StatedCost {
             usd: Some(0.0042),
             basis: crate::pricing::CostBasis::Metered,
+            by_category: None,
         };
         let out = frames(zdr_answer_stream(
             "req-zdr".to_owned(),
@@ -16351,6 +16772,7 @@ mod zdr_provenance_tests {
         let stated = StatedCost {
             usd: None,
             basis: crate::pricing::CostBasis::Metered,
+            by_category: None,
         };
         let out = frames(zdr_answer_stream(
             "req-zdr".to_owned(),
@@ -21480,6 +21902,19 @@ mod execute_turn_tests {
             !invoke.contains("env::var"),
             "the handler reads no environment: the switch is the plan store's, read once"
         );
+    }
+
+    /// The verification pass records the judge and resample calls it makes, so the overhead is
+    /// read after it: an earlier read would leave those calls out of the frame and its rows.
+    #[test]
+    fn the_overhead_is_read_after_the_verification_pass() {
+        let invoke = code_of("pub async fn invoke_stream_sse(", "\n}\n");
+        let verified = invoke
+            .find("crate::sse_events::ChatEvent::Verification {")
+            .expect("the verification pass emits its verdict");
+        let read = invoke.find("sink.overhead_usage()").expect("the overhead is read");
+        assert!(verified < read, "the verification pass runs before the overhead is read");
+        assert_eq!(invoke.matches("sink.overhead_usage()").count(), 1);
     }
 
     /// The gauge's one owner: the handler opens exactly one guard and its producer task holds it.

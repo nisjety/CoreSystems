@@ -2085,6 +2085,36 @@ describe('turn_timing, cost_basis and result_receipt', () => {
     expect(onTurnTiming).not.toHaveBeenCalled()
     expect(onDone).toHaveBeenCalledTimes(1)
   })
+
+  it('passes the turn totals of a usage frame through, and states none for an older frame', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([
+      frame('usage', {
+        input_tokens: 2042,
+        output_tokens: 207,
+        cost_usd: 0.002456,
+        cost_basis: 'metered',
+        latency_ms: 900,
+        calls: 3,
+        unpriced_calls: 0,
+        cost_by_category: { input_usd: 0.002, cache_read_usd: 0, cache_write_usd: 0, output_usd: 0.000456 },
+      }),
+      frame('usage', { cost_usd: null, calls: 2, unpriced_calls: 1 }),
+      frame('usage', { cost_usd: 0.0031, cost_by_category: { input_usd: 0.001 } }),
+      frame('done', {}),
+    ])))
+    const onUsage = vi.fn()
+    await streamChat({ content: 'hi' }, { onUsage })
+    expect(onUsage.mock.calls[0]?.[0]).toMatchObject({
+      calls: 3,
+      unpricedCalls: 0,
+      costByCategory: { inputUsd: 0.002, cacheReadUsd: 0, cacheWriteUsd: 0, outputUsd: 0.000456 },
+    })
+    expect(onUsage.mock.calls[1]?.[0]).toMatchObject({ calls: 2, unpricedCalls: 1 })
+    expect(onUsage.mock.calls[1]?.[0].costByCategory).toBeUndefined()
+    // A breakdown with a missing part is no breakdown, and a frame without the keys has none.
+    expect(onUsage.mock.calls[2]?.[0].costByCategory).toBeUndefined()
+    expect(onUsage.mock.calls[2]?.[0].calls).toBeUndefined()
+  })
 })
 
 describe('run_parked (WS03 S8-A, display only)', () => {

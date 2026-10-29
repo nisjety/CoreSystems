@@ -706,11 +706,18 @@ struct Gateway {
     app: Router,
     bearers: DelegatedBearers,
     unary_calls: Arc<AtomicUsize>,
+    /// The publisher the turn's ledger rows go to, read back by the envelope tests.
+    publisher: Arc<DynPublisher>,
     _auth_core: MockServer,
     _jwks: MockServer,
 }
 
 async fn start_gateway(rounds: Vec<Vec<mpv1::ToolCall>>) -> Gateway {
+    start_gateway_with(rounds, None).await
+}
+
+/// [`start_gateway`], pricing its turns against the catalogue at `pricing_url` when one is given.
+async fn start_gateway_with(rounds: Vec<Vec<mpv1::ToolCall>>, pricing_url: Option<String>) -> Gateway {
     // The dev bypass accepts the ingress bearer unverified, but a route that extracts
     // a delegated bearer still needs one that verifies. The turn therefore carries
     // four, signed for the identity the bypass gives its ingress bearer. An allowlist
@@ -737,7 +744,11 @@ async fn start_gateway(rounds: Vec<Vec<mpv1::ToolCall>>) -> Gateway {
     };
     let session = spawn_session().await;
     let mut state = AppState::new();
-    state.publisher = Arc::new(DynPublisher::InMemory(InMemoryPublisher::new()));
+    let publisher = Arc::new(DynPublisher::InMemory(InMemoryPublisher::new()));
+    state.publisher = publisher.clone();
+    if let Some(url) = pricing_url {
+        state.pricing = PricingCache::new(Some(url), reqwest::Client::new());
+    }
     state.inference_client = spawn_provider(provider).await;
     state.session_client = SessionCoreClient::new(session.clone());
     state.managed_run_client = ManagedRunLifecycleClient::new(session);
@@ -752,6 +763,7 @@ async fn start_gateway(rounds: Vec<Vec<mpv1::ToolCall>>) -> Gateway {
         app: build_router(state, None),
         bearers,
         unary_calls,
+        publisher,
         _auth_core: auth_core,
         _jwks: jwks,
     }
@@ -803,12 +815,13 @@ async fn stream_turn(gateway: &Gateway, body: &str) -> Vec<(String, serde_json::
         .collect()
 }
 
-/// Today the tool-decision calls report tokens that nothing sums: the loop reads them
-/// for a debug line, and the final `usage` frame states the answer's counts alone.
-/// WS27-S2 makes the frame the turn's total across every provider call.
+/// The tool-decision calls are provider calls of the turn, so the final `usage` frame
+/// states their tokens with the answer's, and counts every call it covers (WS27-S2). The
+/// two decision calls here are the round that proposes `count_words` and the round that
+/// proposes nothing; the title and follow-up calls come after the frame and are not in it.
 #[tokio::test]
 #[serial_test::serial]
-async fn tool_round_tokens_are_absent_from_the_final_usage_frame() {
+async fn tool_round_tokens_are_in_the_final_usage_frame() {
     let round = vec![mpv1::ToolCall {
         id: "call-count".into(),
         name: "count_words".into(),
@@ -840,9 +853,137 @@ async fn tool_round_tokens_are_absent_from_the_final_usage_frame() {
         unary_calls >= 2,
         "a decision round and the round proposing nothing ran: {unary_calls} unary calls"
     );
-    assert_eq!(usage[0]["input_tokens"], ANSWER_INPUT, "{}", usage[0]);
-    assert_eq!(usage[0]["output_tokens"], ANSWER_OUTPUT, "{}", usage[0]);
+    assert_eq!(usage[0]["input_tokens"], 2 * DECISION_INPUT + ANSWER_INPUT, "{}", usage[0]);
+    assert_eq!(usage[0]["output_tokens"], 2 * DECISION_OUTPUT + ANSWER_OUTPUT, "{}", usage[0]);
+    assert_eq!(usage[0]["calls"], 3, "{}", usage[0]);
+    // No catalogue is configured here, so no call has a price.
+    assert_eq!(usage[0]["unpriced_calls"], 3, "{}", usage[0]);
+    assert!(usage[0]["cost_usd"].is_null(), "{}", usage[0]);
     clear_auth_env();
+}
+
+/// Each tool-decision round is one provider call of the turn: two rounds that propose a
+/// call and the round that proposes nothing are three calls before the answer.
+#[tokio::test]
+#[serial_test::serial]
+async fn tool_rounds_report_every_provider_call() {
+    let round = |id: &str, texts: &str| {
+        vec![mpv1::ToolCall {
+            id: id.into(),
+            name: "count_words".into(),
+            arguments_json: format!(r#"{{"texts":["{texts}"]}}"#),
+        }]
+    };
+    let gateway = start_gateway(vec![round("call-a", "Hei på deg"), round("call-b", "Hei")]).await;
+    let frames = stream_turn(&gateway, CHAT_BODY).await;
+    let usage = usage_frame(&frames);
+    assert_eq!(usage["calls"], 4, "{usage}");
+    assert_eq!(usage["input_tokens"], 3 * DECISION_INPUT + ANSWER_INPUT, "{usage}");
+    assert_eq!(usage["output_tokens"], 3 * DECISION_OUTPUT + ANSWER_OUTPUT, "{usage}");
+    clear_auth_env();
+}
+
+/// With a catalogue, the frame's cost is the sum of its priced calls, and its breakdown
+/// sums to the same total.
+#[tokio::test]
+#[serial_test::serial]
+async fn final_usage_is_the_sum_of_tool_rounds_and_answer() {
+    let catalogue = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/pricing"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "rates": [
+                { "model": "default", "input_per_million": 3.0, "output_per_million": 15.0 },
+                { "model": "mock", "input_per_million": 1.0, "output_per_million": 2.0 },
+            ],
+        })))
+        .mount(&catalogue)
+        .await;
+    let round = vec![mpv1::ToolCall {
+        id: "call-count".into(),
+        name: "count_words".into(),
+        arguments_json: r#"{"texts":["Hei på deg"]}"#.into(),
+    }];
+    let gateway = start_gateway_with(vec![round], Some(catalogue.uri())).await;
+    let frames = stream_turn(&gateway, CHAT_BODY).await;
+    let usage = usage_frame(&frames);
+    let input = f64::from(2 * DECISION_INPUT + ANSWER_INPUT);
+    let output = f64::from(2 * DECISION_OUTPUT + ANSWER_OUTPUT);
+    let want = input * 1.0 / 1_000_000.0 + output * 2.0 / 1_000_000.0;
+    let cost = usage["cost_usd"].as_f64().expect("every call is priced");
+    assert!((cost - want).abs() < 1e-12, "got {cost}, want {want}: {usage}");
+    assert_eq!(usage["unpriced_calls"], 0, "{usage}");
+    let parts: f64 = ["input_usd", "cache_read_usd", "cache_write_usd", "output_usd"]
+        .iter()
+        .map(|key| usage["cost_by_category"][*key].as_f64().expect("a priced total states every part"))
+        .sum();
+    assert!((parts - want).abs() < 1e-12, "the parts sum to the total: {usage}");
+    clear_auth_env();
+}
+
+/// With the switch on, each tool round has a ledger row of its own and every chat row names
+/// the run. With it off, the answer's row is the only one, and it names no run.
+#[tokio::test]
+#[serial_test::serial]
+async fn chat_envelopes_carry_run_id() {
+    let round = |id: &str, texts: &str| {
+        vec![mpv1::ToolCall {
+            id: id.into(),
+            name: "count_words".into(),
+            arguments_json: format!(r#"{{"texts":["{texts}"]}}"#),
+        }]
+    };
+
+    std::env::set_var("MODEL_GATEWAY_TURN_USAGE_COMPLETE", "true");
+    let gateway = start_gateway(vec![round("call-a", "Hei på deg"), round("call-b", "Hei")]).await;
+    let _frames = stream_turn(&gateway, CHAT_BODY).await;
+    let rows = usage_rows(&gateway);
+    std::env::remove_var("MODEL_GATEWAY_TURN_USAGE_COMPLETE");
+    let keys: Vec<&str> = rows.iter().map(|row| row.idempotency_key.as_str()).collect();
+    assert_eq!(keys.len(), 4, "three round rows and the answer's row: {keys:?}");
+    assert!(keys[0].ends_with("-USAGE_ENVELOPE-r1"), "{keys:?}");
+    assert!(keys[1].ends_with("-USAGE_ENVELOPE-r2"), "{keys:?}");
+    assert!(keys[2].ends_with("-USAGE_ENVELOPE-r3"), "{keys:?}");
+    assert!(keys[3].ends_with("-USAGE_ENVELOPE"), "{keys:?}");
+    let run_id = rows[3].payload["run_id"].as_str().expect("the answer's row names its run");
+    assert!(!run_id.is_empty());
+    for row in &rows {
+        assert_eq!(row.payload["run_id"], run_id, "every row of the turn names its run");
+    }
+
+    let gateway = start_gateway(vec![round("call-a", "Hei på deg")]).await;
+    let _frames = stream_turn(&gateway, CHAT_BODY).await;
+    let rows = usage_rows(&gateway);
+    assert_eq!(rows.len(), 1, "with the switch off, only the answer is published: {rows:?}");
+    assert!(rows[0].payload.get("run_id").is_none(), "no run is named with the switch off");
+    clear_auth_env();
+}
+
+/// The chat body every turn of these tests sends.
+const CHAT_BODY: &str = r#"{"content":"Hvor mange ord er det?","model":"m","features":["tools","usage"]}"#;
+
+/// The turn's one `usage` frame.
+fn usage_frame(frames: &[(String, serde_json::Value)]) -> serde_json::Value {
+    let usage: Vec<&serde_json::Value> = frames
+        .iter()
+        .filter(|(event, _)| event == "usage")
+        .map(|(_, data)| data)
+        .collect();
+    assert_eq!(usage.len(), 1, "one usage frame per answer: {frames:?}");
+    usage[0].clone()
+}
+
+/// The USAGE_ENVELOPE rows the gateway published to its in-memory publisher.
+fn usage_rows(gateway: &Gateway) -> Vec<mp_events::envelope::Envelope> {
+    let DynPublisher::InMemory(publisher) = gateway.publisher.as_ref() else {
+        panic!("the harness publishes in memory");
+    };
+    publisher
+        .drain()
+        .into_iter()
+        .map(|(_, envelope)| envelope)
+        .filter(|envelope| envelope.event_type == "USAGE_ENVELOPE")
+        .collect()
 }
 
 /// A model the catalogue does not list used to be priced at the `default` row, so a

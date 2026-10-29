@@ -289,6 +289,16 @@ pub enum ChatEvent {
         /// zero so every earlier payload stays valid.
         cache_read_tokens: u32,
         cache_write_tokens: u32,
+        /// Model calls this total covers: the tool-decision rounds, the artifact
+        /// checks, the overhead calls and the answer. A turn whose answer was its
+        /// only call says 1.
+        calls: u32,
+        /// Of `calls`, the metered ones whose price was unknown. A total that has
+        /// any is missing that call's cost, so `cost_usd` is then null.
+        unpriced_calls: u32,
+        /// The cost split by what was billed, present exactly when `cost_usd` is a
+        /// metered total.
+        cost_by_category: Option<crate::pricing::CategoryCost>,
     },
     /// Per-turn phase timing (Q14): ids, milliseconds and counts, never
     /// content. Emitted once, just before the terminal `done`, `error` or
@@ -645,6 +655,9 @@ impl ChatEvent {
                 retention_class,
                 cache_read_tokens,
                 cache_write_tokens,
+                calls,
+                unpriced_calls,
+                cost_by_category,
             } => {
                 let mut usage = json!({
                     "input_tokens": input_tokens,
@@ -661,6 +674,18 @@ impl ChatEvent {
                 // Optional: a client that predates it sees the same payload.
                 if let Some(basis) = cost_basis {
                     usage["cost_basis"] = json!(basis.as_str());
+                }
+                // Always stated, so a total is never read as covering calls it does not.
+                usage["calls"] = json!(calls);
+                usage["unpriced_calls"] = json!(unpriced_calls);
+                // Only where the total was priced; a breakdown of nothing is not stated.
+                if let Some(parts) = cost_by_category {
+                    usage["cost_by_category"] = json!({
+                        "input_usd": parts.input_usd,
+                        "cache_read_usd": parts.cache_read_usd,
+                        "cache_write_usd": parts.cache_write_usd,
+                        "output_usd": parts.output_usd,
+                    });
                 }
                 // Optional, and per field: an empty value is left out.
                 if let Some(served_by) = served_by {
@@ -914,6 +939,10 @@ pub struct RichEventSink {
     /// copy lived in the browser that watched the stream. Generated binaries
     /// (data: URIs) are NOT recorded — see [`RecordedArtifact::from_event`].
     artifacts: std::sync::Arc<std::sync::Mutex<Vec<RecordedArtifact>>>,
+    /// The provider calls the turn made beside its answer and its tool rounds (a
+    /// source judge, a self-consistency resample), kept for the final usage frame
+    /// and their ledger rows. Each is recorded by the site that made it.
+    overhead: std::sync::Arc<std::sync::Mutex<Vec<crate::usage_meter::CallUsage>>>,
     /// The turn's clock, shared the same way, so the tool loop and the draft
     /// checks it runs can time their calls without new parameters.
     timing: Option<crate::turn_timing::TurnTiming>,
@@ -1036,6 +1065,7 @@ impl RichEventSink {
             request_id,
             citations: std::sync::Arc::default(),
             artifacts: std::sync::Arc::default(),
+            overhead: std::sync::Arc::default(),
             timing: None,
             resume: None,
             subscription_failure: std::sync::Mutex::new(None),
@@ -1209,6 +1239,26 @@ impl RichEventSink {
             return;
         }
         let _ = self.tx.send(Ok(event.to_sse(&self.request_id))).await;
+    }
+
+    /// Record a provider call the turn made beside its answer. It is stored as an
+    /// overhead call whatever phase it was built with.
+    pub fn record_overhead(&self, call: crate::usage_meter::CallUsage) {
+        if let Ok(mut recorded) = self.overhead.lock() {
+            recorded.push(crate::usage_meter::CallUsage {
+                phase: crate::usage_meter::CallPhase::Overhead,
+                ..call
+            });
+        }
+    }
+
+    /// The overhead calls recorded so far, in the order they ran.
+    #[must_use]
+    pub fn overhead_usage(&self) -> Vec<crate::usage_meter::CallUsage> {
+        self.overhead
+            .lock()
+            .map(|recorded| recorded.clone())
+            .unwrap_or_default()
     }
 
     /// The artifacts seen so far, one entry per id carrying its LATEST version,
@@ -1596,6 +1646,9 @@ mod tests {
         assert!(!ChatEvent::Usage {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 1,
             output_tokens: 2,
             cost_usd: None,
@@ -1679,6 +1732,9 @@ mod tests {
         assert!(ChatEvent::Usage {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 1,
             output_tokens: 2,
             cost_usd: Some(0.01),
@@ -1736,6 +1792,9 @@ mod tests {
         let usage = ChatEvent::Usage {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 12,
             output_tokens: 34,
             cost_usd: Some(0.002),
@@ -1866,6 +1925,9 @@ mod tests {
         let subscription = ChatEvent::Usage {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 1_800,
             output_tokens: 120,
             cost_usd: Some(0.0),
@@ -1882,6 +1944,9 @@ mod tests {
         let unestablished = ChatEvent::Usage {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,
@@ -1902,11 +1967,13 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "calls",
                 "confidence",
                 "cost_usd",
                 "input_tokens",
                 "latency_ms",
-                "output_tokens"
+                "output_tokens",
+                "unpriced_calls"
             ]
         );
     }
@@ -1915,6 +1982,9 @@ mod tests {
         ChatEvent::Usage {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 10,
             output_tokens: 5,
             cost_usd: Some(0.0),
@@ -1935,6 +2005,9 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
         ChatEvent::Usage {
             cache_read_tokens: read,
             cache_write_tokens: write,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 1200,
             output_tokens: 80,
             cost_usd: None,
@@ -1970,14 +2043,16 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
         assert_eq!(
             baseline_keys,
             [
+                "calls",
                 "confidence",
                 "cost_basis",
                 "cost_usd",
                 "input_tokens",
                 "latency_ms",
-                "output_tokens"
+                "output_tokens",
+                "unpriced_calls"
             ],
-            "no provenance, no new keys"
+            "no provenance: the provenance keys stay out"
         );
 
         let azure = usage_with(ServedBy::stamped("azure-openai", "eu", 3));
@@ -2066,6 +2141,9 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
         let zdr = ChatEvent::Usage {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 3,
             output_tokens: 4,
             cost_usd: None,
@@ -2091,6 +2169,9 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
         let waived = ChatEvent::Usage {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 3,
             output_tokens: 4,
             cost_usd: None,
@@ -2116,6 +2197,9 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
         let zdr = ChatEvent::Usage {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 3,
             output_tokens: 4,
             cost_usd: None,
@@ -2143,6 +2227,9 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
         let usage = ChatEvent::Usage {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,
@@ -2454,6 +2541,16 @@ mod payload_contract {
             }),
             cache_read_tokens: u32::from(full) * 5,
             cache_write_tokens: u32::from(full) * 3,
+            calls: 1 + 2 * u32::from(full),
+            unpriced_calls: 0,
+            // The breakdown is stated only where the total is priced, so the golden
+            // records the key as present on some payloads and absent on others.
+            cost_by_category: full.then_some(crate::pricing::CategoryCost {
+                input_usd: 0.001,
+                cache_read_usd: 0.0005,
+                cache_write_usd: 0.0,
+                output_usd: 0.0005,
+            }),
         }
     }
 

@@ -406,3 +406,37 @@ fn the_zdr_stream_asks_the_classifier_and_no_longer_keeps_its_own_list() {
         "the four-feature refusal with no feature name is still in sse.rs"
     );
 }
+
+/// A ZDR turn states its one call's cost in its own frame and publishes no ledger row. The
+/// per-call rows of WS27 S2 belong to the ordinary path: the ZDR branch returns before the
+/// tool loop starts, and the frame writer of a ZDR answer has no publisher to write to.
+#[test]
+fn usage_envelopes_are_not_published_for_a_zdr_turn() {
+    let sse = include_str!("../src/sse.rs");
+    let zdr_return = sse
+        .find("return zdr_direct_stream(")
+        .expect("the ZDR branch hands the turn to zdr_direct_stream");
+    let first_rounds = sse
+        .find("run_tool_rounds_for_model_with_attachments(")
+        .expect("the ordinary path runs the tool rounds");
+    assert!(
+        zdr_return < first_rounds,
+        "a ZDR turn returns before the tool loop can make a call"
+    );
+    for signature in ["async fn zdr_direct_stream(", "fn zdr_answer_stream(", "async fn direct_infer_turn("] {
+        let body = function_body(sse, signature);
+        assert!(!body.contains("publish("), "{signature} publishes nothing");
+        assert!(!body.contains("turn_call_rows"), "{signature} builds no ledger row");
+    }
+}
+
+/// The source of the function whose signature starts with `signature`, up to its closing brace.
+fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    let start = source
+        .find(signature)
+        .unwrap_or_else(|| panic!("{signature} is in sse.rs"));
+    let end = source[start..]
+        .find("\n}\n")
+        .map_or(source.len(), |offset| start + offset);
+    &source[start..end]
+}

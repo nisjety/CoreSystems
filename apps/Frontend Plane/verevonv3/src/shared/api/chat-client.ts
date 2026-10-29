@@ -410,6 +410,12 @@ export type ChatUsageEvent = {
   confidence?: number
   cacheReadTokens?: number
   cacheWriteTokens?: number
+  /** Model calls the total covers: tool-decision rounds, artifact checks, overhead and the answer. Absent on an older gateway. */
+  calls?: number
+  /** Of `calls`, the metered ones whose price was unknown. A total with any has a null `costUsd`. */
+  unpricedCalls?: number
+  /** The cost split by what was billed, present exactly when the total was priced. */
+  costByCategory?: ChatCostByCategory
   /**
    * Where the answer was processed, exactly as the gateway stamped it
    * (`provider_used`, `residency`, `privacy_tier`). Absent on an older gateway
@@ -419,8 +425,29 @@ export type ChatUsageEvent = {
   servedBy?: AnswerServedBy
 }
 
+export type ChatCostByCategory = {
+  inputUsd: number
+  cacheReadUsd: number
+  cacheWriteUsd: number
+  outputUsd: number
+}
+
 function costBasisValue(value: unknown): ChatCostBasis | undefined {
   return value === 'metered' || value === 'subscription' ? value : undefined
+}
+
+/** The breakdown of a usage total: present only when all four parts are numbers. */
+function costByCategoryValue(value: unknown): ChatCostByCategory | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const parts = value as Record<string, unknown>
+  const inputUsd = num(parts.input_usd)
+  const cacheReadUsd = num(parts.cache_read_usd)
+  const cacheWriteUsd = num(parts.cache_write_usd)
+  const outputUsd = num(parts.output_usd)
+  if (inputUsd === undefined || cacheReadUsd === undefined || cacheWriteUsd === undefined || outputUsd === undefined) {
+    return undefined
+  }
+  return { inputUsd, cacheReadUsd, cacheWriteUsd, outputUsd }
 }
 
 /** The `servedBy` key of a usage event, present only when the server stamped something usable. */
@@ -1561,6 +1588,9 @@ function dispatchAgUiEvent(
             confidence: num(value.confidence),
             cacheReadTokens: num(value.cache_read_tokens) ?? num(value.cacheReadTokens),
             cacheWriteTokens: num(value.cache_write_tokens) ?? num(value.cacheWriteTokens),
+            calls: num(value.calls),
+            unpricedCalls: num(value.unpriced_calls),
+            costByCategory: costByCategoryValue(value.cost_by_category),
             ...servedByField(value),
           })
           break
@@ -1817,6 +1847,9 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         confidence: num(usage.confidence),
         cacheReadTokens: num(usage.cache_read_tokens) ?? num(usage.cacheReadTokens),
         cacheWriteTokens: num(usage.cache_write_tokens) ?? num(usage.cacheWriteTokens),
+        calls: num(usage.calls),
+        unpricedCalls: num(usage.unpriced_calls),
+        costByCategory: costByCategoryValue(usage.cost_by_category),
         ...servedByField(payload),
       })
       break
