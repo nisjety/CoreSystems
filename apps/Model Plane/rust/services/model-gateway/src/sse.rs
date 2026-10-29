@@ -3091,6 +3091,7 @@ pub async fn invoke_stream_sse(
             connector_ids.clone(),
             retrieval_scope.is_auto() && !conversation_only,
         ))
+        .with_usage_progress(usage_progress_switch())
         .buffering(stream_buffers.clone(), buffer_key.clone(), seq);
 
         // Grounding's citations were already sent on the wire above (chat-
@@ -5134,6 +5135,23 @@ pub async fn invoke_stream_sse(
                             &features,
                             &req_id,
                             anchored,
+                        )
+                        .await;
+                    }
+                    // The answer call's progress frame comes just before the usage frame that closes the turn,
+                    // and states the same total. A turn whose answer made no provider call has none.
+                    if answer_call.is_some() && sink.streams_usage_progress() {
+                        emit_and_buffer(
+                            &tx,
+                            &stream_buffers,
+                            &buffer_key,
+                            &mut seq,
+                            &features,
+                            &req_id,
+                            crate::sse_events::ChatEvent::UsageProgress {
+                                phase: crate::usage_meter::CallPhase::Answer,
+                                snapshot: turn,
+                            },
                         )
                         .await;
                     }
@@ -8100,6 +8118,23 @@ async fn run_infer_fallback(
             )
             .await;
             let cost_usd = frame_cost_usd(&turn);
+            // The fallback answer is a provider call of its own, so it gets the progress frame the
+            // stream's answer gets, just before the usage frame that carries the same total.
+            if usage_progress_switch() {
+                emit_and_buffer(
+                    tx,
+                    &buffers,
+                    &buffer_key,
+                    &mut seq,
+                    features,
+                    request_id,
+                    crate::sse_events::ChatEvent::UsageProgress {
+                        phase: crate::usage_meter::CallPhase::Answer,
+                        snapshot: turn,
+                    },
+                )
+                .await;
+            }
             // Scored above, before the persist.
             let usage_event = crate::sse_events::ChatEvent::Usage {
                 cache_read_tokens: saturating_u32(turn.cache_read),
@@ -9210,13 +9245,15 @@ async fn judge_sources(
     match response {
         Ok(Ok(resp)) => {
             let resp = resp.into_inner();
-            sink.record_overhead(crate::tool_loop::metered_call(
+            let call = crate::tool_loop::metered_call(
                 crate::usage_meter::CallPhase::Overhead,
                 &resp,
                 &route.model,
                 &route.provider_hint,
                 &route.subscription_connection_id,
-            ));
+            );
+            crate::tool_loop::stream_call_usage(state, sink, &call).await;
+            sink.record_overhead(call);
             crate::verification::parse_verdict(&resp.content)
         }
         Ok(Err(error)) => {
@@ -9285,13 +9322,15 @@ async fn resample_answer(
                 let resp = resp.into_inner();
                 // Recorded as each draw answers: a failed draw ends the set, but the draws
                 // that answered before it were billed.
-                sink.record_overhead(crate::tool_loop::metered_call(
+                let call = crate::tool_loop::metered_call(
                     crate::usage_meter::CallPhase::Overhead,
                     &resp,
                     model,
                     &route.provider_hint,
                     &route.subscription_connection_id,
-                ));
+                );
+                crate::tool_loop::stream_call_usage(state, sink, &call).await;
+                sink.record_overhead(call);
                 samples.push(resp.content);
             }
             _ => {
@@ -12566,6 +12605,21 @@ fn turn_usage_complete_switch() -> bool {
     turn_usage_complete_enabled(&|key| std::env::var(key).ok())
 }
 
+/// Switch for the `usage_progress` frames (WS27 S3): one for each provider call a turn makes,
+/// streamed while the turn runs. Only the literal `true` enables it, and it is read per turn, so a
+/// restart is not needed to turn it off.
+const USAGE_PROGRESS_ENV: &str = "MODEL_GATEWAY_USAGE_PROGRESS";
+
+fn usage_progress_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+    lookup(USAGE_PROGRESS_ENV).as_deref() == Some("true")
+}
+
+/// The switch as this process's environment states it. The turn's sink and the fallback answer read
+/// it through here, so the handler itself reads no environment.
+fn usage_progress_switch() -> bool {
+    usage_progress_enabled(&|key| std::env::var(key).ok())
+}
+
 /// The turn's usage as one meter: every call of the tool phase, the overhead calls beside the
 /// answer, then the answer when it made a provider call of its own. The catalogue is read once,
 /// so every call is priced against the same rates.
@@ -13328,13 +13382,13 @@ fn publish_implicit_dissatisfaction(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_persona_message, agent_subscription_failure, authored_instructions_message,
-        build_stream_envelope,
-        build_usage_envelope, classify_agentic_run_outcome, dispatch_never_reached_execution_core,
-        frame_cost_usd, turn_call_rows, turn_usage, turn_usage_complete_enabled,
-        approved_plan_is_for, format_approved_plan_block, is_confirmed_agent_dispatch_rejection,
+        agent_persona_message, agent_subscription_failure, approved_plan_is_for,
+        authored_instructions_message, build_stream_envelope, build_usage_envelope,
+        classify_agentic_run_outcome, dispatch_never_reached_execution_core,
+        format_approved_plan_block, frame_cost_usd, is_confirmed_agent_dispatch_rejection,
         latest_proposed_plan, orchestration_event_to_step_update, sanitize_follow_up_suggestions,
-        sanitize_thread_title, stream_ended_with_no_content, AgenticRunOutcome, PlanState,
+        sanitize_thread_title, stream_ended_with_no_content, turn_call_rows, turn_usage,
+        turn_usage_complete_enabled, usage_progress_enabled, AgenticRunOutcome, PlanState,
     };
     use crate::http_routes::InvokeRequest;
     use crate::state::AppState;
@@ -14523,6 +14577,21 @@ mod tests {
             let value = value.map(str::to_owned);
             turn_usage_complete_enabled(&|key| {
                 assert_eq!(key, "MODEL_GATEWAY_TURN_USAGE_COMPLETE");
+                value.clone()
+            })
+        };
+        assert!(with(Some("true")));
+        for off in [None, Some(""), Some("1"), Some("TRUE"), Some(" true"), Some("false")] {
+            assert!(!with(off), "{off:?} must not enable it");
+        }
+    }
+
+    #[test]
+    fn the_usage_progress_switch_is_on_only_for_the_literal_true() {
+        let with = |value: Option<&str>| {
+            let value = value.map(str::to_owned);
+            usage_progress_enabled(&|key| {
+                assert_eq!(key, "MODEL_GATEWAY_USAGE_PROGRESS");
                 value.clone()
             })
         };
@@ -21922,6 +21991,32 @@ mod execute_turn_tests {
         // The request is built from the ratcheted posture, not the one the function was given.
         let ratcheted = body.find("let permission_mode = ratcheted;").expect("the shadow");
         assert!(ratcheted < built, "the posture is ratcheted before the request is built");
+    }
+
+    /// The answer's progress frame comes just before the usage frame and states the turn's total, so
+    /// the last progress frame of a turn and the frame that closes it agree.
+    #[test]
+    fn the_answer_progress_frame_precedes_the_usage_frame_with_the_turn_total() {
+        let invoke = code_of("pub async fn invoke_stream_sse(", "\n}\n");
+        assert_eq!(
+            invoke.matches("ChatEvent::UsageProgress {").count(),
+            1,
+            "{invoke}"
+        );
+        let progress = invoke
+            .find("ChatEvent::UsageProgress {")
+            .expect("the answer's progress frame");
+        let usage = invoke
+            .find("let usage_event = crate::sse_events::ChatEvent::Usage {")
+            .expect("the usage frame");
+        assert!(
+            progress < usage,
+            "the progress frame precedes the usage frame"
+        );
+        assert!(
+            invoke[progress..usage].contains("snapshot: turn,"),
+            "the progress frame states the turn's total: {invoke}"
+        );
     }
 
     /// Only an ordinary request's flag reaches the stream; a continuation passes false; and the

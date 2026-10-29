@@ -2117,6 +2117,74 @@ describe('turn_timing, cost_basis and result_receipt', () => {
   })
 })
 
+describe('usage_progress (WS27 S3)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const frame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+
+  it('reads a progress frame by its closed keys, native and in an AG-UI CUSTOM envelope', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([
+      frame('usage_progress', {
+        calls: 2,
+        phase: 'tool_round',
+        input_tokens: 1200,
+        output_tokens: 90,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        cost_usd: 0.0041,
+        cost_basis: 'metered',
+      }),
+      frame('usage_progress', {
+        calls: 3,
+        phase: 'overhead',
+        input_tokens: 10,
+        output_tokens: 1,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        cost_usd: null,
+        unpriced_calls: 1,
+        future_key: true,
+      }),
+      frame('usage_progress', { calls: 4, phase: 'a_phase_this_build_does_not_know' }),
+      frame('CUSTOM', {
+        type: 'CUSTOM',
+        name: 'usage_progress',
+        value: {
+          calls: 5,
+          phase: 'answer',
+          input_tokens: 50,
+          output_tokens: 5,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+          cost_usd: 0.0002,
+          cost_basis: 'subscription',
+        },
+        runId: 'run-9',
+      }),
+      frame('done', {}),
+    ])))
+    const onUsageProgress = vi.fn()
+    const onUsage = vi.fn()
+    const onUnknownEvent = vi.fn()
+    await streamChat({ content: 'hi' }, { onUsageProgress, onUsage, onUnknownEvent })
+
+    expect(onUsageProgress.mock.calls.map(([event]) => event)).toEqual([
+      { calls: 2, phase: 'tool_round', inputTokens: 1200, outputTokens: 90, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.0041, costBasis: 'metered' },
+      { calls: 3, phase: 'overhead', inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, unpricedCalls: 1 },
+      { calls: 4 },
+      { calls: 5, phase: 'answer', inputTokens: 50, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.0002, costBasis: 'subscription' },
+    ])
+    // The second frame's null cost is no cost at all, and an unknown phase is no phase.
+    expect(onUsageProgress.mock.calls[1]?.[0].costUsd).toBeUndefined()
+    expect(onUsageProgress.mock.calls[2]?.[0].phase).toBeUndefined()
+    // A progress frame never stands in for the turn's usage frame, which this stream did not send.
+    expect(onUsage).not.toHaveBeenCalled()
+    expect(onUnknownEvent).not.toHaveBeenCalled()
+  })
+})
+
 describe('run_parked (WS03 S8-A, display only)', () => {
   afterEach(() => {
     vi.unstubAllGlobals()

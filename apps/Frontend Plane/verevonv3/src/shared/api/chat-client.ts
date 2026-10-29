@@ -451,6 +451,34 @@ export type ChatCostByCategory = {
   outputUsd: number
 }
 
+/** The provider call a progress frame reports, as its closed phase token. */
+export type ChatUsagePhase = 'answer' | 'tool_round' | 'agent_round' | 'overhead'
+
+/**
+ * The turn's running total after one of its provider calls (`usage_progress`, `usage` family).
+ *
+ * The gateway streams one per call while the turn runs. The terminal `usage` frame stays the
+ * authority: its totals replace every progress total of the turn. Counts and closed tokens only.
+ */
+export type ChatUsageProgressEvent = {
+  /** Calls the total covers so far, the call this frame reports included. */
+  calls?: number
+  phase?: ChatUsagePhase
+  inputTokens?: number
+  outputTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
+  /**
+   * The metered cost so far. Absent while a call is unpriced or the turn is a subscription's, and
+   * `unpricedCalls` or `costBasis` then says which.
+   */
+  costUsd?: number
+  /** Absent when the turn mixes metered and subscription calls. */
+  costBasis?: ChatCostBasis
+  /** Of `calls`, the metered ones whose price was unknown. Absent at zero. */
+  unpricedCalls?: number
+}
+
 function costBasisValue(value: unknown): ChatCostBasis | undefined {
   return value === 'metered' || value === 'subscription' ? value : undefined
 }
@@ -467,6 +495,27 @@ function costByCategoryValue(value: unknown): ChatCostByCategory | undefined {
     return undefined
   }
   return { inputUsd, cacheReadUsd, cacheWriteUsd, outputUsd }
+}
+
+function usagePhaseValue(value: unknown): ChatUsagePhase | undefined {
+  return value === 'answer' || value === 'tool_round' || value === 'agent_round' || value === 'overhead'
+    ? value
+    : undefined
+}
+
+/** A `usage_progress` payload, read by its closed keys and nothing else. */
+function usageProgressFrame(payload: Record<string, unknown>): ChatUsageProgressEvent {
+  return {
+    calls: num(payload.calls),
+    phase: usagePhaseValue(payload.phase),
+    inputTokens: num(payload.input_tokens),
+    outputTokens: num(payload.output_tokens),
+    cacheReadTokens: num(payload.cache_read_tokens),
+    cacheWriteTokens: num(payload.cache_write_tokens),
+    costUsd: num(payload.cost_usd),
+    costBasis: costBasisValue(payload.cost_basis),
+    unpricedCalls: num(payload.unpriced_calls),
+  }
 }
 
 /** The `servedBy` key of a usage event, present only when the server stamped something usable. */
@@ -768,6 +817,8 @@ export type ChatStreamHandlers = {
   onToolResult?: (event: ChatToolResultEvent) => void
   onAttachment?: (event: ChatAttachmentEvent) => void
   onUsage?: (event: ChatUsageEvent) => void
+  /** The running total after one provider call, while the turn runs (`usage_progress`). See `ChatUsageProgressEvent`. */
+  onUsageProgress?: (event: ChatUsageProgressEvent) => void
   onTitle?: (event: ChatTitleEvent) => void
   onFollowUps?: (event: ChatFollowUpsEvent) => void
   /** See `ChatPlanProposedEvent`. */
@@ -1645,6 +1696,9 @@ function dispatchAgUiEvent(
             ...servedByField(value),
           })
           break
+        case 'usage_progress':
+          handlers.onUsageProgress?.(usageProgressFrame(value))
+          break
         case 'awaiting_approval':
         case 'run_paused_for_approval':
           handlers.onStep?.({
@@ -1906,6 +1960,9 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
       })
       break
     }
+    case 'usage_progress':
+      handlers.onUsageProgress?.(usageProgressFrame(payload))
+      break
     case 'turn_timing': {
       // Optional by contract: an older gateway never sends it, and a payload
       // without its totals is dropped rather than shown as a zero.

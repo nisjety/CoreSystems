@@ -5564,6 +5564,24 @@ pub(crate) fn metered_call(
     }
 }
 
+/// Streams the running total after one provider call the tool phase made, when the turn's sink streams
+/// usage progress. The call is priced only then, so a turn with the switch off reads the catalogue no
+/// more often than it did before.
+pub(crate) async fn stream_call_usage(
+    state: &AppState,
+    sink: &crate::sse_events::RichEventSink,
+    call: &crate::usage_meter::CallUsage,
+) {
+    if !sink.streams_usage_progress() {
+        return;
+    }
+    let priced = state
+        .pricing
+        .priced(call.basis, &call.model, call.legs())
+        .await;
+    sink.record_call(call, &priced).await;
+}
+
 /// Keep tool selection from drafting an answer that this phase discards. This
 /// instruction belongs only to the decision request, never to the conversation
 /// returned to the final streaming answer (or persisted as user context).
@@ -7999,13 +8017,17 @@ pub async fn run_tool_rounds_for_model_with_attachments(
 
         // The round's tokens are the provider's own counts. The route guard above has
         // already accepted the answer, so a round a wrong provider answered is not billed.
-        usage.push(metered_call(
+        let round_usage = metered_call(
             crate::usage_meter::CallPhase::ToolRound,
             &resp,
             model,
             provider_hint,
             subscription_connection_id,
-        ));
+        );
+        if let Some(sink) = sink {
+            stream_call_usage(state, sink, &round_usage).await;
+        }
+        usage.push(round_usage);
         let truncated_call_was_finish = resp.tool_calls.last().is_some_and(|call| call.name == FINISH_TOOL_PHASE);
         let finish_proposed = resp.tool_calls.iter().any(|call| call.name == FINISH_TOOL_PHASE);
         let phase_finished = take_tool_phase_signal(&mut resp.tool_calls);
@@ -8213,14 +8235,18 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                             call.finish_response(&response);
                         }
                         if let Ok(answered) = &response {
+                            let overhead = metered_call(
+                                crate::usage_meter::CallPhase::Overhead,
+                                answered,
+                                model,
+                                provider_hint,
+                                subscription_connection_id,
+                            );
+                            if let Some(sink) = sink {
+                                stream_call_usage(state, sink, &overhead).await;
+                            }
                             if let Ok(mut recorded) = check_usage.lock() {
-                                recorded.push(metered_call(
-                                    crate::usage_meter::CallPhase::Overhead,
-                                    answered,
-                                    model,
-                                    provider_hint,
-                                    subscription_connection_id,
-                                ));
+                                recorded.push(overhead);
                             }
                         }
                         response

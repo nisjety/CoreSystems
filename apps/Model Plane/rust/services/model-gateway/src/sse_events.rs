@@ -394,6 +394,18 @@ pub enum ChatEvent {
     RetrievalNotice {
         notice: crate::retrieval_metadata::RetrievalNotice,
     },
+    // ---- usage progress (WS27) ----
+    /// The turn's running total after one of its provider calls, streamed while the turn runs
+    /// (`MODEL_GATEWAY_USAGE_PROGRESS`). It belongs to the `usage` family, so a client that did not ask
+    /// for usage never receives it. Counts and closed tokens only: no content, tool name or argument.
+    /// The terminal `usage` frame stays the authority for the turn's total.
+    UsageProgress {
+        /// The provider call this frame reports, as its closed phase token.
+        phase: crate::usage_meter::CallPhase,
+        /// The turn so far, the call included.
+        snapshot: crate::usage_meter::Snapshot,
+    },
+    // ---- end usage progress (WS27) ----
     // ---- lifecycle (WS15) ----
     /// A tool call is being retried after a transient failure, before the next attempt. Counts and
     /// closed tokens only (see `mp_contracts::lifecycle_notice`): the error text never reaches here.
@@ -478,6 +490,9 @@ impl ChatEvent {
             ChatEvent::Usage { .. }
             | ChatEvent::ResultReceipt { .. }
             | ChatEvent::TurnTiming { .. } => Some("usage"),
+            // ---- usage progress (WS27) ----
+            ChatEvent::UsageProgress { .. } => Some("usage"),
+            // ---- end usage progress (WS27) ----
             ChatEvent::MemoryRecall { .. } => Some("memory"),
             // ---- lifecycle (WS15) ----
             ChatEvent::RetryScheduled { .. } => Some("steps"),
@@ -546,6 +561,9 @@ impl ChatEvent {
             ChatEvent::PlanProposed { .. } => "plan_proposed",
             ChatEvent::QueuedInput { .. } | ChatEvent::QueuedInputReceipted { .. } => "queued_input",
             ChatEvent::RetrievalNotice { .. } => "retrieval_notice",
+            // ---- usage progress (WS27) ----
+            ChatEvent::UsageProgress { .. } => "usage_progress",
+            // ---- end usage progress (WS27) ----
             ChatEvent::Stopped { .. } => "stopped",
             ChatEvent::Error { .. }
             | ChatEvent::ZdrError { .. }
@@ -767,6 +785,29 @@ impl ChatEvent {
                 "wording_key": notice.wording_key,
                 "request_id": request_id,
             }),
+            // ---- usage progress (WS27) ----
+            ChatEvent::UsageProgress { phase, snapshot } => {
+                let mut payload = json!({
+                    "calls": snapshot.calls,
+                    "phase": phase.as_str(),
+                    "input_tokens": snapshot.input,
+                    "output_tokens": snapshot.output,
+                    "cache_read_tokens": snapshot.cache_read,
+                    "cache_write_tokens": snapshot.cache_write,
+                    "cost_usd": snapshot.cost_usd,
+                });
+                // Omitted, not null, where the total has no single basis: a basis stated for a mixed
+                // total would describe one of its calls as if it described all of them.
+                if let Some(basis) = snapshot.basis {
+                    payload["cost_basis"] = json!(basis.as_str());
+                }
+                // Stated only once a call went unpriced, so a frame whose calls are all priced keeps its shape.
+                if snapshot.unpriced_calls > 0 {
+                    payload["unpriced_calls"] = json!(snapshot.unpriced_calls);
+                }
+                payload
+            }
+            // ---- end usage progress (WS27) ----
             // ---- lifecycle (WS15) ----
             ChatEvent::RetryScheduled {
                 scope,
@@ -944,6 +985,11 @@ pub struct RichEventSink {
     /// source judge, a self-consistency resample), kept for the final usage frame
     /// and their ledger rows. Each is recorded by the site that made it.
     overhead: std::sync::Arc<std::sync::Mutex<Vec<crate::usage_meter::CallUsage>>>,
+    /// Whether this turn streams a `usage_progress` frame for each call it records (WS27 S3). The
+    /// handler that builds the sink sets it once, from the switch, so every site reads one answer.
+    usage_progress: bool,
+    /// The running total of the calls this sink has recorded, which each progress frame states.
+    meter: std::sync::Mutex<crate::usage_meter::UsageMeter>,
     /// The turn's clock, shared the same way, so the tool loop and the draft
     /// checks it runs can time their calls without new parameters.
     timing: Option<crate::turn_timing::TurnTiming>,
@@ -1070,6 +1116,8 @@ impl RichEventSink {
             citations: std::sync::Arc::default(),
             artifacts: std::sync::Arc::default(),
             overhead: std::sync::Arc::default(),
+            usage_progress: false,
+            meter: std::sync::Mutex::new(crate::usage_meter::UsageMeter::default()),
             timing: None,
             connector_turn: None,
             resume: None,
@@ -1280,6 +1328,42 @@ impl RichEventSink {
             .lock()
             .map(|recorded| recorded.clone())
             .unwrap_or_default()
+    }
+
+    /// Stream a `usage_progress` frame for each call this sink records, when `enabled`.
+    #[must_use]
+    pub fn with_usage_progress(mut self, enabled: bool) -> Self {
+        self.usage_progress = enabled;
+        self
+    }
+
+    /// Whether this sink streams usage progress. A caller prices a call for [`Self::record_call`]
+    /// only when this is true, so a turn with the switch off reads the price catalogue no more often
+    /// than it did before.
+    #[must_use]
+    pub fn streams_usage_progress(&self) -> bool {
+        self.usage_progress
+    }
+
+    /// Record a provider call the turn made and stream the turn's running total after it. Does
+    /// nothing unless the sink streams usage progress.
+    pub async fn record_call(
+        &self,
+        call: &crate::usage_meter::CallUsage,
+        priced: &crate::pricing::Priced,
+    ) {
+        if !self.usage_progress {
+            return;
+        }
+        // The lock is released before the emit below: a frame is never sent while the meter is held.
+        let Ok(snapshot) = self.meter.lock().map(|mut meter| meter.record(call, priced)) else {
+            return;
+        };
+        self.emit(ChatEvent::UsageProgress {
+            phase: call.phase,
+            snapshot,
+        })
+        .await;
     }
 
     /// The artifacts seen so far, one entry per id carrying its LATEST version,
@@ -1766,7 +1850,13 @@ mod tests {
             retention_class: None,
         }
         .should_emit(&feats));
+        let progress = ChatEvent::UsageProgress {
+            phase: crate::usage_meter::CallPhase::ToolRound,
+            snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.01))]),
+        };
+        assert!(progress.should_emit(&feats));
         // Not opted in:
+        assert!(!progress.should_emit(&families(&["reasoning"])));
         assert!(!ChatEvent::Citation {
             id: "c".into(),
             title: "t".into(),
@@ -1788,6 +1878,177 @@ mod tests {
             status: "active".into(),
         }
         .should_emit(&feats));
+    }
+
+    /// The running total a sink's meter states after `calls`, each a `(basis, price)`: a metered call
+    /// is priced at its figure (`None` is unpriced), and a subscription call is priced at a known zero.
+    fn running_total(
+        calls: &[(crate::pricing::CostBasis, Option<f64>)],
+    ) -> crate::usage_meter::Snapshot {
+        use crate::pricing::{CategoryCost, CostBasis, PriceSource, Priced};
+        use crate::usage_meter::{CallPhase, CallUsage, UsageMeter};
+        let mut meter = UsageMeter::default();
+        let mut total = meter.snapshot();
+        for &(basis, usd) in calls {
+            let call = CallUsage {
+                phase: CallPhase::ToolRound,
+                model: "gpt-5".into(),
+                provider: "openai".into(),
+                basis,
+                input: 1_000,
+                output: 100,
+                cache_read: 200,
+                cache_write: 0,
+            };
+            let priced = match basis {
+                CostBasis::Subscription => Priced {
+                    usd: Some(0.0),
+                    by_category: None,
+                    source: PriceSource::Subscription,
+                },
+                CostBasis::Metered => Priced {
+                    usd,
+                    by_category: usd.map(|usd| CategoryCost {
+                        input_usd: usd,
+                        cache_read_usd: 0.0,
+                        cache_write_usd: 0.0,
+                        output_usd: 0.0,
+                    }),
+                    source: if usd.is_some() { PriceSource::Exact } else { PriceSource::Default },
+                },
+            };
+            total = meter.record(&call, &priced);
+        }
+        total
+    }
+
+    /// The keys a progress frame of `calls` carries, and the frame's own payload.
+    fn progress_payload(
+        calls: &[(crate::pricing::CostBasis, Option<f64>)],
+    ) -> serde_json::Map<String, Value> {
+        ChatEvent::UsageProgress {
+            phase: crate::usage_meter::CallPhase::Overhead,
+            snapshot: running_total(calls),
+        }
+        .payload("req-1")
+        .as_object()
+        .expect("a progress payload is an object")
+        .clone()
+    }
+
+    /// Each progress frame states the closed keys its total supports and no others: `cost_basis` only
+    /// for one basis, `unpriced_calls` only once a call went unpriced, and `cost_usd` null otherwise.
+    #[test]
+    fn usage_progress_has_only_closed_keys() {
+        use crate::pricing::CostBasis::{Metered, Subscription};
+        use std::collections::BTreeSet;
+        let closed: BTreeSet<String> = [
+            "calls",
+            "phase",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "cost_usd",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        // The closed keys, and the optional ones a frame states beside them.
+        let with = |extra: &[&str]| -> BTreeSet<String> {
+            let mut keys = closed.clone();
+            keys.extend(extra.iter().map(|key| (*key).to_owned()));
+            keys
+        };
+        let keys_of = |payload: &serde_json::Map<String, Value>| -> BTreeSet<String> {
+            payload.keys().cloned().collect()
+        };
+
+        // Every call priced and metered: a total in one basis, stated as such.
+        let priced = progress_payload(&[(Metered, Some(0.25)), (Metered, Some(0.5))]);
+        assert_eq!(keys_of(&priced), with(&["cost_basis"]));
+        assert_eq!(priced["cost_usd"], 0.75);
+        assert_eq!(priced["cost_basis"], "metered");
+        assert_eq!(priced["phase"], "overhead");
+
+        // One unpriced call: the cost is null, never the priced calls' sum, and the count is stated.
+        let unpriced = progress_payload(&[(Metered, Some(0.25)), (Metered, None)]);
+        assert_eq!(keys_of(&unpriced), with(&["cost_basis", "unpriced_calls"]));
+        assert!(unpriced["cost_usd"].is_null());
+        assert_eq!(unpriced["unpriced_calls"], 1);
+
+        // A subscription turn has no dollar figure, and its basis says so.
+        let subscription = progress_payload(&[(Subscription, None)]);
+        assert_eq!(keys_of(&subscription), with(&["cost_basis"]));
+        assert!(subscription["cost_usd"].is_null());
+        assert_eq!(subscription["cost_basis"], "subscription");
+
+        // Mixed bases state no basis, and the metered part's cost stays.
+        let mixed = progress_payload(&[(Metered, Some(0.25)), (Subscription, None)]);
+        assert_eq!(keys_of(&mixed), with(&[]));
+        assert_eq!(mixed["cost_usd"], 0.25);
+
+        // Before any call the total states no basis and no cost.
+        let empty = progress_payload(&[]);
+        assert_eq!(keys_of(&empty), with(&[]));
+        assert!(empty["cost_usd"].is_null());
+        assert_eq!(empty["calls"], 0);
+    }
+
+    /// A progress frame belongs to the `usage` family, so it is gated exactly as the usage frame is.
+    #[test]
+    fn usage_progress_is_gated_with_the_usage_family() {
+        let event = ChatEvent::UsageProgress {
+            phase: crate::usage_meter::CallPhase::Answer,
+            snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.25))]),
+        };
+        assert_eq!(event.family(), Some("usage"));
+        assert_eq!(event.name(), "usage_progress");
+        assert!(event.should_emit(&families(&["usage"])));
+        assert!(!event.should_emit(&families(&["steps", "tools"])), "not asked for, not sent");
+        assert!(!event.should_emit(&[]), "the plain chat profile never receives it");
+    }
+
+    /// A sink streams one frame for each call it records, and only while it is switched on and its
+    /// client asked for usage.
+    #[tokio::test]
+    async fn a_recorded_call_streams_the_running_total_only_when_the_sink_streams_it() {
+        async fn frames_sent(streams: bool, features: &[&str]) -> usize {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            let sink = RichEventSink::new(tx, families(features), "req-1".to_owned())
+                .with_usage_progress(streams);
+            let call = crate::usage_meter::CallUsage {
+                phase: crate::usage_meter::CallPhase::ToolRound,
+                model: "gpt-5".into(),
+                provider: "openai".into(),
+                basis: crate::pricing::CostBasis::Metered,
+                input: 1_000,
+                output: 100,
+                cache_read: 0,
+                cache_write: 0,
+            };
+            let priced = crate::pricing::Priced {
+                usd: Some(0.25),
+                by_category: Some(crate::pricing::CategoryCost {
+                    input_usd: 0.25,
+                    cache_read_usd: 0.0,
+                    cache_write_usd: 0.0,
+                    output_usd: 0.0,
+                }),
+                source: crate::pricing::PriceSource::Exact,
+            };
+            sink.record_call(&call, &priced).await;
+            sink.record_call(&call, &priced).await;
+            drop(sink);
+            let mut sent = 0;
+            while rx.try_recv().is_ok() {
+                sent += 1;
+            }
+            sent
+        }
+        assert_eq!(frames_sent(true, &["usage"]).await, 2, "one frame per recorded call");
+        assert_eq!(frames_sent(false, &["usage"]).await, 0, "the switch is off");
+        assert_eq!(frames_sent(true, &[]).await, 0, "a client that did not ask for usage gets none");
     }
 
     #[test]
@@ -1832,6 +2093,12 @@ mod tests {
         assert_eq!(p["latency_ms"], 880);
         assert!((p["cost_usd"].as_f64().unwrap() - 0.002).abs() < 1e-9);
         assert_eq!(p["cost_basis"], "metered");
+
+        let progress = ChatEvent::UsageProgress {
+            phase: crate::usage_meter::CallPhase::Answer,
+            snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.01))]),
+        };
+        assert_eq!(progress.name(), "usage_progress");
 
         let cite = ChatEvent::Citation {
             id: "c1".into(),
@@ -2423,6 +2690,7 @@ mod payload_contract {
         "Artifact",
         "Attachment",
         "Usage",
+        "UsageProgress",
         "TurnTiming",
         "Title",
         "FollowUps",
@@ -2455,6 +2723,7 @@ mod payload_contract {
             ChatEvent::Artifact { .. } => "Artifact",
             ChatEvent::Attachment { .. } => "Attachment",
             ChatEvent::Usage { .. } => "Usage",
+            ChatEvent::UsageProgress { .. } => "UsageProgress",
             ChatEvent::TurnTiming { .. } => "TurnTiming",
             ChatEvent::Title { .. } => "Title",
             ChatEvent::FollowUps { .. } => "FollowUps",
@@ -2575,6 +2844,35 @@ mod payload_contract {
         }
     }
 
+    /// A progress frame of a turn whose tokens are fixed, so only its calls, its cost and the optional
+    /// keys that go with them vary.
+    fn usage_progress(
+        calls: u32,
+        cost_usd: Option<f64>,
+        basis: Option<crate::pricing::CostBasis>,
+        unpriced_calls: u32,
+    ) -> ChatEvent {
+        ChatEvent::UsageProgress {
+            phase: crate::usage_meter::CallPhase::ToolRound,
+            snapshot: crate::usage_meter::Snapshot {
+                calls,
+                input: 2_042,
+                output: 207,
+                cache_read: 5,
+                cache_write: 3,
+                cost_usd,
+                unpriced_calls,
+                basis,
+                by_category: cost_usd.map(|_| crate::pricing::CategoryCost {
+                    input_usd: 0.001,
+                    cache_read_usd: 0.0005,
+                    cache_write_usd: 0.0,
+                    output_usd: 0.0005,
+                }),
+            },
+        }
+    }
+
     fn turn_timing(full: bool) -> ChatEvent {
         use crate::turn_timing::{Counts, Draft, Marks, Outcome, Phase, PhaseSpan, ProviderSummary};
         let report = crate::turn_timing::TurnTimingReport {
@@ -2678,6 +2976,16 @@ mod payload_contract {
             ChatEvent::Attachment { id: s("f1"), name: s("f.png"), mime: s("image/png"), url: s("blob:1"), size: 2048 },
             usage(false),
             usage(true),
+            usage_progress(1, None, Some(crate::pricing::CostBasis::Subscription), 0),
+            usage_progress(
+                3,
+                Some(0.002_456),
+                Some(crate::pricing::CostBasis::Metered),
+                0,
+            ),
+            usage_progress(2, None, Some(crate::pricing::CostBasis::Metered), 1),
+            // A mixed total states its cost and no basis, which is why the golden must mark `cost_basis` optional.
+            usage_progress(4, Some(0.25), None, 0),
             turn_timing(false),
             turn_timing(true),
             ChatEvent::Title { title: s("") },

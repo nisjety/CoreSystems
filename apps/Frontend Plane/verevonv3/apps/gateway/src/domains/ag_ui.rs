@@ -887,6 +887,8 @@ fn map_upstream_frame(run: &mut AgUiRunState, frame: SseFrame) -> Vec<Event> {
         | "attachment"
         | "reasoning_delta"
         | "usage"
+        // WS27 S3: a running total during a turn, counts only, shown as it arrives.
+        | "usage_progress"
         | "citation"
         | "grounding"
         | "step_update"
@@ -1374,6 +1376,28 @@ mod tests {
             assert!(rendered.contains("id: 9"), "{name} keeps its cursor: {rendered}");
             assert!(!rendered.contains("RAW"), "{name} is not opaque: {rendered}");
         }
+    }
+
+    /// WS27 S3: a progress frame is a display-only CUSTOM payload with its counts and its SSE cursor
+    /// intact, like the usage frame it precedes, and never an opaque RAW.
+    #[test]
+    fn a_usage_progress_frame_is_carried_as_a_custom_event_with_its_cursor() {
+        let mut run = AgUiRunState::default();
+        let events = map_upstream_frame(
+            &mut run,
+            SseFrame {
+                event: Some("usage_progress".into()),
+                id: Some("12".into()),
+                data: r#"{"calls":2,"phase":"tool_round","input_tokens":1200,"output_tokens":90,"cache_read_tokens":0,"cache_write_tokens":0,"cost_usd":0.0041,"cost_basis":"metered"}"#.into(),
+            },
+        );
+        assert_eq!(events.len(), 1);
+        let rendered = format!("{:?}", events[0]);
+        assert!(rendered.contains("CUSTOM"), "{rendered}");
+        assert!(rendered.contains("usage_progress"), "{rendered}");
+        assert!(rendered.contains("tool_round"), "{rendered}");
+        assert!(rendered.contains("id: 12"), "usage_progress keeps its cursor: {rendered}");
+        assert!(!rendered.contains("RAW"), "{rendered}");
     }
 
     /// The CUSTOM allowlist stays closed: the two new names are in it, and a name that merely

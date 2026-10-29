@@ -445,6 +445,26 @@ fn usage_envelopes_are_not_published_for_a_zdr_turn() {
     }
 }
 
+#[test]
+fn usage_progress_is_not_streamed_for_a_zdr_turn() {
+    let sse = include_str!("../src/sse.rs");
+    let zdr_return = sse
+        .find("return zdr_direct_stream(")
+        .expect("the ZDR branch hands the turn to zdr_direct_stream");
+    let sink = sse
+        .find(".with_usage_progress(")
+        .expect("the ordinary path builds its sink with the usage-progress switch");
+    assert!(
+        zdr_return < sink,
+        "a ZDR turn returns before its sink can stream usage progress"
+    );
+    for signature in ["async fn zdr_direct_stream(", "fn zdr_answer_stream(", "async fn direct_infer_turn("] {
+        let body = function_body(sse, signature);
+        assert!(!body.contains("UsageProgress"), "{signature} streams no usage progress");
+        assert!(!body.contains("stream_call_usage"), "{signature} prices no call for progress");
+    }
+}
+
 /// The source of the function whose signature starts with `signature`, up to its closing brace.
 fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
     let start = source

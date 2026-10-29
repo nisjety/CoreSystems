@@ -44,6 +44,7 @@ asserted, not just reported.
 | `tool_result` | `tools` | `ChatEvent::ToolResult` | ✅ |
 | `turn_timing` | `usage` | `ChatEvent::TurnTiming` | ✅ |
 | `usage` | `usage` | `ChatEvent::Usage` | ✅ |
+| `usage_progress` | `usage` | `ChatEvent::UsageProgress` | ✅ |
 | `verification` | `citations` | `ChatEvent::Verification` | ✅ |
 
 ## Handled by the SPA but not defined by `ChatEvent`
