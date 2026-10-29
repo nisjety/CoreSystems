@@ -326,6 +326,8 @@ const OUTPUT_TRUNCATE: usize = 2000;
 fn data_category(tool_name: &str) -> &'static str {
     match tool_name {
         "knowledge_search" => "customer_private",
+        // The document inventory lists the org's own private corpus (titles, sources), not public data.
+        "knowledge_list_documents" => "customer_private",
         // External MCP tools can touch arbitrary data of unknown provenance —
         // classify honestly as `unclassified` rather than over-claim that an
         // external server returns only public, non-personal data.
@@ -1168,6 +1170,15 @@ async fn merged_tool_defs_governed(
     let workspace_mode = crate::workspace_tools::mode();
     if crate::workspace_tools::offered(workspace_mode, zdr, space_scoped) {
         tools.extend(crate::workspace_tools::tool_defs(workspace_mode));
+    }
+    // The owner document listing (WS24-S8): offered only under the admission switch and never to a
+    // retention-bound run. `zdr` is that flag and already folds in a waived route (see `offered_tools`).
+    // Appended like the workspace tools, so the run is not derivable.
+    if crate::runtime_loop::owner_reads::permitted(
+        crate::runtime_loop::owner_reads::admission_table(),
+        zdr,
+    ) {
+        tools.push(crate::runtime_loop::owner_reads::tool_def());
     }
     // The ungoverned listing, exactly as it was. A zero-retention run is not asked:
     // nothing it could be offered may run.
@@ -6211,6 +6222,7 @@ mod capability_binding_contract {
         all.extend(crate::workspace_tools::tool_defs(
             crate::workspace_tools::Mode::All,
         ));
+        all.push(crate::runtime_loop::owner_reads::tool_def());
         all
     }
 
@@ -8572,6 +8584,14 @@ mod tests {
         assert!(tools
             .iter()
             .any(|tool| tool.name == crate::ticket_tools::TOOL_NAME));
+    }
+
+    #[tokio::test]
+    async fn the_owner_document_listing_is_never_offered_to_a_retention_bound_run() {
+        let tools = merged_tool_defs("run-1", "org-1", "user-1", &[], &TicketViewPolicy, false, true).await;
+        assert!(tools
+            .iter()
+            .all(|tool| tool.name != crate::runtime_loop::owner_reads::TOOL_NAME));
     }
 
     #[test]

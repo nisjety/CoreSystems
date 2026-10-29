@@ -109,6 +109,40 @@ fn every_do_executor_the_contract_names_is_defined_in_this_service() {
 }
 
 #[test]
+fn every_do_executor_the_contract_names_is_bound_to_a_capability() {
+    for row in rows() {
+        let id = row["actionId"].as_str().expect("actionId");
+        if let Some(tool) = row["executor"]["do"].as_str() {
+            assert!(
+                execution_core::capability_policy::trusted_capability_id(tool).is_some(),
+                "{id} names the Do tool `{tool}`, which no capability binds"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_owner_read_the_contract_names_is_the_one_this_service_offers() {
+    use execution_core::runtime_loop::owner_reads;
+
+    let rows = rows();
+    let row = rows
+        .iter()
+        .find(|row| row["actionId"] == owner_reads::ACTION_ID)
+        .expect("the owner read has a contract row");
+    assert_eq!(row["access"], "read");
+    assert_eq!(row["executor"]["do"], owner_reads::TOOL_NAME);
+    assert_eq!(
+        execution_core::capability_policy::trusted_capability_id(owner_reads::TOOL_NAME).as_deref(),
+        Some("cap.retrieval.query")
+    );
+    // Offered only under the admission switch, and never to a run that is retention-bound.
+    assert!(owner_reads::permitted(true, false));
+    assert!(!owner_reads::permitted(false, false));
+    assert!(!owner_reads::permitted(true, true));
+}
+
+#[test]
 fn the_seven_eligible_ids_without_an_owner_path_have_no_executor_here() {
     let source = service_source();
     let unexecutable: Vec<String> = rows()

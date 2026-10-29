@@ -295,12 +295,13 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
 export type ModelReadSurfaceEntry = Readonly<{
   access: 'read'
   authority: 'delegated_user_bearer'
-  executor: Readonly<{ ask: string }>
+  executor: Readonly<{ ask: string; do?: string }>
   sideEffectClass: 'read'
 }>
 
-function readSurfaceOf(ask: string): ModelReadSurfaceEntry {
-  return { access: 'read', authority: 'delegated_user_bearer', executor: { ask }, sideEffectClass: 'read' }
+function readSurfaceOf(ask: string, doTool?: string): ModelReadSurfaceEntry {
+  const executor = doTool === undefined ? { ask } : { ask, do: doTool }
+  return { access: 'read', authority: 'delegated_user_bearer', executor, sideEffectClass: 'read' }
 }
 
 export const MODEL_READ_SURFACE: Readonly<Record<string, ModelReadSurfaceEntry>> = {
@@ -310,7 +311,7 @@ export const MODEL_READ_SURFACE: Readonly<Record<string, ModelReadSurfaceEntry>>
   'social.list_accounts': readSurfaceOf('social_list_accounts'),
   'social.list_posts': readSurfaceOf('social_list_posts'),
   'social.list_campaigns': readSurfaceOf('social_list_campaigns'),
-  'knowledge.list_documents': readSurfaceOf('knowledge_list_documents'),
+  'knowledge.list_documents': readSurfaceOf('knowledge_list_documents', 'knowledge_list_documents'),
   'knowledge.graph_search': readSurfaceOf('knowledge_graph_search'),
   'knowledge.wiki_search': readSurfaceOf('knowledge_wiki_search'),
   'knowledge.contradictions': readSurfaceOf('knowledge_contradictions'),

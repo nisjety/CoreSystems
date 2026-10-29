@@ -1104,7 +1104,8 @@
       "exemptReason": null,
       "eligible": false,
       "executor": {
-        "ask": "knowledge_list_documents"
+        "ask": "knowledge_list_documents",
+        "do": "knowledge_list_documents"
       },
       "hashBasis": null,
       "schemaHash": null,

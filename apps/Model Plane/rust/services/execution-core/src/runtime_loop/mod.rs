@@ -15,6 +15,9 @@ pub(crate) mod run_effort;
 pub(crate) mod scheduled_agent;
 pub(crate) mod skill_budget;
 pub mod subagent_results;
+// WS24-S8. The file lives at the crate root; lib.rs should declare it there (shared edit).
+#[path = "../owner_reads.rs"]
+pub mod owner_reads;
 
 #[cfg(test)]
 pub(crate) mod session_core_rules_double;
@@ -772,6 +775,18 @@ async fn execute_step_inner(
             "{tool_name} is not available on this run: workspace tools need a Space-scoped run on a deployment that switches them on, and never run under zero data retention"
         ));
     }
+    // The owner document listing reads on the user's bearer, so it runs only under the admission
+    // switch and never under retention (WS24-S8). Refused before the capability gate is asked.
+    if tool_name == crate::runtime_loop::owner_reads::TOOL_NAME
+        && !crate::runtime_loop::owner_reads::permitted(
+            crate::runtime_loop::owner_reads::admission_table(),
+            zdr || waived,
+        )
+    {
+        return StepOutcome::failed(&format!(
+            "{tool_name} is not available on this run: the owner document listing needs MODEL_ACTION_ADMISSION=table and a run that is not retention-bound"
+        ));
+    }
     // The class and floor this call's policy decision carried. A governed MCP call is
     // compared with them at dispatch (`execute_governed_mcp`).
     let signed_class: crate::mcp_gateway::SignedToolClass;
@@ -993,6 +1008,15 @@ async fn execute_step_inner(
         execute_web_search(tool_input, org_id, zdr).await
     } else if matches!(tool_name, WEB_FETCH_TOOL | QUARRY_MCP_WEB_READ_TOOL) {
         execute_web_fetch(tool_input, org_id, zdr).await
+    } else if tool_name == crate::runtime_loop::owner_reads::TOOL_NAME {
+        crate::runtime_loop::owner_reads::execute(
+            tool_input,
+            org_id,
+            crate::runtime_loop::owner_reads::admission_table(),
+            zdr || waived,
+            data_plane_bearer,
+        )
+        .await
     } else if tool_name == KNOWLEDGE_SEARCH_TOOL {
         execute_knowledge_search(
             tool_input,

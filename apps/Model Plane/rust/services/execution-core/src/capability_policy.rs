@@ -1510,6 +1510,9 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         "browser_agent" | "browser.observe" | "browser.act" => "cap.browser.open",
         "web_search" | "web_fetch" | "web.search" | "web.read" => "cap.tool.http",
         "knowledge_search" => "cap.retrieval.query",
+        // The owner document inventory (WS24-S8) is a read of the same Data Plane corpus under the
+        // run's own bearer, so it is governed by the same retrieval capability.
+        "knowledge_list_documents" => "cap.retrieval.query",
         // Reads back a result the same run parked under a handle (WS25-S5).
         "result_query" => "cap.result.query",
         // The two context-memory tools. `cap.memory.index`/`cap.memory.search`
@@ -1799,6 +1802,10 @@ mod tests {
     fn bindings_are_exact_and_unknown_or_dynamic_tools_fail_closed() {
         assert_eq!(
             trusted_capability_id("knowledge_search").as_deref(),
+            Some("cap.retrieval.query")
+        );
+        assert_eq!(
+            trusted_capability_id("knowledge_list_documents").as_deref(),
             Some("cap.retrieval.query")
         );
         assert_eq!(
