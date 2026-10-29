@@ -668,6 +668,7 @@ mod tests {
             control_epoch: 7,
             budget: None,
             policy_mode: None,
+            next_step: 6,
         };
         store.save_run_checkpoint(checkpoint).await.unwrap();
 
@@ -677,6 +678,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(loaded.control_epoch, 7);
+        assert_eq!(
+            loaded.next_step, 6,
+            "the state JSON keeps the step key high-water mark"
+        );
         assert_eq!(loaded.control_mode, BrowserControlMode::HumanTakeover);
         assert!(store
             .load_run_checkpoint("org_b", &run_id)

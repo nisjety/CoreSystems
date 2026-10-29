@@ -798,7 +798,8 @@ fn the_checkpoint_carries_the_ledger_and_a_resume_restores_it() {
     let mut entry = entry_with_budget(Some(agent_budget(2)));
     budget_charge(&mut entry, true, 0.001);
     budget_charge(&mut entry, true, 0.001);
-    let checkpoint = checkpoint_for_entry(&entry);
+    let live = handle_for(entry_with_budget(None)).live;
+    let checkpoint = checkpoint_for_entry(&entry, &live);
     let saved = checkpoint
         .budget
         .clone()
@@ -834,8 +835,11 @@ fn the_checkpoint_carries_the_ledger_and_a_resume_restores_it() {
 #[test]
 fn an_old_checkpoint_without_a_budget_still_loads() {
     // What a checkpoint looked like before budgets: the same JSON without the field.
-    let mut legacy =
-        serde_json::to_value(checkpoint_for_entry(&entry_with_budget(None))).unwrap();
+    let mut legacy = serde_json::to_value(checkpoint_for_entry(
+        &entry_with_budget(None),
+        &handle_for(entry_with_budget(None)).live,
+    ))
+    .unwrap();
     legacy.as_object_mut().unwrap().remove("budget");
     let checkpoint: quarry_runtime::step_receipts::AgentRunCheckpoint =
         serde_json::from_value(legacy).expect("a pre-budget checkpoint loads");
@@ -2138,6 +2142,7 @@ fn gone_checkpoint(run_id: &RunKind, actor: &str, zdr: ZdrMode, status: AgentRun
         control_epoch: 0,
         budget: None,
         policy_mode: None,
+        next_step: 2,
     }
 }
 
@@ -2578,6 +2583,59 @@ async fn event_keys_are_unique_across_lanes() {
     let unique: std::collections::HashSet<u32> = keys.iter().copied().collect();
     assert_eq!(unique.len(), keys.len(), "no two steps of the run share a key");
     assert_eq!(keys, (0..64).collect::<Vec<u32>>(), "keys run consecutively from the start");
+}
+
+/// D2: a resumed run's first step key is past every key the run used: the checkpoint's
+/// `next_step`, its completed `step` count, and one past its last receipt, whichever is
+/// highest (a legacy checkpoint has `next_step` 0).
+#[test]
+fn a_resume_starts_past_every_step_key_the_run_used() {
+    let receipt =
+        |step: u32| ReceiptBuilder::start("run".to_owned(), step).skip(AgentAction::Back, "test");
+    let mut checkpoint = gone_checkpoint(
+        &RunKind::new(),
+        "user",
+        ZdrMode::Off,
+        AgentRunStatus::Active,
+    );
+    checkpoint.next_step = 0;
+    assert_eq!(
+        resume_next_step(&checkpoint, &[]),
+        2,
+        "no receipts: the completed steps"
+    );
+    assert_eq!(
+        resume_next_step(&checkpoint, &[receipt(0), receipt(4), receipt(1)]),
+        5,
+        "a legacy checkpoint: one past the last receipt, in any order"
+    );
+    checkpoint.next_step = 9;
+    assert_eq!(
+        resume_next_step(&checkpoint, &[receipt(4)]),
+        9,
+        "keys with no receipt"
+    );
+    assert_eq!(
+        resume_next_step(&checkpoint, &[receipt(u32::MAX)]),
+        u32::MAX,
+        "no overflow"
+    );
+}
+
+/// D2: every checkpoint save carries the run's next step key, including the keys of failed
+/// steps that the completed `step` count leaves out.
+#[tokio::test]
+async fn the_checkpoint_carries_the_next_step_key() {
+    let handle = handle_for(entry_with_budget(None));
+    for _ in 0..3 {
+        handle.live.reserve_step();
+    }
+    let entry = handle.entry.lock().await;
+    let checkpoint = checkpoint_for_entry(&entry, &handle.live);
+    assert_eq!(
+        (checkpoint.step, checkpoint.next_step),
+        (entry.summary.step, 3)
+    );
 }
 
 #[tokio::test]

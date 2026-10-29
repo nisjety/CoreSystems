@@ -263,7 +263,7 @@ pub async fn step(
     // letting the caller continue with a browser state that cannot be
     // recovered after a crash.
     if !entry.zdr.is_active() {
-        let checkpoint = checkpoint_for_entry(&entry);
+        let checkpoint = checkpoint_for_entry(&entry, &handle.live);
         state
             .receipts
             .save_run_checkpoint(checkpoint)
@@ -421,7 +421,7 @@ pub(super) async fn execute_ws_action(
     if !entry.zdr.is_active() {
         state
             .receipts
-            .save_run_checkpoint(checkpoint_for_entry(&entry))
+            .save_run_checkpoint(checkpoint_for_entry(&entry, &handle.live))
             .await?;
     }
     Ok(observation)

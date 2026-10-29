@@ -299,6 +299,7 @@ pub async fn attach_run(
     record_browser_timeline_event(
         &state,
         &entry,
+        &handle.live,
         BrowserTimelineEventKind::Attach {
             state: BrowserAttachState::Attached,
             attach_id: attach_id.clone(),
@@ -310,6 +311,7 @@ pub async fn attach_run(
     record_browser_timeline_event(
         &state,
         &entry,
+        &handle.live,
         BrowserTimelineEventKind::Tab {
             operation: BrowserTabOperation::Opened,
             tab_id: Some(tab_id.clone()),
@@ -419,6 +421,7 @@ async fn finish_attach(
     if let Err(error) = record_browser_timeline_event(
         state,
         entry,
+        &handle.live,
         BrowserTimelineEventKind::Attach {
             state: phase,
             attach_id: ended.attach_id.clone(),
@@ -534,6 +537,7 @@ pub async fn control_tab(
         record_browser_timeline_event(
             &state,
             &entry,
+            &handle.live,
             BrowserTimelineEventKind::TabControl {
                 tab_id: tab_id.clone(),
                 holder,
@@ -851,7 +855,7 @@ pub(super) async fn delegate_step(
     if !entry.zdr.is_active() {
         state
             .receipts
-            .save_run_checkpoint(checkpoint_for_entry(&entry))
+            .save_run_checkpoint(checkpoint_for_entry(&entry, &handle.live))
             .await
             .map_err(|error| driver_err(request_id, error))?;
     }
@@ -883,6 +887,7 @@ pub(super) async fn person_tab_gate(
         record_browser_timeline_event(
             state,
             entry,
+            &handle.live,
             BrowserTimelineEventKind::TabControl {
                 tab_id,
                 holder: BrowserTabHolder::Human,

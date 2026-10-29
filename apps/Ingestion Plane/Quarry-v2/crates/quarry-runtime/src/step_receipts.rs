@@ -91,6 +91,13 @@ pub struct AgentRunCheckpoint {
     /// (read as `allowlist`). A resume whose grant disagrees is refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_mode: Option<String>,
+    /// The step key the run hands out next: one past the highest key it reserved, for a
+    /// completed, failed or refused-landing step alike (`step` counts completed steps
+    /// only, and stays what the step cap and the projection read). A resume starts its
+    /// keys at the highest of this, `step` and one past the run's last receipt, so no step
+    /// key repeats in a run. 0 on a checkpoint written before it existed (D2).
+    #[serde(default)]
+    pub next_step: u32,
 }
 
 /// The budget ledger of a run, stored with its checkpoint so a resume restores
@@ -1131,6 +1138,7 @@ mod tests {
             control_epoch: 0,
             budget: None,
             policy_mode: None,
+            next_step: 3,
         };
         store.save_run_checkpoint(checkpoint).await.unwrap();
         assert!(store
@@ -1144,6 +1152,7 @@ mod tests {
             .unwrap()
             .expect("checkpoint should be present");
         assert_eq!(loaded.step, 2);
+        assert_eq!(loaded.next_step, 3, "the step key high-water mark is kept");
         assert_eq!(loaded.actor_id, "user_a");
         assert_eq!(loaded.lease_id, "lease_01ARZ3NDEKTSV4RRFFQ69G5FAV");
         store.close_run_checkpoint("org_a", &run_id).await.unwrap();
@@ -1156,6 +1165,30 @@ mod tests {
                 .status,
             AgentRunStatus::Closed
         );
+    }
+
+    /// D2: a checkpoint written before `next_step` existed loads with 0, so a resume falls
+    /// back to `step` and the run's receipts for its first key.
+    #[test]
+    fn legacy_checkpoint_without_next_step_reads_zero() {
+        let legacy = serde_json::json!({
+            "org_id": "org_a",
+            "run_id": "run_a",
+            "profile_id": "prof_a",
+            "step": 1,
+            "current_url": "",
+            "constraints": { "max_steps": 5, "allowed_domains": ["example.com"] },
+            "zdr": "off",
+        });
+        let checkpoint: AgentRunCheckpoint =
+            serde_json::from_value(legacy).expect("a checkpoint without next_step loads");
+        assert_eq!((checkpoint.step, checkpoint.next_step), (1, 0));
+        let written = serde_json::to_value(AgentRunCheckpoint {
+            next_step: 4,
+            ..checkpoint
+        })
+        .unwrap();
+        assert_eq!(written["next_step"], 4, "the field is always written");
     }
 
     #[tokio::test]
@@ -1494,6 +1527,7 @@ mod tests {
             status: AgentRunStatus::Active,
             control_mode: BrowserControlMode::AgentControl,
             control_epoch: 0,
+            next_step: 2,
             budget: Some(BudgetCheckpoint {
                 class: "agent".into(),
                 steps: 2,

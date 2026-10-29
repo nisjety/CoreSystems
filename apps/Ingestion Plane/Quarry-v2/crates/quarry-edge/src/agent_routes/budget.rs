@@ -142,7 +142,11 @@ pub(super) fn cost_source_label(source: CostSource) -> &'static str {
 /// `agent.budget_exhausted` event, and a checkpoint that stores the latch so a
 /// resume restores it. Nothing is written for a ZDR run (the event goes through
 /// `emit_for_zdr`). Errors are logged, never returned: the caller returns the 402.
-pub(super) async fn announce_budget_refusal(state: &AppState, entry: &mut RunEntry) {
+pub(super) async fn announce_budget_refusal(
+    state: &AppState,
+    entry: &mut RunEntry,
+    live: &RunLive,
+) {
     let zdr = entry.zdr;
     let run_id = entry.run_id.clone();
     let Some(payload) = entry
@@ -165,7 +169,7 @@ pub(super) async fn announce_budget_refusal(state: &AppState, entry: &mut RunEnt
     if !zdr.is_active() {
         if let Err(error) = state
             .receipts
-            .save_run_checkpoint(checkpoint_for_entry(entry))
+            .save_run_checkpoint(checkpoint_for_entry(entry, live))
             .await
         {
             tracing::warn!(

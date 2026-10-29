@@ -283,6 +283,7 @@ pub async fn new_tab(
     record_browser_timeline_event(
         &state,
         &entry,
+        &handle.live,
         BrowserTimelineEventKind::Tab {
             operation: BrowserTabOperation::Opened,
             initiated_by: Some(admitted.initiator),
@@ -360,6 +361,7 @@ pub async fn select_tab(
     record_browser_timeline_event(
         &state,
         &entry,
+        &handle.live,
         BrowserTimelineEventKind::Tab {
             operation: BrowserTabOperation::Selected,
             initiated_by: Some(admitted.initiator),
@@ -438,6 +440,7 @@ pub async fn close_tab(
     record_browser_timeline_event(
         &state,
         &entry,
+        &handle.live,
         BrowserTimelineEventKind::Tab {
             operation: BrowserTabOperation::Closed,
             initiated_by: Some(admitted.initiator),
@@ -472,10 +475,10 @@ pub async fn devtools_events(
             if handle.live.owned_by(&claims) {
                 handle.live.touch();
             }
-            handle.entry.clone()
+            (handle.entry.clone(), handle.live.clone())
         })
     };
-    let Some(entry_arc) = entry_arc else {
+    let Some((entry_arc, live)) = entry_arc else {
         return Err(status_err(
             StatusCode::NOT_FOUND,
             &request_id,
@@ -503,6 +506,7 @@ pub async fn devtools_events(
         record_browser_timeline_event(
             &state,
             &entry,
+            &live,
             BrowserTimelineEventKind::Devtools {
                 event_count: events.len().min(u32::MAX as usize) as u32,
                 last_sequence: last.sequence,

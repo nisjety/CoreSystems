@@ -91,6 +91,26 @@ pub(super) fn resumed_run_class(
         .map_or(derived, |stored| stored.stricter(derived))
 }
 
+/// D2: the first step key a resumed run hands out. A step key is reserved for every
+/// admitted step, completed or failed, while the checkpoint's `step` counts completed steps
+/// only, so seeding the keys from `step` gave a key that a failed step had already used
+/// (two receipts, events and SPA timeline entries under one key). This is the highest of:
+/// the checkpoint's `next_step` (the counter at its last save; 0 on a checkpoint written
+/// before it existed), its `step`, and one past the run's last receipt (a key that failed
+/// after the last save, or any key of a run checkpointed by older code). `step` itself is
+/// unchanged: it still drives the step cap, the projection and the skipped receipt's key.
+pub(super) fn resume_next_step(checkpoint: &AgentRunCheckpoint, receipts: &[StepReceipt]) -> u32 {
+    let after_receipts = receipts
+        .iter()
+        .map(|receipt| receipt.step.saturating_add(1))
+        .max()
+        .unwrap_or(0);
+    checkpoint
+        .next_step
+        .max(checkpoint.step)
+        .max(after_receipts)
+}
+
 /// `POST /v1/agent/runs` — acquire a leased browser session for a new run.
 pub async fn start_run(
     State(state): State<AppState>,
@@ -204,6 +224,14 @@ pub async fn start_run(
         if super::human_browse::is_blank_tab(&checkpoint.current_url) {
             checkpoint.current_url.clear();
         }
+        // D2: the resumed run's step keys start past every key the run already used. The
+        // receipts live in the same store as the checkpoint just read.
+        let receipts = state
+            .receipts
+            .list_for_org(&org_id, run_id)
+            .await
+            .map_err(|error| driver_err(&request_id, error))?;
+        checkpoint.next_step = resume_next_step(&checkpoint, &receipts);
         Some(checkpoint)
     } else {
         None
@@ -713,10 +741,10 @@ pub async fn start_run(
     // are authoritative (see above), so the resume request cannot lengthen it.
     .with_run(run_class, entry.constraints.max_runtime_s.map(u64::from))
     .with_policy(web_decision)
-    .with_resume_step(entry.summary.step);
+    .with_resume_step(resume_checkpoint.as_ref().map_or(0, |cp| cp.next_step));
 
     if !zdr.is_active() {
-        let checkpoint = checkpoint_for_entry(&entry);
+        let checkpoint = checkpoint_for_entry(&entry, &live);
         if let Err(error) = state.receipts.save_run_checkpoint(checkpoint).await {
             let _ = state.agent_driver.release(entry.session).await;
             return Err(driver_err(&request_id, error));
