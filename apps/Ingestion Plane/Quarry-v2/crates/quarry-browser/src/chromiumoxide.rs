@@ -2276,7 +2276,11 @@ async fn install_network_guard(
             .await;
             // SC4 D3: after the receipt, so a `goto` the refusal ends finds it recorded.
             if main_frame_document {
-                navigation_watches.document_request(guarded_page.target_id(), &event, refusal);
+                navigation_watches.document_request(
+                    guarded_page.target_id(),
+                    &PausedDocument::of(&event),
+                    refusal,
+                );
             }
             if let Err(error) = command_result {
                 tracing::warn!(error_class = crate::deadlines::cdp_class(&error), "chromiumoxide request guard resolution failed");
@@ -2523,11 +2527,13 @@ const NAVIGATION_REFUSED_BY_GUARD: &str = "url_or_dns_blocked";
 /// `unknown` for what is a policy refusal. The block showed only in the next
 /// observation's egress receipts.
 ///
-/// A navigation is the first main-frame document request the guard sees once its
-/// `goto` starts, plus every redirect hop of it (a request whose
-/// `redirectedRequestId`, or whose network id, is already in the chain). A document
-/// request outside that chain (the page navigating itself, a frame) and any
-/// subresource never end a `goto`.
+/// A navigation is the first main-frame document request for the `goto`'s own URL
+/// (fragment aside, or its `https` upgrade) the guard sees once the `goto` starts, plus
+/// every redirect hop of it (a request whose `redirectedRequestId`, or whose network id,
+/// is already in the chain). A document request outside that chain (the old page
+/// navigating itself elsewhere in the meantime, a frame) and any subresource never end a
+/// `goto`. A `goto` whose own request goes unrecognised only loses the early end: it
+/// runs to its navigate deadline as before.
 #[derive(Default)]
 struct NavigationWatches {
     /// Innermost lock: a `std` mutex, never held across an `.await`.
@@ -2541,6 +2547,9 @@ struct NavigationWatches {
 
 struct NavigationWatch {
     id: u64,
+    /// Where the `goto` goes, without its fragment (a Fetch request URL has none);
+    /// `None` for a URL that does not parse, whose first document request is taken.
+    target: Option<url::Url>,
     /// The Fetch request ids of the navigation's document request and its redirect hops.
     requests: HashSet<String>,
     /// Their network ids (one id across a redirect chain).
@@ -2549,12 +2558,58 @@ struct NavigationWatch {
     refused: Option<tokio::sync::oneshot::Sender<&'static str>>,
 }
 
+impl NavigationWatch {
+    /// Whether a document request for `raw` is the `goto`'s own first one: its URL, or
+    /// the `https` form of an `http` one (Chromium tries that first).
+    fn starts_with(&self, raw: &str) -> bool {
+        let Some(target) = self.target.as_ref() else {
+            return true;
+        };
+        let Ok(mut requested) = url::Url::parse(raw) else {
+            return false;
+        };
+        requested.set_fragment(None);
+        if requested == *target {
+            return true;
+        }
+        let mut upgraded = target.clone();
+        target.scheme() == "http" && upgraded.set_scheme("https").is_ok() && requested == upgraded
+    }
+}
+
+/// The parts of a paused main-frame document request a [`NavigationWatch`] reads.
+struct PausedDocument<'a> {
+    /// Its Fetch request id.
+    request: &'a str,
+    url: &'a str,
+    network: Option<&'a str>,
+    /// The Fetch request id of the hop that redirected to it.
+    redirected_from: Option<&'a str>,
+}
+
+impl<'a> PausedDocument<'a> {
+    fn of(event: &'a EventRequestPaused) -> Self {
+        Self {
+            request: event.request_id.inner(),
+            url: &event.request.url,
+            network: event.network_id.as_ref().map(|id| id.inner().as_str()),
+            redirected_from: event
+                .redirected_request_id
+                .as_ref()
+                .map(|id| id.inner().as_str()),
+        }
+    }
+}
+
 impl NavigationWatches {
-    /// Watch the navigation `page` starts next, until the returned guard drops.
-    fn watch(self: &Arc<Self>, page: &Page) -> WatchedNavigation {
+    /// Watch the navigation of `tab` to `url`, until the returned guard drops.
+    fn watch(self: &Arc<Self>, tab: TargetId, url: &str) -> WatchedNavigation {
         let (refused, receiver) = tokio::sync::oneshot::channel();
         let id = self.sequence.fetch_add(1, Ordering::Relaxed);
-        let tab = page.target_id().clone();
+        let target = url::Url::parse(url).ok().map(|mut target| {
+            target.set_fragment(None);
+            target
+        });
         self.by_tab
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -2562,6 +2617,7 @@ impl NavigationWatches {
                 tab.clone(),
                 NavigationWatch {
                     id,
+                    target,
                     requests: HashSet::new(),
                     networks: HashSet::new(),
                     refused: Some(refused),
@@ -2575,12 +2631,13 @@ impl NavigationWatches {
         }
     }
 
-    /// The guard decided a main-frame document request of `tab`: `refusal` is the
-    /// policy that refused it, if one did.
+    /// The guard decided a main-frame document request of `tab` (`event`'s Fetch
+    /// request id, URL, network id and `redirectedRequestId`): `refusal` is the policy
+    /// that refused it, if one did.
     fn document_request(
         &self,
         tab: &TargetId,
-        event: &EventRequestPaused,
+        event: &PausedDocument<'_>,
         refusal: Option<&'static str>,
     ) {
         let mut by_tab = self
@@ -2590,18 +2647,19 @@ impl NavigationWatches {
         let Some(watch) = by_tab.get_mut(tab) else {
             return;
         };
-        let network = event.network_id.as_ref().map(|id| id.inner().as_str());
-        let ours = match event.redirected_request_id.as_ref() {
-            Some(previous) => {
-                watch.requests.contains(previous.inner())
-                    || network.is_some_and(|network| watch.networks.contains(network))
-            }
-            None => watch.requests.is_empty(),
-        };
+        let network = event.network;
+        // A hop is in the chain by its `redirectedRequestId` or, failing that, its
+        // network id (one across a redirect chain); the chain starts with the `goto`'s
+        // own URL, never with whatever main-frame request comes first.
+        let ours = event
+            .redirected_from
+            .is_some_and(|previous| watch.requests.contains(previous))
+            || network.is_some_and(|network| watch.networks.contains(network))
+            || (watch.requests.is_empty() && watch.starts_with(event.url));
         if !ours {
             return;
         }
-        watch.requests.insert(event.request_id.inner().clone());
+        watch.requests.insert(event.request.to_owned());
         if let Some(network) = network {
             watch.networks.insert(network.to_owned());
         }
@@ -2675,7 +2733,7 @@ async fn goto_watched(
     url: &str,
     limit: Duration,
 ) -> QuarryResult<()> {
-    let mut watched = watches.watch(page);
+    let mut watched = watches.watch(page.target_id().clone(), url);
     tokio::select! {
         biased;
         Ok(policy) = &mut watched.refused => Err(navigation_refused(policy)),
@@ -9003,12 +9061,130 @@ mod tests {
         assert!(waited < bound / 3, "{case}: {waited:?}");
     }
 
-    /// Whether the tab's Fetch guard recorded a `domain_grant_blocked` receipt for
-    /// `tab_id` after `after` (a subresource's can land just after the load).
+    fn paused<'a>(
+        request: &'a str,
+        url: &'a str,
+        network: Option<&'a str>,
+        redirected_from: Option<&'a str>,
+    ) -> PausedDocument<'a> {
+        PausedDocument {
+            request,
+            url,
+            network,
+            redirected_from,
+        }
+    }
+
+    /// SC4 D3 review: while a `goto` waits for its document request, a main-frame
+    /// document the old page starts for another URL is not taken as the `goto`'s own,
+    /// refused or allowed: refused, it used to end the `goto` with a false
+    /// `SECURITY_BLOCKED`; allowed, it took the chain's first place, so the `goto`'s own
+    /// refusal later was missed and it waited out its deadline.
+    #[test]
+    fn a_navigation_watch_starts_with_its_own_url_only() {
+        let watches = Arc::new(NavigationWatches::default());
+        let tab = TargetId::new("tab");
+
+        let mut watched = watches.watch(tab.clone(), "http://allowed.test/page#top");
+        watches.document_request(
+            &tab,
+            &paused("stray", "http://refused.test/", Some("n-stray"), None),
+            Some(NAVIGATION_REFUSED_BY_GRANT),
+        );
+        assert!(
+            watched.refused.try_recv().is_err(),
+            "the old page's refused navigation is not the goto's"
+        );
+        // The goto's own request (Chromium tries the https form first), then allowed.
+        watches.document_request(
+            &tab,
+            &paused("own", "https://allowed.test/page", Some("n-own"), None),
+            None,
+        );
+        assert!(watched.refused.try_recv().is_err());
+        drop(watched);
+
+        let mut watched = watches.watch(tab.clone(), "http://refused.test/next");
+        watches.document_request(
+            &tab,
+            &paused("stray", "http://elsewhere.test/", Some("n-stray"), None),
+            None,
+        );
+        watches.document_request(
+            &tab,
+            &paused("own", "http://refused.test/next", Some("n-own"), None),
+            Some(NAVIGATION_REFUSED_BY_GRANT),
+        );
+        assert_eq!(
+            watched.refused.try_recv().ok(),
+            Some(NAVIGATION_REFUSED_BY_GRANT),
+            "an allowed stray navigation does not hide the goto's own refusal"
+        );
+    }
+
+    /// SC4 D3 review: a redirect hop is in the chain by its `redirectedRequestId` or, when
+    /// Chromium leaves that out, by the chain's network id; a later document request with
+    /// neither is not.
+    #[test]
+    fn a_navigation_watch_follows_redirect_hops_by_request_or_network_id() {
+        let watches = Arc::new(NavigationWatches::default());
+        let tab = TargetId::new("tab");
+
+        let mut watched = watches.watch(tab.clone(), "http://allowed.test/redirect");
+        watches.document_request(
+            &tab,
+            &paused("r1", "http://allowed.test/redirect", Some("n1"), None),
+            None,
+        );
+        watches.document_request(
+            &tab,
+            &paused("other", "http://refused.test/", Some("n2"), None),
+            Some(NAVIGATION_REFUSED_BY_GRANT),
+        );
+        assert!(watched.refused.try_recv().is_err(), "not a hop of the goto");
+        // A hop without `redirectedRequestId`, on the chain's network id.
+        watches.document_request(
+            &tab,
+            &paused("r2", "http://refused.test/", Some("n1"), None),
+            Some(NAVIGATION_REFUSED_BY_GRANT),
+        );
+        assert_eq!(
+            watched.refused.try_recv().ok(),
+            Some(NAVIGATION_REFUSED_BY_GRANT)
+        );
+        drop(watched);
+
+        let mut watched = watches.watch(tab.clone(), "http://allowed.test/redirect");
+        watches.document_request(
+            &tab,
+            &paused("r1", "http://allowed.test/redirect", None, None),
+            None,
+        );
+        watches.document_request(
+            &tab,
+            &paused("r2", "http://refused.test/", None, Some("r1")),
+            Some(NAVIGATION_REFUSED_BY_GUARD),
+        );
+        assert_eq!(
+            watched.refused.try_recv().ok(),
+            Some(NAVIGATION_REFUSED_BY_GUARD)
+        );
+        drop(watched);
+        assert!(
+            watches.by_tab.lock().unwrap().is_empty(),
+            "a dropped watch is gone"
+        );
+    }
+
+    /// Whether the tab's Fetch guard recorded a `domain_grant_blocked` receipt for a
+    /// request to `host` on `tab_id` after `after` (a subresource's can land just after
+    /// the load). The host keeps Chromium's own background requests, which the guard
+    /// refuses too, from passing for the one a check is about.
     async fn grant_block_recorded(
         driver: &ChromiumoxideDriver,
         session: &BrowserSession,
         tab_id: &str,
+        host: &str,
         after: u64,
     ) -> bool {
         for _ in 0..40 {
@@ -9020,6 +9196,7 @@ mod tests {
                 receipt.tab_id.as_deref() == Some(tab_id)
                     && receipt.decision == BrowserEgressDecision::Block
                     && receipt.policy == "domain_grant_blocked"
+                    && url::Url::parse(&receipt.url).is_ok_and(|url| url.host_str() == Some(host))
             }) {
                 return true;
             }
@@ -9104,7 +9281,7 @@ mod tests {
             "the refused page never arrived: {html}"
         );
         assert!(
-            grant_block_recorded(&driver, &session, &tab_id, 0).await,
+            grant_block_recorded(&driver, &session, &tab_id, "sc4.fixture.test", 0).await,
             "the refusal is a receipt"
         );
 
@@ -9121,7 +9298,7 @@ mod tests {
         let error = driver.goto(&session, "about:blank").await.unwrap_err();
         assert_refused_at_once("first step, redirect", &error, started.elapsed(), bound);
         assert!(
-            grant_block_recorded(&driver, &session, &tab_id, after).await,
+            grant_block_recorded(&driver, &session, &tab_id, "sc4-out.fixture.test", after).await,
             "the refused hop is a receipt"
         );
         assert!(!page_html(&driver, &session).await.contains("sc4-"));
@@ -9200,7 +9377,8 @@ mod tests {
             let error = driver.goto(&session, "about:blank").await.unwrap_err();
             assert_refused_at_once(case, &error, started.elapsed(), bound);
             assert!(
-                grant_block_recorded(&driver, &session, &tab_id, after).await,
+                grant_block_recorded(&driver, &session, &tab_id, "sc4-out.fixture.test", after)
+                    .await,
                 "{case}: the refusal is a receipt"
             );
             assert_eq!(abandoned_count(&driver), 1, "{case}: marked");
@@ -9233,7 +9411,7 @@ mod tests {
             .expect("a refused image does not fail the navigation");
         assert!(page_html(&driver, &session).await.contains("sc4-image-out"));
         assert!(
-            grant_block_recorded(&driver, &session, &tab_id, after).await,
+            grant_block_recorded(&driver, &session, &tab_id, "sc4-out.fixture.test", after).await,
             "the refused image is a receipt"
         );
         assert_eq!(abandoned_count(&driver), 0);
