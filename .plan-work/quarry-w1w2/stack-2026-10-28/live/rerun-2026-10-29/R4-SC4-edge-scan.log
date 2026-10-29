@@ -1,0 +1,68 @@
+# R4-SC4 edge log scan (docker logs --timestamps quarry-edge; each container's log saved before it was recreated). JSON lines; counts only.
+== edge-shipped.log lines=372 first=2026-10-29T09:59:13.3262496Z last=2026-10-29T10:06:11.7046994Z
+lines matching relaunch|crash|lost|disconnect|dead|recycled|unhealthy|panic: 0
+lines containing slow.crawl.test: 0
+lines containing held.html, slow.html, toblank, img.html, pixel.png, /redir or /ext: 0
+lines containing about:blank: 0
+lines containing fixture-a.crawl.test or fixture-b.crawl.test: 0
+levels:  5 "ERROR"; 45 "INFO"; 322 "WARN";
+chromiumoxide 'WS Invalid message' warns: 18
+run sweeper lines (run expired / would_expire): 0 / 0
+SECURITY_BLOCKED / domain_grant_blocked / no_current_page mentions: 0 / 0 / 0
+WARN messages (distinct, count):
+      150 "QUARRY_EDGE_AUTH_DEV_BYPASS enabled — bearer failed real JWKS verification, falling back to stub claims (or
+        1 "QUARRY_EDGE__RERANK_SHADOW has no effect while QUARRY_EDGE__SEMANTIC_RERANK is off"
+       18 "WS Invalid message: data did not match any variant of untagged enum Message"
+      150 "failed to decode JWT header"
+        1 "no BrowserBroker validator is configured: browser grants are not enforced (not production)"
+        1 "page-image producer connect failed; disabled"
+        1 "smart_router[+]: brave (paid backup) — EXTERNAL: queries egress to api.search.brave.com; set QUARRY_EDGE__Z
+ERROR lines (time | message | status | latency | path):
+  2026-10-29T09:59:13.689149Z | authorization violation | nats: authorization violation |  | 
+  2026-10-29T10:04:43.065926Z | response failed | Status code: 504 Gateway Timeout | 25023 ms | /v1/agent/runs/run_01M63HW4AYC2RENKKGMA7N7BEB/step
+  2026-10-29T10:05:11.434926Z | response failed | Status code: 504 Gateway Timeout | 25024 ms | /v1/agent/runs/run_01M63HX0A216K79Z8VVF0F38Y2/step
+  2026-10-29T10:05:39.320533Z | response failed | Status code: 504 Gateway Timeout | 25183 ms | /v1/agent/runs/run_01M63HXVXDXW1J3NY2SEC653BK/step
+  2026-10-29T10:06:08.440553Z | response failed | Status code: 504 Gateway Timeout | 25214 ms | /v1/agent/runs/run_01M63HYRAASXEZZ0DN5298717Z/step
+== edge-rs.log lines=160 first=2026-10-29T10:06:55.1709641Z last=2026-10-29T10:10:05.4079169Z
+lines matching relaunch|crash|lost|disconnect|dead|recycled|unhealthy|panic: 0
+lines containing slow.crawl.test: 0
+lines containing held.html, slow.html, toblank, img.html, pixel.png, /redir or /ext: 0
+lines containing about:blank: 0
+lines containing fixture-a.crawl.test or fixture-b.crawl.test: 0
+levels:  3 "ERROR"; 48 "INFO"; 109 "WARN";
+chromiumoxide 'WS Invalid message' warns: 5
+run sweeper lines (run expired / would_expire): 3 / 0
+SECURITY_BLOCKED / domain_grant_blocked / no_current_page mentions: 0 / 0 / 0
+WARN messages (distinct, count):
+       50 "QUARRY_EDGE_AUTH_DEV_BYPASS enabled — bearer failed real JWKS verification, falling back to stub claims (or
+        1 "QUARRY_EDGE__RERANK_SHADOW has no effect while QUARRY_EDGE__SEMANTIC_RERANK is off"
+        5 "WS Invalid message: data did not match any variant of untagged enum Message"
+       50 "failed to decode JWT header"
+        1 "no BrowserBroker validator is configured: browser grants are not enforced (not production)"
+        1 "page-image producer connect failed; disabled"
+        1 "smart_router[+]: brave (paid backup) — EXTERNAL: queries egress to api.search.brave.com; set QUARRY_EDGE__Z
+ERROR lines (time | message | status | latency | path):
+  2026-10-29T10:06:55.307262Z | authorization violation | nats: authorization violation |  | 
+  2026-10-29T10:07:32.891271Z | response failed | Status code: 504 Gateway Timeout | 25206 ms | /v1/agent/runs/run_01M63J1ADAF8J79N0D8HTRZG57/step
+  2026-10-29T10:08:38.560752Z | response failed | Status code: 504 Gateway Timeout | 25119 ms | /v1/agent/runs/run_01M63J3B12EP2BRXES9NC1YXKD/step
+== edge-final.log lines=104 first=2026-10-29T10:10:25.7831362Z last=2026-10-29T10:11:23.5997190Z
+lines matching relaunch|crash|lost|disconnect|dead|recycled|unhealthy|panic: 0
+lines containing slow.crawl.test: 0
+lines containing held.html, slow.html, toblank, img.html, pixel.png, /redir or /ext: 0
+lines containing about:blank: 0
+lines containing fixture-a.crawl.test or fixture-b.crawl.test: 0
+levels:  2 "ERROR"; 45 "INFO"; 57 "WARN";
+chromiumoxide 'WS Invalid message' warns: 5
+run sweeper lines (run expired / would_expire): 0 / 0
+SECURITY_BLOCKED / domain_grant_blocked / no_current_page mentions: 0 / 0 / 0
+WARN messages (distinct, count):
+       24 "QUARRY_EDGE_AUTH_DEV_BYPASS enabled — bearer failed real JWKS verification, falling back to stub claims (or
+        1 "QUARRY_EDGE__RERANK_SHADOW has no effect while QUARRY_EDGE__SEMANTIC_RERANK is off"
+        5 "WS Invalid message: data did not match any variant of untagged enum Message"
+       24 "failed to decode JWT header"
+        1 "no BrowserBroker validator is configured: browser grants are not enforced (not production)"
+        1 "page-image producer connect failed; disabled"
+        1 "smart_router[+]: brave (paid backup) — EXTERNAL: queries egress to api.search.brave.com; set QUARRY_EDGE__Z
+ERROR lines (time | message | status | latency | path):
+  2026-10-29T10:10:25.907468Z | authorization violation | nats: authorization violation |  | 
+  2026-10-29T10:11:20.257067Z | response failed | Status code: 504 Gateway Timeout | 25149 ms | /v1/agent/runs/run_01M63J88WJKM50WT1EYTRN3Z34/step

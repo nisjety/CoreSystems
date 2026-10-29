@@ -130,3 +130,53 @@ None. Every PASS row matches its evidence in status, timing and count. Notes tha
 2. **Duplicate receipt step key after a resume** (rs-receipts.txt: step 1 `wait completed` at 02:45:09Z and step 1 `wait failed DRIVER_FAILED` at 02:45:50Z). Confirmed in code: resume seeds from `summary.step` (`lifecycle.rs:716`), which counts successful steps only (`types.rs:101-114`), while keys are reserved for every admitted step (`step.rs:155`). Every T4b-1-shaped run that idles out and resumes hits it.
 3. **Off-list redirect costs the full 25 s and answers `TIMEOUT`, not `SECURITY_BLOCKED`** (s1.log x2, s1-redirect-body.raw; the block is visible as `domain_grant_blocked` for fixture-b/ext in s1-redirect-next-egress.json).
 4. Not run: open-web run, browser socket and attach-delegate step paths, and a resume from an old checkpoint that still holds `about:blank`.
+
+## R4-SC4 (depth fixes)
+
+- Checked on 2026-10-29 at about 10:20Z, after the leg ended at 10:13:50Z. The check was read-only: no stack, flag or code change, and this section is the only file write.
+- **Read:** R4-SC4.md, all 25 R4-SC4-* files (the d1, d3, reg, rs, final, edge-scan, probe and ready-and-end logs; flags-end.txt; helper.sh.txt; rs-expired-lines.txt; rs-receipts.txt; 4 .raw bodies and 9 .json bodies), and the R4-SC4 lines (75-77) in `../flags-log.md`.
+- **Live checks run now:**
+  - live-flags.env is 0 bytes (stat). Its mtime is 10:15:20Z because `live.sh` line 15 runs `touch` on it whenever it is called; the file is still empty.
+  - `live.sh flags | diff - P0-live-flags-end.txt` is empty (exit 0), and so is the diff against R4-SC4-flags-end.txt.
+  - `docker ps -a --filter name=qlive` returns 0 rows.
+  - quarry-edge is running and healthy. It started at 10:10:25Z (the revert recreate) with RestartCount 0. Its env has `RUN_SWEEPER_DRY_RUN=1` and no `RUN_SWEEP_INTERVAL_S`, `AGENT_RUN_IDLE_TTL_S` or `QUARRY_BROWSER_DEADLINE_SCALE`.
+  - `GET 127.0.0.1:8082/ready` returns 200: status ready, browser healthy, generation 1, sessions_open 0, probe_failures 0.
+  - A read-only SELECT (`BEGIN READ ONLY`, database quarry_edge) over the 26 run ids gave `closed|26`. The same SELECT found no run whose receipts repeat a step key.
+
+| row | result | evidence checked |
+|---|---|---|
+| D3a (x4: 2 first-step, 2 later-step) | PASS (confirmed) | d3.log tries 1-3 and final.log: 403 in 0.148 / 0.134 s as a first step and 0.037 / 0.053 s as a later step. Every body has `SECURITY_BLOCKED`, `retryable:false` and `details {op:navigate, reason:domain_grant_blocked}` (d3a-first-body.raw, d3a-later-body.raw), and every leak check is 0. The receipt is `failed SECURITY_BLOCKED` at step 0 (first step) or step 1 (later step); d3a-first-receipts.json agrees. The next wait is 200 in 0.188 / 0.182 s on about:blank, or 0.166 / 0.167 s on fixture-a. The next navigate to fixture-a is 200 in 0.264 / 0.188 / 0.183 / 0.282 s. `tabs` is n=1 after the refusal and at the end of tries 1-3. |
+| D3b (x2) | PASS (confirmed) | img.html returns 200 in 0.246 / 0.126 s with title "R4-SC4 offlist image", 10 AX nodes and `policy_denials []`. The same observation has `fixture-b.crawl.test/pixel.png block domain_grant_blocked` on tab-1 (d3b-navigate-observation.json). The wait after it is 200 in 0.164 / 0.179 s, and every receipt is completed. |
+| D3c (x4) | PASS (confirmed, scope note) | All 4 D3a runs' next observation includes `slow/redir allow` and `fixture-b/ext block domain_grant_blocked` with tab-1 (d3c-next-observation-egress.json). `GET /egress-receipts` shows the fixture-b row in all 3 shipped tries (d3c-egress-receipts-endpoint.json; final.log does not check the endpoint). The receipt holds the full URL with its path and `host:null`, so it is not host-only. |
+| D1a (x4) | PASS (confirmed) | d1.log tries 1-3 and final.log: the first wait is 200 in 0.432 / 0.411 / 0.317 / 0.275 s, url about:blank, step 0, 3 AX nodes, `wait_completed`, `no_current_page` 0. Tabs go 0 → 1 (about:blank) → 1 (fixture-a) in tries 1-3; the final try has no "before" read but shows 1 → 1. Checkpoint `1|active|[]|1`. Navigate is 200 "Fixture A" in 0.296 / 0.288 / 0.216 / 0.190 s. |
+| D1b (x1) | PASS (confirmed) | `wait_for body` is 200 in 0.199 s with `selector_observed` and url about:blank (d1b-first-wait-for-body.json). Tabs are n=1 after it and after the navigate (200 in 0.237 s). |
+| D1c (x2, +rs3) | PASS (confirmed) | rs.log rs1/rs2: navigate 504 in 25.211 / 25.121 s, then a wait 200 on about:blank. rs-expired-lines.txt has `run expired idle` lines with idle_s 31 / 30 (and rs3 31). A step on the expired run is 404 `run_not_live`, `resumable:true`. Resume is 200 in 0.024 / 0.021 s with tabs n=0. The wait right after the resume is 200 in 0.333 / 0.316 s on about:blank with `DRIVER_FAILED` 0 (rs1/rs2 wait-after-resume bodies). Navigate is 200 in 0.220 / 0.215 s. rs3: resume 200 in 0.236 s, then a wait 200 on "Fixture A". |
+| D2 (x3) | PASS (confirmed, live re-check) | rs-receipts.txt and the API lists agree. rs1 has keys 0-4, rs2 has 0-5 with the failed `/redir` at key 2 at 10:08:39.386, and rs3 has 0-4 with the failed key 1. The keys are distinct and strictly increasing by started_at. rs2's checkpoint before the idle was `1|active|[]|3`, and the closed checkpoints have next_step 5 / 6 / 5. The live SELECT found 0 runs with a repeated step key. |
+| T1 (x2) | PASS (confirmed) | reg.log: 504 in 25.027 / 25.027 s, `TIMEOUT`, `deadline_ms:25000`, url-in-body 0. The next navigate is 200 in 0.199 / 0.209 s with `ax_snapshot` 0, and the wait after it is 200. |
+| T4b-1 (x3, +rs1/rs2) | PASS (confirmed) | reg.log x2 and final.log: 504 in 25.187 / 25.218 / 25.151 s (t4b1-hang-body.raw, no URL). The wait is 200 in 0.180 / 0.184 / 0.208 s on about:blank, and the navigate is 200. rs1/rs2 return 504 in 25.211 / 25.121 s. The 25.15-25.22 range in the summary covers only the x3. |
+| T6 (x4) | PASS (confirmed) | 0.368 / 0.323 / 0.310 / 0.450 s. I recomputed the 11 step-0 fixture-a navigates (T6 x4, D3a warm x2, D3b warm, S1a warm, T1 warm x2, rs3): 0.274, 0.280, 0.295, 0.310, 0.310, 0.323, 0.353, 0.366, 0.368, 0.409, 0.450. That gives min 0.274 and median 0.323, as reported. |
+| S1a (x2 +rs2) | PASS (confirmed) | 403 in 0.0057 / 0.0046 / 0.0039 s with `details:null` (s1a-first-body.raw). Receipt counts stay 0 -> 0 and 1 -> 1. |
+| T5 | PASS (confirmed, scope note) | The generation values in the logs are only 0 (the first `/ready` of the d1, rs and final containers) and 1 (d1 5, d3 8, reg 10, rs 4, final 5), with nothing above 1. ready-and-end.log shows generation 1, probe_failures 0 and rc=0 for all 3 containers. edge-scan.log (372 / 160 / 104 lines) has 0 relaunch/crash lines, 0 test host/URL lines and 0 SECURITY_BLOCKED/no_current_page lines. Its 7 ERROR 504 paths are runs HW4A, HX0A, HXVX, HYRA, J1AD, J3B1 and J88W, which are exactly the 7 TIMEOUT steps (T1 x2, T4b-1 x3, rs1, rs2). There is no 502, and 1 NATS boot line per container. The raw docker logs are not kept; the scan is the leg's own count summary. |
+| closes | PASS (confirmed, live re-check) | `close: HTTP=200` appears 4 + 6 + 8 + 3 + 4 = 25 times for 25 distinct run ids, plus the tabs-shape probe run (ready-and-end.log). The live read-only SELECT gives `closed|26`. |
+| Flag ledger / end state | PASS (confirmed) | flags-log lines 75-77 record that `RUN_SWEEPER_DRY_RUN` 1 -> 0, `RUN_SWEEP_INTERVAL_S` -> 5 and `AGENT_RUN_IDLE_TTL_S` -> 30 were set at 10:06:51Z, and all three were reverted at 10:10:21Z. The edge start time (10:10:25Z), the container env and the empty flags diff confirm the revert. |
+| Secret scan of the evidence | PASS | No matches for JWTs (`eyJ`), `Bearer <value>`, sk-/sk-ant/AKIA/gh*_/xox keys, private-key headers, `password/secret/token/api_key=` values, or nats/postgres URLs with credentials, across R4-SC4.md and the R4-SC4-* files. |
+
+### Downgrades
+
+None. Every PASS row matches its evidence in status, timing and count. These notes do not change any result:
+
+- **D3a:** R4-SC4.md says "One tab throughout (`GET /tabs` n=1 before and after)", but d3.log records tabs only after the refusal and at the end; there is no "before" read in the D3a tries. Those reads are n=1 and are enough for the claim.
+- **D3c:** the endpoint check covers the 3 shipped tries; the final D3a try checked only the next observation.
+- **T4b-1:** the summary's 25.15-25.22 s range covers the x3 only; rs2's first-step 504 was 25.121 s.
+- **Tabs shape:** the helper's jq reads `id`, but the API field is `tabId` (see the probe run in ready-and-end.log). Every tabs `id:null` value in the logs comes from that, not from the edge.
+
+### Depth (R4-SC4), agreed with the leg
+
+1. **Egress receipts carry the full URL with its path, and `host` is null.** Examples are `fixture-b.crawl.test/ext` and `/pixel.png`, in both the observation and `GET /egress-receipts`. The endpoint reports `zdr:false` for these runs. The owner should decide whether this is acceptable under ZDR persistence or relay, like open issue 3.
+2. **After a first-step D3 refusal, the two read surfaces disagree:** browser-session shows `currentUrl ""` while `/tabs` shows about:blank. This lasts until the next observation.
+3. **A refused navigate is charged 1000 micro-USD**, the flat navigate cost (d3a-first-receipts.json).
+4. **`outcome.latency_ms` is 0 on completed receipts** even though the steps took 0.16-0.28 s.
+5. **The checkpoint `step` column is still the count of completed steps.** The key high-water mark is in `state->>'next_step'`.
+6. **Not run:** `screenshot`, `pdf` and `get_content` on a session with no page; the socket and attach-delegate step paths; an open-web run; and `HUMAN_RECEIPT_MODE=none`.
+
+R3-SC4 open issues 1 (502 after resume), 2 (duplicate step key) and 3 (25 s TIMEOUT on an off-list redirect) are closed on live dev by this leg.

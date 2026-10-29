@@ -1,0 +1,114 @@
+=== RS start 2026-10-29T10:07:06Z ready={"generation":0,"sessions_open":0}
+--- rs1 run=run_01M63J1ADAF8J79N0D8HTRZG57
+first navigate slow.html: http=504 time=25.211229
+  {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":25000,"effect":"unknown","op":"navigate"}}
+wait (blank tab): http=200 time=0.181109
+  {"url":"about:blank","title":null,"step":1,"ax_nodes":3,"ax_names":[]}
+receipts before idle: [{"step":0,"a":"navigate","s":"failed","code":"TIMEOUT"},{"step":1,"a":"wait","s":"completed","code":null}]
+checkpoint before idle (step|status|[url]|next_step): 1|active|[]|2
+idle from 2026-10-29T10:07:34Z; polling /ready sessions_open
+sessions_open 0 after 32s (10:08:06Z)
+step on the expired run: http=404 time=0.005686
+  {"code":"NOT_FOUND","message":"agent run is not live","retryable":false,"details":{"reason":"run_not_live","resumable":true,"resume_run_id":"run_01M63J1ADAF8J79N0D8HTRZG57"}}
+checkpoint after expiry (step|status|[url]|next_step): 1|active|[]|2
+resume: http=200 time=0.024252
+  {"run_id":"run_01M63J1ADAF8J79N0D8HTRZG57","error":null}
+browser-session after resume: {"currentUrl":"","title":null,"status":"active","live":true}
+tabs after resume: {"n":0,"tabs":[]}
+wait right after resume: http=200 time=0.333073
+  {"url":"about:blank","title":null,"step":2,"ax_nodes":3,"ax_names":[]}
+  no_current_page=0 DRIVER_FAILED=0
+tabs after the wait: {"n":1,"tabs":[{"id":null,"url":"about:blank","active":true}]}
+navigate fixture-a: http=200 time=0.220126
+  {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+wait after it: http=200 time=0.173924 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":4,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","do
+tabs at end: {"n":1,"tabs":[{"id":null,"url":"http://fixture-a.crawl.test/","active":true}]}
+receipts (API): [{"step":0,"a":"navigate","s":"failed","code":"TIMEOUT"},{"step":1,"a":"wait","s":"completed","code":null},{"step":2,"a":"wait","s":"completed","code":null},{"step":3,"a":"navigate","s":"completed","code":null},{"step":4,"a":"wait","s":"completed","code":null}]
+receipts (SELECT step|action|status|started_at UTC, by started_at):
+  0|navigate|failed|10:07:32.879
+  1|wait|completed|10:07:33.250
+  2|wait|completed|10:08:08.519
+  3|navigate|completed|10:08:09.319
+  4|wait|completed|10:08:09.828
+  step keys: 0 1 2 3 4 distinct=5 total=5 strictly-increasing=yes
+checkpoint before close (step|status|[url]|next_step): 4|active|[http://fixture-a.crawl.test/]|5
+close: HTTP=200
+checkpoint after close: 4|closed|[http://fixture-a.crawl.test/]|5
+ready: {"generation":1,"sessions_open":0}
+--- rs2 run=run_01M63J3B12EP2BRXES9NC1YXKD
+first navigate slow.html: http=504 time=25.121478
+  {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":25000,"effect":"unknown","op":"navigate"}}
+wait (blank tab): http=200 time=0.166957
+  {"url":"about:blank","title":null,"step":1,"ax_nodes":3,"ax_names":[]}
+navigate /redir (failed step right before the idle): http=403 time=0.068836
+  {"code":"SECURITY_BLOCKED","message":"browser navigation is outside the run's allowed domains","retryable":false,"details":{"op":"navigate","reason":"domain_grant_blocked"}}
+navigate about:blank (admission refusal, no key): http=403 time=0.003913
+  {"code":"SECURITY_BLOCKED","message":"browser navigation is outside the run's allowed domains","retryable":false,"details":null}
+receipts before idle: [{"step":0,"a":"navigate","s":"failed","code":"TIMEOUT"},{"step":1,"a":"wait","s":"completed","code":null},{"step":2,"a":"navigate","s":"failed","code":"SECURITY_BLOCKED"}]
+checkpoint before idle (step|status|[url]|next_step): 1|active|[]|3
+idle from 2026-10-29T10:08:40Z; polling /ready sessions_open
+sessions_open 0 after 33s (10:09:13Z)
+step on the expired run: http=404 time=0.006303
+  {"code":"NOT_FOUND","message":"agent run is not live","retryable":false,"details":{"reason":"run_not_live","resumable":true,"resume_run_id":"run_01M63J3B12EP2BRXES9NC1YXKD"}}
+checkpoint after expiry (step|status|[url]|next_step): 1|active|[]|3
+resume: http=200 time=0.020711
+  {"run_id":"run_01M63J3B12EP2BRXES9NC1YXKD","error":null}
+browser-session after resume: {"currentUrl":"","title":null,"status":"active","live":true}
+tabs after resume: {"n":0,"tabs":[]}
+wait right after resume: http=200 time=0.316067
+  {"url":"about:blank","title":null,"step":3,"ax_nodes":3,"ax_names":[]}
+  no_current_page=0 DRIVER_FAILED=0
+tabs after the wait: {"n":1,"tabs":[{"id":null,"url":"about:blank","active":true}]}
+navigate fixture-a: http=200 time=0.214546
+  {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":4,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+wait after it: http=200 time=0.171942 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":5,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","do
+tabs at end: {"n":1,"tabs":[{"id":null,"url":"http://fixture-a.crawl.test/","active":true}]}
+receipts (API): [{"step":0,"a":"navigate","s":"failed","code":"TIMEOUT"},{"step":1,"a":"wait","s":"completed","code":null},{"step":2,"a":"navigate","s":"failed","code":"SECURITY_BLOCKED"},{"step":3,"a":"wait","s":"completed","code":null},{"step":4,"a":"navigate","s":"completed","code":null},{"step":5,"a":"wait","s":"completed","code":null}]
+receipts (SELECT step|action|status|started_at UTC, by started_at):
+  0|navigate|failed|10:08:38.549
+  1|wait|completed|10:08:39.018
+  2|navigate|failed|10:08:39.386
+  3|wait|completed|10:09:16.218
+  4|navigate|completed|10:09:17.399
+  5|wait|completed|10:09:17.965
+  step keys: 0 1 2 3 4 5 distinct=6 total=6 strictly-increasing=yes
+checkpoint before close (step|status|[url]|next_step): 4|active|[http://fixture-a.crawl.test/]|6
+close: HTTP=200
+checkpoint after close: 4|closed|[http://fixture-a.crawl.test/]|6
+ready: {"generation":1,"sessions_open":0}
+--- rs3 run=run_01M63J5EKM6H3K4NY9VKMPFJYV (checkpoint with a URL)
+navigate fixture-a: http=200 time=0.365736
+navigate /redir (failed step right before the idle): http=403 time=0.090091
+  {"code":"SECURITY_BLOCKED","message":"browser navigation is outside the run's allowed domains","retryable":false,"details":{"op":"navigate","reason":"domain_grant_blocked"}}
+receipts before idle: [{"step":0,"a":"navigate","s":"completed","code":null},{"step":1,"a":"navigate","s":"failed","code":"SECURITY_BLOCKED"}]
+checkpoint before idle (step|status|[url]|next_step): 1|active|[http://fixture-a.crawl.test/]|2
+idle from 2026-10-29T10:09:24Z; polling /ready sessions_open
+sessions_open 0 after 33s (10:09:57Z)
+step on the expired run: http=404 time=0.007070
+  {"code":"NOT_FOUND","message":"agent run is not live","retryable":false,"details":{"reason":"run_not_live","resumable":true,"resume_run_id":"run_01M63J5EKM6H3K4NY9VKMPFJYV"}}
+checkpoint after expiry (step|status|[url]|next_step): 1|active|[http://fixture-a.crawl.test/]|2
+resume: http=200 time=0.236312
+  {"run_id":"run_01M63J5EKM6H3K4NY9VKMPFJYV","error":null}
+browser-session after resume: {"currentUrl":"http://fixture-a.crawl.test/","title":null,"status":"active","live":true}
+tabs after resume: {"n":1,"tabs":[{"id":null,"url":"http://fixture-a.crawl.test/","active":true}]}
+wait right after resume: http=200 time=0.184107
+  {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+  no_current_page=0 DRIVER_FAILED=0
+tabs after the wait: {"n":1,"tabs":[{"id":null,"url":"http://fixture-a.crawl.test/","active":true}]}
+navigate fixture-a: http=200 time=0.198543
+  {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+wait after it: http=200 time=0.215831 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":4,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","do
+tabs at end: {"n":1,"tabs":[{"id":null,"url":"http://fixture-a.crawl.test/","active":true}]}
+receipts (API): [{"step":0,"a":"navigate","s":"completed","code":null},{"step":1,"a":"navigate","s":"failed","code":"SECURITY_BLOCKED"},{"step":2,"a":"wait","s":"completed","code":null},{"step":3,"a":"navigate","s":"completed","code":null},{"step":4,"a":"wait","s":"completed","code":null}]
+receipts (SELECT step|action|status|started_at UTC, by started_at):
+  0|navigate|completed|10:09:22.994
+  1|navigate|failed|10:09:23.256
+  2|wait|completed|10:09:59.966
+  3|navigate|completed|10:10:01.169
+  4|wait|completed|10:10:01.888
+  step keys: 0 1 2 3 4 distinct=5 total=5 strictly-increasing=yes
+checkpoint before close (step|status|[url]|next_step): 4|active|[http://fixture-a.crawl.test/]|5
+close: HTTP=200
+checkpoint after close: 4|closed|[http://fixture-a.crawl.test/]|5
+ready: {"generation":1,"sessions_open":0}
+=== RS end 2026-10-29T10:10:06Z ready={"generation":1,"sessions_open":0}
