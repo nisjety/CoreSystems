@@ -196,6 +196,13 @@ impl VerifiedIdentity {
             .ok_or_else(|| Status::unauthenticated("verified session-core credential required"))
     }
 
+    /// The delegated inference-core bearer that accompanied the ingress call, if one did. Only
+    /// the content-screening RPC reads it, to decide whether its classifier may run.
+    #[must_use]
+    pub(crate) fn inference_bearer(&self) -> Option<&str> {
+        self.inference_bearer.as_deref()
+    }
+
     /// Build an inference-core request only when an independently verified,
     /// identity-bound `aud=inference-core` bearer accompanied the ingress call.
     ///

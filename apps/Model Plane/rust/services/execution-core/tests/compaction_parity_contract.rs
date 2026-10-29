@@ -581,6 +581,46 @@ fn both_loops_classify_through_one_trust_table_and_one_scanner() {
     );
 }
 
+/// The Do loop's screening leg (WS26-S7) asks the gateway for a verdict and keeps no classifier of
+/// its own. The gateway answers through the same trust table the chat loop reads, so a tool
+/// classified in one loop is classified the same way in the other.
+#[test]
+fn the_screening_rpc_leg_names_the_same_trust_table() {
+    let client = read("execution-core/src/screening_client.rs");
+    let gateway = read("model-gateway/src/grpc.rs");
+
+    for (which, source) in [
+        ("execution-core screening client", &client),
+        ("model-gateway ScreenContent", &gateway),
+    ] {
+        assert!(
+            !source.contains("fn classify("),
+            "{which} defines its own `classify`; the trust table lives only in mp-content-safety"
+        );
+        assert!(
+            !source.contains("TOOL_TRUST"),
+            "{which} keeps a tool table of its own; the trust table lives only in mp-content-safety"
+        );
+        assert!(
+            !source.contains("INJECTION_MARKERS"),
+            "{which} keeps a marker list of its own; the markers live only in mp-content-safety"
+        );
+    }
+    assert!(
+        gateway.contains("async fn screen_content("),
+        "model-gateway must serve ScreenContent for the Do loop"
+    );
+    assert!(
+        gateway.contains("fn screen_verdict<")
+            && gateway.contains("TrustClass::classify(tool_name)"),
+        "ScreenContent must classify the tool through the shared table"
+    );
+    assert!(
+        client.contains("TrustClass"),
+        "the Do loop's screening leg must name the shared TrustClass, not a second one"
+    );
+}
+
 /// Every ground-checked tool must actually be *offered* by at least one loop,
 /// and every shipping-shaped tool a loop offers must be ground-checked.
 ///

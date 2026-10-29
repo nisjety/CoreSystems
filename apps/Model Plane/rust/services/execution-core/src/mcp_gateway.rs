@@ -851,6 +851,33 @@ impl GovernedMcp {
             .map_err(|status| status.message().to_owned())?;
         self.gateway.proxy(request).await
     }
+
+    /// One screening verdict from model-gateway, asked as the execution service. The capability
+    /// bearer rides along when this service can mint one, so the gateway reads the org's injection
+    /// policy. Without it the gateway keeps its own default mode and screening stays on.
+    ///
+    /// # Errors
+    ///
+    /// A status when no gateway credential could be obtained or the gateway refused the call.
+    pub async fn screen_content(
+        &self,
+        request: pb::ScreenContentRequest,
+    ) -> Result<pb::ScreenContentResponse, Status> {
+        let org_id = request.org_id.clone();
+        let mut request = Request::new(request);
+        insert_bearer(
+            &mut request,
+            "authorization",
+            &self.gateway_bearer(&org_id).await?,
+        )?;
+        if let Ok(bearer) = self.capability_bearer(&org_id).await {
+            insert_bearer(&mut request, "x-capability-authorization", &bearer)?;
+        }
+        ModelGatewayClient::new(self.gateway.channel.clone())
+            .screen_content(request)
+            .await
+            .map(tonic::Response::into_inner)
+    }
 }
 
 #[tonic::async_trait]

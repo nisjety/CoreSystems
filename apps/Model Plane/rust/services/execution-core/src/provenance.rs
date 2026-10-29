@@ -31,6 +31,12 @@
 /// `mp-content-safety`; see the module docs.
 pub use mp_content_safety::TrustClass;
 
+/// The Do loop's leg of the screening pass (WS26-S7): the verdict model-gateway gives for a result
+/// this module has already read. The file sits beside this one. The crate root is not owned by
+/// that slice, so the declaration lives here, with its path spelled out.
+#[path = "screening_client.rs"]
+pub(crate) mod screening_client;
+
 /// Whether `tool_name` runs against a connected third-party account. Every such
 /// tool is personal data: it is refused under ZDR and on a waived route, and its
 /// audit category is `personal`. The trust class of the tools that return

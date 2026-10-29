@@ -176,6 +176,9 @@ service ModelGateway {
 
   // Health check for load balancer probes.
   rpc Health(HealthRequest) returns (HealthResponse);
+
+  // WS26-S7: Do-mode content screening. A verdict only; the content is never returned.
+  rpc ScreenContent(ScreenContentRequest) returns (ScreenContentResponse);
 }
 
 // InvokeRequest — normalized inference request entering the gateway.
@@ -1541,4 +1544,39 @@ message ListTasksRequest {
 message ListTasksResponse {
   string request_id = 1;
   repeated TaskRecord tasks = 2;
+}
+
+// ScreenContentRequest — one tool result from the Do loop, screened for injection.
+// The content crosses only this plane-internal boundary: it is scanned, never stored,
+// and never returned (ScreenContentResponse carries the verdict alone).
+message ScreenContentRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string user_id = 3;
+  string run_id = 4;
+  // The tool that produced the result, named as the shared trust table names it.
+  string tool_name = 5;
+  // The complete, untruncated tool output.
+  string content = 6;
+  // True on a ZDR run: the inline classifier is never called.
+  bool zdr = 7;
+}
+
+// ScreenContentResponse — the verdict for one ScreenContentRequest, without content.
+message ScreenContentResponse {
+  string request_id = 1;
+  // The trust class label the gateway classified the tool under.
+  string trust_class = 2;
+  // clean, flagged, degraded, policy-disabled or not-applicable (ScreeningPosture).
+  string posture = 3;
+  // completed, skipped-*, unavailable-*, or not-run when the inline pass is off.
+  string semantic_outcome = 4;
+  // True when the org's mode is enforce and a flagged result must not reach the model.
+  bool withhold = 5;
+  // BLAKE3 hex digest of the payload the gateway scanned, so the caller can match it.
+  string content_hash = 6;
+  // Rule ids that fired. Ids only, never matched text.
+  repeated string flags = 7;
+  // The injection_defense mode the verdict was made under: frame, tighten or enforce.
+  string mode = 8;
 }
