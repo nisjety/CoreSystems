@@ -28,6 +28,13 @@ const (
 	// of widening this credential.
 	ownerActionTicketCapabilityID = "cap.tool.ticket.create"
 
+	// browserOwnerCapabilityID is attested only by its owner, browser-broker,
+	// on its own route and scope. The broker owns the grants every browser run
+	// needs and probes its grant store and the Quarry validation path before it
+	// attests; execution-core's generic health credential can measure neither,
+	// so the generic and tenant lanes refuse this id outright.
+	browserOwnerCapabilityID = "cap.browser.open"
+
 	// genericGlobalHealthAttesterID is the only workload currently permitted to
 	// use the generic global-health route. Its Rust reporter probes precisely
 	// the capabilities listed below; a scope alone is intentionally not a
@@ -77,8 +84,11 @@ var reasonCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,127}$`)
 //
 // Everything with effects or an owner elsewhere stays OFF this list on purpose:
 // cap.tool.provider.execute, cap.tool.social.publish, cap.tool.shipping.book,
-// cap.browser.open and cap.tool.ticket.create (see
-// ownerActionTicketCapabilityID) must be attested by their own owners.
+// cap.browser.open and cap.tool.ticket.create must be attested by their own
+// owners. Two of them have one: cap.tool.ticket.create is attested by
+// conversation-core on the owner-action lane (see
+// ownerActionTicketCapabilityID), and cap.browser.open by browser-broker on
+// its own browser health lane (see browserOwnerCapabilityID).
 //
 // This list stays a list precisely because widening it is a decision. Added
 // 2026-08-26 after live proof: execution-core's reporter was attesting the
@@ -188,8 +198,19 @@ func mayUseGenericGlobalHealthAttestation(principal authctx.Principal, capabilit
 	return allowed
 }
 
+// attestationLane names the route an availability attestation arrived on.
+// Each owner lane admits exactly one service identity and one capability id;
+// the generic lane admits execution-core's measured runtimes and tenant rows.
+type attestationLane int
+
+const (
+	laneGeneric attestationLane = iota
+	laneOwnerAction
+	laneBrowserOwner
+)
+
 func (h *CapabilitiesHandler) attestAvailability(w http.ResponseWriter, request *http.Request) {
-	h.attestAvailabilityForLane(w, request, false)
+	h.attestAvailabilityForLane(w, request, laneGeneric)
 }
 
 // attestOwnerActionHealth is intentionally a different route and service
@@ -197,15 +218,24 @@ func (h *CapabilitiesHandler) attestAvailability(w http.ResponseWriter, request 
 // ticket adapter and only after Capability Core itself has a Control public-key
 // verifier; it cannot make arbitrary Model capabilities runnable.
 func (h *CapabilitiesHandler) attestOwnerActionHealth(w http.ResponseWriter, request *http.Request) {
-	h.attestAvailabilityForLane(w, request, true)
+	h.attestAvailabilityForLane(w, request, laneOwnerAction)
 }
 
-func (h *CapabilitiesHandler) attestAvailabilityForLane(w http.ResponseWriter, request *http.Request, ownerActionLane bool) {
+// attestBrowserOwnerHealth is browser-broker's dedicated lane. The broker can
+// attest cap.browser.open only, only in the global organization, and only as
+// its exact signed service identity; it cannot make any other capability
+// runnable. Unlike the owner-action lane it needs no Control verifier: the
+// broker's own grant validation is the run-bound authority behind the browser.
+func (h *CapabilitiesHandler) attestBrowserOwnerHealth(w http.ResponseWriter, request *http.Request) {
+	h.attestAvailabilityForLane(w, request, laneBrowserOwner)
+}
+
+func (h *CapabilitiesHandler) attestAvailabilityForLane(w http.ResponseWriter, request *http.Request, lane attestationLane) {
 	if request.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if h.availabilityStore == nil || (ownerActionLane && h.modelActionViews == nil) {
+	if h.availabilityStore == nil || (lane == laneOwnerAction && h.modelActionViews == nil) {
 		jsonErr(w, "availability update failed", http.StatusServiceUnavailable)
 		return
 	}
@@ -227,7 +257,8 @@ func (h *CapabilitiesHandler) attestAvailabilityForLane(w http.ResponseWriter, r
 	principal, principalPresent := authctx.PrincipalFromContext(request.Context())
 	organizationID := verifiedOrganizationID(request)
 	globalAuthority := principalPresent && mayAttestGlobalCapability(principal)
-	if ownerActionLane {
+	switch lane {
+	case laneOwnerAction:
 		if !principalPresent || principal.PrincipalType != "service" ||
 			principal.ActorID != authz.ConversationCoreServiceID ||
 			!principal.HasScope(authz.OwnerActionHealthWriteScope) ||
@@ -236,20 +267,37 @@ func (h *CapabilitiesHandler) attestAvailabilityForLane(w http.ResponseWriter, r
 			return
 		}
 		globalAuthority = true
+	case laneBrowserOwner:
+		if !principalPresent || principal.PrincipalType != "service" ||
+			principal.ActorID != authz.BrowserBrokerServiceID ||
+			principal.OrganizationID != "global" ||
+			!principal.HasScope(authz.BrowserHealthWriteScope) ||
+			organizationID != "global" || capabilityID != browserOwnerCapabilityID {
+			jsonErr(w, "browser health attestation is not authorized", http.StatusForbidden)
+			return
+		}
+		globalAuthority = true
 	}
 	// Owner actions are never eligible for the generic health route, including
 	// its tenant lane. This independently backs up the HTTP authorizer: a
 	// future route-policy regression cannot let a tenant health reporter make a
 	// globally registered owner action runnable.
-	if !ownerActionLane && capabilityID == ownerActionTicketCapabilityID {
+	if lane != laneOwnerAction && capabilityID == ownerActionTicketCapabilityID {
 		jsonErr(w, "owner-action capability requires a dedicated health attester", http.StatusForbidden)
 		return
 	}
-	if !ownerActionLane && !globalAuthority && organizationID == "global" {
+	// The same guard for the browser: only its owner's lane may attest it, so
+	// neither the generic global credential nor a tenant health reporter (even
+	// against an org-scoped row carrying this id) can make it runnable.
+	if lane != laneBrowserOwner && capabilityID == browserOwnerCapabilityID {
+		jsonErr(w, "browser capability requires its owner health attester", http.StatusForbidden)
+		return
+	}
+	if lane == laneGeneric && !globalAuthority && organizationID == "global" {
 		jsonErr(w, "tenant health attester may not target global capability health", http.StatusForbidden)
 		return
 	}
-	if !ownerActionLane && globalAuthority && !mayUseGenericGlobalHealthAttestation(principal, capabilityID) {
+	if lane == laneGeneric && globalAuthority && !mayUseGenericGlobalHealthAttestation(principal, capabilityID) {
 		jsonErr(w, "generic global health attester may not attest this capability", http.StatusForbidden)
 		return
 	}

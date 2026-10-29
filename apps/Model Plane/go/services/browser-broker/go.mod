@@ -9,6 +9,7 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
 	github.com/triodelab/model-plane/gen/go v0.0.0
 	github.com/triodelab/model-plane/pkg/authctx v0.0.0
+	github.com/triodelab/model-plane/pkg/servicetoken v0.0.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/metric v1.43.0
 	go.opentelemetry.io/otel/sdk/metric v1.43.0
@@ -80,3 +81,5 @@ replace google.golang.org/genproto => google.golang.org/genproto v0.0.0-20260414
 replace github.com/triodelab/model-plane/gen/go => ../../gen
 
 replace github.com/triodelab/model-plane/pkg/authctx => ../../pkg/authctx
+
+replace github.com/triodelab/model-plane/pkg/servicetoken => ../../pkg/servicetoken

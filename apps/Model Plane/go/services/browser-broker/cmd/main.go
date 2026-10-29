@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/triodelab/model-plane/services/browser-broker/internal/authz"
 	"github.com/triodelab/model-plane/services/browser-broker/internal/grant"
+	"github.com/triodelab/model-plane/services/browser-broker/internal/healthattest"
 	bbserver "github.com/triodelab/model-plane/services/browser-broker/internal/server"
 	"github.com/triodelab/model-plane/services/browser-broker/internal/sitepolicy"
 	"google.golang.org/grpc"
@@ -88,6 +89,11 @@ func main() {
 		slog.Warn("browser-broker running with in-memory grants only (ephemeral development); every grant is lost on restart")
 	}
 	go purgeLoop(ctx, purger)
+	// cap.browser.open health (F1): the broker owns the browser runtime, so it
+	// attests the capability to capability-core on its own lane, probing the
+	// same grant store /readyz uses. Never fatal: an unconfigured or failing
+	// attester only leaves the row to lapse as stale.
+	healthattest.Start(ctx, os.Getenv, ready, slog.Default())
 
 	// Health server on :8087
 	mux := http.NewServeMux()

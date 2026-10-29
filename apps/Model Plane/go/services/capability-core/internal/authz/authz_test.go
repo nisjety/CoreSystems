@@ -16,6 +16,7 @@ func TestAuthorizeHTTPPinsTenantAndRequiresWriteScope(t *testing.T) {
 	globalTenantHealthWriter := authctx.Principal{OrganizationID: "global", ActorID: "health-global-tenant", PrincipalType: "service", Scopes: []string{HealthWriteScope}, RetentionPolicyPresent: true}
 	globalHealthWriter := authctx.Principal{OrganizationID: "global", ActorID: ExecutionCoreServiceID, PrincipalType: "service", Scopes: []string{GlobalHealthWriteScope}, RetentionPolicyPresent: true}
 	tenantGlobalHealthWriter := authctx.Principal{OrganizationID: "org-a", ActorID: ExecutionCoreServiceID, PrincipalType: "service", Scopes: []string{GlobalHealthWriteScope}, RetentionPolicyPresent: true}
+	browserHealthWriter := authctx.Principal{OrganizationID: "global", ActorID: BrowserBrokerServiceID, PrincipalType: "service", Scopes: []string{BrowserHealthWriteScope, ReadScope}, RetentionPolicyPresent: true}
 
 	tests := []struct {
 		name      string
@@ -41,6 +42,17 @@ func TestAuthorizeHTTPPinsTenantAndRequiresWriteScope(t *testing.T) {
 		{name: "tenant-agnostic command execution is quarantined", principal: writer, method: http.MethodPost, target: "/api/v1/commands/exec", wantErr: true},
 		{name: "service read needs scope", principal: authctx.Principal{OrganizationID: "org-a", ActorID: "svc-a", PrincipalType: "service"}, method: http.MethodGet, target: "/api/v1/mcp", wantErr: true},
 		{name: "service writer may read", principal: writer, method: http.MethodGet, target: "/api/v1/mcp"},
+		{name: "browser-broker may attest browser health", principal: browserHealthWriter, method: http.MethodPost, target: "/api/v1/capabilities/browser/health"},
+		{name: "browser health route is POST only", principal: browserHealthWriter, method: http.MethodPut, target: "/api/v1/capabilities/browser/health", wantErr: true},
+		{name: "browser-broker bound to a tenant may not attest browser health", principal: func() authctx.Principal { p := browserHealthWriter; p.OrganizationID = "org-a"; return p }(), method: http.MethodPost, target: "/api/v1/capabilities/browser/health", wantErr: true},
+		{name: "unprefixed broker name may not attest browser health", principal: func() authctx.Principal { p := browserHealthWriter; p.ActorID = "browser-broker"; return p }(), method: http.MethodPost, target: "/api/v1/capabilities/browser/health", wantErr: true},
+		{name: "unrelated service with the browser scope may not attest browser health", principal: func() authctx.Principal { p := browserHealthWriter; p.ActorID = "service:unrelated"; return p }(), method: http.MethodPost, target: "/api/v1/capabilities/browser/health", wantErr: true},
+		{name: "browser-broker without its scope may not attest browser health", principal: authctx.Principal{OrganizationID: "global", ActorID: BrowserBrokerServiceID, PrincipalType: "service", Scopes: []string{HealthWriteScope, WriteScope}, RetentionPolicyPresent: true}, method: http.MethodPost, target: "/api/v1/capabilities/browser/health", wantErr: true},
+		{name: "user holding the browser scope may not attest browser health", principal: func() authctx.Principal { p := browserHealthWriter; p.PrincipalType = "user"; return p }(), method: http.MethodPost, target: "/api/v1/capabilities/browser/health", wantErr: true},
+		{name: "global execution health workload may not attest browser health", principal: globalHealthWriter, method: http.MethodPost, target: "/api/v1/capabilities/browser/health", wantErr: true},
+		{name: "browser-broker scope opens no generic health route", principal: browserHealthWriter, method: http.MethodPost, target: "/api/v1/capabilities/availability", wantErr: true},
+		{name: "browser-broker scope opens no owner-action route", principal: browserHealthWriter, method: http.MethodPost, target: "/api/v1/capabilities/owner-actions/health", wantErr: true},
+		{name: "browser-broker scope is no catalog write", principal: browserHealthWriter, method: http.MethodPost, target: "/api/v1/capabilities/upsert", wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -111,6 +123,29 @@ func TestAuthorizeHTTPRequiresExplicitNonZDRPostureForDurableMutations(t *testin
 	healthWriter.ZeroDataRetention = true
 	if err := AuthorizeHTTP(healthWriter, httptest.NewRequest(http.MethodPost, "/api/v1/capabilities/availability", nil)); err == nil {
 		t.Fatal("issuer-ZDR health writer was authorized to mutate durable availability")
+	}
+
+	browserHealthWriter := authctx.Principal{
+		OrganizationID:         "global",
+		ActorID:                BrowserBrokerServiceID,
+		PrincipalType:          "service",
+		Scopes:                 []string{BrowserHealthWriteScope},
+		RetentionPolicyPresent: true,
+	}
+	browserHealth := func() *http.Request {
+		return httptest.NewRequest(http.MethodPost, "/api/v1/capabilities/browser/health", nil)
+	}
+	if err := AuthorizeHTTP(browserHealthWriter, browserHealth()); err != nil {
+		t.Fatalf("explicit non-ZDR browser health writer denied: %v", err)
+	}
+	unspecifiedBrowserHealthWriter := browserHealthWriter
+	unspecifiedBrowserHealthWriter.RetentionPolicyPresent = false
+	if err := AuthorizeHTTP(unspecifiedBrowserHealthWriter, browserHealth()); err == nil {
+		t.Fatal("browser health writer without a verified retention posture was authorized")
+	}
+	browserHealthWriter.ZeroDataRetention = true
+	if err := AuthorizeHTTP(browserHealthWriter, browserHealth()); err == nil {
+		t.Fatal("issuer-ZDR browser health writer was authorized to mutate durable availability")
 	}
 }
 
