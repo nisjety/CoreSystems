@@ -136,6 +136,9 @@ services:
       IMPORTS_API_URL: ${IMPORTS_API_URL:-http://imports-api:3025}
       MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-http://model-gateway:8080}
       MODEL_GATEWAY_DEV_BEARER: ${MODEL_GATEWAY_DEV_BEARER:-}
+      # WS21-S2: mint a browser bearer for a personal, non-ZDR agentic turn and forward it to model-gateway. Off by
+      # default; only the literal `true`. execution-core's EXECUTION_DO_BROWSER_ENABLED must be on too.
+      BROWSER_DO_ENABLED: ${BROWSER_DO_ENABLED:-false}
       MODEL_PLANE_RECOMMEND_URL: ${MODEL_PLANE_RECOMMEND_URL:-http://model-gateway:8080/v1/recommend/plan}
       # Search verticals: SearXNG (videos) + autocomplete-core (typeahead). Web/images/answer
       # ride QUARRY_EDGE_URL above. Suggestions stay empty until AUTOCOMPLETE_INTERNAL_TOKEN is set.

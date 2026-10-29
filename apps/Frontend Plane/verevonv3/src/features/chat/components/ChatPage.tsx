@@ -130,6 +130,7 @@ export default function ChatPage() {
     sourceScope,
     setSourceScope,
     retrievalScope,
+    spaceScoped,
     setRetrievalScope,
     setBrowseWeb,
     temporaryChat,
@@ -237,6 +238,7 @@ export default function ChatPage() {
       onSourceScopeChange={setSourceScope}
       sourceScopeLocked={state.turns.length > 0}
       retrievalScope={retrievalScope()}
+      spaceScoped={spaceScoped()}
       onRetrievalScopeChange={setRetrievalScope}
       imageMode={imageMode()}
       message={input()}

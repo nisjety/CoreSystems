@@ -436,6 +436,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.set_connector_scope",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:d95f42f79dfc5ee9a8ecde6e67ec2808ba0db0e552ca5fe259b2c6c95180472b",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.submit_feedback",
       "registry": true,
       "access": "none",
@@ -871,6 +884,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "integrations.browse_connection",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:f04f1d378a0118acd7f61842f0c763f4c82d01de08c5b460edf6fbd8338120a5",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "integrations.disconnect",
       "registry": true,
       "access": "none",
@@ -907,6 +933,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:4e0a4bd1a952069de1653f606591c927d17b82d96bc1c02b1afedc5c460ad87a",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "integrations.fetch_connection_content",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:262c861451ce26a66ae3b0aabda351bc3747eb11d2ecc01b8f609f2de4534491",
       "zdr_allowed": false
     },
     {
