@@ -1357,11 +1357,13 @@ function lanesHoldingScope(scope: string): string[] {
  * Asks the real authorizer for `scope` alone from EVERY principal on EVERY
  * audience: the `allowed` lanes must be authorized and every other pair refused,
  * so a grant that spread to a second principal or a second audience fails here by
- * name, and the refused count shows the whole matrix ran.
+ * name, and the refused count shows the whole matrix ran. `orgId` is the
+ * organization every request names (a fixed-binding lane needs its own).
  */
 function expectScopeConfinedTo(
   scope: string,
   allowed: readonly string[],
+  orgId = 'org-a',
 ): void {
   const registry = registryWithTestCredentials();
   const audiences = everyAudience();
@@ -1371,7 +1373,7 @@ function expectScopeConfinedTo(
       const attempt = () =>
         authorizePlaneServicePrincipal(
           registry,
-          mintRequest(name, audience, scope),
+          mintRequest(name, audience, scope, orgId),
         );
       if (allowed.includes(`${name}|${audience}`)) {
         expect(attempt).not.toThrow();
@@ -2098,14 +2100,15 @@ describeIfPolicy(
 // global holding capability:browser:health:write; it reads the row's version
 // with capability:read first. The write is durable, so capability-core refuses a
 // zero-retention or posture-less token: the lane must be persistent. The scope is
-// one principal, one audience, and nothing else on the row.
+// one principal, one audience, and nothing else on the row. The attester only ever
+// mints for `global`, so the row is a fixed binding with no directory tenancy: the
+// credential cannot mint a tenant organization's capability:read token.
 const browserHealthScope = 'capability:browser:health:write';
 const browserBroker = 'browser-broker';
 
 describeIfPolicy('principal policy browser-broker health attester', () => {
   it('registers browser-broker for capability-core alone, persistent, with exactly the read and browser health scopes', () => {
     expect(policy?.[browserBroker]).toEqual({
-      tenancy: 'directory',
       audiences: ['capability-core'],
       consumerEnv: 'BROWSER_BROKER_SERVICE_API_KEY',
       orgIds: ['global'],
@@ -2122,9 +2125,11 @@ describeIfPolicy('principal policy browser-broker health attester', () => {
     expect(lanesHoldingScope(browserHealthScope)).toEqual([
       `${browserBroker}|capability-core`,
     ]);
-    expectScopeConfinedTo(browserHealthScope, [
-      `${browserBroker}|capability-core`,
-    ]);
+    expectScopeConfinedTo(
+      browserHealthScope,
+      [`${browserBroker}|capability-core`],
+      'global',
+    );
   });
 
   it('gives browser-broker no other health or catalog authority', () => {
@@ -2162,6 +2167,27 @@ describeIfPolicy('principal policy browser-broker health attester', () => {
       orgBinding: 'fixed',
       zdr: false,
     });
+  });
+
+  it('refuses to mint for any organization but global, even read-only', () => {
+    const registry = registryWithTestCredentials();
+    for (const orgId of ['acme', 'org-a']) {
+      for (const requestedScopes of [
+        ['capability:read'],
+        [browserHealthScope, 'capability:read'],
+      ]) {
+        expect(() =>
+          authorizePlaneServicePrincipal(registry, {
+            serviceId: browserBroker,
+            credential: `test-only-${browserBroker}-key`,
+            audience: 'capability-core',
+            orgId,
+            requestedScopes,
+            reason: 'browser-broker attests cap.browser.open runtime health',
+          }),
+        ).toThrow();
+      }
+    }
   });
 
   it('refuses the browser health scope mixed with a scope the lane does not hold', () => {

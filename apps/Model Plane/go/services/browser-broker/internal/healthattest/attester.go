@@ -80,6 +80,7 @@ const (
 	StateUnhealthy = "unhealthy"
 
 	ReasonReady                 = "browser_broker_ready"
+	ReasonGRPCNotServing        = "browser_broker_not_serving"
 	ReasonGrantStoreUnavailable = "grant_store_unavailable"
 	ReasonQuarryEdgeNotReady    = "quarry_edge_not_ready"
 )
@@ -162,7 +163,10 @@ type Attester struct {
 	tokens *servicetoken.Provider
 	client *http.Client
 	ready  func(context.Context) error
-	logger *slog.Logger
+	// serving reports whether the broker's gRPC surface (ValidateGrant and
+	// the rest) is up; nil means it is not checked.
+	serving func() bool
+	logger  *slog.Logger
 }
 
 // New builds an Attester. ready is the grant-store ping /readyz uses; a nil
@@ -205,8 +209,10 @@ func noRedirectClient() *http.Client {
 // Start reads the configuration and, when it is complete, runs the attester in
 // the background until ctx ends. It reports whether the attester started. It
 // never fails the caller: an incomplete configuration is a WARN, an absent one
-// an INFO.
-func Start(ctx context.Context, getenv func(string) string, ready func(context.Context) error, logger *slog.Logger) bool {
+// an INFO. serving reports whether the broker's gRPC server is serving; the
+// caller starts the attester only once that server has been launched, so the
+// capability is never attested available before grants can be validated.
+func Start(ctx context.Context, getenv func(string) string, ready func(context.Context) error, serving func() bool, logger *slog.Logger) bool {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -225,6 +231,7 @@ func Start(ctx context.Context, getenv func(string) string, ready func(context.C
 		logger.Warn("cap.browser.open health attestation off: configuration is invalid", "error", err.Error())
 		return false
 	}
+	attester.serving = serving
 	logger.Info("cap.browser.open health attestation on",
 		"interval_seconds", int(cfg.Interval.Seconds()),
 		"quarry_probe", cfg.QuarryReadyURL != "")
@@ -247,9 +254,14 @@ func (a *Attester) Run(ctx context.Context) {
 	}
 }
 
-// Probe measures the broker's runtime: the grant store first, then (when
-// configured) quarry-edge's readiness.
+// Probe measures the broker's runtime: its own gRPC server first, then the
+// grant store, then (when configured) quarry-edge's readiness. quarry-edge's
+// /ready is its durability flag, set once at boot: it says the Quarry process
+// is up, not that a grant validation round trip works end to end.
 func (a *Attester) Probe(ctx context.Context) (state, reasonCode string) {
+	if a.serving != nil && !a.serving() {
+		return StateUnhealthy, ReasonGRPCNotServing
+	}
 	if a.ready != nil {
 		pingCtx, cancel := context.WithTimeout(ctx, grantStoreTimeout)
 		err := a.ready(pingCtx)

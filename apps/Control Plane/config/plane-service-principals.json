@@ -1,6 +1,5 @@
 {
   "browser-broker": {
-    "tenancy": "directory",
     "audiences": [
       "capability-core"
     ],

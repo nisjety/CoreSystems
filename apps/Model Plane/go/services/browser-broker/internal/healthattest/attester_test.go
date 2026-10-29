@@ -248,6 +248,36 @@ func TestFailedGrantStorePingAttestsUnavailableExecution(t *testing.T) {
 	}
 }
 
+func TestGRPCNotServingAttestsUnavailableExecutionBeforeAnyOtherProbe(t *testing.T) {
+	auth := newFakeAuthCore(t)
+	capability := newFakeCapabilityCore(t)
+	quarry := newQuarry(t, http.StatusOK)
+	pinged := false
+	attester, _ := newAttester(t, auth, capability, quarry.URL+"/ready", func(context.Context) error {
+		pinged = true
+		return nil
+	})
+	serving := false
+	attester.serving = func() bool { return serving }
+	if err := attester.Attest(context.Background()); err != nil {
+		t.Fatalf("Attest() = %v", err)
+	}
+	got := capability.lastPost(t)
+	if got["state"] != "unhealthy" || got["reason_code"] != "browser_broker_not_serving" || got["execution_mode"] != "unavailable" {
+		t.Fatalf("posted %v", got)
+	}
+	if pinged {
+		t.Fatal("the grant store was probed although the gRPC server is not serving")
+	}
+	serving = true
+	if err := attester.Attest(context.Background()); err != nil {
+		t.Fatalf("Attest() = %v", err)
+	}
+	if got := capability.lastPost(t); got["state"] != "available" || got["reason_code"] != "browser_broker_ready" {
+		t.Fatalf("posted %v once serving", got)
+	}
+}
+
 func TestQuarryNotReadyAttestsUnavailableExecution(t *testing.T) {
 	auth := newFakeAuthCore(t)
 	capability := newFakeCapabilityCore(t)
@@ -465,7 +495,7 @@ func TestPartialConfigDisablesTheAttesterAndNamesOnlyTheVariables(t *testing.T) 
 	}
 
 	logs := &bytes.Buffer{}
-	if Start(context.Background(), env(values), nil, slog.New(slog.NewTextHandler(logs, nil))) {
+	if Start(context.Background(), env(values), nil, nil, slog.New(slog.NewTextHandler(logs, nil))) {
 		t.Fatal("Start started an attester on a partial configuration")
 	}
 	if !strings.Contains(logs.String(), "level=WARN") || strings.Contains(logs.String(), testCredential) {
@@ -493,7 +523,7 @@ func TestCompleteConfigStartsTheAttester(t *testing.T) {
 		EnvCapabilityCoreURL: capability.server.URL + "/",
 		EnvAuthCoreURL:       auth.server.URL,
 		EnvServiceAPIKey:     testCredential,
-	}), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}), nil, func() bool { return true }, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if !started {
 		t.Fatal("Start did not start on a complete configuration")
 	}

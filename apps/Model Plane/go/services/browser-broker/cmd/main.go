@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -89,11 +90,6 @@ func main() {
 		slog.Warn("browser-broker running with in-memory grants only (ephemeral development); every grant is lost on restart")
 	}
 	go purgeLoop(ctx, purger)
-	// cap.browser.open health (F1): the broker owns the browser runtime, so it
-	// attests the capability to capability-core on its own lane, probing the
-	// same grant store /readyz uses. Never fatal: an unconfigured or failing
-	// attester only leaves the row to lapse as stale.
-	healthattest.Start(ctx, os.Getenv, ready, slog.Default())
 
 	// Health server on :8087
 	mux := http.NewServeMux()
@@ -131,12 +127,25 @@ func main() {
 	grpc_health_v1.RegisterHealthServer(grpcServer, healthServerGRPC)
 	healthServerGRPC.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 
+	// serving is true from the moment the gRPC server is launched on its bound
+	// listener until Serve fails; the health attester reads it.
+	var serving atomic.Bool
+	serving.Store(true)
 	go func() {
 		slog.Info("gRPC listening", "addr", ":9095")
 		if err := grpcServer.Serve(lis); err != nil {
+			serving.Store(false)
 			slog.Error("gRPC serve error", "error", err)
 		}
 	}()
+
+	// cap.browser.open health (F1): the broker owns the browser runtime, so it
+	// attests the capability to capability-core on its own lane, probing its own
+	// gRPC server and the same grant store /readyz uses. It starts only once the
+	// listener is bound and the server launched, and reports unhealthy if Serve
+	// fails. Never fatal: an unconfigured or failing attester only leaves the
+	// row to lapse as stale.
+	healthattest.Start(ctx, os.Getenv, ready, serving.Load, slog.Default())
 
 	<-ctx.Done()
 	slog.Info("shutting down")
