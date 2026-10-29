@@ -50,6 +50,17 @@ A browser operation that did not finish inside its deadline (`crates/quarry-brow
 
 After a `navigate` timeout the load is stopped and the page can be read at once: the tab is on the slow page if its document had arrived, and still on the page it had before if not (SC4); after a timeout on a run's first `navigate` the tab is kept the same way, on `about:blank` if the document had not arrived (SC4 T4b). The next step observes that blank tab (200, `url` `about:blank`): the check of the page a step landed on accepts exactly `about:blank` as a tab with no page yet, never as a navigation target (T4b-1). A step that lands outside the run's (or the attachment's) allowed domains is a 403 `SECURITY_BLOCKED` on every step path (the REST step said `BAD_REQUEST` before 2026-10-29) and leaves a `failed` receipt with no observation. A new tab opened with a URL is still closed when its navigation times out, so as a run's first action it leaves no current page (`no_current_page`; open follow-up). On an agent step the timeout can also come from the observation read after the action (`evaluate`, `content`, `ax_snapshot`); its `effect` is then the step's: `unknown` (`retryable` false) after an action that can change the page, `none` (`retryable` true) after a wait or a read-only action.
 
+## 403 `SECURITY_BLOCKED`: a navigation the browser's network guard refused (SC4 D3)
+
+The tab's Fetch guard refused the navigation's own document request, or a redirect hop of it. The navigation ends at once with `details {reason, op: "navigate"}` and no URL or host; `retryable` is false. Before 2026-10-29 it waited out the navigate deadline (25 s live) and answered 504 `TIMEOUT` with `effect: "unknown"`. It covers every navigation that goes through the chromium driver's `goto`: an agent `navigate` (REST step, browser socket, delegate step; a run's first one too), a resume's recovery navigation, and a scrape rendered in the browser; and a new tab opened with a URL (whose tab is then closed, as on any failure of that navigation).
+
+| reason | message | meaning |
+|---|---|---|
+| `domain_grant_blocked` | `browser navigation is outside the run's allowed domains` | the host is outside the run's (or the tab's) egress policy, or on its deny list. The message is the edge's own for an off-list target, so the gateway answers it as `browser_navigation_outside_scope` |
+| `url_or_dns_blocked` | `browser navigation target is blocked by security policy` | the URL or its DNS answer is blocked (a private or unresolvable address) |
+
+The tab keeps the page it had (`about:blank` on a run's first step) and answers reads at once; the refusal is an egress receipt (with the same `policy`), which the next observation carries; the next navigate first clears the refused navigation from chromiumoxide's queue (about 0.1 s), as after a navigate `TIMEOUT`. The step's receipt is `failed` with `SECURITY_BLOCKED` and the flat cost of a failed action. A refused image, frame or other subresource never fails a navigation: it shows only as an egress receipt.
+
 ## 415 `UNSUPPORTED_MEDIA` on `POST /v1/scrape`
 
 A body refused by its content kind (`QUARRY_EDGE__DOC_ROUTING`, `docs/RUNBOOKS.md`, "Scrape returns 415"). `details.kind` is set in every case.
