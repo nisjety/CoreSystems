@@ -204,8 +204,8 @@ pub(super) const BLANK_TAB_URL: &str = "about:blank";
 
 /// Whether `url` is a tab with no page yet (T4b-1). Exactly `about:blank`: it loads
 /// nothing, so a step that lands on it reached no host. It is an observation only, never a
-/// navigation target: `RunNavPolicy::allows` and the browser's egress guard still refuse it
-/// as one. `about:srcdoc` (a frame's inline document, never a tab's URL) and every other
+/// navigation target: the edge's `RunNavPolicy::allows` still refuses it as one (the
+/// browser's `guard_navigation_target` admits it, as it loads nothing). `about:srcdoc` (a frame's inline document, never a tab's URL) and every other
 /// `about:` URL are not this case.
 pub(super) fn is_blank_tab(url: &str) -> bool {
     url == BLANK_TAB_URL

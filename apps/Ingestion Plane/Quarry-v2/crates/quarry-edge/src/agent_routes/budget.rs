@@ -113,6 +113,23 @@ pub(super) fn receipt_cost_source(telemetry: &BrowserTelemetry) -> CostSource {
     }
 }
 
+/// The cost of a failed step and its source. `ran` is the telemetry of a browser action
+/// that ran and whose landed page the edge then refused (T4b-1): it is charged as a
+/// completed action is, since the action did run. An action that failed is charged the
+/// flat table (WS6.B).
+pub(super) fn failed_step_cost(
+    ran: Option<&BrowserTelemetry>,
+    action: &AgentAction,
+) -> (f64, CostSource) {
+    match ran {
+        Some(telemetry) => (
+            receipt_cost_usd(telemetry, action),
+            receipt_cost_source(telemetry),
+        ),
+        None => (estimated_action_cost_usd(action), CostSource::FlatTable),
+    }
+}
+
 pub(super) fn cost_source_label(source: CostSource) -> &'static str {
     match source {
         CostSource::FlatTable => "flat_table",

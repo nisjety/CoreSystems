@@ -3,7 +3,9 @@
 //! A run's first navigation commits its tab on `about:blank` and then navigates it (SC4 T4b).
 //! When that navigation never commits, the tab stays on `about:blank`, and the next
 //! observation of it is a tab with no page yet: it reached no host, so it is answered (200),
-//! the run's checkpoint keeps no URL for it, and a resume of such a run starts on a blank tab.
+//! the run's checkpoint keeps no URL for it, and a resume of such a run makes no recovery
+//! navigation (on chromium it then has no tab until its next navigate, as a run that never
+//! navigated: a first observe answers `no_current_page`).
 //! `about:blank` is accepted only as that observation. A page on a host outside the run's
 //! allowed domains is still refused, with the same `SECURITY_BLOCKED` on the REST step and
 //! on the browser socket, and the refused step is recorded as `failed` with no observation
@@ -148,6 +150,9 @@ async fn a_step_that_lands_outside_the_run_is_a_failed_security_blocked_step() {
     edge.driver.set_page_url(Some("https://example.test/a"));
     let first = edge.step(&person, &run, wait_action(), Some("agent")).await;
     assert_eq!(first.status, 200, "{}", first.body);
+    // The refused steps did run: they read this egress, and the driver verified this cost.
+    edge.driver.record_egress(1);
+    edge.driver.set_action_cost(Some(250_000));
 
     for landed in ["https://evil.test/", "about:srcdoc"] {
         edge.driver.set_page_url(Some(landed));
@@ -170,7 +175,15 @@ async fn a_step_that_lands_outside_the_run_is_a_failed_security_blocked_step() {
         assert_eq!(refused["outcome"]["error_code"], "SECURITY_BLOCKED", "{refused}");
         assert!(refused["observation"].is_null(), "no observation of a refused page: {refused}");
         assert!(!refused.to_string().contains("evil.test"), "{refused}");
+        assert_eq!(refused["cost_micro_usd"], 250_000, "the driver's cost: {refused}");
+        assert_eq!(refused["cost_source"], "provider_billed", "{refused}");
     }
+
+    // The egress the refused steps read is not lost: the next observation carries it.
+    edge.driver.set_page_url(Some("https://example.test/a"));
+    let next = edge.step(&person, &run, wait_action(), Some("agent")).await;
+    assert_eq!(next.status, 200, "{}", next.body);
+    assert_eq!(next.data()["egress_receipts"][0]["sequence"], 1, "{}", next.body);
 }
 
 /// The browser socket's step (the shared step path) gives the same two answers.
@@ -212,7 +225,8 @@ async fn the_browser_socket_observes_a_blank_tab_and_refuses_a_foreign_page() {
 /// A run released while its tab had no page yet resumes, both from the checkpoint this edge
 /// writes (`""`) and from one written before the fix (`about:blank`), and the resume makes
 /// no recovery navigation (there was a 403 "durable checkpoint URL is outside the persisted
-/// allowed domains" for the second).
+/// allowed domains" for the second); a navigate then works. The recording driver always has
+/// a page, so this does not check what a first observe after the resume answers.
 #[tokio::test]
 async fn a_run_checkpointed_on_a_blank_tab_resumes_without_a_recovery_navigation() {
     let edge = Edge::start(idle_limits(60)).await;
@@ -241,9 +255,16 @@ async fn a_run_checkpointed_on_a_blank_tab_resumes_without_a_recovery_navigation
             gotos,
             "{stored:?}: a resume never navigates to a blank tab"
         );
-        let after = edge.step(&person, &run, wait_action(), Some("agent")).await;
+        edge.driver.set_page_url(Some("https://example.test/"));
+        let after = edge
+            .step(&person, &run, navigate("https://example.test/"), Some("agent"))
+            .await;
         assert_eq!(after.status, 200, "{stored:?}: {}", after.body);
-        assert_eq!(after.data()["url"], "about:blank", "{stored:?}: {}", after.body);
-        assert_eq!(checkpoint(&edge, &run).await.current_url, "", "{stored:?}");
+        assert_eq!(
+            checkpoint(&edge, &run).await.current_url,
+            "https://example.test/",
+            "{stored:?}"
+        );
+        edge.driver.set_page_url(Some("about:blank"));
     }
 }

@@ -199,6 +199,30 @@ fn provider_meter_cost_is_copied_exactly_and_unknown_remains_unknown_in_telemetr
     assert!((telemetry_receipt_cost_usd(&metered) - 0.012_345).abs() < f64::EPSILON);
 }
 
+/// T4b-1 review: a step refused for the page it landed on did run, so it keeps the driver's
+/// cost; an action that failed is charged the flat table.
+#[test]
+fn a_refused_landing_keeps_the_driver_cost_and_a_failed_action_the_flat_table() {
+    use quarry_runtime::action_cost::CostSource;
+
+    let action = AgentAction::Wait { ms: 0 };
+    let metered = BrowserTelemetry {
+        verified_action_cost_micro_usd: Some(12_345),
+        ..BrowserTelemetry::default()
+    };
+    let (cost, source) = failed_step_cost(Some(&metered), &action);
+    assert!((cost - 0.012_345).abs() < f64::EPSILON);
+    assert_eq!(source, CostSource::ProviderBilled);
+    assert_eq!(
+        failed_step_cost(None, &action),
+        (estimated_action_cost_usd(&action), CostSource::FlatTable)
+    );
+    assert_eq!(
+        failed_step_cost(Some(&BrowserTelemetry::default()), &action),
+        (estimated_action_cost_usd(&action), CostSource::FlatTable)
+    );
+}
+
 #[test]
 fn zdr_forbids_persistent_profile_when_profile_id_supplied() {
     assert!(zdr_forbids_persistent_profile(ZdrMode::On, false, true));

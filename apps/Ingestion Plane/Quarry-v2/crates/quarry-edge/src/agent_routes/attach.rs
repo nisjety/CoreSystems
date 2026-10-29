@@ -753,6 +753,7 @@ pub(super) async fn delegate_step(
         live.budget.charge();
         live.last_activity_ms = unix_ms_now();
     }
+    let egress_cursor = lane.ctx.last_egress_sequence;
     let step_result = runner.execute(&req, &pinned, &mut lane.ctx).await;
     let mut entry = handle.entry.lock().await;
     // D2-031: the attachment may have been released, revoked or ended (or the run closed)
@@ -791,6 +792,7 @@ pub(super) async fn delegate_step(
     }
     // The landed page is checked before the receipt and the checkpoint (T4b-1), against the
     // attachment's hosts. An agent tab opened without a start URL is on `about:blank`.
+    let ran = step_result.as_ref().ok().map(|observation| observation.telemetry.clone());
     let step_result = step_result.and_then(|observation| {
         super::step::check_landed_page(
             state,
@@ -823,13 +825,15 @@ pub(super) async fn delegate_step(
             observation
         }
         Err(error) => {
+            let (failed_usd, failed_source) = failed_step_cost(ran.as_ref(), &receipt_action);
+            lane.ctx.last_egress_sequence = egress_cursor;
             let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
                 .org_id(receipt_org)
                 .actor_id(receipt_actor)
                 .initiator(StepInitiator::Agent, admitted.control_epoch)
                 .agent(admitted.agent.clone())
-                .failed_cost(estimated_action_cost_usd(&receipt_action))
-                .cost_source(CostSource::FlatTable)
+                .failed_cost(failed_usd)
+                .cost_source(failed_source)
                 .tab(Some(tab_id.clone()), Some(attach_id.clone()))
                 .typed_field(typed_kind)
                 .fail(receipt_action, &error);

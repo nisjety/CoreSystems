@@ -33,6 +33,7 @@ use quarry_browser::{
     BrowserDriver, BrowserDriverCapabilities, BrowserEgressPolicy, BrowserSession, BrowserTab,
     LiveFrame, LiveFrameOptions, SessionInner,
 };
+use quarry_core::contracts::{BrowserEgressDecision, BrowserEgressReceipt, BrowserTelemetry};
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::event::{Event, EventType};
 use quarry_core::ids::kinds::RunKind;
@@ -215,6 +216,11 @@ pub struct RecordingDriver {
     /// The URL the page reports (`window.location.href`) to the observation's page-state
     /// read, when a test sets one; otherwise the read answers nothing, as before.
     page_url: Mutex<Option<String>>,
+    /// The egress receipts the driver holds, by sequence, when a test records some;
+    /// otherwise `egress_receipts` is unsupported, as before.
+    egress: Mutex<Vec<u64>>,
+    /// The driver-verified cost of every action, when a test sets one.
+    action_cost_micro_usd: Mutex<Option<u64>>,
 }
 
 /// What ends a held `goto`: a fixed time, or a gate the test opens itself.
@@ -321,6 +327,16 @@ impl RecordingDriver {
     pub fn set_page_url(&self, url: Option<&str>) {
         *self.page_url.lock().unwrap() = url.map(str::to_owned);
     }
+
+    /// Record an egress receipt with `sequence`: the next observation reads it.
+    pub fn record_egress(&self, sequence: u64) {
+        self.egress.lock().unwrap().push(sequence);
+    }
+
+    /// Make every action's telemetry carry `micro_usd` as its driver-verified cost.
+    pub fn set_action_cost(&self, micro_usd: Option<u64>) {
+        *self.action_cost_micro_usd.lock().unwrap() = micro_usd;
+    }
 }
 
 #[async_trait]
@@ -371,6 +387,38 @@ impl BrowserDriver for RecordingDriver {
         _policy: BrowserEgressPolicy,
     ) -> QuarryResult<()> {
         Ok(())
+    }
+
+    async fn egress_receipts(
+        &self,
+        _session: &BrowserSession,
+        after_sequence: u64,
+        _limit: usize,
+    ) -> QuarryResult<Vec<BrowserEgressReceipt>> {
+        let egress = self.egress.lock().unwrap();
+        if egress.is_empty() {
+            return Err(QuarryError::unsupported_action("egress_receipts"));
+        }
+        Ok(egress
+            .iter()
+            .filter(|sequence| **sequence > after_sequence)
+            .map(|sequence| BrowserEgressReceipt {
+                sequence: *sequence,
+                tab_id: None,
+                method: "GET".into(),
+                url: "https://example.test/".into(),
+                decision: BrowserEgressDecision::Allow,
+                policy: "url_dns_public".into(),
+                timestamp_ms: 0,
+            })
+            .collect())
+    }
+
+    async fn telemetry(&self, _session: &BrowserSession) -> QuarryResult<BrowserTelemetry> {
+        Ok(BrowserTelemetry {
+            verified_action_cost_micro_usd: *self.action_cost_micro_usd.lock().unwrap(),
+            ..BrowserTelemetry::default()
+        })
     }
 
     async fn goto(&self, _session: &BrowserSession, _url: &str) -> QuarryResult<()> {
