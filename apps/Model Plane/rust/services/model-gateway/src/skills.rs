@@ -21,6 +21,11 @@ use mp_contracts::model_plane::v1::{
     MatchSkillsRequest, MatchSkillsResponse, Skill, SkillMatch,
 };
 
+// The first-party Office skills live in their own file (WS19-S9). lib.rs does not
+// declare it yet, so it is declared here; drop this attribute when lib.rs does.
+#[path = "builtin_skills.rs"]
+pub mod builtin_skills;
+
 const DEFAULT_MATCH_LIMIT: i32 = 5;
 const MAX_MATCH_LIMIT: i32 = 20;
 
@@ -114,12 +119,18 @@ pub struct SkillStore {
     // Bookkeeping for the learned skills in `inner`; taken for the length of one
     // refresh, never across an await.
     book: Arc<Mutex<BucketBook>>,
+    // Whether the first-party Office skills are listed for every org (WS19-S9). Read
+    // once, when the store is built, so a running process never changes its answers.
+    builtin_office: bool,
 }
 
 impl SkillStore {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            builtin_office: builtin_skills::enabled(),
+            ..Self::default()
+        }
     }
 
     /// Insert or replace a skill. Generates an id when empty.
@@ -210,14 +221,29 @@ impl SkillStore {
             .filter(|e| e.key().0 == org_id)
             .map(|e| e.value().clone())
             .collect();
+        if self.builtin_office {
+            let builtins: Vec<Skill> = builtin_skills::skills()
+                .into_iter()
+                .filter(|builtin| !out.iter().any(|stored| stored.id == builtin.id))
+                .collect();
+            out.extend(builtins);
+        }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
     }
 
     fn get(&self, org_id: &str, skill_id: &str) -> Option<Skill> {
-        self.inner
+        let stored = self
+            .inner
             .get(&(org_id.to_string(), skill_id.to_string()))
-            .map(|s| s.value().clone())
+            .map(|s| s.value().clone());
+        stored.or_else(|| {
+            if self.builtin_office {
+                builtin_skills::skill(skill_id)
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -449,7 +475,15 @@ fn score(query_terms: &[String], s: &Skill) -> f32 {
     if query_terms.is_empty() {
         return 0.0;
     }
-    let haystack = format!("{} {} {}", s.name, s.tags.join(" "), s.body).to_lowercase();
+    // A first-party skill is found by its name and trigger keywords alone. Its body is
+    // instruction prose that shares words with almost every request, and matching on it
+    // would put all four Office skills into every answer's budget.
+    let haystack = if builtin_skills::is_builtin(s) {
+        format!("{} {}", s.name, s.tags.join(" "))
+    } else {
+        format!("{} {} {}", s.name, s.tags.join(" "), s.body)
+    }
+    .to_lowercase();
     let hits = query_terms
         .iter()
         .filter(|t| haystack.contains(t.as_str()))

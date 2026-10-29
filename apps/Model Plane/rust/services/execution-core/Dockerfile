@@ -121,6 +121,9 @@ RUN set -e; \
 # behave identically); having it in the image keeps any other Python entry point
 # honest too.
 ENV MPLBACKEND=Agg
+# First-party Office skills (WS19-S9): the files the gateway embeds, which the sandbox
+# reads from the image. The builtin_skills contract test pins the two together.
+COPY skills/office/ /opt/verevon/skills/office/
 RUN useradd --system --uid 10001 --create-home --shell /usr/sbin/nologin modelplane
 COPY --from=builder /usr/local/bin/execution-core /usr/local/bin/execution-core
 USER modelplane
