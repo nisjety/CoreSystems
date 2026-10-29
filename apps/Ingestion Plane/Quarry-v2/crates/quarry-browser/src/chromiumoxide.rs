@@ -1301,6 +1301,13 @@ impl ChromiumoxideDriver {
         // contexts); other sessions attach in parallel.
         let attach_lock = self.attach_lock(&session_key).await;
         let _attaching = attach_lock.lock().await;
+        // A placeholder is wanted only while the session has no page: one that got a
+        // tab while this call waited for the attach uses that tab.
+        if first_navigation == FirstNavigation::Placeholder {
+            if let Some(found) = self.active_tab_page(session).await {
+                return Ok(found);
+            }
+        }
 
         // The page counts against the slot from here; the guard gives it back,
         // and closes whatever this call created, on every early return, on a
@@ -1389,56 +1396,17 @@ impl ChromiumoxideDriver {
                 None => (true, None),
             }
         };
-        let snapshot = if first_tab {
-            match self.load_snapshot(&session.lease).await {
-                Ok(snapshot) => snapshot,
-                Err(failure) => {
-                    tracing::warn!(
-                        event = "profile_load_failed",
-                        reason = failure.class(),
-                        "browser profile could not be loaded"
-                    );
-                    match failure {
-                        // The profile exists but cannot be read now: refuse the attach (503)
-                        // instead of starting fresh, which the release would then save over it.
-                        ProfileLoadError::KeyUnavailable(error) => {
-                            return Err(error.with_details(
-                                json!({ "reason": "profile_key_unavailable" }),
-                            ));
-                        }
-                        // Unreadable: start fresh, and do not overwrite it at release.
-                        ProfileLoadError::Corrupt(_) => {
-                            let mut pages = self.pages.lock().await;
-                            pages.entry(session_key.clone()).or_default().lease_restore_failed =
-                                true;
-                            None
-                        }
-                        // Crypto-shredded: gone for good, the same as no profile.
-                        ProfileLoadError::KeyDestroyed => None,
-                    }
-                }
-            }
+        // SC4 D1: a placeholder tab (an observation of a session with no page) leaves the
+        // restore to the session's first `goto`, which knows where the run is going.
+        let restores_profile = first_tab && first_navigation != FirstNavigation::Placeholder;
+        let snapshot = if restores_profile {
+            self.load_first_tab_snapshot(session, &session_key).await?
         } else {
             None
         };
-        // WS17.C1: a profile-enabled session under capture v2 keeps an origin journal and
-        // installs the pagehide flush on its tabs. Everything else records nothing.
-        let profile_journal = if session.lease.persist_profile
-            && self.profiles.is_some()
-            && capture_v2_enabled()
-        {
-            let mut pages = self.pages.lock().await;
-            let session_pages = pages.entry(session_key.clone()).or_default();
-            if let Ok(mut journal) = session_pages.journal.lock() {
-                journal.enable();
-            }
-            if snapshot.as_ref().is_some_and(SessionSnapshot::has_state) {
-                session_pages.profile_loaded_nonempty = true;
-            }
-            Some(session_pages.journal.clone())
-        } else {
-            None
-        };
+        let profile_journal = self
+            .enable_profile_journal(session, &session_key, snapshot.as_ref())
+            .await;
         let new_page_params = CreateTargetParamsBuilder::default()
             .url("about:blank")
             .browser_context_id(context_id.clone())
@@ -1538,78 +1506,25 @@ impl ChromiumoxideDriver {
         }
         // WS17.C2: restore the saved profile BEFORE the first navigation: the first request
         // already carries the restored cookies, so nothing reloads. Once per context.
-        let mut restore_failed = false;
-        if let Some(snapshot) = snapshot.as_ref() {
-            let policy = RestorePolicy::from_env();
-            let restored = {
-                let browser_guard = self.browser.read().await;
-                match browser_guard.as_ref() {
-                    Some(browser) => {
-                        with_deadline(Op::TabAttach, async {
-                            Ok(profile_restore::restore_into_context(
-                                browser,
-                                &context_id,
-                                &page,
-                                snapshot,
-                                initial_url,
-                                chrono::Utc::now(),
-                                &policy,
-                            )
-                            .await)
-                        })
-                        .await
-                    }
-                    None => Err(browser_missing()),
-                }
-            };
-            let report = match restored {
-                Ok((report, _emulation)) => report,
-                Err(error) => {
-                    tracing::warn!(
-                        event = "profile_restore_failed",
-                        error_class = error.code.wire_name(),
-                        "browser profile restore did not finish"
-                    );
-                    RestoreReport {
-                        cookies_total: u32::try_from(snapshot.cookies.len()).unwrap_or(u32::MAX),
-                        failed: true,
-                        ..RestoreReport::default()
-                    }
-                }
-            };
-            restore_failed = report.failed;
-            tracing::info!(
-                event = "profile_restored",
-                cookies_total = report.cookies_total,
-                cookies_applied = report.cookies_applied,
-                skipped_expired = report.skipped_expired,
-                skipped_session_stale = report.skipped_session_stale,
-                cookies_rejected = report.cookies_rejected,
-                origins_seeded = report.origins_seeded,
-                idb_databases = report.idb_databases,
-                ua_changed = report.ua_changed,
-                failed = report.failed,
-                "browser profile restored"
-            );
-            // The origins the profile holds stay in the next capture unless a live tab
-            // replaces them: a run that never visits an origin must not lose its storage.
-            if let Some(journal) = profile_journal.as_ref() {
-                if let Ok(mut journal) = journal.lock() {
-                    journal.carry(snapshot.effective_origins(initial_url));
-                }
-            }
-            self.session_telemetry
-                .lock()
+        let restore_failed = match snapshot.as_ref() {
+            Some(snapshot) => {
+                self.restore_snapshot_into(
+                    &session_key,
+                    &context_id,
+                    &page,
+                    snapshot,
+                    initial_url,
+                    profile_journal.as_ref(),
+                )
                 .await
-                .entry(session_key.clone())
-                .or_default()
-                .profile_restore = Some(report.summary());
-        }
+            }
+            None => false,
+        };
         // Where the tab is when it is committed. A caller-driven first navigation runs
         // after the commit, so the tab is there for it to keep on a TIMEOUT.
         let committed_url = match first_navigation {
             FirstNavigation::InAttach => initial_url,
-            FirstNavigation::ByCaller => "about:blank",
+            FirstNavigation::ByCaller | FirstNavigation::Placeholder => "about:blank",
         };
         if committed_url != "about:blank" {
             // No recovery here: a tab whose first navigation fails is closed by the
@@ -1637,7 +1552,10 @@ impl ChromiumoxideDriver {
         if let Some(context_id) = attach.context.take() {
             session_pages.browser_context_id = Some(context_id);
             session_pages.download_dir = attach.download_dir.take();
-            // The context's first tab is committed: the profile is restored, once.
+        }
+        // The context's first tab is committed: the profile is restored, once. A
+        // placeholder that made the context leaves it to the session's first `goto`.
+        if restores_profile {
             session_pages.profile_restored = true;
             session_pages.profile_emulation = profile_emulation.filter(|e| !e.is_empty());
             session_pages.lease_restore_failed |= restore_failed;
@@ -1848,6 +1766,202 @@ impl ChromiumoxideDriver {
             .map_err(ProfileLoadError::classify)
     }
 
+    /// The profile the context's first tab restores (WS17.C2). A key that cannot be
+    /// reached refuses the call (503) instead of starting fresh, which the release would
+    /// then save over the profile; an unreadable profile starts fresh and is not saved
+    /// over; a crypto-shredded one is the same as none.
+    async fn load_first_tab_snapshot(
+        &self,
+        session: &BrowserSession,
+        session_key: &str,
+    ) -> QuarryResult<Option<SessionSnapshot>> {
+        match self.load_snapshot(&session.lease).await {
+            Ok(snapshot) => Ok(snapshot),
+            Err(failure) => {
+                tracing::warn!(
+                    event = "profile_load_failed",
+                    reason = failure.class(),
+                    "browser profile could not be loaded"
+                );
+                match failure {
+                    ProfileLoadError::KeyUnavailable(error) => {
+                        Err(error.with_details(json!({ "reason": "profile_key_unavailable" })))
+                    }
+                    ProfileLoadError::Corrupt(_) => {
+                        let mut pages = self.pages.lock().await;
+                        pages
+                            .entry(session_key.to_owned())
+                            .or_default()
+                            .lease_restore_failed = true;
+                        Ok(None)
+                    }
+                    ProfileLoadError::KeyDestroyed => Ok(None),
+                }
+            }
+        }
+    }
+
+    /// WS17.C1: a profile-enabled session under capture v2 keeps an origin journal and
+    /// installs the pagehide flush on its tabs. Everything else records nothing.
+    async fn enable_profile_journal(
+        &self,
+        session: &BrowserSession,
+        session_key: &str,
+        snapshot: Option<&SessionSnapshot>,
+    ) -> Option<Arc<std::sync::Mutex<OriginJournal>>> {
+        if !(session.lease.persist_profile && self.profiles.is_some() && capture_v2_enabled()) {
+            return None;
+        }
+        let mut pages = self.pages.lock().await;
+        let session_pages = pages.entry(session_key.to_owned()).or_default();
+        if let Ok(mut journal) = session_pages.journal.lock() {
+            journal.enable();
+        }
+        if snapshot.is_some_and(SessionSnapshot::has_state) {
+            session_pages.profile_loaded_nonempty = true;
+        }
+        Some(session_pages.journal.clone())
+    }
+
+    /// WS17.C2: restore `snapshot` into the context, planned for `initial_url`, before the
+    /// tab's first navigation. Returns whether the restore failed (the release then does
+    /// not save over the stored profile).
+    async fn restore_snapshot_into(
+        &self,
+        session_key: &str,
+        context_id: &BrowserContextId,
+        page: &Page,
+        snapshot: &SessionSnapshot,
+        initial_url: &str,
+        profile_journal: Option<&Arc<std::sync::Mutex<OriginJournal>>>,
+    ) -> bool {
+        let policy = RestorePolicy::from_env();
+        let restored = {
+            let browser_guard = self.browser.read().await;
+            match browser_guard.as_ref() {
+                Some(browser) => {
+                    with_deadline(Op::TabAttach, async {
+                        Ok(profile_restore::restore_into_context(
+                            browser,
+                            context_id,
+                            page,
+                            snapshot,
+                            initial_url,
+                            chrono::Utc::now(),
+                            &policy,
+                        )
+                        .await)
+                    })
+                    .await
+                }
+                None => Err(browser_missing()),
+            }
+        };
+        let report = match restored {
+            Ok((report, _emulation)) => report,
+            Err(error) => {
+                tracing::warn!(
+                    event = "profile_restore_failed",
+                    error_class = error.code.wire_name(),
+                    "browser profile restore did not finish"
+                );
+                RestoreReport {
+                    cookies_total: u32::try_from(snapshot.cookies.len()).unwrap_or(u32::MAX),
+                    failed: true,
+                    ..RestoreReport::default()
+                }
+            }
+        };
+        tracing::info!(
+            event = "profile_restored",
+            cookies_total = report.cookies_total,
+            cookies_applied = report.cookies_applied,
+            skipped_expired = report.skipped_expired,
+            skipped_session_stale = report.skipped_session_stale,
+            cookies_rejected = report.cookies_rejected,
+            origins_seeded = report.origins_seeded,
+            idb_databases = report.idb_databases,
+            ua_changed = report.ua_changed,
+            failed = report.failed,
+            "browser profile restored"
+        );
+        // The origins the profile holds stay in the next capture unless a live tab
+        // replaces them: a run that never visits an origin must not lose its storage.
+        if let Some(journal) = profile_journal {
+            if let Ok(mut journal) = journal.lock() {
+                journal.carry(snapshot.effective_origins(initial_url));
+            }
+        }
+        self.session_telemetry
+            .lock()
+            .await
+            .entry(session_key.to_owned())
+            .or_default()
+            .profile_restore = Some(report.summary());
+        report.failed
+    }
+
+    /// SC4 D1: the session's page is a placeholder (`FirstNavigation::Placeholder`, an
+    /// observation of a session with no page), so its context has not restored the
+    /// profile. The session's first `goto` restores it now, into that tab and planned for
+    /// the `goto`'s target, as a first `goto` that opens its own tab does: profile load,
+    /// locale and timezone, cookies and web storage, then the navigation.
+    async fn restore_profile_before_first_goto(
+        &self,
+        session: &BrowserSession,
+        session_key: &str,
+        page: &Page,
+        url: &str,
+    ) -> QuarryResult<()> {
+        let pending = |pages: &HashMap<String, SessionPages>| {
+            pages
+                .get(session_key)
+                .filter(|session_pages| !session_pages.profile_restored)
+                .and_then(|session_pages| session_pages.browser_context_id.clone())
+        };
+        if pending(&*self.pages.lock().await).is_none() {
+            return Ok(());
+        }
+        let attach_lock = self.attach_lock(session_key).await;
+        let _attaching = attach_lock.lock().await;
+        let Some(context_id) = pending(&*self.pages.lock().await) else {
+            return Ok(());
+        };
+        let snapshot = self.load_first_tab_snapshot(session, session_key).await?;
+        let profile_journal = self
+            .enable_profile_journal(session, session_key, snapshot.as_ref())
+            .await;
+        let profile_emulation = snapshot.as_ref().map(ProfileEmulation::from_snapshot);
+        if let Some(emulation) = profile_emulation.as_ref().filter(|e| !e.is_empty()) {
+            let _ = best_effort(Op::TabAttach, async {
+                profile_restore::apply_profile_emulation(page, emulation).await;
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .await;
+        }
+        let restore_failed = match snapshot.as_ref() {
+            Some(snapshot) => {
+                self.restore_snapshot_into(
+                    session_key,
+                    &context_id,
+                    page,
+                    snapshot,
+                    url,
+                    profile_journal.as_ref(),
+                )
+                .await
+            }
+            None => false,
+        };
+        let mut pages = self.pages.lock().await;
+        if let Some(session_pages) = pages.get_mut(session_key) {
+            session_pages.profile_restored = true;
+            session_pages.profile_emulation = profile_emulation.filter(|e| !e.is_empty());
+            session_pages.lease_restore_failed |= restore_failed;
+        }
+        Ok(())
+    }
+
     async fn persist_current_page(&self, session: &BrowserSession) -> QuarryResult<()> {
         if !session.lease.persist_profile {
             return Ok(());
@@ -1855,6 +1969,23 @@ impl ChromiumoxideDriver {
         let Some(store) = self.profiles.as_ref() else {
             return Ok(());
         };
+        // SC4 D1: a session whose context never restored the profile (it only observed a
+        // placeholder tab) does not save its empty jar over the stored profile.
+        let never_restored = {
+            let pages = self.pages.lock().await;
+            pages
+                .get(&Self::session_key(session))
+                .is_some_and(|session_pages| {
+                    session_pages.browser_context_id.is_some() && !session_pages.profile_restored
+                })
+        };
+        if never_restored {
+            tracing::info!(
+                event = "profile_save_skipped_not_restored",
+                "browser profile not saved: this session never restored it"
+            );
+            return Ok(());
+        }
         // WS17.C2: a profile that could not be read or restored is not overwritten by what
         // this session happened to hold.
         let restore_failed = {
@@ -1870,7 +2001,13 @@ impl ChromiumoxideDriver {
             );
             return Ok(());
         }
-        if capture_v2_enabled() {
+        #[allow(unused_mut)]
+        let mut capture_v2 = capture_v2_enabled();
+        #[cfg(test)]
+        {
+            capture_v2 |= self.hooks.release_capture_v2.load(Ordering::SeqCst);
+        }
+        if capture_v2 {
             return self.persist_profile_v2(session, store).await;
         }
         let Some((_tab_id, page)) = self.active_tab_page(session).await else {
@@ -2361,6 +2498,12 @@ enum FirstNavigation {
     /// out leaves the tab as any later one does, readable and drained at the next `goto`
     /// (SC4 T4b, a run's first step).
     ByCaller,
+    /// Nobody (SC4 D1, `ensure_page`): the session had no page and is observed, so it
+    /// gets a tab on `about:blank` that goes nowhere. There is no URL to plan the
+    /// profile restore for, so a context's first tab leaves it to the session's first
+    /// `goto` (`restore_profile_before_first_goto`); a session that has a page by the
+    /// time the attach lock is held keeps it, and no tab is opened.
+    Placeholder,
 }
 
 /// The tab's Fetch guard refused a request the run's egress policy does not allow (its
@@ -4185,13 +4328,45 @@ impl BrowserDriver for ChromiumoxideDriver {
         Ok(())
     }
 
+    /// SC4 D1: a session with no page yet (a run that never navigated, one resumed
+    /// from a checkpoint with no URL) gets a placeholder tab on `about:blank`, so it
+    /// can be observed. It is navigated nowhere; the session's first `goto` uses it.
+    async fn ensure_page(&self, session: &BrowserSession) -> QuarryResult<()> {
+        let owner = self.admission(session);
+        self.refuse_lost(session)?;
+        if self.active_tab_page(session).await.is_some() {
+            return Ok(());
+        }
+        if let Some(pin) = session.tab_pin() {
+            return Err(pinned_tab_closed_error(pin));
+        }
+        let (tab_id, page) = self
+            .open_tab_page(session, None, FirstNavigation::Placeholder, true, None)
+            .await?;
+        self.update_tab_metadata(&Self::session_key(session), &tab_id, &page)
+            .await;
+        self.invalidate_live_frame_cache(session, owner).await;
+        Ok(())
+    }
+
     async fn goto(&self, session: &BrowserSession, url: &str) -> QuarryResult<()> {
         let owner = self.admission(session);
         self.refuse_lost(session)?;
         guard_navigation_target(url).await?;
         self.require_configured_egress(session).await?;
         let (tab_id, page, created) = match self.active_tab_page(session).await {
-            Some((tab_id, page)) => (tab_id, page, false),
+            Some((tab_id, page)) => {
+                // SC4 D1: a placeholder tab (the session was observed before it had a
+                // page) restores the profile here, as the tab below would at its open.
+                self.restore_profile_before_first_goto(
+                    session,
+                    &Self::session_key(session),
+                    &page,
+                    url,
+                )
+                .await?;
+                (tab_id, page, false)
+            }
             None => {
                 if let Some(pin) = session.tab_pin() {
                     return Err(pinned_tab_closed_error(pin));
@@ -5840,6 +6015,9 @@ struct TestHooks {
     goto_detour: std::sync::Mutex<Option<(String, Duration)>>,
     /// The detour leaves the tab's Fetch guard on, which then refuses the fixture host.
     goto_detour_keeps_guard: AtomicBool,
+    /// The release's profile save takes the capture v2 path without the process-wide
+    /// environment switch (which every test in the binary would see).
+    release_capture_v2: AtomicBool,
     /// The same for `close_tab`, between taking the tab out of the session's
     /// pages and giving its page back to the slot book.
     close_tab_hold: AtomicBool,
@@ -7132,6 +7310,12 @@ mod tests {
             .goto(&session, "about:blank")
             .await
             .expect_err("a released session navigates nowhere");
+        assert_eq!(loss_reason(&error), "session_not_open", "{error:?}");
+        // SC4 D1: nor does a released session get a placeholder tab to observe.
+        let error = driver
+            .ensure_page(&session)
+            .await
+            .expect_err("a released session is given no page");
         assert_eq!(loss_reason(&error), "session_not_open", "{error:?}");
         assert_eq!(driver.book().slot(SLOT).unwrap().pages, 0);
         assert_eq!(driver.launch_count(), 0);
@@ -8499,6 +8683,298 @@ mod tests {
         }
         driver.shutdown().await;
         proxy_task.abort();
+    }
+
+    /// SC4 D1: a session with no tab yet (a run that never navigated, one resumed from a
+    /// checkpoint with no URL) is observed on a placeholder tab: `ensure_page` opens one
+    /// on `about:blank`, active and readable, that goes nowhere; a second call keeps it;
+    /// the session's first `goto` navigates that same tab (no second tab). A plain page
+    /// read still answers `no_current_page` before it: only observing steps ask for a page.
+    /// On the old code the trait's no-op `ensure_page` left the session with no tab, and
+    /// the run's observation failed `no_current_page` (502) in the live RS leg.
+    #[tokio::test]
+    async fn an_observed_session_with_no_page_gets_a_blank_tab_its_first_goto_uses() {
+        if !live_enabled() {
+            return;
+        }
+        let (endpoint, proxy_task) = fixture_proxy().await;
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(Arc::new(FixtureProxyProvider(endpoint)))
+            .with_pool_config(quiet_pool());
+        let session = driver
+            .acquire(&make_lease_with_key("sc4-d1-placeholder"))
+            .await
+            .expect("acquire");
+        driver
+            .configure_egress_policy(&session, BrowserEgressPolicy::deny_all())
+            .await
+            .expect("install deny-all egress policy");
+        assert!(driver.list_tabs(&session).await.expect("tabs").is_empty());
+        let error = driver.content(&session).await.expect_err("no page yet");
+        assert_eq!(loss_reason(&error), "no_current_page", "{error:?}");
+
+        driver
+            .ensure_page(&session)
+            .await
+            .expect("a placeholder tab");
+        let tabs = driver.list_tabs(&session).await.expect("tabs");
+        assert_eq!(tabs.len(), 1, "{tabs:?}");
+        assert!(tabs[0].active, "{tabs:?}");
+        assert_eq!(tabs[0].url.as_deref(), Some("about:blank"), "{tabs:?}");
+        let placeholder = tabs[0].tab_id.clone();
+        driver
+            .native_page_projection(&session)
+            .await
+            .expect("the accessibility tree of the blank tab answers");
+        let href = driver
+            .evaluate(&session, "window.location.href")
+            .await
+            .expect("page state");
+        assert_eq!(href, json!("about:blank"));
+        assert!(!page_html(&driver, &session).await.contains("sc4-"));
+
+        driver
+            .ensure_page(&session)
+            .await
+            .expect("a page already there");
+        let tabs = driver.list_tabs(&session).await.expect("tabs");
+        assert_eq!(tabs.len(), 1, "a second call opens nothing: {tabs:?}");
+
+        *driver.hooks.goto_detour.lock().unwrap() = Some((
+            "http://sc4.fixture.test/next.html".to_owned(),
+            Duration::from_secs(5),
+        ));
+        driver
+            .goto(&session, "about:blank")
+            .await
+            .expect("the first navigation goes through on the placeholder");
+        assert!(page_html(&driver, &session).await.contains("sc4-next-page"));
+        let tabs = driver.list_tabs(&session).await.expect("tabs");
+        assert_eq!(tabs.len(), 1, "the goto used the placeholder: {tabs:?}");
+        assert_eq!(tabs[0].tab_id, placeholder, "{tabs:?}");
+        *driver.hooks.goto_detour.lock().unwrap() = None;
+        driver.release(session).await.expect("release");
+        driver.shutdown().await;
+        proxy_task.abort();
+    }
+
+    /// A profile store over an in-memory one that counts its loads and saves.
+    struct CountingProfileStore {
+        inner: crate::session::InMemoryProfileStore,
+        loads: AtomicUsize,
+        saves: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ProfileStore for CountingProfileStore {
+        async fn save(
+            &self,
+            org_id: &str,
+            profile_id: &quarry_core::ids::kinds::ProfileKind,
+            snapshot: &SessionSnapshot,
+            meta: &crate::session::SaveMeta,
+        ) -> QuarryResult<crate::session::SaveOutcome> {
+            self.saves.fetch_add(1, Ordering::SeqCst);
+            self.inner.save(org_id, profile_id, snapshot, meta).await
+        }
+        async fn load(
+            &self,
+            org_id: &str,
+            profile_id: &quarry_core::ids::kinds::ProfileKind,
+        ) -> QuarryResult<Option<SessionSnapshot>> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            self.inner.load(org_id, profile_id).await
+        }
+        async fn delete(
+            &self,
+            org_id: &str,
+            profile_id: &quarry_core::ids::kinds::ProfileKind,
+        ) -> QuarryResult<()> {
+            self.inner.delete(org_id, profile_id).await
+        }
+        async fn list(&self, org_id: &str) -> QuarryResult<Vec<crate::session::ProfileSummary>> {
+            self.inner.list(org_id).await
+        }
+        async fn save_metadata(
+            &self,
+            org_id: &str,
+            profile_id: &quarry_core::ids::kinds::ProfileKind,
+            metadata: &crate::session::ProfileMetadata,
+        ) -> QuarryResult<()> {
+            self.inner.save_metadata(org_id, profile_id, metadata).await
+        }
+        async fn load_metadata(
+            &self,
+            org_id: &str,
+            profile_id: &quarry_core::ids::kinds::ProfileKind,
+        ) -> QuarryResult<Option<crate::session::ProfileMetadata>> {
+            self.inner.load_metadata(org_id, profile_id).await
+        }
+    }
+
+    /// SC4 D1 and WS17.C2: a placeholder tab has no URL to plan the profile restore for,
+    /// so it neither loads nor restores the profile; the session's first `goto` does, into
+    /// that tab and before its navigation, as a first `goto` that opens its own tab does,
+    /// and only once. A session that only observed never restored the profile and does not
+    /// save its jar over it at release (without that rule a capture v2 release stored the
+    /// placeholder context's empty jar over it). Needs no network.
+    #[tokio::test]
+    async fn a_placeholder_tab_leaves_the_profile_to_the_first_goto() {
+        if !live_enabled() {
+            return;
+        }
+        let store = Arc::new(CountingProfileStore {
+            inner: crate::session::InMemoryProfileStore::new(),
+            loads: AtomicUsize::new(0),
+            saves: AtomicUsize::new(0),
+        });
+        let mut lease = make_lease_with_key("sc4-d1-profile-observe");
+        lease.persist_profile = true;
+        let stored = SessionSnapshot {
+            cookies: vec![Cookie {
+                name: "sc4_d1".into(),
+                value: "kept".into(),
+                domain: "example.com".into(),
+                path: "/".into(),
+                expires: Some(chrono::Utc::now() + chrono::Duration::days(3)),
+                ..Default::default()
+            }],
+            captured_at: Some(chrono::Utc::now()),
+            ..Default::default()
+        };
+        store
+            .inner
+            .save(
+                &lease.org_id,
+                &lease.profile_id,
+                &stored,
+                &crate::session::SaveMeta::now(None),
+            )
+            .await
+            .expect("seed the profile");
+        let driver = live_driver()
+            .with_pool_config(quiet_pool())
+            .with_profile_store(store.clone());
+        // Capture v2 saves whatever the context holds (v1 cannot capture a blank tab).
+        driver
+            .hooks
+            .release_capture_v2
+            .store(true, Ordering::SeqCst);
+
+        // A session that only observes: no load, no restore, no save.
+        let session = driver.acquire(&lease).await.expect("acquire");
+        driver
+            .configure_egress_policy(&session, BrowserEgressPolicy::deny_all())
+            .await
+            .expect("policy");
+        driver
+            .ensure_page(&session)
+            .await
+            .expect("a placeholder tab");
+        assert_eq!(
+            store.loads.load(Ordering::SeqCst),
+            0,
+            "the placeholder loads nothing"
+        );
+        let telemetry = driver.telemetry(&session).await.expect("telemetry");
+        assert!(telemetry.profile_restore.is_none(), "{telemetry:?}");
+        driver.release(session).await.expect("release");
+        assert_eq!(
+            store.saves.load(Ordering::SeqCst),
+            0,
+            "a session that never restored the profile does not save over it"
+        );
+        let kept = store
+            .inner
+            .load(&lease.org_id, &lease.profile_id)
+            .await
+            .expect("load")
+            .expect("still stored");
+        assert_eq!(kept.cookies.len(), 1, "{kept:?}");
+
+        // A session that observes, then navigates: the goto loads and restores it, once.
+        let session = driver.acquire(&lease).await.expect("acquire");
+        driver
+            .configure_egress_policy(&session, BrowserEgressPolicy::deny_all())
+            .await
+            .expect("policy");
+        driver
+            .ensure_page(&session)
+            .await
+            .expect("a placeholder tab");
+        driver
+            .goto(&session, "about:blank")
+            .await
+            .expect("the first goto");
+        assert_eq!(
+            store.loads.load(Ordering::SeqCst),
+            1,
+            "the first goto loads it"
+        );
+        let restore = driver
+            .telemetry(&session)
+            .await
+            .expect("telemetry")
+            .profile_restore
+            .expect("the first goto restored the profile");
+        assert_eq!(restore.cookies_total, 1, "{restore:?}");
+        driver
+            .goto(&session, "about:blank")
+            .await
+            .expect("a later goto");
+        assert_eq!(
+            store.loads.load(Ordering::SeqCst),
+            1,
+            "restored once per context"
+        );
+        let tabs = driver.list_tabs(&session).await.expect("tabs");
+        assert_eq!(tabs.len(), 1, "{tabs:?}");
+        driver.release(session).await.expect("release");
+        driver.shutdown().await;
+    }
+
+    /// SC4 D1: a profile whose key cannot be reached does not fail the observation (the
+    /// placeholder loads nothing); the first `goto` loads it and is refused (503), as the
+    /// first `goto` that opens its own tab is, and nothing is saved over the profile.
+    #[tokio::test]
+    async fn an_unreadable_profile_refuses_the_first_goto_after_a_placeholder() {
+        if !live_enabled() {
+            return;
+        }
+        let store = Arc::new(FailingLoadStore::new(QuarryError::new(
+            ErrorCode::RuntimeNotReady,
+            "profile key unavailable",
+        )));
+        let driver = live_driver()
+            .with_pool_config(quiet_pool())
+            .with_profile_store(store.clone());
+        let mut lease = make_lease_with_key("sc4-d1-profile-key");
+        lease.persist_profile = true;
+        let session = driver.acquire(&lease).await.expect("acquire");
+        driver
+            .configure_egress_policy(&session, BrowserEgressPolicy::deny_all())
+            .await
+            .expect("policy");
+        driver
+            .ensure_page(&session)
+            .await
+            .expect("the observation is not refused");
+        let error = driver
+            .goto(&session, "about:blank")
+            .await
+            .expect_err("the first goto must not start fresh over an unreadable profile");
+        assert_eq!(error.code, ErrorCode::RuntimeNotReady, "{error:?}");
+        assert_eq!(
+            error
+                .details
+                .as_ref()
+                .map(|details| details["reason"].clone()),
+            Some(json!("profile_key_unavailable")),
+            "{error:?}"
+        );
+        let _ = driver.release(session).await;
+        assert_eq!(store.saves.load(Ordering::SeqCst), 0);
+        driver.shutdown().await;
     }
 
     fn abandoned_count(driver: &ChromiumoxideDriver) -> usize {

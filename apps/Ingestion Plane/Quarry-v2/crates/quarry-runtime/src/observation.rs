@@ -434,6 +434,15 @@ impl ObservationRunner {
         let policy_denials: Vec<String> = Vec::new();
         let mut current_screenshot: Option<Vec<u8>> = None;
 
+        // SC4 D1: an action that only reads the page observes the session as it is, also
+        // when it has no page yet (a run that never navigated, one resumed from a
+        // checkpoint with no URL): the driver gives it a tab on `about:blank`, navigated
+        // nowhere, instead of the step failing with `no_current_page`. An action that
+        // acts on a page still needs one.
+        if action_only_observes(&effective_action) {
+            self.browser.ensure_page(session).await?;
+        }
+
         if let Some(verified_target_action) = verified_target_action {
             self.browser
                 .act_on_verified_target(session, verified_target_action)
@@ -1669,6 +1678,18 @@ fn action_requires_atomic_target(action: &AgentAction) -> bool {
             | AgentAction::FrameUploadRef { .. }
             | AgentAction::DownloadRef { .. }
             | AgentAction::FrameDownloadRef { .. }
+    )
+}
+
+/// SC4 D1: the actions that only read the page as it is (a wait, a capture). They observe
+/// a session with no page yet on a blank tab (`BrowserDriver::ensure_page`).
+fn action_only_observes(action: &AgentAction) -> bool {
+    matches!(
+        action,
+        AgentAction::Wait { .. }
+            | AgentAction::Screenshot { .. }
+            | AgentAction::Pdf
+            | AgentAction::GetContent
     )
 }
 
@@ -3597,6 +3618,8 @@ mod tests {
         /// The egress receipts the driver holds, by sequence; none means the driver
         /// has no receipt authority.
         egress_sequences: &'static [u64],
+        /// SC4 D1: every `ensure_page` call.
+        ensured: std::sync::atomic::AtomicUsize,
     }
 
     /// The typed timeout the chromiumoxide driver returns for `op`.
@@ -3658,6 +3681,11 @@ mod tests {
             _url: &str,
         ) -> QuarryResult<()> {
             self.touch();
+            Ok(())
+        }
+        async fn ensure_page(&self, _session: &quarry_browser::BrowserSession) -> QuarryResult<()> {
+            self.ensured
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
         async fn click(
@@ -3881,6 +3909,49 @@ mod tests {
             1,
             "only the content read was made"
         );
+    }
+
+    /// SC4 D1: an action that only reads the page asks the driver for a page first, so a
+    /// session with none yet is observed on a blank tab; an action that moves or acts on
+    /// the page does not (a navigation opens its own tab, a click needs a real page).
+    #[tokio::test]
+    async fn only_an_observing_action_asks_the_driver_for_a_page() {
+        let ensured =
+            |driver: &ContentDriver| driver.ensured.load(std::sync::atomic::Ordering::SeqCst);
+        for action in [AgentAction::Wait { ms: 0 }, AgentAction::GetContent] {
+            let driver = Arc::new(ContentDriver {
+                html: b"<html><body><p>hello</p></body></html>",
+                ..Default::default()
+            });
+            observe(
+                driver.clone(),
+                action.clone(),
+                &mut ObservationContext::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{action:?}: {error:?}"));
+            assert_eq!(ensured(&driver), 1, "{action:?}");
+        }
+        for action in [
+            AgentAction::Navigate {
+                url: "https://example.com/".into(),
+            },
+            AgentAction::Click {
+                selector: "#go".into(),
+            },
+        ] {
+            let driver = Arc::new(ContentDriver {
+                html: b"<html><body><p>hello</p></body></html>",
+                ..Default::default()
+            });
+            let _ = observe(
+                driver.clone(),
+                action.clone(),
+                &mut ObservationContext::default(),
+            )
+            .await;
+            assert_eq!(ensured(&driver), 0, "{action:?}");
+        }
     }
 
     /// SC4 T3: the same stalled read after an action that can change the page (here a

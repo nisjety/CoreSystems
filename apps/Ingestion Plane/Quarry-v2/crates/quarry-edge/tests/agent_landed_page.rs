@@ -4,8 +4,10 @@
 //! When that navigation never commits, the tab stays on `about:blank`, and the next
 //! observation of it is a tab with no page yet: it reached no host, so it is answered (200),
 //! the run's checkpoint keeps no URL for it, and a resume of such a run makes no recovery
-//! navigation (on chromium it then has no tab until its next navigate, as a run that never
-//! navigated: a first observe answers `no_current_page`).
+//! navigation. SC4 D1: such a resumed run, like a run that never navigated, has no tab on
+//! chromium until something gives it one; an observing step (a wait) asks the driver for a
+//! page (`ensure_page`, a tab on `about:blank` that goes nowhere) and answers 200 with the
+//! blank observation, where it answered `DRIVER_FAILED` `no_current_page` (502).
 //! `about:blank` is accepted only as that observation. A page on a host outside the run's
 //! allowed domains is still refused, with the same `SECURITY_BLOCKED` on the REST step and
 //! on the browser socket, and the refused step is recorded as `failed` with no observation
@@ -226,7 +228,8 @@ async fn the_browser_socket_observes_a_blank_tab_and_refuses_a_foreign_page() {
 /// writes (`""`) and from one written before the fix (`about:blank`), and the resume makes
 /// no recovery navigation (there was a 403 "durable checkpoint URL is outside the persisted
 /// allowed domains" for the second); a navigate then works. The recording driver always has
-/// a page, so this does not check what a first observe after the resume answers.
+/// a page here; what a first observe after the resume answers is checked under
+/// `model_pages` below.
 #[tokio::test]
 async fn a_run_checkpointed_on_a_blank_tab_resumes_without_a_recovery_navigation() {
     let edge = Edge::start(idle_limits(60)).await;
@@ -267,4 +270,128 @@ async fn a_run_checkpointed_on_a_blank_tab_resumes_without_a_recovery_navigation
         );
         edge.driver.set_page_url(Some("about:blank"));
     }
+}
+
+/// SC4 D1, the live RS sequence: a run checkpointed on a blank tab expires and is resumed
+/// from a checkpoint with no URL (this edge's `""`, and a legacy `about:blank`). The resume
+/// makes no recovery navigation, so the new session has no page; the next wait asks the
+/// driver for one and answers 200 with the blank observation (it was 502 `DRIVER_FAILED`
+/// `no_current_page`, not retryable), its receipt is `completed`, the checkpoint keeps no
+/// URL, and a navigate after it works.
+#[tokio::test]
+async fn a_run_resumed_with_no_url_observes_a_blank_tab_and_then_navigates() {
+    let edge = Edge::start(idle_limits(60)).await;
+    edge.driver.model_pages();
+    let person = member_token();
+    let run = run_left_on_a_blank_tab(&edge, &person).await;
+
+    for stored in ["", "about:blank"] {
+        assert_eq!(
+            sweep_once(&edge.state, later(120_000)).await.expired,
+            1,
+            "{stored:?}"
+        );
+        let mut saved = checkpoint(&edge, &run).await;
+        saved.current_url = stored.to_owned();
+        edge.state
+            .receipts
+            .save_run_checkpoint(saved)
+            .await
+            .expect("checkpoint write");
+        let resumed = edge
+            .post(&person, "/v1/agent/runs", json!({ "resume_run_id": run }))
+            .await;
+        assert_eq!(resumed.status, 200, "{stored:?}: {}", resumed.body);
+        let (gotos, ensured) = (edge.driver.goto_entered(), edge.driver.ensure_page_calls());
+
+        edge.driver.set_page_url(Some("about:blank"));
+        let wait = edge.step(&person, &run, wait_action(), Some("agent")).await;
+        assert_eq!(
+            wait.status, 200,
+            "{stored:?}: the blank tab is observed: {}",
+            wait.body
+        );
+        assert_eq!(
+            wait.data()["url"],
+            "about:blank",
+            "{stored:?}: {}",
+            wait.body
+        );
+        assert_eq!(edge.driver.ensure_page_calls(), ensured + 1, "{stored:?}");
+        assert_eq!(
+            edge.driver.goto_entered(),
+            gotos,
+            "{stored:?}: the wait navigated nowhere"
+        );
+        assert_eq!(checkpoint(&edge, &run).await.current_url, "", "{stored:?}");
+
+        edge.driver.set_page_url(Some("https://example.test/"));
+        let next = edge
+            .step(
+                &person,
+                &run,
+                navigate("https://example.test/"),
+                Some("agent"),
+            )
+            .await;
+        assert_eq!(next.status, 200, "{stored:?}: {}", next.body);
+        assert_eq!(
+            checkpoint(&edge, &run).await.current_url,
+            "https://example.test/",
+            "{stored:?}"
+        );
+        // The next round starts from a run whose page is blank again.
+        edge.driver.set_page_url(Some("about:blank"));
+        let blank = edge.step(&person, &run, wait_action(), Some("agent")).await;
+        assert_eq!(blank.status, 200, "{stored:?}: {}", blank.body);
+    }
+
+    let receipts = edge.receipts(&person, &run).await;
+    let waits_after_resume: Vec<&str> = receipts
+        .iter()
+        .filter(|receipt| receipt["action"]["type"] == "wait")
+        .map(|receipt| receipt["outcome"]["status"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(waits_after_resume, vec!["completed"; 4], "{receipts:?}");
+}
+
+/// SC4 D1, the decision for a run that never navigated: its first step may be a wait, which
+/// observes a blank tab (200, `about:blank`) instead of failing `no_current_page`; nothing is
+/// navigated, the checkpoint keeps no URL, and the first navigate then works on that tab.
+#[tokio::test]
+async fn a_fresh_runs_first_wait_observes_a_blank_tab() {
+    let edge = Edge::start(RunLimits::default()).await;
+    edge.driver.model_pages();
+    let person = member_token();
+    let run = edge.start_run(&person, run_on_example_test()).await;
+
+    edge.driver.set_page_url(Some("about:blank"));
+    let wait = edge.step(&person, &run, wait_action(), Some("agent")).await;
+    assert_eq!(wait.status, 200, "{}", wait.body);
+    assert_eq!(wait.data()["url"], "about:blank", "{}", wait.body);
+    assert_eq!(edge.driver.ensure_page_calls(), 1);
+    assert_eq!(edge.driver.goto_entered(), 0, "a wait navigates nowhere");
+    assert_eq!(checkpoint(&edge, &run).await.current_url, "");
+
+    edge.driver.set_page_url(Some("https://example.test/"));
+    let next = edge
+        .step(
+            &person,
+            &run,
+            navigate("https://example.test/"),
+            Some("agent"),
+        )
+        .await;
+    assert_eq!(next.status, 200, "{}", next.body);
+    assert_eq!(
+        checkpoint(&edge, &run).await.current_url,
+        "https://example.test/"
+    );
+    assert_eq!(
+        outcomes(&edge, &person, &run).await,
+        vec![
+            ("wait".to_owned(), "completed".to_owned()),
+            ("navigate".to_owned(), "completed".to_owned()),
+        ]
+    );
 }

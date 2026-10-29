@@ -221,6 +221,14 @@ pub struct RecordingDriver {
     egress: Mutex<Vec<u64>>,
     /// The driver-verified cost of every action, when a test sets one.
     action_cost_micro_usd: Mutex<Option<u64>>,
+    /// Set by [`RecordingDriver::model_pages`]: a session then has no page until a `goto`
+    /// or an `ensure_page` gives it one, and a page read before that answers
+    /// `no_current_page`, as the chromium driver does.
+    model_pages: AtomicBool,
+    /// The sessions that have a page (by their shared state), under `model_pages`.
+    sessions_with_page: Mutex<std::collections::HashSet<usize>>,
+    /// How many times the driver was asked to give a session a page (`ensure_page`).
+    ensure_page_calls: AtomicU32,
 }
 
 /// What ends a held `goto`: a fixed time, or a gate the test opens itself.
@@ -337,6 +345,51 @@ impl RecordingDriver {
     pub fn set_action_cost(&self, micro_usd: Option<u64>) {
         *self.action_cost_micro_usd.lock().unwrap() = micro_usd;
     }
+
+    /// Model pages the way the chromium driver has them (SC4 D1): from now on a session
+    /// has no page until a `goto` (whose tab is there even when the
+    /// navigation then times out) or an `ensure_page` gives it one; a page read before
+    /// that (the observation's page state, content and accessibility reads) answers the
+    /// driver's `DRIVER_FAILED` `no_current_page`, not retryable.
+    pub fn model_pages(&self) {
+        self.model_pages.store(true, Ordering::SeqCst);
+    }
+
+    /// How many times the driver was asked to give a session a page.
+    pub fn ensure_page_calls(&self) -> u32 {
+        self.ensure_page_calls.load(Ordering::SeqCst)
+    }
+
+    fn session_id(session: &BrowserSession) -> usize {
+        Arc::as_ptr(&session.inner) as usize
+    }
+
+    fn give_page(&self, session: &BrowserSession) {
+        self.sessions_with_page
+            .lock()
+            .unwrap()
+            .insert(Self::session_id(session));
+    }
+
+    /// Under `model_pages`, the chromium driver's error for a session with no page.
+    fn refuse_without_page(&self, session: &BrowserSession) -> QuarryResult<()> {
+        if !self.model_pages.load(Ordering::SeqCst)
+            || self
+                .sessions_with_page
+                .lock()
+                .unwrap()
+                .contains(&Self::session_id(session))
+        {
+            return Ok(());
+        }
+        let mut error = QuarryError::new(
+            ErrorCode::DriverFailed,
+            "chromiumoxide: no current page; call goto() first",
+        )
+        .with_details(json!({ "reason": "no_current_page" }));
+        error.retryable = false;
+        Err(error)
+    }
 }
 
 #[async_trait]
@@ -374,6 +427,10 @@ impl BrowserDriver for RecordingDriver {
     }
 
     async fn release(&self, session: BrowserSession) -> QuarryResult<()> {
+        self.sessions_with_page
+            .lock()
+            .unwrap()
+            .remove(&Self::session_id(&session));
         self.released
             .lock()
             .unwrap()
@@ -421,8 +478,10 @@ impl BrowserDriver for RecordingDriver {
         })
     }
 
-    async fn goto(&self, _session: &BrowserSession, _url: &str) -> QuarryResult<()> {
+    async fn goto(&self, session: &BrowserSession, _url: &str) -> QuarryResult<()> {
         self.goto_entered.fetch_add(1, Ordering::SeqCst);
+        // The chromium driver commits a session's first tab before navigating it.
+        self.give_page(session);
         let hold = self.timeout_next_goto.lock().unwrap().take();
         if let Some(hold) = hold {
             match hold {
@@ -443,8 +502,25 @@ impl BrowserDriver for RecordingDriver {
         Ok(())
     }
 
-    async fn content(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
+    async fn ensure_page(&self, session: &BrowserSession) -> QuarryResult<()> {
+        self.ensure_page_calls.fetch_add(1, Ordering::SeqCst);
+        self.give_page(session);
+        Ok(())
+    }
+
+    async fn content(&self, session: &BrowserSession) -> QuarryResult<Bytes> {
+        self.refuse_without_page(session)?;
         Ok(Bytes::from_static(PAGE))
+    }
+
+    /// Unsupported, as before; under `model_pages` a session with no page answers the
+    /// chromium driver's `no_current_page` (the read that fails the observation there).
+    async fn native_page_projection(
+        &self,
+        session: &BrowserSession,
+    ) -> QuarryResult<quarry_browser::BrowserNativeProjection> {
+        self.refuse_without_page(session)?;
+        Err(QuarryError::unsupported_action("native_page_projection"))
     }
 
     async fn screenshot(&self, _session: &BrowserSession, _full_page: bool) -> QuarryResult<Bytes> {
@@ -488,9 +564,10 @@ impl BrowserDriver for RecordingDriver {
 
     async fn new_tab(
         &self,
-        _session: &BrowserSession,
+        session: &BrowserSession,
         url: Option<&str>,
     ) -> QuarryResult<BrowserTab> {
+        self.give_page(session);
         self.tab_urls.lock().unwrap().push(url.map(str::to_owned));
         let tab_id = format!("tab_{}", self.tab_seq.fetch_add(1, Ordering::SeqCst) + 1);
         self.tab_ids.lock().unwrap().push(tab_id.clone());
@@ -503,12 +580,9 @@ impl BrowserDriver for RecordingDriver {
     }
 
     /// Counts the call and answers, so a test can prove the edge never got this far.
-    async fn evaluate(
-        &self,
-        _session: &BrowserSession,
-        _script: &str,
-    ) -> QuarryResult<Value> {
+    async fn evaluate(&self, session: &BrowserSession, _script: &str) -> QuarryResult<Value> {
         self.evaluate_calls.fetch_add(1, Ordering::SeqCst);
+        self.refuse_without_page(session)?;
         Ok(match self.page_url.lock().unwrap().as_deref() {
             Some(url) => json!({ "url": url, "title": null }),
             None => Value::Null,
