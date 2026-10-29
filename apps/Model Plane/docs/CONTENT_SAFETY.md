@@ -1,6 +1,6 @@
 # Content safety for external tool results
 
-Status: the inline injection pass (WS26-S6) is built behind default-off switches. It is source-verified only. No threshold has been evaluated (WS26-S8), so no default has changed and every org stays in `frame` mode.
+Status: the inline injection pass (WS26-S6) is built behind default-off switches and is source-verified only. The evaluation corpus and the live eval (WS26-S8) are built, but the live run has not been made and archived. No threshold has been met, so no default has changed and every org stays in `frame` mode.
 
 External tool results (`web_search`, `fetch_url`, `browser_agent`) are untrusted text that the model reads in the same context as its instructions. Model Plane screens each one before the model reads it. This note covers the screening modes, what each mode does, and the switches that select it.
 
@@ -97,6 +97,48 @@ A withheld payload is never parked for later reads, and the payload is not store
 - Turning `tighten` on for an org requires an archived evaluation (WS26-S8: deterministic benign false positives zero, semantic benign false positives at most 1%, paraphrase recall at least 85%, p95 added latency at most 2.5 s) and a week of counters.
 - `enforce` is set per org, after the same evaluation, and never for third-party MCP results before WS05.
 - To roll back, set the org row to `frame`, or set `CONTENT_SAFETY_SEMANTIC_INLINE` to `false`. With the inline switch off, the code path is the one that ran before this slice.
+
+## Evaluation (WS26-S8)
+
+The corpus lives in `rust/crates/mp-content-safety/tests/corpus/`. Each line is a JSON object with `id`, `kind`, `text`, `expect` (`flag` or `clean`) and `needs`. `needs: deterministic` means the scanner decides the row. `needs: semantic` means the scanner must leave the row clean, so only the classifier can flag it. Each file holds one combination of the two:
+
+| File | Rows | `expect` | `needs` | Kinds |
+| --- | --- | --- | --- | --- |
+| `attacks.jsonl` | 487 | flag | deterministic | direct, uppercase, zero-width, fullwidth, line break, tag block, bidi, homoglyph, spaced letters, soft hyphen, forged framing, instruction in HTML (`indirect_html`), non-English markers (`multilingual_marker`) |
+| `attacks_semantic.jsonl` | 103 | flag | semantic | `paraphrase` (English), `paraphrase_multilingual`, `split_markup`, `leetspeak`, `small_caps` |
+| `benign.jsonl` | 349 | clean | deterministic | ordinary business text in several scripts |
+| `benign_semantic.jsonl` | 93 | clean | semantic | `benign_injection_doc`, `benign_near_miss`, `benign_long_page`, `benign_multilingual` |
+
+The rows are synthetic and public. No customer text belongs in them.
+
+`cargo test -p mp-content-safety` is the offline gate. It checks that every deterministic attack is a hit, that no benign row is a hit, and that no semantic row is already a hit, so the semantic rows keep measuring the classifier.
+
+The live eval is `cargo test -p model-gateway --test content_safety_eval -- --ignored`, run through `scripts/eval-content-safety.sh`. It sends every row through the production path: the deterministic scan first, then the inline pass in `tighten` mode, which calls the classifier only for a row the scan left clean. It prints counts per kind, the benign and paraphrase rates, the classifier model and the p95 latency of the calls. It never prints corpus text. It refuses a bearer that belongs to a ZDR org or to an org other than `CONTENT_SAFETY_EVAL_ORG_ID`.
+
+### Thresholds
+
+| Measure | Limit | Checked by |
+| --- | --- | --- |
+| Deterministic attacks flagged | every row | offline gate |
+| Benign rows flagged by the scanner | zero | offline gate and live eval |
+| Benign rows flagged by the classifier | at most 1% | live eval |
+| Paraphrase recall (semantic attacks flagged) | at least 85% | live eval |
+| p95 added latency of an inline call | at most 2.5 s | live eval |
+| Classifier calls that end `unavailable-*` in production | below 5% over a week | screening counters |
+
+These are the limits from the build plan. The live eval (`content_safety_eval.rs`) carries the same numbers, and the owner confirms them before the first archived run. Changing one means changing both.
+
+### Running it and promoting a default
+
+1. Run `CONTENT_SAFETY_EVAL_BEARER=<token> CONTENT_SAFETY_EVAL_ORG_ID=<org> scripts/eval-content-safety.sh` against a non-ZDR test org. The token goes in alone, without the word Bearer. Set `CONTENT_SAFETY_INJECTION_MODEL` if the run should use a model other than inference-core's default, and set `CONTENT_SAFETY_SEMANTIC_DEADLINE_MS` to its production value.
+2. Copy the archived output, which holds counts only, into `docs/MODEL_PLANE_RELEASE_EVIDENCE.md` with the date, the commit and the model.
+3. Change a default, or an org's `injection_defense` mode, only after step 2 holds and a week of screening counters shows fewer than 5% of classifier calls ending `unavailable-*`. The counters are `mp_gateway_semantic_screen_total` (WS26-S1) and `mp_gateway_injection_screen_total` (WS26-S6). `enforce` follows the same rule, per org.
+
+### Limits of the evaluation
+
+- The corpus is small and synthetic. A passing run shows that the classifier handles these rows, not that it catches every injection. Add public examples each quarter, never customer text.
+- A quoted marker is a deterministic hit by design. A public article that quotes "ignore previous instructions" is flagged, and under `enforce` it is withheld. The corpus has no such row, because the zero-false-positive gate would fail on it. The owner decides whether to narrow the marker list or accept the withhold.
+- Two false positives are known and are not yet in the corpus: emoji subdivision sequences, whose tag-block characters are flagged, and the legacy phrase "you are now a" in ordinary marketing text. Each needs its own decision before `enforce` is used on pages that contain them.
 
 ## Known limits
 

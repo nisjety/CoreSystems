@@ -1,63 +1,56 @@
-//! Corpus gate for the shared scanner.
+//! Corpus gate for the shared scanner (WS26-S2, extended by WS26-S8).
 //!
-//! Every attack line must be a hit under the normalised scan, and not one
-//! benign line may be. Both files are synthetic and public: no customer text
-//! belongs in them. A failing line prints its id and kind, never its text.
+//! Deterministic rows must decide the scan: every `needs: deterministic`
+//! attack is a hit, and no benign row is a hit. Semantic rows must be left
+//! clean by the scanner, so only the live classifier can flag them. Their
+//! numbers come from the eval in `model-gateway/tests/content_safety_eval.rs`.
+//! The corpus is synthetic and public. A failing line prints its id and kind,
+//! never its text.
 
-use std::path::PathBuf;
+#[allow(dead_code)]
+#[path = "corpus/rows.rs"]
+mod rows;
+
+use std::collections::BTreeSet;
 
 use mp_content_safety::rules::MARKERS;
 use mp_content_safety::scan::{scan_in, ScanMode};
-
-struct Row {
-    id: String,
-    kind: String,
-    text: String,
-}
-
-fn corpus(file: &str) -> Vec<Row> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/corpus")
-        .join(file);
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            let value: serde_json::Value =
-                serde_json::from_str(line).expect("each corpus line is a JSON object");
-            let field = |name: &str| {
-                value[name]
-                    .as_str()
-                    .unwrap_or_else(|| panic!("corpus row lacks string field `{name}`"))
-                    .to_owned()
-            };
-            Row {
-                id: field("id"),
-                kind: field("kind"),
-                text: field("text"),
-            }
-        })
-        .collect()
-}
-
-fn attacks() -> Vec<Row> {
-    corpus("attacks.jsonl")
-}
-
-fn benign() -> Vec<Row> {
-    corpus("benign.jsonl")
-}
+use rows::{Expect, Needs, Row};
 
 #[test]
 fn corpus_meets_the_minimum_sizes() {
-    assert!(attacks().len() >= 150, "attacks.jsonl has {} rows, need >= 150", attacks().len());
-    assert!(benign().len() >= 300, "benign.jsonl has {} rows, need >= 300", benign().len());
+    let sizes = [
+        ("attacks.jsonl", rows::attacks().len(), 150),
+        ("attacks_semantic.jsonl", rows::attacks_semantic().len(), 100),
+        ("benign.jsonl", rows::benign().len(), 300),
+        ("benign_semantic.jsonl", rows::benign_semantic().len(), 60),
+    ];
+    for (file, have, need) in sizes {
+        assert!(have >= need, "{file} has {have} rows, need >= {need}");
+    }
 }
 
 #[test]
-fn every_attack_line_is_a_deterministic_hit() {
-    let misses: Vec<String> = attacks()
+fn each_file_declares_one_expectation_and_one_layer() {
+    let files: [(&str, Vec<Row>, Expect, Needs); 4] = [
+        ("attacks.jsonl", rows::attacks(), Expect::Flag, Needs::Deterministic),
+        ("attacks_semantic.jsonl", rows::attacks_semantic(), Expect::Flag, Needs::Semantic),
+        ("benign.jsonl", rows::benign(), Expect::Clean, Needs::Deterministic),
+        ("benign_semantic.jsonl", rows::benign_semantic(), Expect::Clean, Needs::Semantic),
+    ];
+    for (file, rows, expect, needs) in files {
+        let stray: Vec<&str> = rows
+            .iter()
+            .filter(|row| row.expect != expect || row.needs != needs)
+            .map(|row| row.id.as_str())
+            .collect();
+        assert!(stray.is_empty(), "{file} has rows outside its expect and needs: {stray:?}");
+    }
+}
+
+#[test]
+fn every_deterministic_attack_is_a_hit() {
+    let misses: Vec<String> = rows::attacks()
         .iter()
         .filter(|row| !scan_in(ScanMode::Normalized, &row.text).is_hit())
         .map(|row| format!("{} ({})", row.id, row.kind))
@@ -67,8 +60,9 @@ fn every_attack_line_is_a_deterministic_hit() {
 
 #[test]
 fn no_benign_line_is_a_hit() {
-    let false_positives: Vec<String> = benign()
-        .iter()
+    let false_positives: Vec<String> = rows::benign()
+        .into_iter()
+        .chain(rows::benign_semantic())
         .filter_map(|row| {
             let report = scan_in(ScanMode::Normalized, &row.text);
             report
@@ -77,6 +71,21 @@ fn no_benign_line_is_a_hit() {
         })
         .collect();
     assert!(false_positives.is_empty(), "benign lines flagged: {false_positives:?}");
+}
+
+/// A semantic row the scanner already flags would test the scanner, and the live
+/// numbers would stop measuring the classifier.
+#[test]
+fn semantic_attacks_are_left_to_the_classifier() {
+    let already_flagged: Vec<String> = rows::attacks_semantic()
+        .iter()
+        .filter(|row| scan_in(ScanMode::Normalized, &row.text).is_hit())
+        .map(|row| format!("{} ({})", row.id, row.kind))
+        .collect();
+    assert!(
+        already_flagged.is_empty(),
+        "semantic attack lines the scanner already flags: {already_flagged:?}"
+    );
 }
 
 #[test]
@@ -89,7 +98,7 @@ fn the_sixteen_original_phrases_are_hits_in_both_modes() {
 
 #[test]
 fn normalisation_only_ever_adds_flags() {
-    for row in attacks().iter().chain(benign().iter()) {
+    for row in rows::all() {
         if scan_in(ScanMode::Legacy, &row.text).is_hit() {
             assert!(
                 scan_in(ScanMode::Normalized, &row.text).is_hit(),
@@ -102,7 +111,7 @@ fn normalisation_only_ever_adds_flags() {
 
 #[test]
 fn rule_ids_are_plain_identifiers() {
-    for row in attacks().iter() {
+    for row in rows::attacks() {
         for rule in scan_in(ScanMode::Normalized, &row.text).rule_ids {
             assert!(
                 rule.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_'),
@@ -112,11 +121,22 @@ fn rule_ids_are_plain_identifiers() {
     }
 }
 
+#[test]
+fn ids_are_unique_across_the_corpus() {
+    let mut seen = BTreeSet::new();
+    for row in rows::all() {
+        assert!(seen.insert(row.id.clone()), "duplicate corpus id {}", row.id);
+    }
+}
+
 /// A 4 MiB benign payload must scan in under 250 ms. Only meaningful with
-/// optimisations, so debug builds check correctness alone.
+/// optimisations, so debug builds check correctness alone. The payload is the
+/// S2 benign set, so the number stays comparable with the S2 baseline.
+/// `benign_semantic.jsonl` scans markedly slower in release, and that is an open
+/// finding for the owner, not something this payload should hide.
 #[test]
 fn a_four_mib_benign_payload_scans_within_budget() {
-    let paragraph = benign()
+    let paragraph = rows::benign()
         .into_iter()
         .map(|row| row.text)
         .collect::<Vec<_>>()

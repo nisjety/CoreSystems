@@ -1185,6 +1185,24 @@ Before a release claim can move to `candidate`:
 Until those rows are populated with the required evidence classes, the Model
 Plane remains source-verified or locally integrated, not production-ready.
 
+## Content-safety corpus and live eval (WS26-S8, 2026-10-29)
+
+Evidence class reached: `test`, for the offline gate (`cargo test -p mp-content-safety`). The live eval's six offline tests passed before their last edit (the bearer check now also requires the org claim); they are re-run once the model-gateway lib builds again. The live run has not been made, so the `integration` class is not reached.
+
+What exists in source:
+
+- `rust/crates/mp-content-safety/tests/corpus/`: four corpus files, 1,032 rows in all. The deterministic attacks (487), the semantic attacks (103), the benign rows (349) and the semantic benign rows (93) each carry `expect` and `needs`.
+- `cargo test -p mp-content-safety`: 30 tests pass (20 unit tests and the 10 corpus gate tests).
+- `rust/services/model-gateway/tests/content_safety_eval.rs`: the live eval, `#[ignore]`d. Its six offline tests (the gate arithmetic, the bearer check and the p95 rule) run in the normal test pass.
+- `scripts/eval-content-safety.sh`: runs the offline gates, then the live eval, and archives the output. It refuses to start without `CONTENT_SAFETY_EVAL_BEARER` and `CONTENT_SAFETY_EVAL_ORG_ID`.
+
+Not yet evidence:
+
+- The live run against the classifier on a non-ZDR test org. Its thresholds are in `docs/CONTENT_SAFETY.md` under "Evaluation (WS26-S8)". They are neither met nor unmet until the run is archived here.
+- No default has changed. `CONTENT_SAFETY_MODE_DEFAULT` stays `frame`, and `CONTENT_SAFETY_SEMANTIC_INLINE` stays off.
+
+Archive slot for the live run: the output of `scripts/eval-content-safety.sh` (counts and latency only), with its date, commit, model and the test org's name, goes below this line.
+
 ## Signed baseline, candidate and rehearsal pipeline (WS01-S12, code half, 2026-10-23)
 
 What exists in source, with its tests:
