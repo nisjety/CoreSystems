@@ -1,0 +1,21 @@
+preflight (read-only)
+  ok   running: quarry-edge
+  ok   running: model-plane-browser-broker-1
+  ok   running: model-plane-model-gateway-1
+  ok   running: model-plane-execution-core-1
+  ok   running: verevon-gateway-rs
+  ok   running: auth-service
+FAIL: quarry-edge: ENVIRONMENT is 'dev', want 'production' (container quarry-edge)
+FAIL: quarry-edge: QUARRY_EDGE_AUTH_DEV_BYPASS is '1', want '0' (container quarry-edge)
+  ok   quarry-edge: QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS=0
+  ok   quarry-edge: QUARRY_BROWSER_NO_SANDBOX=0
+FAIL: quarry-edge: QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL is '<unset>', want 'http://browser-broker:9095' (container quarry-edge)
+FAIL: quarry-edge: QUARRY_EDGE__DURABLE_EVENT_HISTORY is '<unset>', want '1' (container quarry-edge)
+FAIL: broker: BROWSER_BROKER_GRANT_TTL_SECONDS is '900', want '45' (container model-plane-browser-broker-1)
+FAIL: gateway: BROWSER_GRANT_ENFORCEMENT is '<unset>', want 'strict' (container verevon-gateway-rs)
+FAIL: quarry-edge root filesystem is not read-only
+FAIL: quarry-edge cap_drop is '', want ALL
+FAIL: quarry-edge publishes 1 port binding(s)
+  ok   preflight: no process in quarry-edge has --no-sandbox on its command line
+FAIL: auth-core registry check says 'bad': rebuild auth-core with the registry row (--boot)
+preflight FAILED: nothing was run

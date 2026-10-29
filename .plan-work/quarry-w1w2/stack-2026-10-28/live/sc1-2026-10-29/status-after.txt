@@ -1,0 +1,15 @@
+== 2026-10-29T11:09:10Z SC1 posture of the live dev stack
+auth-core  (auth-service) running/healthy  registry: ok capability-core-memory-controls=kept
+broker     (model-plane-browser-broker-1) running/healthy  BROWSER_BROKER_GRANT_TTL_SECONDS=45  (sc1)
+gateway    (verevon-gateway-rs) running/healthy  BROWSER_GRANT_ENFORCEMENT=strict  (sc1)
+quarry-edge(quarry-edge) running/healthy  mode=sc1
+             ENVIRONMENT=production
+             QUARRY_EDGE_AUTH_DEV_BYPASS=0
+             QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS=0
+             QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL=http://browser-broker:9095
+             QUARRY_EDGE__REQUIRE_BROWSER_GRANTS=1
+             QUARRY_EDGE__DURABLE_EVENT_HISTORY=1
+             QUARRY_EDGE__ARTIFACT_BACKEND=filesystem
+             QUARRY_BROWSER_NO_SANDBOX=0
+             read_only=true cap_drop=ALL host_ports=0 networks=ingestion-net,inter-plane-bus,
+spa :5173/ 200   unauth /api/v1/browser/sessions 401
