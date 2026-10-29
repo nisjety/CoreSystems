@@ -1,15 +1,17 @@
-//! The Space workspace's read-only tools (WS24-S3): `workspace_read`,
-//! `workspace_grep`, `workspace_glob` and `workspace_list`.
+//! The Space workspace's tools: the read-only `workspace_read`, `workspace_grep`, `workspace_glob`
+//! and `workspace_list` (WS24-S3), and the writes `workspace_edit` and `workspace_put` (WS24-S4).
 //!
-//! A Space-scoped Do run reads the Space's files from its hydrated workspace, the tree
-//! `code_interpreter` runs against. Each read is a pure file operation under the canonical root
-//! ([`crate::workspace_edit`]): no network, no code and no write. The tools are offered only while
+//! A Space-scoped Do run reads and edits the Space's files in its hydrated workspace, the tree
+//! `code_interpreter` runs against. Each call is a file operation under the canonical root
+//! ([`crate::workspace_edit`]): no network and no code. The tools are offered only while
 //! [`MODE_ENV`] switches them on, to a run that is Space-scoped and not retention-bound, and they
-//! dispatch through the signed capability gate as `cap.workspace.read` (migration 0018).
+//! dispatch through the signed capability gate as `cap.workspace.read` (migration 0018) or
+//! `cap.workspace.write` (migration 0019).
 //!
-//! A read sees the Space tree as this run hydrated it. Edits made by other runs are not visible
-//! until they are promoted, and the tool descriptions say so, so a model does not take a read for
-//! the Space's latest state.
+//! A read sees the Space tree as this run hydrated it, plus this run's own edits. An edit is a
+//! per-run overlay: other runs do not see it until something promotes it, and nothing does yet, so
+//! every write result says so (`durability: "run_overlay"`). The tool descriptions say both things,
+//! so a model does not take a read for the Space's latest state.
 
 use mp_contracts::model_plane::v1 as pb;
 use serde_json::{json, Value};
@@ -24,12 +26,18 @@ pub const GLOB_TOOL: &str = "workspace_glob";
 pub const GREP_TOOL: &str = "workspace_grep";
 pub const LIST_TOOL: &str = "workspace_list";
 pub const READ_TOOL: &str = "workspace_read";
+pub const EDIT_TOOL: &str = "workspace_edit";
+pub const PUT_TOOL: &str = "workspace_put";
 
 /// The most matches a grep returns when the call names no `max_results`.
 const GREP_DEFAULT_RESULTS: usize = 100;
 
-/// How far the switch reaches. `all` will also offer the write tools once WS24-S4 adds them;
-/// until then it offers exactly what `read` does.
+/// The `durability` every write result carries: the change lives in this run's overlay only.
+const DURABILITY: &str = "run_overlay";
+const OVERLAY_NOTE: &str = "Saved to this run's workspace overlay. Other runs of this Space do not see the change, and nothing has promoted it to the Space.";
+
+/// How far the switch reaches. `read` offers the four read tools. `all` also offers the two write
+/// tools, so only a deployment that means to let runs change a Space's workspace switches it on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Off,
@@ -60,14 +68,43 @@ pub fn offered(mode: Mode, zdr: bool, space_scoped: bool) -> bool {
 }
 
 #[must_use]
-pub fn is_workspace_tool(name: &str) -> bool {
+pub fn is_workspace_read(name: &str) -> bool {
     matches!(name, GLOB_TOOL | GREP_TOOL | LIST_TOOL | READ_TOOL)
 }
 
-/// The read tools in a fixed order, so the offered set, and the prompt cache built on it, is the
-/// same on every run.
 #[must_use]
-pub fn tool_defs() -> Vec<pb::ToolDefinition> {
+pub fn is_workspace_write(name: &str) -> bool {
+    matches!(name, EDIT_TOOL | PUT_TOOL)
+}
+
+#[must_use]
+pub fn is_workspace_tool(name: &str) -> bool {
+    is_workspace_read(name) || is_workspace_write(name)
+}
+
+/// Whether the switch admits one workspace tool by name. Checked at dispatch as well as at offer,
+/// so a write the offer did not show is still refused under `read`.
+#[must_use]
+pub fn admits(mode: Mode, name: &str) -> bool {
+    match mode {
+        Mode::Off => false,
+        Mode::Read => is_workspace_read(name),
+        Mode::All => is_workspace_tool(name),
+    }
+}
+
+/// The tools the switch offers, in a fixed order, so the offered set, and the prompt cache built on
+/// it, is the same on every run: the reads, then the writes under `all`.
+#[must_use]
+pub fn tool_defs(mode: Mode) -> Vec<pb::ToolDefinition> {
+    match mode {
+        Mode::Off => Vec::new(),
+        Mode::Read => read_defs(),
+        Mode::All => read_defs().into_iter().chain(write_defs()).collect(),
+    }
+}
+
+fn read_defs() -> Vec<pb::ToolDefinition> {
     vec![
         def(
             GLOB_TOOL,
@@ -179,6 +216,72 @@ pub fn tool_defs() -> Vec<pb::ToolDefinition> {
     ]
 }
 
+fn write_defs() -> Vec<pb::ToolDefinition> {
+    vec![
+        def(
+            EDIT_TOOL,
+            "Replace exact text in one existing file of this Space's workspace. Read the file first and \
+             pass its version token as expected_version: the edit is refused if the file changed since \
+             that read. old_string must match the file exactly once unless replace_all is true, so copy \
+             it from the read and include surrounding lines when it is short. The change is this run's \
+             own overlay: other runs of the Space do not see it, and nothing has promoted it to the Space.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "A file path relative to the workspace root"
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "The exact text to replace, as a read returned it"
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "The text that replaces old_string; an empty string deletes it"
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "Replace every match instead of refusing more than one; default false"
+                    },
+                    "expected_version": {
+                        "type": "string",
+                        "description": "The version token from the read of this file, sha256:<hex>"
+                    }
+                },
+                "required": ["path", "old_string", "new_string", "expected_version"]
+            }),
+        ),
+        def(
+            PUT_TOOL,
+            "Create one file in this Space's workspace, or overwrite one you read first. Omit \
+             expected_version to create a file that must not exist yet; pass the version token of a read \
+             to overwrite a file that still holds it. Parent directories are created. The change is this \
+             run's own overlay: other runs of the Space do not see it, and nothing has promoted it to the Space.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "A file path relative to the workspace root"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The whole new content of the file: UTF-8 text, at most 1 MiB"
+                    },
+                    "expected_version": {
+                        "type": "string",
+                        "description": "The version token of the file being overwritten, sha256:<hex>; omit to create"
+                    }
+                },
+                "required": ["path", "content"]
+            }),
+        ),
+    ]
+}
+
 fn def(name: &str, description: &str, schema: Value) -> pb::ToolDefinition {
     pb::ToolDefinition {
         name: name.to_owned(),
@@ -187,23 +290,31 @@ fn def(name: &str, description: &str, schema: Value) -> pb::ToolDefinition {
     }
 }
 
-/// Runs one read tool against the Space's workspace root and returns its result as JSON text. The
-/// shared lock is held for the whole call, so a read never interleaves with an edit made by the
-/// same run. The file work runs on a blocking thread, because a grep can read many files.
+/// Runs one workspace tool against the Space's workspace root and returns its result as JSON text.
+/// A read holds the run's lock shared, so it never interleaves with an edit made by the same run. A
+/// write holds it exclusively, so no read or other write sees half of an edit. The file work runs on
+/// a blocking thread, because a grep can read many files.
 pub async fn execute(
     tool_name: &str,
     tool_input: &str,
     root: &WorkspaceRoot,
     lock: &WorkspaceLock,
 ) -> Result<String, String> {
-    let _shared = lock.read().await;
     let args: Value = serde_json::from_str(tool_input)
         .map_err(|error| format!("invalid_argument: the tool input is not JSON: {error}"))?;
     let (tool, root) = (tool_name.to_owned(), root.clone());
-    match tokio::task::spawn_blocking(move || run(&tool, &args, &root)).await {
+    let work = move || run(&tool, &args, &root);
+    let outcome = if is_workspace_write(tool_name) {
+        let _exclusive = lock.write().await;
+        tokio::task::spawn_blocking(work).await
+    } else {
+        let _shared = lock.read().await;
+        tokio::task::spawn_blocking(work).await
+    };
+    match outcome {
         Ok(result) => result,
         Err(error) => Err(format!(
-            "io_error: the workspace read did not finish: {error}"
+            "io_error: the workspace operation did not finish: {error}"
         )),
     }
 }
@@ -214,9 +325,9 @@ fn run(tool: &str, args: &Value, root: &WorkspaceRoot) -> Result<String, String>
         GREP_TOOL => grep(args, root),
         LIST_TOOL => list(args, root),
         READ_TOOL => read(args, root),
-        other => Err(format!(
-            "invalid_argument: {other} is not a workspace read tool"
-        )),
+        EDIT_TOOL => edit(args, root),
+        PUT_TOOL => put(args, root),
+        other => Err(format!("invalid_argument: {other} is not a workspace tool")),
     }?;
     Ok(value.to_string())
 }
@@ -285,9 +396,63 @@ fn list(args: &Value, root: &WorkspaceRoot) -> Result<Value, String> {
     Ok(json!({"entries": entries, "truncated": outcome.truncated}))
 }
 
+fn edit(args: &Value, root: &WorkspaceRoot) -> Result<Value, String> {
+    let path = text_arg(args, "path")?;
+    let expected = optional_version(args)?;
+    let outcome = workspace_edit::edit(
+        root,
+        path,
+        text_arg(args, "old_string")?,
+        text_arg(args, "new_string")?,
+        optional_flag(args, "replace_all")?,
+        expected.as_ref(),
+    )
+    .map_err(refused_write)?;
+    Ok(json!({
+        "path": path,
+        "version_before": outcome.version_before.as_str(),
+        "version_after": outcome.version_after.as_str(),
+        "replacements": outcome.replacements,
+        "first_changed_line": outcome.first_changed_line,
+        "diff_preview": outcome.diff_preview,
+        "durability": DURABILITY,
+        "note": OVERLAY_NOTE,
+    }))
+}
+
+fn put(args: &Value, root: &WorkspaceRoot) -> Result<Value, String> {
+    let path = text_arg(args, "path")?;
+    let expected = optional_version(args)?;
+    let outcome = workspace_edit::put(root, path, text_arg(args, "content")?, expected.as_ref())
+        .map_err(refused_write)?;
+    Ok(json!({
+        "path": path,
+        "version_before": outcome.version_before.as_ref().map(workspace_edit::Version::as_str),
+        "version_after": outcome.version_after.as_str(),
+        "durability": DURABILITY,
+        "note": OVERLAY_NOTE,
+    }))
+}
+
 /// The closed code first, so the model can branch on it, then the sentence it can show.
 fn refused(error: EditError) -> String {
     format!("{}: {error}", error.code())
+}
+
+/// A refused write. A stale version also names the current token, so the model can read the file
+/// again and retry against it.
+fn refused_write(error: EditError) -> String {
+    let current = match &error {
+        EditError::StaleVersion { current } => Some(current.as_str().to_owned()),
+        _ => None,
+    };
+    match current {
+        Some(current) => format!(
+            "{}: {error}. The current version is {current}.",
+            error.code()
+        ),
+        None => refused(error),
+    }
 }
 
 fn text_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -311,6 +476,25 @@ fn optional_whole(args: &Value, key: &str) -> Result<Option<usize>, String> {
             .and_then(|whole| usize::try_from(whole).ok())
             .map(Some)
             .ok_or_else(|| format!("invalid_argument: {key} must be a whole number")),
+    }
+}
+
+fn optional_flag(args: &Value, key: &str) -> Result<bool, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(flag)) => Ok(*flag),
+        Some(_) => Err(format!("invalid_argument: {key} must be true or false")),
+    }
+}
+
+/// The version token a caller sent back, if it sent one. A write that needs one (an edit always does)
+/// is refused by the engine with `read_first`, so an absent token is not an error here.
+fn optional_version(args: &Value) -> Result<Option<workspace_edit::Version>, String> {
+    match args.get("expected_version") {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => workspace_edit::Version::parse(text_arg(args, "expected_version")?)
+            .map(Some)
+            .map_err(refused),
     }
 }
 
@@ -362,7 +546,10 @@ mod tests {
 
     #[test]
     fn every_read_tool_is_bound_to_the_read_capability() {
-        let names: Vec<String> = tool_defs().into_iter().map(|def| def.name).collect();
+        let names: Vec<String> = tool_defs(Mode::Read)
+            .into_iter()
+            .map(|def| def.name)
+            .collect();
         assert_eq!(
             names,
             [
@@ -387,7 +574,7 @@ mod tests {
 
     #[test]
     fn no_workspace_tool_name_trips_the_risky_substring_gate() {
-        for def in tool_defs() {
+        for def in tool_defs(Mode::All) {
             assert!(
                 !crate::permission::is_risky_tool(&def.name),
                 "{} trips the risky-name gate",
@@ -398,7 +585,7 @@ mod tests {
 
     #[test]
     fn every_schema_is_a_json_object_schema() {
-        for def in tool_defs() {
+        for def in tool_defs(Mode::All) {
             let schema: Value = serde_json::from_str(&def.parameters_json)
                 .unwrap_or_else(|error| panic!("{} schema is not JSON: {error}", def.name));
             assert_eq!(schema["type"], "object", "{}", def.name);
@@ -431,6 +618,255 @@ mod tests {
         let root = WorkspaceRoot::new(&dir).expect("root");
         let lock: WorkspaceLock = std::sync::Arc::new(tokio::sync::RwLock::new(()));
         let error = execute(READ_TOOL, r#"{"path":"../outside.txt"}"#, &root, &lock)
+            .await
+            .expect_err("refused");
+        assert!(error.starts_with("outside_root:"), "{error}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A scratch workspace, its root and the one lock every call of the test shares.
+    fn workspace(name: &str) -> (std::path::PathBuf, WorkspaceRoot, WorkspaceLock) {
+        let dir = scratch(name);
+        let root = WorkspaceRoot::new(&dir).expect("root");
+        let lock: WorkspaceLock = std::sync::Arc::new(tokio::sync::RwLock::new(()));
+        (dir, root, lock)
+    }
+
+    fn edit_input(path: &str, old: &str, new: &str, expected: &str) -> String {
+        json!({
+            "path": path,
+            "old_string": old,
+            "new_string": new,
+            "expected_version": expected,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn the_write_tools_are_offered_only_under_all() {
+        let names = |mode: Mode| -> Vec<String> {
+            tool_defs(mode).into_iter().map(|def| def.name).collect()
+        };
+        assert!(names(Mode::Off).is_empty());
+        assert_eq!(
+            names(Mode::Read),
+            [
+                "workspace_glob",
+                "workspace_grep",
+                "workspace_list",
+                "workspace_read"
+            ]
+        );
+        assert_eq!(
+            names(Mode::All),
+            [
+                "workspace_glob",
+                "workspace_grep",
+                "workspace_list",
+                "workspace_read",
+                "workspace_edit",
+                "workspace_put"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_write_tools_are_bound_to_the_write_capability_and_not_the_read_one() {
+        for name in [EDIT_TOOL, PUT_TOOL] {
+            assert!(
+                is_workspace_write(name) && is_workspace_tool(name),
+                "{name}"
+            );
+            assert_eq!(
+                crate::capability_policy::trusted_capability_id(name).as_deref(),
+                Some("cap.workspace.write"),
+                "{name} must bind to cap.workspace.write"
+            );
+        }
+        for name in [GLOB_TOOL, GREP_TOOL, LIST_TOOL, READ_TOOL] {
+            assert!(!is_workspace_write(name), "{name} is a read");
+        }
+    }
+
+    #[test]
+    fn the_switch_admits_the_writes_only_under_all() {
+        assert!(!admits(Mode::Off, READ_TOOL));
+        assert!(admits(Mode::Read, READ_TOOL));
+        assert!(!admits(Mode::Read, EDIT_TOOL));
+        assert!(!admits(Mode::Read, PUT_TOOL));
+        assert!(admits(Mode::All, EDIT_TOOL));
+        assert!(admits(Mode::All, PUT_TOOL));
+        assert!(
+            !admits(Mode::All, "shell"),
+            "only workspace tools are admitted here"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_edit_is_applied_and_reports_itself_as_a_run_overlay() {
+        let (dir, root, lock) = workspace("edit");
+        std::fs::write(dir.join("notes.txt"), b"alpha\nbeta\n").expect("write");
+        let before = workspace_edit::Version::of(b"alpha\nbeta\n");
+        let input = edit_input("notes.txt", "beta", "gamma", before.as_str());
+        let output = execute(EDIT_TOOL, &input, &root, &lock)
+            .await
+            .expect("edit");
+        let value: Value = serde_json::from_str(&output).expect("json");
+        assert_eq!(value["version_before"], before.as_str());
+        assert_eq!(
+            value["version_after"],
+            workspace_edit::Version::of(b"alpha\ngamma\n").as_str()
+        );
+        assert_eq!(value["replacements"], 1);
+        assert_eq!(value["durability"], "run_overlay");
+        assert!(
+            value["note"]
+                .as_str()
+                .is_some_and(|note| note.contains("Other runs of this Space do not see")),
+            "the result must say other runs do not see the change: {value}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("notes.txt")).expect("read back"),
+            "alpha\ngamma\n"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_edit_without_a_version_is_refused_as_read_first() {
+        let (dir, root, lock) = workspace("read-first");
+        std::fs::write(dir.join("notes.txt"), b"alpha\n").expect("write");
+        let input =
+            json!({"path": "notes.txt", "old_string": "alpha", "new_string": "beta"}).to_string();
+        let error = execute(EDIT_TOOL, &input, &root, &lock)
+            .await
+            .expect_err("refused");
+        assert!(error.starts_with("read_first: "), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("notes.txt")).expect("read back"),
+            "alpha\n",
+            "a refused edit writes nothing"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn stale_version_returns_remedy_message() {
+        let (dir, root, lock) = workspace("stale");
+        std::fs::write(dir.join("notes.txt"), b"alpha\n").expect("write");
+        let stale = workspace_edit::Version::of(b"older\n");
+        let input = edit_input("notes.txt", "alpha", "beta", stale.as_str());
+        let error = execute(EDIT_TOOL, &input, &root, &lock)
+            .await
+            .expect_err("stale");
+        let current = workspace_edit::Version::of(b"alpha\n");
+        assert!(error.starts_with("stale_version: "), "{error}");
+        assert!(error.contains("read it again and retry"), "{error}");
+        assert!(
+            error.ends_with(&format!("The current version is {}.", current.as_str())),
+            "the model needs the current token to retry: {error}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn secret_pattern_edit_refused() {
+        let (dir, root, lock) = workspace("secret");
+        std::fs::write(dir.join("notes.txt"), b"alpha\n").expect("write");
+        let before = workspace_edit::Version::of(b"alpha\n");
+        // Assembled so the test holds no key-shaped literal for a secret scanner to flag.
+        let secret = concat!("aws AKIA", "IOSFODNN7EXAMPLE");
+        let input = edit_input("notes.txt", "alpha", secret, before.as_str());
+        let error = execute(EDIT_TOOL, &input, &root, &lock)
+            .await
+            .expect_err("refused");
+        assert!(error.starts_with("secret_pattern: "), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("notes.txt")).expect("read back"),
+            "alpha\n"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn parallel_edits_same_path_serialise() {
+        let (dir, root, lock) = workspace("parallel");
+        std::fs::write(dir.join("notes.txt"), b"one two\n").expect("write");
+        let base = workspace_edit::Version::of(b"one two\n");
+        let first_input = edit_input("notes.txt", "one", "1", base.as_str());
+        let second_input = edit_input("notes.txt", "two", "2", base.as_str());
+        let (first, second) = tokio::join!(
+            execute(EDIT_TOOL, &first_input, &root, &lock),
+            execute(EDIT_TOOL, &second_input, &root, &lock),
+        );
+        let results = [first, second];
+        assert_eq!(
+            results.iter().filter(|result| result.is_ok()).count(),
+            1,
+            "exactly one edit may win: {results:?}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| matches!(result, Err(error) if error.starts_with("stale_version: "))),
+            "the other edit is refused as stale: {results:?}"
+        );
+        let content = std::fs::read_to_string(dir.join("notes.txt")).expect("read back");
+        assert!(
+            content == "1 two\n" || content == "one 2\n",
+            "neither edit may be lost or merged: {content:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_edit_is_visible_to_the_next_read_of_the_same_root() {
+        let (dir, root, lock) = workspace("visible");
+        std::fs::write(dir.join("notes.txt"), b"alpha\n").expect("write");
+        let before = workspace_edit::Version::of(b"alpha\n");
+        let input = edit_input("notes.txt", "alpha", "omega", before.as_str());
+        execute(EDIT_TOOL, &input, &root, &lock)
+            .await
+            .expect("edit");
+        let output = execute(READ_TOOL, r#"{"path":"notes.txt"}"#, &root, &lock)
+            .await
+            .expect("read");
+        let value: Value = serde_json::from_str(&output).expect("json");
+        assert_eq!(value["lines"], json!(["omega"]));
+        assert_eq!(
+            value["version"],
+            workspace_edit::Version::of(b"omega\n").as_str(),
+            "a read returns the token the next edit must send"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn put_creates_a_file_and_refuses_to_create_it_twice() {
+        let (dir, root, lock) = workspace("put");
+        let input = json!({"path": "src/new.rs", "content": "fn main() {}\n"}).to_string();
+        let output = execute(PUT_TOOL, &input, &root, &lock)
+            .await
+            .expect("create");
+        let value: Value = serde_json::from_str(&output).expect("json");
+        assert!(value["version_before"].is_null(), "{value}");
+        assert_eq!(value["durability"], "run_overlay");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("src/new.rs")).expect("read back"),
+            "fn main() {}\n"
+        );
+        let error = execute(PUT_TOOL, &input, &root, &lock)
+            .await
+            .expect_err("exists");
+        assert!(error.starts_with("exists: "), "{error}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_write_that_leaves_the_workspace_is_refused_with_its_code() {
+        let (dir, root, lock) = workspace("write-escape");
+        let input = json!({"path": "../escape.txt", "content": "x"}).to_string();
+        let error = execute(PUT_TOOL, &input, &root, &lock)
             .await
             .expect_err("refused");
         assert!(error.starts_with("outside_root:"), "{error}");

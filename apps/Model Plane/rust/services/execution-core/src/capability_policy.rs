@@ -1553,6 +1553,9 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         "workspace_read" | "workspace_grep" | "workspace_glob" | "workspace_list" => {
             "cap.workspace.read"
         }
+        // The two Space workspace writes (WS24-S4) are their own capability, so an org can switch
+        // them off and keep the reads. They change only this run's overlay.
+        "workspace_edit" | "workspace_put" => "cap.workspace.write",
         // A Conversation Core ticket is a model-proposed effect, never a
         // generic service call. The executor's dedicated adapter obtains a
         // current Control target-action decision and the owner verifies it.

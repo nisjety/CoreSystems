@@ -200,9 +200,15 @@ const EXECUTE_PROVIDER_ACTION_TOOL: &str = "execute_provider_action";
 /// split adopted, MIT) explicitly blocks memory-write for child agents: a
 /// delegated context should report findings, not quietly rewrite what the
 /// parent's user will be remembered as having said.
+///
+/// The two Space workspace writes (WS24-S4) are the same kind of write: an
+/// overlay change that the run's own later reads see, so a restricted context
+/// must not make it either. This list is transitional; WS05 S4/S6 answer it
+/// from the declared class instead.
 #[must_use]
 pub fn is_restricted_context_write(tool_name: &str) -> bool {
-    tool_name.trim() == "save_memory"
+    let name = tool_name.trim();
+    name == "save_memory" || crate::workspace_tools::is_workspace_write(name)
 }
 
 /// Operation-aware risk classification for a specific tool call. Extends
@@ -809,21 +815,39 @@ mod tests {
     }
 
     #[test]
-    fn restricted_context_writes_are_exactly_the_memory_write() {
-        // save_memory must NOT be approval-gated on a normal run (that would
-        // kill the feature) but MUST be refused in plan mode and delegated
-        // subagents — the two-classifier split this function exists for.
-        assert!(is_restricted_context_write("save_memory"));
-        assert!(is_restricted_context_write(" save_memory "));
-        assert!(
-            !is_risky_tool("save_memory"),
-            "must not need human approval"
-        );
-        assert!(
-            !is_restricted_context_write("recall_memory"),
-            "reads are fine anywhere"
-        );
-        assert!(!is_restricted_context_write("knowledge_search"));
+    fn restricted_context_writes_are_exactly_the_memory_and_workspace_writes() {
+        // save_memory and the two Space workspace writes must NOT be approval-gated on a normal run
+        // (that would kill the feature, and an overlay is the run's own) but MUST be refused in plan
+        // mode and delegated subagents — the two-classifier split this function exists for.
+        for name in [
+            "save_memory",
+            " save_memory ",
+            "workspace_edit",
+            " workspace_put ",
+        ] {
+            assert!(
+                is_restricted_context_write(name),
+                "{name:?} is a restricted write"
+            );
+            assert!(
+                !is_risky_tool(name.trim()),
+                "{name:?} must not need human approval"
+            );
+        }
+        for name in [
+            "recall_memory",
+            "knowledge_search",
+            "workspace_read",
+            "workspace_grep",
+            "workspace_glob",
+            "workspace_list",
+            "plan.propose",
+        ] {
+            assert!(
+                !is_restricted_context_write(name),
+                "{name} is fine in a restricted context"
+            );
+        }
     }
 
     #[test]
@@ -1208,11 +1232,49 @@ mod tests {
         }
     }
 
+    /// The Space workspace writes need the `workspace_write` rung, as `save_memory` does: a run
+    /// granted only `read_only` (plan mode) is refused, and a run granted `workspace_write` is not.
+    #[test]
+    fn workspace_writes_require_the_workspace_write_rung() {
+        for name in ["workspace_edit", "workspace_put"] {
+            assert_eq!(
+                rung_required_for(name, "{}"),
+                AutonomyRung::WorkspaceWrite,
+                "{name}"
+            );
+            assert!(
+                check_autonomy_rung(AutonomyRung::ReadOnly, name, "{}").is_err(),
+                "{name} must be refused at read_only"
+            );
+            check_autonomy_rung(AutonomyRung::WorkspaceWrite, name, "{}")
+                .expect("the granted rung covers a workspace write");
+        }
+        check_autonomy_rung(AutonomyRung::ReadOnly, "workspace_grep", "{}")
+            .expect("a read runs at read_only");
+    }
+
+    /// The writes are an overlay of one run and ask no approval under either posture, as
+    /// `save_memory` asks none: the rung and the plan and subagent refusals are their gates.
+    #[test]
+    fn workspace_edit_pauses_nothing_under_auto_and_ask() {
+        for name in ["workspace_edit", "workspace_put"] {
+            for mode in [PermissionMode::Auto, PermissionMode::Ask] {
+                assert_eq!(
+                    evaluate_call(mode, name, "{}"),
+                    PermissionDecision::Allow,
+                    "{name} under {mode:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn read_only_refuses_everything_plan_mode_refuses() {
         for tool in [
             "book_shipment",
             "save_memory",
+            "workspace_edit",
+            "workspace_put",
             "publish_social_post",
             "shell",
         ] {

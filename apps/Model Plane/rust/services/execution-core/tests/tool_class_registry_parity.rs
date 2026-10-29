@@ -95,6 +95,7 @@ fn seeded_rows() -> Vec<Seeded> {
     );
     for later in [
         "0018_workspace_read_capability.up.sql",
+        "0019_workspace_write_capability.up.sql",
         "0020_result_query_capability.up.sql",
         "0024_provider_read_tool.up.sql",
     ] {

@@ -281,6 +281,56 @@ func TestBackgroundProcessCapabilityStaysLowRiskBehindASecondGate(t *testing.T) 
 	}
 }
 
+// 0019 seed: cap.workspace.write is a row of its own, so an org can switch the two write tools off
+// and keep the reads. It is a low-risk context write with no approval floor (the change is the run's
+// own overlay), starts unattested, names only the write tools, and its down migration removes exactly
+// what the up migration added.
+func TestWorkspaceWriteCapabilityIsASeparateUnattestedRow(t *testing.T) {
+	t.Parallel()
+
+	up := readMigration(t, "0019_workspace_write_capability.up.sql")
+	for _, required := range []string{
+		"'cap.workspace.write'",
+		"'workspace_edit'",
+		"'workspace_put'",
+		"'low'",
+		"'global'",
+		"ARRAY['global']",
+		"ARRAY['execution-dispatch']",
+		"'execution-dispatch:cap.workspace.write:v1'",
+		"'unavailable'",
+		"'health_not_attested'",
+		"'context_write'",
+		"'run_overlay_only'",
+		"'migration:0019_workspace_write_capability'",
+		"ON CONFLICT (id) DO UPDATE SET",
+		"WHERE capability_tools.source = 'seed'",
+	} {
+		if !strings.Contains(up, required) {
+			t.Fatalf("migration missing %q", required)
+		}
+	}
+	if strings.Contains(up, "availability_state = 'available'") {
+		t.Fatal("migration must not fabricate a live health attestation")
+	}
+	for _, read := range []string{"'workspace_read'", "'workspace_grep'", "'workspace_glob'", "'workspace_list'", "'cap.workspace.read'"} {
+		if strings.Contains(up, read) {
+			t.Fatalf("the write capability must not carry the read family, found %s", read)
+		}
+	}
+	down := readMigration(t, "0019_workspace_write_capability.down.sql")
+	for _, required := range []string{
+		"DELETE FROM capability_tools",
+		"DELETE FROM capabilities",
+		"'cap.workspace.write'",
+		"'migration:0019_workspace_write_capability'",
+	} {
+		if !strings.Contains(down, required) {
+			t.Fatalf("down migration missing %q", required)
+		}
+	}
+}
+
 // 0018 seed: cap.workspace.read is one low-risk row for the four read-only workspace
 // tools. It starts unattested, names no write tool (writes are a separate capability,
 // WS24-S4), and its down migration removes exactly what the up migration added.

@@ -760,11 +760,13 @@ async fn execute_step_inner(
     if tool_name == READ_PROVIDER_ACTION_TOOL && sandbox.is_some() {
         return StepOutcome::failed("read_provider_action is not available in a Space room");
     }
-    // Workspace reads copy a Space's files to this host and take a durable lease, so none runs
-    // under zero data retention or on a waived route, nor while the switch is off. Refused before
-    // the capability gate is asked, as MCP is (WS24-S3).
+    // Workspace tools copy a Space's files to this host and take a durable lease, so none runs
+    // under zero data retention or on a waived route, nor one the switch does not admit: the writes
+    // need `all` (WS24-S3, WS24-S4). Refused before the capability gate is asked, as MCP is.
     if crate::workspace_tools::is_workspace_tool(tool_name)
-        && (zdr || waived || crate::workspace_tools::mode() == crate::workspace_tools::Mode::Off)
+        && (zdr
+            || waived
+            || !crate::workspace_tools::admits(crate::workspace_tools::mode(), tool_name))
     {
         return StepOutcome::failed(&format!(
             "{tool_name} is not available on this run: workspace tools need a Space-scoped run on a deployment that switches them on, and never run under zero data retention"
@@ -950,6 +952,14 @@ async fn execute_step_inner(
             crate::run_inputs::global().get(org_id, run_id)
         } else {
             None
+        };
+        // A Space run's code may write the Space tree, so it holds the run's workspace exclusively
+        // for the call: no workspace read or edit of this run interleaves with it (WS24-S4). The call
+        // can run to its timeout, and the exclusion is as long as that. A run with no Space has no tree.
+        let workspace_lock = sandbox.and(state).map(|state| state.workspace_lock(run_id));
+        let _exclusive = match &workspace_lock {
+            Some(lock) => Some(lock.write().await),
+            None => None,
         };
         execute_code_interpreter(
             tool_input,
@@ -1382,6 +1392,13 @@ async fn execute_process_tool(
         client: sandbox.sandbox_manager_client,
         token: &token,
         start,
+    };
+    // The process family works in the Space tree, so a call holds the run's workspace exclusively
+    // while it executes, as `code_interpreter` does (WS24-S4). Its calls are short registry RPCs.
+    let workspace_lock = state.map(|state| state.workspace_lock(run_id));
+    let _exclusive = match &workspace_lock {
+        Some(lock) => Some(lock.write().await),
+        None => None,
     };
     match crate::process_tools::execute(tool_name, tool_input, &ctx).await {
         Ok(output) => tool_bridge::ToolExecution {

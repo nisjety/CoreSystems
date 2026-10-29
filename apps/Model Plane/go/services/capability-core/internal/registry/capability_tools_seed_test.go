@@ -21,9 +21,10 @@ var seedRowPattern = regexp.MustCompile(`\('global', '([^']+)', '([^']+)', '([a-
 
 func readSeedRows(t *testing.T) []seedRow {
 	t.Helper()
-	// 0016 seeds the classes; 0018 and 0020 add the rows of the tools registered after it.
+	// 0016 seeds the classes; 0018, 0019 and 0020 add the rows of the tools registered after it.
 	sql := readMigration(t, "0016_capability_tool_classes.up.sql") +
 		readMigration(t, "0018_workspace_read_capability.up.sql") +
+		readMigration(t, "0019_workspace_write_capability.up.sql") +
 		readMigration(t, "0020_result_query_capability.up.sql") +
 		readMigration(t, "0024_provider_read_tool.up.sql")
 	var rows []seedRow
@@ -139,6 +140,7 @@ func TestSeededCeilingsAreTheStrictestOfTheirTools(t *testing.T) {
 		"cap.process.background":    {models.SideEffectSandboxCompute, models.ApprovalFloorNone},
 		"cap.tool.provider.execute": {models.SideEffectExternalWrite, models.ApprovalFloorNone},
 		"cap.tool.ticket.create":    {models.SideEffectOwnerEffect, models.ApprovalFloorDurableOwner},
+		"cap.workspace.write":       {models.SideEffectContextWrite, models.ApprovalFloorNone},
 	} {
 		if class[id] != want[0] || floor[id] != want[1] {
 			t.Errorf("%s: ceiling %s/%s, want %s/%s", id, class[id], floor[id], want[0], want[1])

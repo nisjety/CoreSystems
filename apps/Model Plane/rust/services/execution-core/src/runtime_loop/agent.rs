@@ -1153,11 +1153,12 @@ async fn merged_tool_defs_governed(
     ) {
         tools.push(read_provider_action_def());
     }
-    // The Space's read-only workspace tools (WS24-S3): offered to a Space-scoped run that is not
-    // retention-bound, while `WORKSPACE_TOOLS` is on. They are appended after the base set, so the
-    // run is not derivable, as the connected-app read above is.
-    if crate::workspace_tools::offered(crate::workspace_tools::mode(), zdr, space_scoped) {
-        tools.extend(crate::workspace_tools::tool_defs());
+    // The Space's workspace tools (WS24-S3 reads, WS24-S4 writes): offered to a Space-scoped run that
+    // is not retention-bound, as `WORKSPACE_TOOLS` admits them (the writes only under `all`). They are
+    // appended after the base set, so the run is not derivable, as the connected-app read above is.
+    let workspace_mode = crate::workspace_tools::mode();
+    if crate::workspace_tools::offered(workspace_mode, zdr, space_scoped) {
+        tools.extend(crate::workspace_tools::tool_defs(workspace_mode));
     }
     // The ungoverned listing, exactly as it was. A zero-retention run is not asked:
     // nothing it could be offered may run.
@@ -6187,7 +6188,9 @@ mod capability_binding_contract {
         let mut all = offered_tool_defs();
         all.extend(browser_tool_defs());
         all.extend(process_tool_defs());
-        all.extend(crate::workspace_tools::tool_defs());
+        all.extend(crate::workspace_tools::tool_defs(
+            crate::workspace_tools::Mode::All,
+        ));
         all
     }
 
@@ -18551,6 +18554,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn leaf_subagent_may_grep_but_not_edit() {
+        // WS24-S4: a Space workspace write is a restricted context write, so a delegated subagent is
+        // refused it as it is refused `save_memory`, under `auto` as under `ask`. Its reads are not
+        // restricted: the grep in the same round passes the blocklist and meets the switch instead,
+        // which is off in this test, so its refusal names the switch and never the blocklist.
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let zero_version = format!("sha256:{}", "0".repeat(64));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![subagent_call("sub-1", r#"{"goal":"tidy the notes"}"#)],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![
+                        pb::ToolCall {
+                            id: "edit-1".to_owned(),
+                            name: "workspace_edit".to_owned(),
+                            arguments_json: serde_json::json!({
+                                "path": "notes.txt",
+                                "old_string": "draft",
+                                "new_string": "final",
+                                "expected_version": zero_version,
+                            })
+                            .to_string(),
+                        },
+                        pb::ToolCall {
+                            id: "grep-1".to_owned(),
+                            name: "workspace_grep".to_owned(),
+                            arguments_json: r#"{"pattern":"draft"}"#.to_owned(),
+                        },
+                    ],
+                },
+                Scripted::Answer("I could not change the notes myself.".to_owned()),
+                Scripted::Answer("Reported back: the edit needs the main agent.".to_owned()),
+            ],
+            observed_messages.clone(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let mut req = sample_request();
+        req.mode = "auto".to_owned();
+        req.tools = crate::workspace_tools::tool_defs(crate::workspace_tools::Mode::All);
+        run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            &plain_caller(),
+            req,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("a refused call inside a subagent must not fail the run");
+
+        let observed = observed_messages.lock().unwrap();
+        let subagent_next_round = observed[2]
+            .iter()
+            .rfind(|message| message.role == "user")
+            .map_or("", |message| message.content.as_str());
+        assert!(
+            subagent_next_round.contains("tool 'workspace_edit' is a side-effecting")
+                && subagent_next_round.contains("may never run"),
+            "the subagent's edit must be refused by the leaf blocklist: {subagent_next_round}"
+        );
+        assert!(
+            !subagent_next_round.contains("tool 'workspace_grep' is a side-effecting"),
+            "a read is not a restricted write, so the blocklist must not refuse it: {subagent_next_round}"
+        );
+        assert!(
+            subagent_next_round.contains("workspace_grep is not available on this run"),
+            "the grep reaches dispatch, where the switch refuses it while it is off: {subagent_next_round}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_truncated_round_refuses_only_its_last_tool_call_and_runs_the_rest() {
         // pi's version of this guard fails EVERY call in a length-stopped
         // message. Providers emit content blocks in order, so only the final
@@ -18695,6 +18788,97 @@ mod tests {
             r.completed.is_empty(),
             "plan mode must refuse before any step is dispatched/recorded: {:?}",
             r.completed
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_mode_refuses_workspace_edit_but_allows_workspace_read() {
+        // WS24-S4: a Space workspace write is refused in plan mode as `save_memory` is, although no
+        // approval is asked for it under `auto`. The read in the same round is not a restricted write,
+        // so it passes plan mode and meets the switch, which is off in this test: its refusal names the
+        // switch and never plan mode.
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let zero_version = format!("sha256:{}", "0".repeat(64));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![
+                        pb::ToolCall {
+                            id: "edit-1".to_owned(),
+                            name: "workspace_edit".to_owned(),
+                            arguments_json: serde_json::json!({
+                                "path": "notes.txt",
+                                "old_string": "draft",
+                                "new_string": "final",
+                                "expected_version": zero_version,
+                            })
+                            .to_string(),
+                        },
+                        pb::ToolCall {
+                            id: "read-1".to_owned(),
+                            name: "workspace_read".to_owned(),
+                            arguments_json: r#"{"path":"notes.txt"}"#.to_owned(),
+                        },
+                    ],
+                },
+                Scripted::Answer("I described the edit instead of making it.".to_owned()),
+            ],
+            observed_messages.clone(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let mut req = sample_request();
+        req.mode = "auto".to_owned();
+        req.plan_mode = true;
+        req.tools = crate::workspace_tools::tool_defs(crate::workspace_tools::Mode::All);
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            &plain_caller(),
+            req,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("a refused plan-mode tool call must not fail the run");
+
+        assert_eq!(resp.status, "completed");
+        assert_eq!(
+            resp.final_output,
+            "I described the edit instead of making it."
+        );
+        let observed = observed_messages.lock().unwrap();
+        let next_round = observed[1]
+            .iter()
+            .rfind(|message| message.role == "user")
+            .map_or("", |message| message.content.as_str());
+        assert!(
+            next_round.contains("tool 'workspace_edit' is a side-effecting")
+                && next_round.contains("may only investigate, never act"),
+            "plan mode must refuse the edit before it dispatches, and say why: {next_round}"
+        );
+        assert!(
+            !next_round.contains("tool 'workspace_read' is a side-effecting"),
+            "plan mode must not refuse a read: {next_round}"
+        );
+        assert!(
+            next_round.contains("workspace_read is not available on this run"),
+            "the read reaches dispatch, where the switch refuses it while it is off: {next_round}"
         );
     }
 
