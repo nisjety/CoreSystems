@@ -192,6 +192,7 @@ export function toAgUiEvent(event: VerevonUiEvent): AgUiEvent | null {
     case 'run.error':
       return { ...base, type: 'RUN_ERROR', runId: event.runId, requestId: event.requestId, code: event.code, message: event.message }
     // Lifecycle cues are Verevon's own projection; AG-UI names none for them yet.
+    case 'usage.progress':
     case 'lifecycle.retry':
     case 'lifecycle.compaction':
     case 'lifecycle.context':

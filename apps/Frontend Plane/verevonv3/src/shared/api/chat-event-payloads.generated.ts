@@ -199,6 +199,18 @@ export type ChatEventPayloads = {
     retention_reason?: string
     unpriced_calls: number
   }
+  /** Rust variants: UsageProgress. */
+  usage_progress: {
+    cache_read_tokens: number
+    cache_write_tokens: number
+    calls: number
+    cost_basis?: string
+    cost_usd: number | null
+    input_tokens: number
+    output_tokens: number
+    phase: string
+    unpriced_calls?: number
+  }
   /** Rust variants: Verification. */
   verification: {
     kb_citations: number

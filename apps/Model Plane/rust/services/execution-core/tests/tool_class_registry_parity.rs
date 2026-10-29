@@ -98,6 +98,7 @@ fn seeded_rows() -> Vec<Seeded> {
         "0019_workspace_write_capability.up.sql",
         "0020_result_query_capability.up.sql",
         "0024_provider_read_tool.up.sql",
+        "0026_knowledge_list_documents_tool.up.sql",
     ] {
         sql.push_str(&read_text(&format!(
             "../../../go/services/capability-core/migrations/{later}"

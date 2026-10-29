@@ -943,6 +943,69 @@
         }
       }
     },
+    "usage_progress": {
+      "family": "usage",
+      "variants": [
+        "UsageProgress"
+      ],
+      "keys": {
+        "cache_read_tokens": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "cache_write_tokens": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "calls": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "cost_basis": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "cost_usd": {
+          "types": [
+            "null",
+            "number"
+          ],
+          "presence": "always"
+        },
+        "input_tokens": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "output_tokens": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "phase": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "unpriced_calls": {
+          "types": [
+            "integer"
+          ],
+          "presence": "optional"
+        }
+      }
+    },
     "verification": {
       "family": "citations",
       "variants": [

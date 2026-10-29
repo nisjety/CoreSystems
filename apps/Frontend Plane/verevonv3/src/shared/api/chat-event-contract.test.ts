@@ -79,7 +79,7 @@ const TABLES: Tables = {
 }
 
 /** Helpers in chat-client.ts that read the payload they are given; their reads belong to the case that calls them. */
-const READING_HELPERS: readonly string[] = ['emitCitation', 'failureTiming', 'failureFeature', 'parseTurnTiming']
+const READING_HELPERS: readonly string[] = ['emitCitation', 'failureTiming', 'failureFeature', 'parseTurnTiming', 'usageProgressFrame']
 /** Helpers that read the payload in another module, which that module's own tests cover. */
 const READ_ELSEWHERE: readonly string[] = ['servedByField']
 

@@ -139,6 +139,9 @@ services:
       # WS21-S2: mint a browser bearer for a personal, non-ZDR agentic turn and forward it to model-gateway. Off by
       # default; only the literal `true`. execution-core's EXECUTION_DO_BROWSER_ENABLED must be on too.
       BROWSER_DO_ENABLED: ${BROWSER_DO_ENABLED:-false}
+      # WS21-S7: a workspace AI run starts under a real broker grant and carries the browser bearer. Off by default; only
+      # the literal `true`. Keep it off until Quarry accepts broker grants and the broker site policy is shadow or enforce.
+      BROWSER_AI_RUN_REAL_GRANT: ${BROWSER_AI_RUN_REAL_GRANT:-false}
       MODEL_PLANE_RECOMMEND_URL: ${MODEL_PLANE_RECOMMEND_URL:-http://model-gateway:8080/v1/recommend/plan}
       # Search verticals: SearXNG (videos) + autocomplete-core (typeahead). Web/images/answer
       # ride QUARRY_EDGE_URL above. Suggestions stay empty until AUTOCOMPLETE_INTERNAL_TOKEN is set.

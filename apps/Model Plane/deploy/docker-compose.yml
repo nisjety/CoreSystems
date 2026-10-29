@@ -369,6 +369,9 @@ services:
       # WS27-S2: a turn's usage frame and ledger rows count every tool round and the overhead calls, with run_id. Off by
       # default; only the literal `true`. Billing attribution (DEC-18, WS27-D5) must be confirmed before it is turned on.
       MODEL_GATEWAY_TURN_USAGE_COMPLETE: ${MODEL_GATEWAY_TURN_USAGE_COMPLETE:-false}
+      # WS27-S3: stream a usage_progress frame after each provider call of a turn, for a client that asked for usage.
+      # Off by default; only the literal `true`. ZDR turns never stream it.
+      MODEL_GATEWAY_USAGE_PROGRESS: ${MODEL_GATEWAY_USAGE_PROGRESS:-false}
       # WS04-S4: read the plan grant from session-core so a Do run started on another replica carries the rung. On by default
       # since the WS04-S9 proof; only the literal `true` turns it on. Deploy session-core first so migration 0050 has applied;
       # false keeps the in-memory grants (kept as the rollback path).
