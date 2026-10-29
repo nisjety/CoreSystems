@@ -1791,6 +1791,30 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-545 | WS23-S4.code | follow-up | P3 | 21 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-22.json | open |
 | D2-546 | WS26-S6 | risk | P2 | The regenerated mp-events-py inference_pb2.py and execution_pb2.py (protoc 35.1) lower their runtime check from 7.36.x to 7.35.1, and inference_pb2.py changes by 246 lines, more than tag 14 alone, so the checked-in stub was stale; the import is not verified here (no protobuf runtime installed). | open |
 
+
+### Wave-mode batch W2-23 (2026-10-29)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-547 | WS26-S8 | live-proof | P1 | The live eval has not run: run scripts/eval-content-safety.sh on a non-ZDR test org against a live inference-core serving the prompt_injection operation, then archive its counts-only output in the archive slot of MODEL_PLANE_RELEASE_EVIDENCE.md; the thresholds are neither met nor unmet until then. | open |
+| D2-548 | WS26-S8 | decision | P1 | The owner must confirm the four proposed limits (benign classifier false positives at most 1%, paraphrase recall at least 85%, p95 at most 2.5 s, classifier unavailable below 5% in production) before an archived run counts; they are duplicated in CONTENT_SAFETY.md and content_safety_eval.rs and must change together. | open |
+| D2-549 | WS26-S8 | risk | P1 | A quoted marker is a deterministic hit by design, so a public article quoting 'ignore previous instructions' is withheld under enforce; the corpus has no such row because the zero-false-positive gate would fail on it, and the owner must narrow the marker list or accept the withhold before enforce. | open |
+| D2-550 | WS26-S8 | risk | P1 | The legacy marker 'you are now a' flags ordinary text such as 'You are now a member'; no corpus row covers it yet, and the owner must decide before any enforce rollout. | open |
+| D2-551 | WS26-S8 | risk | P1 | Emoji subdivision sequences are still flagged as tag-block characters (already recorded as D2-110); the exemption and a benign row are needed before default-on. | open |
+| D2-552 | WS26-S8 | risk | P1 | The grown benign set scans slower in release: in one same-process harness run the HEAD benign paragraph measured about 205 ms and the grown paragraph 302 to 330 ms, so the budget test now uses the S2 set; scanner speed (S2 scope) or a separate budget for mixed text is an owner decision, to be re-measured on an idle machine. | open |
+| D2-553 | WS26-S8 | follow-up | P1 | The model-gateway lib does not compile in this shared worktree: WS19-S7's in-flight edits in sse.rs, tool_loop.rs and skills.rs reference mp_contracts::skill_bundle, which mp-contracts/src/lib.rs does not declare; the eval test's last two edits are uncompiled, so its six offline tests must be re-run once that registration lands. | open |
+| D2-554 | WS26-S8 | live-proof | P1 | The live classifier eval has never run, so the plan row's definition of done is not met yet: no threshold is met and nothing is archived in MODEL_PLANE_RELEASE_EVIDENCE.md, and no S6 default flip may happen until it is. | open |
+| D2-555 | WS26-S8 | follow-up | P3 | 32 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-23.json | open |
+| D2-556 | WS19-S7 | live-proof | P1 | DoD not run: a live turn with a sample bundle must show the footer, a skill_file tool_call and result, and an org-B token must be refused, on a dev stack with SKILL_BUNDLES_ENABLED on capability-core and SKILL_FILE_TOOL_ENABLED on model-gateway. | open |
+| D2-557 | WS19-S7 | test-gap | P1 | No ZDR golden row for skill_file in zdr_feature_table.rs: the gate is structural (ZDR turns return through zdr_direct_stream at sse.rs ~1668, before fetch_skill_context at ~2600, and that path builds no builtin tools), so the row should assert skill_file is absent under ZDR; it is live-only per the plan. | open |
+| D2-558 | WS19-S7 | test-gap | P1 | No test runs against a fake capability-core. Nothing proves end to end that an org-B bearer gets NotFound, that a bundle read follows the manifest and checks the digest, or that paging works across a real GetSkillBlob. Org scoping depends on capability-core's verifiedOrganizationID (server.go ListSkillBundles, GetSkillBundleManifest and GetSkillBlob), and only the catalogue-name resolution is unit-tested. | open |
+| D2-559 | WS19-S7 | live-proof | P1 | The lead must add `pub mod skill_bundle;` to apps/Model Plane/rust/crates/mp-contracts/src/lib.rs, after `pub mod scheduled_contract;`, before any build or commit. This file is outside the slice's ownership. Without that line the gateway does not compile: there are 4 unresolved mp_contracts::skill_bundle paths. With the line added in a scratch copy, everything compiles and every slice test passes (see tests_rerun). | open |
+| D2-560 | WS19-S7 | live-proof | P1 | The ZDR golden row in zdr_feature_table.rs is not written. The plan marks it live-only. The gate itself is structural: a ZDR turn returns through zdr_direct_stream before fetch_skill_context runs, so no footer is built and skill_file is never offered. | open |
+| D2-561 | WS19-S7 | live-proof | P1 | WS05 declared class `read` for skill_file needs a seed row in a capability-core migration, which this slice does not own. It is handed back in lead_todo and stays inert until WS05-S4. | open |
+| D2-562 | WS19-S7 | live-proof | P1 | Recommended shared edit: add `skill_file` to prompt_context::CONDITIONAL_TOOLS. Without it, when stable_prompt_order is on, a turn that offers skill_file shifts every tool definition after it. | open |
+| D2-563 | WS19-S7 | live-proof | P1 | After the lib.rs line: `cd apps/Model Plane/rust` then `CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p mp-contracts --lib skill_bundle` (expect 10 passed). | open |
+| D2-564 | WS19-S7 | follow-up | P3 | 22 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-23.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -1951,3 +1975,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS24-S3 | zdr, authority, policy | W2-21 | no |
 | WS26-S6 | policy, zdr, money | W2-22 | no |
 | WS23-S4.code | authority, zdr, policy | W2-22 | no |
+| WS19-S7 | auth, zdr | W2-23 | no |
