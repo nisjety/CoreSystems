@@ -197,6 +197,13 @@ pub async fn start_run(
                 None,
             ));
         }
+        // T4b-1: a checkpoint saved before `checkpoint_url` kept a tab with no page yet as
+        // `""` can hold `about:blank`. It means the same, no page to recover: the run starts
+        // on a blank tab, and `about:blank` is never a recovery navigation.
+        let mut checkpoint = checkpoint;
+        if super::human_browse::is_blank_tab(&checkpoint.current_url) {
+            checkpoint.current_url.clear();
+        }
         Some(checkpoint)
     } else {
         None

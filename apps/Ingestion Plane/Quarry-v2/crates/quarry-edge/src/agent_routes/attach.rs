@@ -789,6 +789,19 @@ pub(super) async fn delegate_step(
         }
         return Err(not_found());
     }
+    // The landed page is checked before the receipt and the checkpoint (T4b-1), against the
+    // attachment's hosts. An agent tab opened without a start URL is on `about:blank`.
+    let step_result = step_result.and_then(|observation| {
+        super::step::check_landed_page(
+            state,
+            &handle.live,
+            entry.zdr.is_active(),
+            &observation.url,
+            |url| domain_allowed(url, &attach.allowed_domains),
+            "browser action reached a domain outside the attachment's allowed domains",
+        )?;
+        Ok(observation)
+    });
     let observation = match step_result {
         Ok(observation) => {
             let cost_usd = receipt_cost_usd(&observation.telemetry, &receipt_action);
@@ -838,17 +851,6 @@ pub(super) async fn delegate_step(
             .await
             .map_err(|error| driver_err(request_id, error))?;
     }
-    if !domain_allowed(&observation.url, &attach.allowed_domains) {
-        return Err(driver_err(
-            request_id,
-            QuarryError::new(
-                ErrorCode::SecurityBlocked,
-                "browser action reached a domain outside the attachment's allowed domains",
-            ),
-        ));
-    }
-    crate::agent_policy_gate::gate_visit(state, &handle.live, entry.zdr.is_active(), &observation.url)
-        .map_err(|error| driver_err(request_id, error))?;
     Ok(Json(Envelope::ok(request_id.to_owned(), observation)))
 }
 

@@ -7,6 +7,58 @@ pub(super) async fn human_lane_of(handle: &RunHandle) -> LaneRef {
     handle.entry.lock().await.human_lane.clone()
 }
 
+/// The refusal of a step that landed outside the run's allowed domains.
+const LANDED_OUTSIDE_RUN: &str =
+    "browser action reached a domain outside the run's allowed domains";
+
+/// The check of the page a step landed on, after the action ran: the host rule (the run's,
+/// or the attachment's for a delegate) and then the run's web policy (WS7.D). Every step
+/// path calls it before it records anything, so a refused step leaves a `failed` receipt and
+/// no checkpoint of that page (T4b-1).
+///
+/// A tab with no page yet (`about:blank` exactly, `human_browse::is_blank_tab`) passes: a
+/// run's first navigation that never commits leaves its tab there, and the next observation
+/// of it reached no host. That is all it is accepted as; as a navigation target it is still
+/// refused (gate 11, the tab and attach routes, and the browser's egress guard).
+pub(super) fn check_landed_page(
+    state: &AppState,
+    live: &RunLive,
+    zdr: bool,
+    url: &str,
+    domain_allows: impl FnOnce(&str) -> bool,
+    outside: &'static str,
+) -> QuarryResult<()> {
+    if super::human_browse::is_blank_tab(url) {
+        return Ok(());
+    }
+    if !domain_allows(url) {
+        return Err(QuarryError::new(ErrorCode::SecurityBlocked, outside));
+    }
+    crate::agent_policy_gate::gate_visit(state, live, zdr, url)
+}
+
+/// [`check_landed_page`] against the run's own navigation policy.
+fn check_landed_on_run(
+    state: &AppState,
+    handle: &RunHandle,
+    entry: &RunEntry,
+    obs: BrowserObservation,
+) -> QuarryResult<BrowserObservation> {
+    check_landed_page(
+        state,
+        &handle.live,
+        entry.zdr.is_active(),
+        &obs.url,
+        |url| {
+            entry
+                .nav_policy
+                .allows(url, &entry.constraints.allowed_domains)
+        },
+        LANDED_OUTSIDE_RUN,
+    )?;
+    Ok(obs)
+}
+
 /// `POST /v1/agent/runs/{run_id}/step` — execute one action, return the
 /// resulting observation. `ObservationRunner` emits `ActionStarted`/`ObservationReady`
 /// itself, keyed by the step key this lane reserved.
@@ -137,6 +189,9 @@ pub async fn step(
         crate::metrics::record_takeover_exempt_step(step_started.elapsed());
     }
     let mut entry = handle.entry.lock().await;
+    // The landed page is checked before the receipt and the checkpoint (T4b-1): a page the
+    // caller is refused is a failed step, and its observation is not kept.
+    let step_result = step_result.and_then(|obs| check_landed_on_run(&state, &handle, &entry, obs));
     let (obs, cost_source) = match step_result {
         Ok(obs) => {
             // W4: when the driver omits a provider-billed cost, fall
@@ -207,18 +262,6 @@ pub async fn step(
             .map_err(|error| driver_err(&request_id, error))?;
     }
 
-    if !entry.nav_policy.allows(&obs.url, &entry.constraints.allowed_domains) {
-        return Err(status_err(
-            StatusCode::FORBIDDEN,
-            &request_id,
-            "browser action reached a domain outside the run's allowed domains",
-        ));
-    }
-
-    // WS7.D: the page the step landed on is held to the run's host rules too. The action has
-    // already run; the refusal is the same typed 403 the pre-action gate gives.
-    crate::agent_policy_gate::gate_visit(&state, &handle.live, entry.zdr.is_active(), &obs.url)
-        .map_err(|error| driver_err(&request_id, error))?;
     // `meta.budget` (WS6.B): the run's ledger after this step, labelled with the source of
     // this step's cost. Absent when budgets are off.
     let budget = entry
@@ -314,6 +357,7 @@ pub(super) async fn execute_ws_action(
         crate::metrics::record_takeover_exempt_step(step_started.elapsed());
     }
     let mut entry = handle.entry.lock().await;
+    let step_result = step_result.and_then(|obs| check_landed_on_run(state, handle, &entry, obs));
     let observation = match step_result {
         Ok(observation) => {
             let cost_usd = receipt_cost_usd(&observation.telemetry, &receipt_action);
@@ -367,12 +411,5 @@ pub(super) async fn execute_ws_action(
             .save_run_checkpoint(checkpoint_for_entry(&entry))
             .await?;
     }
-    if !entry.nav_policy.allows(&observation.url, &entry.constraints.allowed_domains) {
-        return Err(QuarryError::new(
-            ErrorCode::SecurityBlocked,
-            "browser action reached a domain outside the run's allowed domains",
-        ));
-    }
-    crate::agent_policy_gate::gate_visit(state, &handle.live, entry.zdr.is_active(), &observation.url)?;
     Ok(observation)
 }

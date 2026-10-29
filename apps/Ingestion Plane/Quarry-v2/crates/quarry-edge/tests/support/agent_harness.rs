@@ -212,6 +212,9 @@ pub struct RecordingDriver {
     /// How many `goto` calls have started (the call is then running, so the step that made
     /// it holds the run lock): tests wait on this instead of sleeping and hoping.
     goto_entered: AtomicU32,
+    /// The URL the page reports (`window.location.href`) to the observation's page-state
+    /// read, when a test sets one; otherwise the read answers nothing, as before.
+    page_url: Mutex<Option<String>>,
 }
 
 /// What ends a held `goto`: a fixed time, or a gate the test opens itself.
@@ -311,6 +314,12 @@ impl RecordingDriver {
     /// Make the next `acquire` fail as a driver would.
     pub fn refuse_next_acquire(&self) {
         self.refuse_next_acquire.store(true, Ordering::SeqCst);
+    }
+
+    /// Make the page report `url` as where it is (the observation reads it, and the edge
+    /// checks the page a step landed on against it), or report nothing again with `None`.
+    pub fn set_page_url(&self, url: Option<&str>) {
+        *self.page_url.lock().unwrap() = url.map(str::to_owned);
     }
 }
 
@@ -452,7 +461,10 @@ impl BrowserDriver for RecordingDriver {
         _script: &str,
     ) -> QuarryResult<Value> {
         self.evaluate_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(Value::Null)
+        Ok(match self.page_url.lock().unwrap().as_deref() {
+            Some(url) => json!({ "url": url, "title": null }),
+            None => Value::Null,
+        })
     }
 
     async fn select_tab(&self, _session: &BrowserSession, tab_id: &str) -> QuarryResult<()> {
