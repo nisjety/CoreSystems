@@ -60,3 +60,36 @@ None. Every PASS row is backed by its evidence file with matching status, timing
 5. **NATS `authorization violation` at edge boot:** 1 line in the scale-0.5 container (R-SC4-edge-scan.log, 23:18:07Z) and 2 lines in the current container. This is pre-existing (it is also noted in P0-live.md, L-X10-robots.md and REVIEW.md) and was not reported in R-SC4.md's T5 row.
 6. **Dev-stub bearer literal** in R-SC4.md and R-X12.md line 6. It is harmless as a dev stub, but it could be redacted to `Bearer <dev-stub>` for hygiene.
 7. Not run in this re-run: `pdf` at its new 25 s deadline, X12.6 (resume of an idle-expired run), and the shadow day. chromiumoxide `WS Invalid message` WARN noise (7 per container) is still present.
+
+## R2-SC4 (T4b fix)
+
+- Checked 2026-10-29 (UTC, after the leg's 01:15:06Z end). Read-only: no stack or code change; this section is the only file write.
+- Read: R2-SC4.md, all 10 R2-SC4-* files (shipped, scale05, final-container, edge-scan, ready-and-end logs; flags-end.txt; 4 .raw bodies), the R2-SC4 lines (70-71) in `../flags-log.md`, and the cited code lines in the worktree.
+- Live checks run now: live-flags.env is 0 bytes (stat); `live.sh flags | diff - P0-live-flags-end.txt` is empty (exit 0); `docker ps -a` has 0 `qlive-rerun-*` / `qlive*` containers; quarry-edge is running, healthy, started 01:12:16Z, RestartCount 0; the container env has no `QUARRY_BROWSER_DEADLINE_SCALE`; `GET 127.0.0.1:8082/ready` returns HTTP 200, status ready, browser slot generation 1, sessions_open 0, probe_failures 0. Read-only SELECT on ingestion-postgres (db quarry_edge) for the 22 run ids parsed from the three .log files: `closed|22`.
+
+| row | result | evidence checked |
+|---|---|---|
+| T4b-1 (first step: slow page) x3 + 1 final | FAIL (confirmed) | shipped.log tries 1-3 + final-container.log: navigate 504 in 25.103 / 25.105 / 25.115 / 25.174 s, `TIMEOUT`, `deadline_ms:25000`, `op:"navigate"`, url-in-body 0. Next wait 403 in 0.214 / 0.173 / 0.205 / 0.220 s, `BAD_REQUEST`, "outside the run's allowed domains" (t4b1-wait-body.raw). currentUrl `about:blank` in all 4. Navigate after 200 in 0.252 / 0.296 / 0.394 / 0.302 s, "Fixture A"; wait after 200 in 0.16-0.21 s. Receipts show step 1 wait `completed` in all 4. Code path confirmed: chromiumoxide.rs:1604-1611 (ByCaller commits about:blank), step.rs:150-165 (receipt appended) and :203-208 (checkpoint saved) before :210-216 (403), lib.rs:300-307 (http/https only), types.rs:613-620 (`status_err` always `BadRequest`) vs step.rs:370-375 (`SecurityBlocked`), lifecycle.rs:563-573 (resume refuses a non-empty, non-allowed checkpoint URL). |
+| T4b-2 (first step: held page) x3 + 1 final | PASS (confirmed) | 504 in 25.188 / 25.148 / 25.101 / 25.180 s, `deadline_ms:25000`, no URL. Wait 200 in 0.176 / 0.193 / 0.184 / 0.171 s, url held.html, title "R-SC4 held image page", 10 AX nodes (t4b2-wait-body.raw), `no_current_page` 0. currentUrl held.html. Navigate after 200 in 0.235 / 0.272 / 0.228 / 0.337 s. |
+| T1 x4 / T3a x2 / T3b x2 | PASS (confirmed) | Hang 504 in 25.035 / 25.026 / 25.036 / 25.047 s, `TIMEOUT`, `deadline_ms:25000`, url-in-body 0, receipt `failed`. T3a next navigate 200 in 0.222 / 0.261 s; T3b next wait 200 in 0.195 / 0.189 s (receipt step 2 `wait`), url fixture-a, "Fixture A", 37 AX nodes, `ax_snapshot` 0. |
+| T4 x1 | PASS (confirmed) | 504 in 25.025 s; wait 200 in 0.226 s, held.html, 10 AX nodes; wait after 200 in 0.193 s. |
+| T2 scale 0.5 (4 runs, 2 first-step) | PASS on the deadline (confirmed); first-step slow sub-case = T4b-1 FAIL | scale05.log: 504 in 12.557 / 12.542 / 12.627 / 12.622 s, `deadline_ms:12500` (t2-first-step-hang-body.raw), no URL. Later-step next navigate 200 0.290 s, next wait 200 0.226 s. First-step held: wait 200 0.232 s with held title, navigate 200 0.276 s. First-step slow: wait 403 `BAD_REQUEST` 0.212 s, currentUrl about:blank, navigate 200 0.298 s. flags-log.md lines 70-71: set 01:10:33Z, reverted 01:12:13Z. |
+| T6 (5 new runs, first step fixture-a) | PASS (confirmed) | 200 "Fixture A" step 0 in 0.460 / 0.414 / 0.296 / 0.354 / 0.419 s: min 0.296, median 0.414. Recomputed from the logs: the 12 step-0 fixture-a navigates in R2-SC4 (5 T6 + 5 shipped warm-ups + 2 scale05 warm-ups) min 0.279, median 0.359; the 16 in the R-SC4 logs min 0.256, median 0.336, max 0.513. |
+| T5 (generation, relaunch, log content) | PASS (confirmed, scope note) | Every .log: `generation:0` at container start, `1` after every close and at the end; ready-and-end.log shows slot ready, probe_failures 0 for all 3 containers. edge-scan.log (288 / 124 / 88 lines): 0 relaunch/crash/lost/disconnect/dead/recycled/unhealthy/panic; 0 lines with slow.crawl.test, held.html, slow.html, about:blank, fixture-a.crawl.test. ERROR lines: 3 NATS `authorization violation` (1 per container, at boot) + 17 `504` lines (11 + 4 + 2) carrying status, latency and run path only, matching the 17 hang steps one-for-one by run id. WS Invalid message WARN 21 / 6 / 4. |
+| closes / end state | PASS (confirmed, live re-check) | `close: HTTP=200` 22 times (16 + 4 + 2); 22 distinct run ids; live SELECT `closed|22`. Live checks above all pass. |
+| Flag ledger | PASS (confirmed) | 1 change, 1 revert (`QUARRY_BROWSER_DEADLINE_SCALE` 0.5, 01:10:33Z -> 01:12:13Z). R2-SC4-flags-end.txt equals the baseline (empty diff now). |
+| Secret scan of the evidence | PASS | 0 matches for JWT, `Bearer <value>`, sk-/sk-ant/ghp_/AKIA keys, `password/secret/token/api_key=` values or PEM headers in the 11 R2-SC4 files and flags-log.md. The only 40+ character strings are `/v1/agent/runs/run_...` paths (17) and two env var names. R2-SC4.md line 6 uses the redacted `Bearer <dev-stub>` form. |
+
+### Downgrades
+
+None. Every PASS row matches its evidence in status, timing and count, and the one FAIL row (T4b-1) is confirmed with its cited code. Notes that do not change a result:
+
+- T5b/T5c are count summaries written by the leg agent; the raw `docker logs` of the 3 containers are not kept in the folder (the scan's 17 ERROR lines do match the 17 hang steps by run id and latency).
+- The `live.sh flags` diff cannot see `QUARRY_BROWSER_DEADLINE_SCALE` (open issue 4 above); the container env was checked directly and the variable is absent.
+- t4b1-wait-body.raw has no `details` key, while the .log line shows `"details":null` (the log reformats the body). Cosmetic.
+- T2's row is mixed: PASS for the deadline, the first-step slow sub-case carries the T4b-1 FAIL.
+- The `curlimages/curl:8.10.1` image pulled for the helper probes is still present locally (as the leg summary says).
+
+### Remaining open issues (R2-SC4)
+
+1. **T4b-1 FAIL (not fixed):** after a first-step navigate TIMEOUT on a page that never commits, the tab is on `about:blank` and the next observe step is refused 403 (`BAD_REQUEST`, "outside the run's allowed domains"); a navigate still works. Side effects: the refused wait's receipt is `completed`; the code is `BAD_REQUEST` where the shared path uses `SECURITY_BLOCKED`; untested, a checkpoint holding `about:blank` would make a resume 403. Fix options in R2-SC4.md Depth 1. Open issue 1 above (502 `no_current_page`) is superseded for the held-page case (T4b-2 now PASS) and replaced by this one for the never-committing case.

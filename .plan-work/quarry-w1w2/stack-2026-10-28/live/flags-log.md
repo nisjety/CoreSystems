@@ -67,3 +67,5 @@ One line per change: time UTC | leg | KEY old -> new. One line per revert.
 2026-10-28T23:27:37Z | R-X12 | QUARRY_EDGE__BUDGET_ENFORCEMENT on -> (unset, compose default shadow) (revert)
 2026-10-28T23:27:37Z | R-X12 | QUARRY_EDGE__AGENT_DEFAULT_MAX_STEPS 5 -> (unset, 60) (revert)
 2026-10-28T23:27:37Z | R-X12 | QUARRY_EDGE__METRICS_ENABLED 1 -> (unset, 0) (revert; live-flags.env empty, edge recreated)
+2026-10-29T01:10:33Z | R2-SC4 | QUARRY_BROWSER_DEADLINE_SCALE (unset, 1) -> 0.5 (T2 incl. a first-step case; navigate deadline 12.5 s; sessions_open was 0)
+2026-10-29T01:12:13Z | R2-SC4 | QUARRY_BROWSER_DEADLINE_SCALE 0.5 -> (unset, 1) (revert; live-flags.env empty, edge recreated)

@@ -1,0 +1,72 @@
+# R2-SC4 edge log scan (docker logs --timestamps quarry-edge; each container's log saved before it was recreated). JSON lines; counts only.
+== edge-shipped.log lines=288 first=2026-10-29T01:00:35.2128278Z last=2026-10-29T01:09:16.6305020Z
+lines matching relaunch|crash|lost|disconnect|dead|recycled|unhealthy|panic: 0
+lines containing slow.crawl.test: 0
+lines containing held.html or slow.html: 0
+lines containing about:blank: 0
+lines containing fixture-a.crawl.test: 0
+levels:  12 "ERROR"; 45 "INFO"; 231 "WARN";
+chromiumoxide 'WS Invalid message' warns: 21
+WARN messages (distinct, count):
+      103 "QUARRY_EDGE_AUTH_DEV_BYPASS enabled — bearer failed real JWKS verification, falling back to stub claims (or
+        1 "QUARRY_EDGE__RERANK_SHADOW has no effect while QUARRY_EDGE__SEMANTIC_RERANK is off"
+       21 "WS Invalid message: data did not match any variant of untagged enum Message"
+      103 "failed to decode JWT header"
+        1 "no BrowserBroker validator is configured: browser grants are not enforced (not production)"
+        1 "page-image producer connect failed; disabled"
+        1 "smart_router[+]: brave (paid backup) — EXTERNAL: queries egress to api.search.brave.com; set QUARRY_EDGE__Z
+ERROR lines (time | message | status | latency | path):
+  2026-10-29T01:00:35.420273Z | authorization violation | nats: authorization violation |  | 
+  2026-10-29T01:04:23.242948Z | response failed | Status code: 504 Gateway Timeout | 25100 ms | /v1/agent/runs/run_01M62JYS237TF1WBZQ8RJRVY44/step
+  2026-10-29T01:04:52.176364Z | response failed | Status code: 504 Gateway Timeout | 25103 ms | /v1/agent/runs/run_01M62JZN9BJ6RRFF253HDY8N9S/step
+  2026-10-29T01:05:20.938573Z | response failed | Status code: 504 Gateway Timeout | 25114 ms | /v1/agent/runs/run_01M62K0HD9M2RMVB12F13PHGJG/step
+  2026-10-29T01:05:50.699412Z | response failed | Status code: 504 Gateway Timeout | 25160 ms | /v1/agent/runs/run_01M62K1EBQCCG38ZGB1K71984Z/step
+  2026-10-29T01:06:20.316444Z | response failed | Status code: 504 Gateway Timeout | 25125 ms | /v1/agent/runs/run_01M62K2B4FBQ625THW98ZWAEMB/step
+  2026-10-29T01:06:49.258087Z | response failed | Status code: 504 Gateway Timeout | 25099 ms | /v1/agent/runs/run_01M62K37EMHAGCYMT6Z500XFFV/step
+  2026-10-29T01:07:18.746882Z | response failed | Status code: 504 Gateway Timeout | 25031 ms | /v1/agent/runs/run_01M62K43WDAZDH06NH3DNWKR32/step
+  2026-10-29T01:07:47.408781Z | response failed | Status code: 504 Gateway Timeout | 25018 ms | /v1/agent/runs/run_01M62K4ZS4PZB462VZQHVY56M4/step
+  2026-10-29T01:08:16.295019Z | response failed | Status code: 504 Gateway Timeout | 25031 ms | /v1/agent/runs/run_01M62K5VYR8KJRZF5GKGMGZYGW/step
+  2026-10-29T01:08:45.222508Z | response failed | Status code: 504 Gateway Timeout | 25041 ms | /v1/agent/runs/run_01M62K6R54BQ2MNW470ZJDCADQ/step
+  2026-10-29T01:09:13.644496Z | response failed | Status code: 504 Gateway Timeout | 25019 ms | /v1/agent/runs/run_01M62K7M5XN8EC2VXB2FB7XNJ9/step
+== edge-scale05.log lines=124 first=2026-10-29T01:10:37.9709496Z last=2026-10-29T01:12:03.3407101Z
+lines matching relaunch|crash|lost|disconnect|dead|recycled|unhealthy|panic: 0
+lines containing slow.crawl.test: 0
+lines containing held.html or slow.html: 0
+lines containing about:blank: 0
+lines containing fixture-a.crawl.test: 0
+levels:  5 "ERROR"; 45 "INFO"; 74 "WARN";
+chromiumoxide 'WS Invalid message' warns: 6
+WARN messages (distinct, count):
+       32 "QUARRY_EDGE_AUTH_DEV_BYPASS enabled — bearer failed real JWKS verification, falling back to stub claims (or
+        1 "QUARRY_EDGE__RERANK_SHADOW has no effect while QUARRY_EDGE__SEMANTIC_RERANK is off"
+        6 "WS Invalid message: data did not match any variant of untagged enum Message"
+       32 "failed to decode JWT header"
+        1 "no BrowserBroker validator is configured: browser grants are not enforced (not production)"
+        1 "page-image producer connect failed; disabled"
+        1 "smart_router[+]: brave (paid backup) — EXTERNAL: queries egress to api.search.brave.com; set QUARRY_EDGE__Z
+ERROR lines (time | message | status | latency | path):
+  2026-10-29T01:10:38.101955Z | authorization violation | nats: authorization violation |  | 
+  2026-10-29T01:11:11.029409Z | response failed | Status code: 504 Gateway Timeout | 12550 ms | /v1/agent/runs/run_01M62KBJB0AS3781BDJFDGDZ5H/step
+  2026-10-29T01:11:27.581251Z | response failed | Status code: 504 Gateway Timeout | 12531 ms | /v1/agent/runs/run_01M62KC30KJE7RF5KZ966EN1SZ/step
+  2026-10-29T01:11:43.357418Z | response failed | Status code: 504 Gateway Timeout | 12623 ms | /v1/agent/runs/run_01M62KCK2G0CDKZZ92WA9CQCFJ/step
+  2026-10-29T01:11:59.932750Z | response failed | Status code: 504 Gateway Timeout | 12617 ms | /v1/agent/runs/run_01M62KD373MZZPQSDZ8XKB4K93/step
+== edge-final.log lines=88 first=2026-10-29T01:12:17.2299823Z last=2026-10-29T01:13:35.1743313Z
+lines matching relaunch|crash|lost|disconnect|dead|recycled|unhealthy|panic: 0
+lines containing slow.crawl.test: 0
+lines containing held.html or slow.html: 0
+lines containing about:blank: 0
+lines containing fixture-a.crawl.test: 0
+levels:  3 "ERROR"; 45 "INFO"; 40 "WARN";
+chromiumoxide 'WS Invalid message' warns: 4
+WARN messages (distinct, count):
+       16 "QUARRY_EDGE_AUTH_DEV_BYPASS enabled — bearer failed real JWKS verification, falling back to stub claims (or
+        1 "QUARRY_EDGE__RERANK_SHADOW has no effect while QUARRY_EDGE__SEMANTIC_RERANK is off"
+        4 "WS Invalid message: data did not match any variant of untagged enum Message"
+       16 "failed to decode JWT header"
+        1 "no BrowserBroker validator is configured: browser grants are not enforced (not production)"
+        1 "page-image producer connect failed; disabled"
+        1 "smart_router[+]: brave (paid backup) — EXTERNAL: queries egress to api.search.brave.com; set QUARRY_EDGE__Z
+ERROR lines (time | message | status | latency | path):
+  2026-10-29T01:12:17.339833Z | authorization violation | nats: authorization violation |  | 
+  2026-10-29T01:13:02.817659Z | response failed | Status code: 504 Gateway Timeout | 25166 ms | /v1/agent/runs/run_01M62KEM2EPB8Z2FYQTJ83Y8XN/step
+  2026-10-29T01:13:31.840524Z | response failed | Status code: 504 Gateway Timeout | 25175 ms | /v1/agent/runs/run_01M62KFGR7RKNFPPZFKFF7F69Q/step
