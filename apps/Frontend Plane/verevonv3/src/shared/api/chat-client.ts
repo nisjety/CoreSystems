@@ -477,6 +477,14 @@ export type ChatUsageProgressEvent = {
   costBasis?: ChatCostBasis
   /** Of `calls`, the metered ones whose price was unknown. Absent at zero. */
   unpricedCalls?: number
+  /** The metered spend cap, when the turn has one (WS27-S6). */
+  ceilingUsd?: number
+  /** The metered token cap, when the turn has one (WS27-S6). */
+  ceilingTokens?: number
+  /** The share of the ceiling used, when a capped figure is known. Above 1 once the cap is passed. */
+  fraction?: number
+  /** The ceiling warning this frame is the first to carry. */
+  warning?: 'run_ceiling_80' | 'run_ceiling_reached'
 }
 
 function costBasisValue(value: unknown): ChatCostBasis | undefined {
@@ -503,6 +511,10 @@ function usagePhaseValue(value: unknown): ChatUsagePhase | undefined {
     : undefined
 }
 
+function runCeilingWarningValue(value: unknown): 'run_ceiling_80' | 'run_ceiling_reached' | undefined {
+  return value === 'run_ceiling_80' || value === 'run_ceiling_reached' ? value : undefined
+}
+
 /** A `usage_progress` payload, read by its closed keys and nothing else. */
 function usageProgressFrame(payload: Record<string, unknown>): ChatUsageProgressEvent {
   return {
@@ -515,6 +527,10 @@ function usageProgressFrame(payload: Record<string, unknown>): ChatUsageProgress
     costUsd: num(payload.cost_usd),
     costBasis: costBasisValue(payload.cost_basis),
     unpricedCalls: num(payload.unpriced_calls),
+    ceilingUsd: num(payload.ceiling_usd),
+    ceilingTokens: num(payload.ceiling_tokens),
+    fraction: num(payload.fraction),
+    warning: runCeilingWarningValue(payload.warning),
   }
 }
 

@@ -204,12 +204,16 @@ export type ChatEventPayloads = {
     cache_read_tokens: number
     cache_write_tokens: number
     calls: number
+    ceiling_tokens?: number
+    ceiling_usd?: number
     cost_basis?: string
     cost_usd: number | null
+    fraction?: number
     input_tokens: number
     output_tokens: number
     phase: string
     unpriced_calls?: number
+    warning?: string
   }
   /** Rust variants: Verification. */
   verification: {
