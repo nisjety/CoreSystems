@@ -113,6 +113,7 @@ import {
 	getAttachmentPolicy,
 	getModelEntitlementMeta,
 	groupChatModels,
+	catalogueAdvertisesConnectorScope,
 	hasZeroRetentionModel,
 	isExpensiveModel,
 	listChatThreads,
@@ -139,6 +140,14 @@ import {
 	type ConnectorContentOperation,
 	type ConnectorPickerTab,
 } from "@/shared/api/integrations-client";
+import {
+	CONNECTOR_SCOPE_LIMIT,
+	connectorScopeBlock,
+	normalizeConnectorScope,
+	toggleConnectorScope,
+	type ConnectorScopeBlock,
+} from "@/shared/actions/chat-connector-scope";
+import { zdrRefusalPresentation } from "@/shared/api/zdr-refusals";
 import {
 	listChatGptSubscriptions,
 	OPENAI_CODEX_SUBSCRIPTION_PROVIDER,
@@ -354,6 +363,11 @@ export type DashboardComposerSubmitPayload = {
      * left its default.
      */
     retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope;
+    /**
+     * The connected accounts this turn may read (WS23 S6). Omitted when none were picked, so a turn
+     * without connected apps is unchanged on the wire.
+     */
+    connectorScope?: string[];
 	actions: ComposerActiveAction[];
 	attachments: DashboardComposerAttachment[];
 	model?: string;
@@ -885,6 +899,11 @@ export function DashboardComposer(props: {
      */
     retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope;
     onRetrievalScopeChange?: (value: import('@/shared/actions/chat-source-scope').RetrievalScope) => void;
+    /**
+     * The conversation is bound to a Space. Connected apps are refused in Space rooms (DEC-06),
+     * so the context panel says why instead of offering chips (WS23 S6).
+     */
+    spaceScoped?: boolean;
 	/** Calm, conversation-first presentation used by the dedicated chat page. */
 	appearance?: "chat" | "default";
 	/** Compact Home dock; only changes the input's initial presentation. */
@@ -1253,6 +1272,31 @@ export function DashboardComposer(props: {
 	const planModeAvailable = createMemo(
 		() => !subscriptionBacked() || subscriptionAgentic(),
 	);
+	// Connected apps for this turn (WS23 S6). The chip row exists only where the catalogue says the
+	// reads can run, and it says why it is off on a turn that cannot take them. The picks are consent
+	// for one turn: they are cleared once that turn is sent, and whenever a block applies.
+	const [connectorScope, setConnectorScope] = createSignal<string[]>([]);
+	const connectorScopeAdvertised = createMemo(() => catalogueAdvertisesConnectorScope(models() ?? []));
+	const connectorScopeBlockReason = createMemo(() => connectorScopeBlock({
+		zeroRetention: zeroRetentionTurn(),
+		spaceScoped: Boolean(props.spaceScoped),
+		conversationOnly: conversationOnly(),
+		subscriptionBacked: subscriptionBacked(),
+		retrievalScope: retrievalScope(),
+	}));
+	const [connectorTabs] = createResource(
+		() => (connectorScopeAdvertised() && connectorScopeBlockReason() === null ? activeOrgId() : false),
+		async (orgId) => {
+			try {
+				return await listConnectorPickerTabs(orgId);
+			} catch {
+				return [] as ConnectorPickerTab[];
+			}
+		},
+	);
+	createEffect(() => connectorScopeBlockReason(), (reason) => {
+		if (reason) setConnectorScope([]);
+	});
 	const selectedModelLabel = () => {
 		const id = selectedModel();
 		// Empty id → backend treats it as Verevon Balance (resilient fallback).
@@ -2682,6 +2726,9 @@ export function DashboardComposer(props: {
 		const submittedSourceScope = sourceScope();
 		const submittedConversationOnly = conversationOnly();
 		const submittedRetrievalScope = retrievalScope();
+		const submittedConnectorScope = connectorScopeBlockReason() === null && connectorScopeAdvertised()
+			? normalizeConnectorScope(connectorScope())
+			: [];
 
 		// Pending from here, so the composer is inert (and a second Enter is
 		// refused) while the tier lookup waits.
@@ -2700,6 +2747,8 @@ export function DashboardComposer(props: {
 			if (!submittedConversationOnly && submittedRetrievalScope !== 'auto') {
 				payload.retrievalScope = submittedRetrievalScope;
 			}
+			// Omitted when nothing was picked, like `retrievalScope` above.
+			if (submittedConnectorScope.length > 0) payload.connectorScope = submittedConnectorScope;
 			if (submittedConversationOnly) {
 				payload.tools = [];
 				payload.actions = [];
@@ -2707,6 +2756,8 @@ export function DashboardComposer(props: {
 			if (payload.attachments.length > 0) payload.attachments = await prepareChatAttachments(payload.attachments);
 			if (props.onSubmit) await props.onSubmit(payload);
 			else await writePendingChatLaunch(payload);
+			// The picks were consent for this turn, so they go with it. A failed send keeps them for a retry.
+			if (submittedConnectorScope.length > 0) setConnectorScope([]);
 		} catch (error) {
 			const message = error instanceof PendingChatLaunchError
 				? error.reason === 'unreadable'
@@ -3212,6 +3263,42 @@ export function DashboardComposer(props: {
 											<option value="web_only">{i18n.tr("Kun nett", "Web only")}</option>
 										</select>
 									</label>
+								</Show>
+								<Show when={connectorScopeAdvertised()}>
+									<div class="grid gap-2 text-sm" role="group" aria-label={i18n.tr("Tilkoblede apper", "Connected apps")}>
+										<span>{i18n.tr("Tilkoblede apper for denne meldingen", "Connected apps for this message")}</span>
+										<Show
+											when={connectorScopeBlockReason()}
+											fallback={(
+												<Show
+													when={(connectorTabs() ?? []).length > 0}
+													fallback={<p>{i18n.tr("Ingen tilkoblede apper ennå. Koble til under Koblinger.", "No connected apps yet. Connect one under Connectors.")}</p>}
+												>
+													<div class="flex flex-wrap gap-2">
+														<For each={connectorTabs() ?? []}>
+															{(tab) => {
+																const selected = () => connectorScope().includes(tab.connectionId);
+																return (
+																	<button
+																		type="button"
+																		aria-pressed={selected() ? "true" : "false"}
+																		disabled={props.submitting || (!selected() && connectorScope().length >= CONNECTOR_SCOPE_LIMIT)}
+																		onClick={() => setConnectorScope((current) => toggleConnectorScope(current, tab.connectionId))}
+																		class={cn("rounded-full border px-3 py-1 text-left", selected() ? "border-current bg-current/10 font-medium" : "border-current/20")}
+																	>
+																		<span class="text-xs opacity-70">{tab.providerKey === "microsoft" ? "Microsoft" : "Google"}</span>{" "}
+																		<strong class="font-medium">{tab.label}</strong>
+																	</button>
+																);
+															}}
+														</For>
+													</div>
+												</Show>
+											)}
+										>
+											{(reason) => <p role="note">{connectorScopeBlockText(reason(), i18n)}</p>}
+										</Show>
+									</div>
 								</Show>
 								<Show when={conversationOnly()}>
 									<p>{i18n.tr("Bare tekst og vedlegg i denne samtalen brukes. Minner, organisasjonskunnskap, nettkilder og tilkoblede tjenester er av. Samtalen lagres, men brukes ikke til nye minner eller læring.", "Only this conversation and its attachments are used. Memory, workspace knowledge, web sources and connected services are off. The conversation is saved, but does not create memories or learned skills.")}</p>
@@ -4161,6 +4248,26 @@ function createComposerTurn(input: {
 	};
 }
 
+// The reader's words for a connected-app block (WS23 S6). The zero-retention line is the copy the
+// gateway's own refusal produces for the same feature, so the composer and a refused request agree.
+function connectorScopeBlockText(reason: ConnectorScopeBlock, i18n: ReturnType<typeof useI18n>): string {
+	const tr = (no: string, en: string) => i18n.tr(no, en);
+	switch (reason) {
+		case "zero_retention":
+			return zdrRefusalPresentation("zdr_feature_not_supported", "connector_read", tr).message;
+		case "space":
+			return tr("Tilkoblede apper er ikke tilgjengelige i Space-rom ennå.", "Connected apps are not available in Space rooms yet.");
+		case "conversation_only":
+			return tr("Bare samtalen er valgt, så tilkoblede apper er av.", "Conversation only is selected, so connected apps are off.");
+		case "subscription":
+			return tr("Tilkoblede apper er ikke tilgjengelige med ChatGPT-abonnementet.", "Connected apps are not available with the ChatGPT subscription.");
+		case "web_only":
+			return tr("Tilkoblede apper er av når kildefilteret er kun nett.", "Connected apps are off when the source filter is web only.");
+		case "knowledge_only":
+			return tr("Tilkoblede apper er av når kildefilteret er kun organisasjon.", "Connected apps are off when the source filter is organization only.");
+	}
+}
+
 function detectTrigger(text: string, position: number): TriggerContext | null {
 	const before = text.slice(0, position);
 	// `@` mentions are intentionally not handled in the global composer:
@@ -4168,6 +4275,8 @@ function detectTrigger(text: string, position: number): TriggerContext | null {
 	// Space rooms own governed agent mentions, so silently searching the
 	// knowledge endpoint and labelling those results as people would be a
 	// misleading invocation control.
+	// Connected apps are picked from the context panel's chip row, not typed. An `@` trigger for them
+	// (WS23 D6) waits until the Space session agrees, because `@` already names Space agents (DEC-26).
 
 	const slashMatch = SLASH_TRIGGER_PATTERN.exec(before);
 	if (slashMatch) {

@@ -1012,6 +1012,51 @@ const integrationsExtendInboxHistoryInput = z.object({
   id: z.string().min(1),
 })
 
+// Connected-app reads for the composer's picker (WS23 S6). The operation is a closed enum, so a
+// client names a listing or a content read and never a write; integration-corev2 still checks that
+// the caller owns the connection. Exported so the browser client validates its calls against them.
+export const integrationsBrowseConnectionInput = z
+  .object({
+    connectionId: z.string().min(1),
+    operation: z.enum(['mail.messages', 'gmail.messages', 'drive.files', 'calendar.events']),
+    params: z.record(z.string(), z.unknown()).optional(),
+  })
+  .strict()
+
+export const integrationsFetchConnectionContentInput = z
+  .object({
+    connectionId: z.string().min(1),
+    operation: z.enum([
+      'drive.file.content',
+      'microsoft.drive.file.content',
+      'google.drive.file.content',
+      'mail.messages.get',
+      'microsoft.mail.messages.get',
+      'google.gmail.messages.get',
+      'gmail.messages.get',
+    ]),
+    params: z.record(z.string(), z.unknown()),
+  })
+  .strict()
+
+const integrationsConnectorActionOutput = z.object({
+  providerKey: z.string(),
+  operation: z.string(),
+  result: z.unknown(),
+})
+
+// The connected accounts one chat turn may read (WS23 S6): the chip selection the composer sends as
+// `connector_scope`. The bounds are the gateway's own (model-gateway `connector_scope`): at most 8
+// distinct ids of 1-128 characters from [A-Za-z0-9_-]. An empty list clears the choice.
+const chatSetConnectorScopeInput = z
+  .object({
+    connectionIds: z
+      .array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/))
+      .max(8)
+      .refine((ids) => new Set(ids).size === ids.length, { message: 'connection ids must be distinct' }),
+  })
+  .strict()
+
 // The org-admin schemas below all describe operations whose owner requires
 // require_org_admin (or, for the two self-service deletion checkpoints,
 // require_active_org) — enforced server-side, not by this schema. Getting the
@@ -3004,6 +3049,28 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'integrations.browse_connection',
+    label: 'Browse connected app',
+    description: 'List mail, calendar or file items in one of the person\'s own connected Microsoft or Google accounts. Read-only: the owner checks that the caller owns the connection, nothing is written and no approval is needed. Only the four listings in the operation enum are accepted.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: integrationsBrowseConnectionInput,
+    outputSchema: integrationsConnectorActionOutput,
+  },
+  {
+    id: 'integrations.fetch_connection_content',
+    label: 'Read connected app content',
+    description: 'Read one mail message or file from one of the person\'s own connected Microsoft or Google accounts. Read-only, with no approval and no write; the owner applies the same ownership check as the listing.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: integrationsFetchConnectionContentInput,
+    outputSchema: integrationsConnectorActionOutput,
+  },
+  {
     id: 'org.soft_delete',
     label: 'Soft-delete organization',
     description: 'Open the organization\'s 30-day GDPR deletion grace window. Reversible via org.restore only inside that window.',
@@ -3298,6 +3365,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: z.object({ filename: z.string().min(1).max(255), content_base64: z.string().min(1).max(1_400_000), content_type: z.string().max(128).optional() }),
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.set_connector_scope',
+    label: 'Choose connected apps for a turn',
+    description: 'Name the connected accounts one chat turn may read: the composer\'s connected-apps chips, sent as connector_scope on that turn only. At most 8 distinct connections, and an empty list clears the choice. The selection is the person\'s consent for that turn, so it is never remembered between turns, and a turn that is zero-retention, Space-scoped or filtered to one source never carries it. Never model-executable: a model does not choose which mailbox it reads.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatSetConnectorScopeInput,
     outputSchema: envelopeStatusOutput,
   },
   {

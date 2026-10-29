@@ -1646,8 +1646,16 @@ export function normalizeGeneratedFile(event: {
   }
 }
 
+/** The citation origins this SPA renders. Any other value from a gateway is dropped, never trusted verbatim. */
+const CITATION_ORIGINS: readonly NonNullable<Citation['origin']>[] = ['web', 'knowledge', 'connector']
+
+function citationOrigin(value: unknown): Citation['origin'] {
+  return CITATION_ORIGINS.find((origin) => origin === value)
+}
+
 export function normalizeCitation(event: { id?: string; title?: string; url?: string; snippet?: string; claimId?: string; sourceGroupId?: string; sourceGroupLabel?: string; start?: number; end?: number; origin?: string }): Citation | null {
   if (!event.url) return null
+  const origin = citationOrigin(event.origin)
   return {
     id: event.id ?? event.url,
     title: event.title ?? hostname(event.url),
@@ -1658,7 +1666,7 @@ export function normalizeCitation(event: { id?: string; title?: string; url?: st
     ...(event.sourceGroupLabel ? { sourceGroupLabel: event.sourceGroupLabel } : {}),
     ...(event.start !== undefined ? { start: event.start } : {}),
     ...(event.end !== undefined ? { end: event.end } : {}),
-    ...(event.origin === 'web' || event.origin === 'knowledge' ? { origin: event.origin } : {}),
+    ...(origin ? { origin } : {}),
   }
 }
 
@@ -1913,6 +1921,7 @@ export function citationFromUnknown(value: unknown, index: number): Citation | n
   const sourceGroupId = stringValue(item.source_group_id) ?? stringValue(item.sourceGroupId)
   const start = numberValue(item.start) ?? numberValue(item.start_offset) ?? numberValue(item.startOffset)
   const end = numberValue(item.end) ?? numberValue(item.end_offset) ?? numberValue(item.endOffset)
+  const origin = citationOrigin(item.origin)
   return {
     id: stringValue(item.id) ?? `web-${index + 1}-${url}`,
     title,
@@ -1922,6 +1931,7 @@ export function citationFromUnknown(value: unknown, index: number): Citation | n
     ...(sourceGroupId ? { sourceGroupId } : {}),
     ...(start !== undefined ? { start } : {}),
     ...(end !== undefined ? { end } : {}),
+    ...(origin ? { origin } : {}),
   }
 }
 

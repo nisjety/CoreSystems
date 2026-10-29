@@ -10,6 +10,7 @@ import { readSseStream, type SseEvent } from './sse'
 import { createDeltaCoalescer, type DeltaCoalescer } from './delta-coalescer'
 import type { ChatEventPayloads } from './chat-event-payloads.generated'
 import { isZdrCode } from './zdr-refusals'
+import { normalizeConnectorScope } from '@/shared/actions/chat-connector-scope'
 import {
   isSelectablePrivacyTier,
   normalizeAnswerServedBy,
@@ -72,6 +73,12 @@ export type ChatInvokeRequest = {
    * `sourceScope === 'conversation'`, which already excludes both families.
    */
   retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
+  /**
+   * The connected accounts this turn may read (WS23 S6), picked in the composer's
+   * connected-apps chips. Sent as `connector_scope` only when non-empty and the turn
+   * can take it: `buildChatWireBody` withholds it on the turns the composer blocks.
+   */
+  connectorScope?: string[]
   content: string
   model?: string
   /** Explicit provider route for a user-owned model subscription. */
@@ -1298,6 +1305,14 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
   const supportContextQuery = !conversationOnly && !supportReadOnly && shouldRequestSupportContext(request.content)
     ? request.content.trim().slice(0, 240)
     : undefined
+  // Connected apps (WS23 S6): the field exists only when the person picked an account for this
+  // turn. It is withheld on the turns the composer blocks (zero retention, Space, conversation-only,
+  // subscription, a filtered source, support) and on an execute turn, which carries no picks of its
+  // own, so the gateway never has to refuse a field this client should not have sent.
+  const connectorScope = conversationOnly || supportReadOnly || subscriptionBacked || request.zdr
+    || executeGranted || request.spaceRef?.trim() || retrievalScope !== 'auto'
+    ? []
+    : normalizeConnectorScope(request.connectorScope)
 
   return {
     content: request.content,
@@ -1358,6 +1373,8 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // Never on an execute turn: the gateway refuses an agentic run with a
     // filtered scope, and the execute turn carries no per-turn source filter.
     ...(retrievalScope !== 'auto' && !executeGranted ? { retrieval_scope: retrievalScope } : {}),
+    // Omitted entirely when nothing was picked, like `retrieval_scope`: an ordinary turn is unchanged.
+    ...(connectorScope.length > 0 ? { connector_scope: connectorScope } : {}),
     attachments: request.attachments ?? [],
     // Opt-in only, like `min_privacy_tier` below: omitted entirely when
     // nothing is pinned, so an ordinary turn's body is byte-identical to
@@ -3582,6 +3599,24 @@ export const AGENTIC_CAPABILITY = 'agentic'
  */
 export function modelSupportsAgentic(model: Pick<ModelInfo, 'capabilities'> | undefined): boolean {
   return model?.capabilities?.includes(AGENTIC_CAPABILITY) ?? false
+}
+
+/**
+ * The catalogue flag for connected-app reads (WS23 S6): a chat model lists it only while
+ * the gateway's connector-read switch is on for the deployment, so the composer shows its
+ * chip row only when the server says the reads can run. Nothing here derives it from a name.
+ */
+export const CONNECTOR_SCOPE_CAPABILITY = 'connector_scope'
+
+/**
+ * Whether some chat model in the catalogue advertises connected-app reads. Deployment-wide,
+ * like the switch behind it: a Verevon mode is not a catalogue entry, so the check is not
+ * per model. An empty or unanswered catalogue advertises nothing.
+ */
+export function catalogueAdvertisesConnectorScope(
+  models: readonly Pick<ModelInfo, 'capabilities' | 'modality'>[],
+): boolean {
+  return models.some((model) => model.modality === 'chat' && (model.capabilities?.includes(CONNECTOR_SCOPE_CAPABILITY) ?? false))
 }
 
 /**

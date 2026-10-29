@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { actionRegistry, getActionDescriptor } from '@/shared/actions/action-registry'
+import {
+  actionRegistry,
+  getActionDescriptor,
+  integrationsBrowseConnectionInput,
+  integrationsFetchConnectionContentInput,
+} from '@/shared/actions/action-registry'
 import { isModelExecutableAction } from '@/shared/actions/model-eligibility'
 import { buildModelContextPack } from '@/shared/context-packs/context-pack'
 
@@ -435,5 +440,64 @@ describe('action registry', () => {
     expect(reset?.inputSchema.safeParse({}).success).toBe(false)
     expect(remember?.inputSchema.safeParse({ threadId: 't1', content: 'Jeg heter Ima' }).success).toBe(true)
     expect(remember?.inputSchema.safeParse({ threadId: 't1', content: '   ' }).success).toBe(false)
+  })
+
+  it('registers the connected-app reads as low-risk, ungated owner contracts the model cannot execute', () => {
+    for (const id of ['integrations.browse_connection', 'integrations.fetch_connection_content'] as const) {
+      const action = getActionDescriptor(id)
+
+      expect(action).toMatchObject({ ownerPlane: 'ingestion', risk: 'low', requiresApproval: false, reversible: true })
+      expect(isModelExecutableAction(id)).toBe(false)
+      expect(buildModelContextPack({ route: '/chat', visibleItems: [] }).availableActions).not.toContain(id)
+    }
+  })
+
+  it('takes only the four connected-app listings and the closed content reads, with no body and no write', () => {
+    // The enums mirror ConnectorBrowseOperation and ConnectorContentOperation in integrations-client.ts.
+    expect(integrationsBrowseConnectionInput.shape.operation.options).toEqual([
+      'mail.messages',
+      'gmail.messages',
+      'drive.files',
+      'calendar.events',
+    ])
+    expect(integrationsFetchConnectionContentInput.shape.operation.options).toEqual([
+      'drive.file.content',
+      'microsoft.drive.file.content',
+      'google.drive.file.content',
+      'mail.messages.get',
+      'microsoft.mail.messages.get',
+      'google.gmail.messages.get',
+      'gmail.messages.get',
+    ])
+
+    const browse = getActionDescriptor('integrations.browse_connection')?.inputSchema
+    expect(browse?.safeParse({ connectionId: 'conn-1', operation: 'drive.files', params: { query: 'rapport' } }).success).toBe(true)
+    expect(browse?.safeParse({ connectionId: 'conn-1', operation: 'mail.messages.send' }).success).toBe(false)
+    expect(browse?.safeParse({ connectionId: '', operation: 'drive.files' }).success).toBe(false)
+    expect(browse?.safeParse({ connectionId: 'conn-1', operation: 'drive.files', body: 'x' }).success).toBe(false)
+
+    const content = getActionDescriptor('integrations.fetch_connection_content')?.inputSchema
+    expect(content?.safeParse({ connectionId: 'conn-1', operation: 'gmail.messages.get', params: { id: 'm1' } }).success).toBe(true)
+    expect(content?.safeParse({ connectionId: 'conn-1', operation: 'gmail.messages.get' }).success).toBe(false)
+    expect(content?.safeParse({ connectionId: 'conn-1', operation: 'mail.send', params: {} }).success).toBe(false)
+  })
+
+  it('registers the connected-app choice as a model-plane action the model cannot execute, and bounds it like the gateway', () => {
+    const scope = getActionDescriptor('chat.set_connector_scope')
+
+    expect(scope).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false })
+    expect(isModelExecutableAction('chat.set_connector_scope')).toBe(false)
+    expect(scope?.description ?? '').toContain('Never model-executable')
+
+    const schema = scope?.inputSchema
+    expect(schema?.safeParse({ connectionIds: [] }).success).toBe(true)
+    expect(schema?.safeParse({ connectionIds: ['conn-1', 'conn_2'] }).success).toBe(true)
+    expect(schema?.safeParse({ connectionIds: Array.from({ length: 8 }, (_, i) => `c${i}`) }).success).toBe(true)
+    expect(schema?.safeParse({ connectionIds: Array.from({ length: 9 }, (_, i) => `c${i}`) }).success).toBe(false)
+    expect(schema?.safeParse({ connectionIds: ['conn-1', 'conn-1'] }).success).toBe(false)
+    expect(schema?.safeParse({ connectionIds: ['conn 1'] }).success).toBe(false)
+    expect(schema?.safeParse({ connectionIds: ['x'.repeat(129)] }).success).toBe(false)
+    // The user, the org and the turn are the server's, never a client input.
+    expect(schema?.safeParse({ connectionIds: [], userId: 'user_x' }).success).toBe(false)
   })
 })

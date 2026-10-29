@@ -135,8 +135,12 @@ export type Citation = {
    * organisasjonskunnskap" / "Kilder: kun nett" receipt badge and lets the
    * Kilder tab defensively flag a citation whose family disagrees with the
    * turn's active `retrievalScope`.
+   *
+   * `'connector'` (WS23 S6) is a mail message, file or calendar item from one
+   * of the person's connected accounts. The gateway sends its title and a
+   * metadata line only, never body text, so the card shows those and nothing more.
    */
-  origin?: 'web' | 'knowledge'
+  origin?: 'web' | 'knowledge' | 'connector'
 }
 
 export type GeneratedFile = {
@@ -579,6 +583,8 @@ export type SendOptions = {
   sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
   /** See `ChatInvokeRequest.retrievalScope`. Per-turn, unlike `sourceScope`. */
   retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
+  /** See `ChatInvokeRequest.connectorScope`. Per-turn, like `retrievalScope`. */
+  connectorScope?: string[]
   actions?: ChatAction[]
   /** Explicit provider route for a connected user-owned model subscription. */
   provider?: string

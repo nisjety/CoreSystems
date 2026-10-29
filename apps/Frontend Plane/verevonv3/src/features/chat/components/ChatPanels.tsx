@@ -38,6 +38,8 @@ import {
   imageArtifactSrc,
 } from './chat-artifacts'
 import {
+  citationGroupKey,
+  citationGroupLabel,
   evidenceSourceGroupKey,
   evidenceSourceGroupLabel,
   evidenceSourceSnippet,
@@ -357,7 +359,16 @@ export function EmptyPanel(props: { icon: JSX.Element; title: string; subtitle: 
  */
 export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null; sources: EvidenceSource[] }) {
   const i18n = useI18n()
-  const groups = createMemo(() => partitionEvidenceSources(props.sources))
+  // Connected-app items (WS23 S6) are the person's own mail, files and events, not web or knowledge
+  // evidence: they sit under their own heading, grouped by account, and stay out of the read tally.
+  const connectorSources = createMemo(() => props.sources.filter(isConnectorSource))
+  const connectorGroups = createMemo(() => groupBySourceGroupId(
+    connectorSources(),
+    (source) => citationGroupKey(source),
+    (source) => citationGroupLabel(source),
+  ))
+  const webSources = createMemo(() => props.sources.filter((source) => !isConnectorSource(source)))
+  const groups = createMemo(() => partitionEvidenceSources(webSources()))
   const hasUnread = () => groups().unread.length > 0
   // `<For>` runs its mapper untracked in Solid 2, so the card's position is
   // computed here rather than read off `groups()` inside the mapper — where a
@@ -400,6 +411,23 @@ export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null;
           <Show when={props.grounding}>
             {(grounding) => <GroundingOverviewCard grounding={grounding()} />}
           </Show>
+          <Show when={connectorSources().length > 0}>
+            <section class="verevon-chat-source-group verevon-chat-source-group--connector">
+              <h2 class="verevon-chat-source-group__heading">{i18n.tr('Tilkoblede apper', 'Connected apps')}</h2>
+              <For each={connectorGroups()}>
+                {(group) => (
+                  <section class="verevon-chat-source-domain-group">
+                    <Show when={connectorGroups().length > 1}>
+                      <h3 class="verevon-chat-source-domain-group__heading">{group.label}</h3>
+                    </Show>
+                    <For each={group.items}>
+                      {(source) => <ConnectorSourceCard source={source} />}
+                    </For>
+                  </section>
+                )}
+              </For>
+            </section>
+          </Show>
           <Show when={hasUnread()}>
             {/* Both numbers, in one line, before the first card: the count in
                 the tab badge is the read one, and a reader who has just seen
@@ -407,8 +435,8 @@ export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null;
                 list below is. */}
             <p class="verevon-chat-source-tally" role="note">
               {i18n.tr(
-                `${groups().read.length} av ${props.sources.length} kilder er lest`,
-                `${groups().read.length} of ${props.sources.length} sources were read`,
+                `${groups().read.length} av ${webSources().length} kilder er lest`,
+                `${groups().read.length} of ${webSources().length} sources were read`,
               )}
             </p>
           </Show>
@@ -534,6 +562,38 @@ export function KnowledgeSourceCard(props: { source: ChatGroundingSource; index:
         Open knowledge <ChevronRight size={14} />
       </a>
     </article>
+  )
+}
+
+/** A connected-app item (WS23 S6) is a web-shaped source that came from the connector origin. */
+function isConnectorSource(source: EvidenceSource): source is Citation & { kind: 'web' } {
+  return source.kind === 'web' && source.origin === 'connector'
+}
+
+/**
+ * A connected-app item cited in an answer (WS23 S6): its title and the metadata line the gateway
+ * allows (sender and date, a start time or a file type). Body text is never sent, so none is shown,
+ * and the title links only when the provider's own address is a safe link.
+ */
+export function ConnectorSourceCard(props: { source: Citation & { kind: 'web' } }) {
+  const i18n = useI18n()
+  const body = () => (
+    <>
+      <div class="verevon-chat-source-card__meta">
+        <span>{i18n.tr('Tilkoblet app', 'Connected app')}</span>
+        <em>{citationGroupLabel(props.source)}</em>
+      </div>
+      <h2>{props.source.title || citationGroupLabel(props.source)}</h2>
+      <Show when={props.source.snippet}><p>{props.source.snippet}</p></Show>
+    </>
+  )
+  return (
+    <Show
+      when={isSafeLinkHref(props.source.url)}
+      fallback={<div class="verevon-chat-source-card">{body()}</div>}
+    >
+      <a class="verevon-chat-source-card" href={props.source.url} target="_blank" rel="noopener noreferrer">{body()}</a>
+    </Show>
   )
 }
 
