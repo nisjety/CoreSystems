@@ -23,8 +23,8 @@ importers:
         specifier: ^2.0.0-alpha.0
         version: 2.0.0-alpha.0(@solidjs/web@2.0.0-rc.0(solid-js@2.0.0-rc.0))(solid-js@2.0.0-rc.0)
       '@quarry/client':
-        specifier: workspace:*
-        version: link:../../Ingestion Plane/Quarry-v2/sdks/typescript
+        specifier: file:../../Ingestion Plane/Quarry-v2/sdks/typescript
+        version: file:../Ingestion Plane/Quarry-v2/sdks/typescript
       '@solidjs/router':
         specifier: ^2.0.0-next.16
         version: 2.0.0-next.16(@solidjs/web@2.0.0-rc.0(solid-js@2.0.0-rc.0))(solid-js@2.0.0-rc.0)
@@ -113,12 +113,6 @@ importers:
       vitest:
         specifier: ^4.1.10
         version: 4.1.11(@types/node@26.4.1)(@vitest/coverage-v8@4.1.10(vitest@4.1.11))(jsdom@30.0.1)(vite@8.2.2(@types/node@26.4.1))
-
-  ../../Ingestion Plane/Quarry-v2/sdks/typescript:
-    devDependencies:
-      typescript:
-        specifier: ^4.0 || ^5.0
-        version: 5.9.3
 
   apps/remote-dev:
     dependencies:
@@ -554,6 +548,9 @@ packages:
     resolution: {integrity: sha512-oxMK4vllB9RK5NQ2l1pq1IfOf2AvnEuj/vYGDj0H2nMtmtZpKtCwt/l00GEO6xjGfpBNAvjovvYdCm50dRQkpQ==}
     engines: {node: '>=20'}
     hasBin: true
+
+  '@quarry/client@file:../Ingestion Plane/Quarry-v2/sdks/typescript':
+    resolution: {directory: ../Ingestion Plane/Quarry-v2/sdks/typescript, type: directory}
 
   '@rolldown/binding-android-arm-eabi@1.2.6':
     resolution: {integrity: sha512-b+jTcARdTiFLI6jB4a5XjTm0RWd6KcRfQj/I2356fxUZemiho9zQLxo0RtCuMDAyKcLo6cEltkgbQp6d1+sjjQ==}
@@ -2576,11 +2573,6 @@ packages:
       eslint: ^8.57.0 || ^9.0.0 || ^10.0.0
       typescript: '>=4.8.4 <6.1.0'
 
-  typescript@5.9.3:
-    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
-    engines: {node: '>=14.17'}
-    hasBin: true
-
   typescript@6.0.3:
     resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
     engines: {node: '>=14.17'}
@@ -3229,6 +3221,8 @@ snapshots:
   '@playwright/test@1.63.0':
     dependencies:
       playwright: 1.63.0
+
+  '@quarry/client@file:../Ingestion Plane/Quarry-v2/sdks/typescript': {}
 
   '@rolldown/binding-android-arm-eabi@1.2.6':
     optional: true
@@ -5266,8 +5260,6 @@ snapshots:
       typescript: '@typescript/typescript6@6.0.2'
     transitivePeerDependencies:
       - supports-color
-
-  typescript@5.9.3: {}
 
   typescript@6.0.3: {}
 

@@ -150,7 +150,7 @@ function LoopMediaLayer({
 			) : stage.kind === "live" && stage.live ? (
 				<LoopLiveDemo live={stage.live} />
             ) : stage.media ? (
-				<ProductLoopMediaContent media={stage.media} priority={index === 0} />
+				<ProductLoopMediaContent media={stage.media} />
 			) : null}
 			{stage.kind === "media" && stage.media?.kind !== "video" ? (
 				<div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(248,248,247,0.02),rgba(248,248,247,0.16)),radial-gradient(circle_at_74%_22%,rgba(238,122,80,0.08),transparent_26%)]" />

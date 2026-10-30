@@ -18,15 +18,16 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:e2e:install": "playwright install chromium",
-    "typecheck": "pnpm --filter @quarry/client build && pnpm --filter @verevon/remote-core build && tsc -b",
+    "typecheck": "pnpm run build:quarry-client && pnpm --filter @verevon/remote-core build && tsc -b",
     "demo:build": "node scripts/build-product-demo.mjs",
     "demo:probe": "node scripts/probe-product-demo.mjs",
-    "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+    "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+    "build:quarry-client": "tsc --ignoreDeprecations 6.0 --module node16 --moduleResolution node16 --rootDir \"../../Ingestion Plane/Quarry-v2/sdks/typescript/src\" -p \"../../Ingestion Plane/Quarry-v2/sdks/typescript/tsconfig.json\" && tsc --ignoreDeprecations 6.0 --module esnext --moduleResolution bundler --rootDir \"../../Ingestion Plane/Quarry-v2/sdks/typescript/src\" -p \"../../Ingestion Plane/Quarry-v2/sdks/typescript/tsconfig.esm.json\""
   },
   "dependencies": {
     "3d-force-graph": "^1.80.0",
     "@kobalte/core": "^2.0.0-alpha.0",
-    "@quarry/client": "workspace:*",
+    "@quarry/client": "file:../../Ingestion Plane/Quarry-v2/sdks/typescript",
     "@solidjs/router": "^2.0.0-next.16",
     "@solidjs/web": "^2.0.0-rc.0",
     "@tanstack/ai": "^0.53.0",
