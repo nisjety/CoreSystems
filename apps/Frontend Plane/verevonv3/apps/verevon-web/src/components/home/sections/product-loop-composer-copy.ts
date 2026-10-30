@@ -11,13 +11,13 @@ const productLoopComposerCopy: Record<
 	ProductLoopComposerCopy
 > = {
 	chat: {
-		label: "04 / Chat",
-		title: "Spør. Få arbeidet i gang.",
-		body: "Beskriv oppgaven. Verevon bruker virksomhetens kunnskap, regler og verktøy til å foreslå neste steg — klart for deres godkjenning.",
+		label: "04 / Spør",
+		title: "Spør. Se sammenhengen.",
+		body: "Beskriv saken. Verevon samler relevant kunnskap, regler og systemdata, slik at dere kan ta neste beslutning på et synlig grunnlag.",
 	},
 	crawl: {
-		label: "04 / Crawl",
-		title: "Hent innhold. Bygg kunnskap.",
+		label: "04 / Hent",
+		title: "Hent innhold. Bygg felles grunnlag.",
 		body: "Hent nettsider og eksterne kilder inn i Verevon, behold kildehenvisningene og gjør innholdet klart for søk og agenter.",
 	},
 	search: {

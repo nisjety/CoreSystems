@@ -1,13 +1,16 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import styles from "./ProductLoopProductDemos.module.css";
 import {
 	Check,
 	ChevronRight,
 	Clock3,
 	FileText,
 	History,
+	Pause,
+	Play,
 	Search,
 	ShieldCheck,
 	Sparkles,
@@ -22,20 +25,26 @@ export type ProductLoopMedia = {
 	webm?: string;
 };
 
+type PlaybackMode = "auto" | "paused" | "playing";
+
 // A loop film plays only while it is in view, its stage layer is showing and the page is
 // visible. Under prefers-reduced-motion: reduce it never plays, so the poster stays.
 export function shouldPlayProductLoopVideo({
 	documentHidden,
 	inView,
 	layerVisible,
+	manualMode = "auto",
 	reducedMotion,
 }: {
 	documentHidden: boolean;
 	inView: boolean;
 	layerVisible: boolean;
+	manualMode?: PlaybackMode;
 	reducedMotion: boolean;
 }) {
-	return inView && layerVisible && !documentHidden && !reducedMotion;
+	return inView && layerVisible && !documentHidden && (
+		manualMode === "playing" || (manualMode === "auto" && !reducedMotion)
+	);
 }
 
 // The site's layout shim rewrites every prefers-reduced-motion matchMedia query to full motion.
@@ -56,49 +65,117 @@ export function productLoopLayerShowing(layer: Element | null) {
 
 function ProductLoopVideo({ media }: { media: ProductLoopMedia }) {
 	const videoRef = useRef<HTMLVideoElement>(null);
+	const [manualMode, setManualMode] = useState<PlaybackMode>("auto");
+	const [reducedMotion, setReducedMotion] = useState(false);
+	const [duration, setDuration] = useState(0);
+	const [currentTime, setCurrentTime] = useState(0);
 	useEffect(() => {
 		const video = videoRef.current;
 		if (!video) return;
 		const layer = video.closest<HTMLElement>("[data-product-loop-layer]");
-		const motion = typeof window.matchMedia === "function" ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
-		let isVisible = false;
+		let isVisible = typeof IntersectionObserver === "undefined";
+		const motionQuery = window.matchMedia?.("(prefers-reduced-motion: reduce)");
 		const update = () => {
-			const layerVisible = productLoopLayerShowing(layer);
-			if (shouldPlayProductLoopVideo({ documentHidden: document.hidden, inView: isVisible, layerVisible, reducedMotion: (motion?.matches ?? false) || productLoopPrefersReducedMotion(video) })) {
+			const motionIsReduced = (motionQuery?.matches ?? false) || productLoopPrefersReducedMotion(video);
+			setReducedMotion(motionIsReduced);
+			if (shouldPlayProductLoopVideo({
+				documentHidden: document.hidden,
+				inView: isVisible,
+				layerVisible: productLoopLayerShowing(layer),
+				manualMode,
+				reducedMotion: motionIsReduced,
+			})) {
 				void video.play().catch(() => {});
 			} else video.pause();
 		};
-		const observer = new IntersectionObserver(([entry]) => { isVisible = entry.isIntersecting; update(); });
+		const observer = typeof IntersectionObserver === "undefined"
+			? null
+			: new IntersectionObserver(([entry]) => { isVisible = entry.isIntersecting; update(); });
 		const layerObserver = new MutationObserver(update);
-		observer.observe(video);
+		observer?.observe(video);
 		if (layer) layerObserver.observe(layer, { attributes: true, attributeFilter: ["style"] });
 		document.addEventListener("visibilitychange", update);
-		motion?.addEventListener("change", update);
+		motionQuery?.addEventListener("change", update);
+		update();
 		return () => {
-			observer.disconnect();
+			observer?.disconnect();
 			layerObserver.disconnect();
 			document.removeEventListener("visibilitychange", update);
-			motion?.removeEventListener("change", update);
+			motionQuery?.removeEventListener("change", update);
 			video.pause();
 		};
-	}, []);
+	}, [manualMode]);
+	const playing = manualMode === "playing" || (manualMode === "auto" && !reducedMotion);
+	const togglePlayback = () => setManualMode(playing ? "paused" : "playing");
+	const syncTime = () => {
+		const video = videoRef.current;
+		if (!video) return;
+		setDuration(Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0);
+		setCurrentTime(Number.isFinite(video.currentTime) ? video.currentTime : 0);
+	};
+	const seek = (value: string) => {
+		const video = videoRef.current;
+		const seconds = Number(value);
+		if (!video || !Number.isFinite(seconds) || duration <= 0) return;
+		video.currentTime = Math.max(0, Math.min(seconds, duration));
+		setCurrentTime(video.currentTime);
+	};
+	const formatTime = (seconds: number) => {
+		const whole = Math.floor(Number.isFinite(seconds) ? seconds : 0);
+		return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+	};
 	return (
-		<video
-			aria-label={media.alt}
-			className="h-full w-full object-contain motion-reduce:[--product-loop-motion:reduce]"
-			disablePictureInPicture
-			disableRemotePlayback
-			loop
-			muted
-			playsInline
-			poster={media.poster}
-			preload="metadata"
-			ref={videoRef}
-			style={{ objectPosition: media.objectPosition ?? "center" }}
-		>
-			{media.webm ? <source src={media.webm} type="video/webm" /> : null}
-			<source src={media.src} type="video/mp4" />
-		</video>
+		<div className={`${styles.card} relative h-full w-full overflow-hidden`} data-product-video-card="">
+			<video
+				aria-label={media.alt}
+				className={`h-full w-full cursor-pointer ${media.webm ? "object-contain" : "object-cover"} motion-reduce:[--product-loop-motion:reduce]`}
+				disablePictureInPicture
+				disableRemotePlayback
+				loop
+				muted
+				onClick={togglePlayback}
+				onDurationChange={syncTime}
+				onLoadedMetadata={syncTime}
+				onTimeUpdate={syncTime}
+				playsInline
+				poster={media.poster}
+				preload="metadata"
+				ref={videoRef}
+				style={{ objectPosition: media.objectPosition ?? "center" }}
+			>
+				{media.webm ? <source src={media.webm} type="video/webm" /> : null}
+				<source src={media.src} type="video/mp4" />
+			</video>
+			<div
+				className={`${styles.controls} absolute bottom-3 right-3 z-30 flex h-11 w-[min(82%,320px)] items-center gap-2 rounded-full border border-black/10 bg-white/95 pl-4 pr-1 text-[#1d1d1b] shadow-[0_4px_24px_rgba(0,0,0,0.14)] backdrop-blur-sm`}
+				data-product-video-controls=""
+			>
+				<span className="shrink-0 font-geist text-[10px] tabular-nums" data-product-video-time="">
+					{formatTime(currentTime)} / {formatTime(duration)}
+				</span>
+				<input
+					aria-label="Spol i video"
+					aria-valuetext={`${formatTime(currentTime)} av ${formatTime(duration)}`}
+					className={`${styles.timeline} min-w-0 flex-1 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#f47753]`}
+					max={duration}
+					min={0}
+					onInput={(event) => seek(event.currentTarget.value)}
+					step="0.1"
+					style={{ background: `linear-gradient(to right, #f47753 ${duration ? (currentTime / duration) * 100 : 0}%, #d6d6d3 0%)` }}
+					type="range"
+					value={currentTime}
+				/>
+				<button
+					aria-label={playing ? "Sett video på pause" : manualMode === "paused" ? "Fortsett video" : "Spill video"}
+					aria-pressed={playing}
+					className="grid size-10 shrink-0 place-items-center rounded-full text-[#1d1d1b] transition-colors hover:bg-black/5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#f47753]"
+					onClick={togglePlayback}
+					type="button"
+				>
+					{playing ? <Pause aria-hidden="true" className="size-4" /> : <Play aria-hidden="true" className="size-4 fill-current" />}
+				</button>
+			</div>
+		</div>
 	);
 }
 
@@ -128,7 +205,7 @@ export function ProductLoopMediaContent({
 	return (
 		<Image
 			alt={media.alt}
-			className="object-cover saturate-[0.88] contrast-[1.02]"
+			className="object-cover"
 			fill
 			loading={priority ? "eager" : "lazy"}
 			sizes="(max-width: 899px) 92vw, 72vw"

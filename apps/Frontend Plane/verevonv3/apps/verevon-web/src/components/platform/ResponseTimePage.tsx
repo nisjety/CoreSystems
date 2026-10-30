@@ -1,7 +1,6 @@
 "use client";
 
 import Image from "next/image";
-import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Footer } from "@/components/core/footer/Footer";
 import { ArrowButton } from "@/components/ui/ArrowButton";
@@ -150,12 +149,9 @@ export function ResponseTimePage() {
 							</p>
 							<div className="mt-10 flex flex-wrap items-center gap-x-8 gap-y-5">
 								<ArrowButton href="#losning" variant="light">Se hvordan</ArrowButton>
-								<Link
-									className="font-geist text-[0.92rem] font-light text-white/72 underline-offset-4 transition-colors hover:text-white hover:underline focus-visible:text-white focus-visible:outline-none"
-									href="/"
-								>
+								<ArrowButton href="/" variant="light">
 									Tilbake til forsiden
-								</Link>
+								</ArrowButton>
 							</div>
 						</div>
 					</div>

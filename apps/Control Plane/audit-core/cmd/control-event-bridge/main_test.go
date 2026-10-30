@@ -48,13 +48,13 @@ func TestBridgeForwardsProvisionedControlEventsAndAcknowledges(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := legacyJS.AddStream(&nats.StreamConfig{
-		Name: "LEGACY_CONTROL", Subjects: []string{"aqencia.controlplane.>", "verevon.gdpr.>"},
+		Name: "LEGACY_CONTROL", Subjects: []string{"controlplane.>", "verevon.gdpr.>"},
 		Storage: nats.FileStorage, Duplicates: 2 * time.Minute,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	received := make(chan *nats.Msg, 3)
-	if _, err := legacy.Subscribe("aqencia.controlplane.org.*", func(message *nats.Msg) {
+	if _, err := legacy.Subscribe("controlplane.org.*", func(message *nats.Msg) {
 		received <- &nats.Msg{Subject: message.Subject, Header: message.Header, Data: append([]byte(nil), message.Data...)}
 	}); err != nil {
 		t.Fatal(err)
@@ -76,10 +76,10 @@ func TestBridgeForwardsProvisionedControlEventsAndAcknowledges(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = bridge.Unsubscribe() })
-	if _, err := js.Publish("aqencia.controlplane.org.created", []byte(`{"org_id":"org-1"}`), nats.MsgId("organization:org-1:1:created")); err != nil {
+	if _, err := js.Publish("controlplane.org.created", []byte(`{"org_id":"org-1"}`), nats.MsgId("organization:org-1:1:created")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := js.Publish("aqencia.controlplane.org.updated", []byte(`{"org_id":"org-1"}`)); err != nil {
+	if _, err := js.Publish("controlplane.org.updated", []byte(`{"org_id":"org-1"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := js.Publish("notifications.org.member_removed", []byte(`{"org_id":"org-1"}`)); err != nil {
@@ -99,7 +99,7 @@ func TestBridgeForwardsProvisionedControlEventsAndAcknowledges(t *testing.T) {
 			t.Fatalf("legacy subscriber received %d of 2 bridged events", len(seen))
 		}
 	}
-	message := seen["aqencia.controlplane.org.created"]
+	message := seen["controlplane.org.created"]
 	if message == nil {
 		t.Fatal("legacy subscriber did not receive created event")
 	}
@@ -109,7 +109,7 @@ func TestBridgeForwardsProvisionedControlEventsAndAcknowledges(t *testing.T) {
 	if message.Header.Get(nats.MsgIdHdr) != "organization:org-1:1:created" {
 		t.Fatalf("bridged Msg-Id = %q", message.Header.Get(nats.MsgIdHdr))
 	}
-	derived := seen["aqencia.controlplane.org.updated"].Header.Get(nats.MsgIdHdr)
+	derived := seen["controlplane.org.updated"].Header.Get(nats.MsgIdHdr)
 	if !strings.HasPrefix(derived, "control-shared:"+provisioner.ControlSharedStreamName+":") {
 		t.Fatalf("derived bridged Msg-Id = %q", derived)
 	}
@@ -117,7 +117,7 @@ func TestBridgeForwardsProvisionedControlEventsAndAcknowledges(t *testing.T) {
 	// A bridge crash after target PubAck but before source ACK redelivers the
 	// same source identity. The legacy stream must de-duplicate it.
 	if err := forwardToLegacy(legacy, legacyJS, &nats.Msg{
-		Subject: "aqencia.controlplane.org.created",
+		Subject: "controlplane.org.created",
 		Header:  nats.Header{nats.MsgIdHdr: []string{"organization:org-1:1:created"}},
 		Data:    []byte(`{"org_id":"org-1"}`),
 	}); err != nil {

@@ -1,0 +1,23 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_dimensions",
+  description: "Bronze: Normalized dimension segment values from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.updated_at AS `syncedAt`,
+  s.last_run_id AS `syncId`,
+  s.tenant_id AS `tenantId`,
+  ${bronze.str("dimensionId")} AS `dimensionId`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`
+FROM ${ref("dw_staging_visma", "dimensions")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

@@ -425,6 +425,63 @@ This is inspired by Firecrawl's engine waterfall but must be exposed as an inspe
 }
 ```
 
+### Implemented bounded public discovery and audit evidence (2026-10-22)
+
+The richer map example above is a design contract, not the current bounded
+implementation. The current `POST /v1/map` accepts only `url`, optional `search`,
+`limit`, and `include_subdomains`; it returns the plain object
+`{url,links:[{url,title?,score?}],count,ranked}`. The `url` is the requested URL;
+each returned link retains the URL actually discovered. Canonical apex/`www`
+redirects can therefore produce `www` links for an apex request.
+
+Both map and `POST /v1/audit/page` use static credentialless single-hop requests:
+public HTTPS only, no cookies or proxy, public-address DNS resolution pinned
+into the connection, 1 MiB decoded response limit, maximum three redirects,
+and fresh URL/security preflight on each hop. Redirects stay on the original
+origin or its exact apex/`www` pair with the same port. Sensitive paths,
+credentials, queries, encoded paths, fragments, redirect loops, nested `www`
+expansion and arbitrary subdomains are rejected. A redirect destination's own
+robots rules are fetched before its document; unavailable/forbidden/rate-limited
+robots cannot be silently treated as permission. Generic `/v1/scrape` and
+`fetch_bounded` do not gain redirect permission.
+
+`POST /v1/audit/page` requires authenticated `scrape:read` for service actors.
+It permits at most eight in-flight captures per process and rejects excess
+requests with 429 without queueing. This is a local transport capacity guard,
+not durable per-organization billing or scheduled-job quota management.
+It accepts exactly `{"url":"https://example.com/"}`. Its fixed 10 second deadline
+includes robots and redirect requests. Successful transport returns a plain
+`bounded_page_v1` object:
+
+```json
+{
+  "version": "bounded_page_v1",
+  "url": "https://example.com/",
+  "final_url": "https://www.example.com/",
+  "status": 200,
+  "fetched_at": "2026-10-22T19:00:00Z",
+  "run_id": "run_...",
+  "fingerprint": "blake3:<64 hexadecimal characters>",
+  "metadata": {"title": null, "description": null, "content_type": "text/html"},
+  "canonical": null,
+  "links": [],
+  "headings": [],
+  "partial": false,
+  "limits": {"body_bytes": 1048576, "timeout_ms": 10000, "max_links": 100}
+}
+```
+
+`metadata.title` and `description` describe the actual HTML title and standard
+description tag, not Open Graph fallbacks. Oversized metadata fails rather than
+becoming a fabricated missing-field finding. Links contain `{url,text?}` and
+headings `{level,text}`; these lists are capped at 100 and 200 respectively,
+with `partial=true` when the source exceeds a list cap. Capture requires HTML
+for successful 2xx sources. An upstream 404/500 is evidence in `status`, not a
+successful page; transport denial, size overflow and timeout remain non-200 API
+failures. No raw HTML, artifacts, browser fallback, ingest, or durable storage
+is produced by this route. Marketing Core owns interpretation, snapshots,
+comparisons, prioritized findings and the work lifecycle.
+
 ### Real-time preview event payloads
 
 Preview events are SSE-only by default and may be stored when `trace` or audit mode is enabled.

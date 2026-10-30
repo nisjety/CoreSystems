@@ -1878,7 +1878,16 @@ function IntegrationsSection() {
                     </Show>
                   </div>
                   <span>{rowSyncProgress() ? `${integration.detail} · ${rowSyncProgress()}` : integration.detail}</span>
+                  <Show when={integration.provider.key === 'google'}>
+                    <span>{i18n.tr('Tilkobling ber om lesetilgang til Workspace, Search Console og Analytics. Ingen sending eller annonseendringer.', 'Connecting requests read access to Workspace, Search Console and Analytics. No sending or ad changes.')}</span>
+                  </Show>
+                  <Show when={integration.provider.key === 'microsoft'}>
+                    <span>{i18n.tr('Tilkobling ber om lesetilgang til Microsoft 365. Clarity kobles til separat.', 'Connecting requests read access to Microsoft 365. Clarity connects separately.')}</span>
+                  </Show>
                   <div class="verevon-settings-integration-caps">
+                    <Show when={!integration.connection}>
+                      <span>{i18n.tr('Mulige funksjoner etter separat godkjenning:', 'Available capabilities subject to separate approval:')}</span>
+                    </Show>
                     <Show when={groups().reads.length}>
                       <span class="verevon-settings-integration-caps__group">
                         <em>{i18n.tr('Leser', 'Reads')}</em> {groups().reads.join(' · ')}

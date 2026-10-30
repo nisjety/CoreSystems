@@ -1,0 +1,27 @@
+{
+  "endpoint_name": "shipments",
+  "bigquery_table": "visma_shipments",
+  "primary_key": "shipmentNumber",
+  "source": "erp_rest",
+  "api_method": "get_shipments",
+  "api_endpoint": "/v1/shipment",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "shipmentNumber",
+    "status",
+    "lastModifiedDateTime"
+  ],
+  "datamart": {
+    "ready": false,
+    "pilot_override": false,
+    "query_file": "config/queries/shipment.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "erp_rest"
+  },
+  "tier": 1
+}

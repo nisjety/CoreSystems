@@ -2,7 +2,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { TrustCenter } from './TrustCenter';
-import { certifications, liveControls, subprocessors } from './trust-data';
+import { certifications, liveControls, procurementEvidence, subprocessors } from './trust-data';
 
 // The page as a reader gets it: the component is rendered, so a sentence that exists in the data or in the JSX
 // but never reaches the page (or reaches it twice) is caught here. The wording itself is pinned in
@@ -51,6 +51,19 @@ describe('TrustCenter as rendered', () => {
 			const expected = entry.level === 'planned' ? 'Planlagt' : entry.level === 'live' ? 'Live' : 'Under arbeid';
 			expect(normalise(item.textContent ?? ''), entry.name).toContain(expected);
 		}
+	});
+
+	it('makes the procurement evidence status legible before detailed disclosures', () => {
+		const rows = [...root.querySelectorAll('[data-procurement-evidence]')];
+		expect(rows).toHaveLength(procurementEvidence.length);
+		expect(text).toContain('Hva dere kan verifisere i dag.');
+		for (const [index, item] of procurementEvidence.entries()) {
+			const rendered = normalise(rows[index].textContent ?? '');
+			expect(rendered, item.title).toContain(normalise(item.title));
+			expect(rendered, item.title).toContain(normalise(item.available));
+			expect(rendered, item.title).toContain(normalise(item.pending));
+		}
+		expect(text).toContain('Vi har ingen rapport å dele ennå.');
 	});
 
 	it('says where data goes and what is not promised, in the page text itself', () => {

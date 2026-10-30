@@ -1,0 +1,34 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Immutable source-observation facts for Xero fixed-asset book values. observation_date is extraction date, not a period-end valuation date.",
+  assertions: {
+    nonNull: ["tenant_id", "asset_id", "asset_observation_id", "asset_observed_at"],
+    uniqueKey: ["asset_observation_id"]
+  }
+}
+
+SELECT
+  observation.asset_observation_id,
+  CONCAT(observation.tenant_id, '|', observation.asset_id) AS asset_key,
+  observation.tenant_id,
+  observation.asset_id,
+  observation.asset_type_id,
+  DATE(observation.asset_observed_at) AS observation_date,
+  observation.asset_observed_at,
+  observation.purchase_price,
+  observation.accounting_book_value,
+  observation.disposal_price,
+  observation.book_current_accumulated_depreciation,
+  observation.book_prior_accumulated_depreciation,
+  observation.book_current_capital_gain,
+  observation.book_current_gain_loss,
+  observation.book_cost_limit,
+  observation.book_residual_value,
+  observation.accounting_book_value IS NOT NULL AS is_book_value_available,
+  observation.is_source_deleted,
+  observation.source_record_id,
+  observation.source_version_id,
+  observation.source_receipt_id,
+  observation.source_run_id
+FROM ${ref("dw_bronze_xero", "xero_fixed_asset_observations")} AS observation

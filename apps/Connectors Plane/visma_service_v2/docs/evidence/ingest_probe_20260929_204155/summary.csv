@@ -1,0 +1,11 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+accounts,,1,0,succeeded,614,614,614,1,0,614,14573,782,2026-09-29 13:38:25.65+00
+branches,,1,0,succeeded,1,1,1,1,0,1,14572,541,2026-01-21 12:45:50.307+00
+contacts,,1,0,succeeded,11727,11727,11727,1,0,11727,14571,5981,2026-09-29 14:32:34.08+00
+credit_terms,,1,0,succeeded,22,22,22,1,0,22,14570,496,2026-09-01 09:31:16.673+00
+customer_sales_prices,,1,0,succeeded,17088,17088,17088,171,0,88,14399,8958,2026-09-28 14:13:38.53+00
+customers,,1,0,succeeded,6586,6586,6586,66,0,86,14333,2051,2026-09-29 21:09:58.827+00
+locations,,1,0,succeeded,14552,14552,14552,146,0,52,14185,63847,2026-09-29 21:09:58.85+00
+sales_orders_v3,,1,-15,running,0,0,0,0,0,0,,0,
+sales_persons,,1,0,succeeded,114,114,114,2,0,14,14870,2150,2026-09-25 11:08:53.157+00
+subaccounts,,1,0,succeeded,11802,11802,11802,119,0,2,14730,593,2026-09-07 15:06:30.56+00

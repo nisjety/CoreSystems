@@ -1,0 +1,32 @@
+query Budgets(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $pageSize: Int! = 5000
+) {
+  budgets(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    pageSize: $pageSize
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    branchId
+    groupId
+    ledgerId
+    financialYear
+    released
+    releasedAmount
+    accountId
+    subaccountId
+    description
+    amount
+    distributedAmount
+    lastModifiedDateTime
+    createdInDataMartDateTime
+    periods {
+      periodId
+      amount
+    }
+  }
+}

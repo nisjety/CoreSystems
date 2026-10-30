@@ -4,6 +4,8 @@ pub mod answer_routes;
 pub mod api_error;
 pub mod budget;
 pub mod audio_routes;
+pub mod audit_page;
+mod audit_seo;
 pub mod auth;
 pub mod cache;
 pub mod canary;

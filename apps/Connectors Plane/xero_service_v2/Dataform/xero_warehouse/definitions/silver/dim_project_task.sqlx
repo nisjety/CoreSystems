@@ -1,0 +1,62 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Lifecycle-aware Xero Project tasks from fully certified parent-scoped task collection runs.",
+  assertions: {
+    nonNull: ["tenant_id", "project_id", "task_id", "project_task_key"],
+    uniqueKey: ["project_task_key"]
+  }
+}
+
+WITH source AS (
+  SELECT task.*, lifecycle.is_current, lifecycle.is_removed,
+         lifecycle.removed_in_run_id, lifecycle.removed_observed_at,
+         lifecycle.record_state, lifecycle.first_seen_at, lifecycle.last_seen_at
+  FROM ${ref("dw_bronze_xero", "xero_project_entity_lifecycle")} AS lifecycle
+  INNER JOIN ${ref("dw_bronze_xero", "xero_project_task_observations")} AS task
+    ON lifecycle.tenant_id = task.tenant_id
+   AND lifecycle.last_seen_source_run_id = task.source_run_id
+   AND lifecycle.project_id = task.project_id
+   AND lifecycle.entity_id = task.task_id
+  WHERE lifecycle.entity_type = 'task'
+)
+SELECT
+  CONCAT(tenant_id, '|', project_id, '|', task_id) AS project_task_key,
+  CONCAT(tenant_id, '|', project_id) AS project_key,
+  tenant_id,
+  project_id,
+  task_id,
+  task_name,
+  task_status,
+  charge_type,
+  rate_amount,
+  rate_currency_code,
+  total_amount,
+  total_currency_code,
+  amount_invoiced,
+  amount_invoiced_currency_code,
+  amount_to_be_invoiced,
+  amount_to_be_invoiced_currency_code,
+  fixed_minutes,
+  total_minutes,
+  minutes_invoiced,
+  minutes_to_be_invoiced,
+  non_chargeable_minutes,
+  project_observed_at,
+  source_record_id,
+  source_version_id,
+  source_receipt_id,
+  source_run_id,
+  is_current,
+  is_removed,
+  removed_in_run_id,
+  removed_observed_at,
+  record_state,
+  first_seen_at,
+  last_seen_at
+FROM source
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY tenant_id, project_id, task_id
+  ORDER BY projection_schema_revision DESC, project_observed_at DESC,
+           source_receipt_id DESC, source_version_id DESC
+) = 1

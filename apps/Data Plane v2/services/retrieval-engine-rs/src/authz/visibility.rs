@@ -40,7 +40,7 @@ pub trait VisibilityClient: Send + Sync {
 }
 
 /// Subject published by user-core when a grant is created/revoked.
-const SUBJECT_RESOURCE_GRANTS_CHANGED: &str = "aqencia.controlplane.acl.resource_grants.changed";
+const SUBJECT_RESOURCE_GRANTS_CHANGED: &str = "controlplane.acl.resource_grants.changed";
 
 #[derive(Deserialize)]
 struct GrantChangedEvent {

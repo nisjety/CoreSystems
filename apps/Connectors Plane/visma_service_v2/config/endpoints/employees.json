@@ -1,0 +1,39 @@
+{
+  "endpoint_name": "employees",
+  "bigquery_table": "visma_employees",
+  "primary_key": "employeeId",
+  "source": "erp_rest",
+  "api_method": "get_employees",
+  "api_endpoint": "/v1/employee",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "employeeId",
+    "employeeNumber",
+    "employeeName",
+    "status",
+    "department",
+    "contact",
+    "address",
+    "lastModifiedDateTime",
+    "employeeClass.id",
+    "calendarID"
+  ],
+  "notes": "DataMart root employees returned 0 rows on 2026-09-29 while the ERP has data (its ETL looks inactive for this entity), so the query file and root_field are filled in but join_normalizer 'normalize_employee' is NOT written or registered: a normalizer cannot be verified without rows. Write it (scripts/normalizer_parity.py) once DataMart returns data.",
+  "datamart": {
+    "ready": false,
+    "type_name": "Employee",
+    "query_file": "config/queries/employee.graphql",
+    "root_field": "employees",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_employee",
+    "fallback_source": "erp_rest",
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    }
+  }
+}

@@ -141,13 +141,13 @@ export const nordlysAnswerChunks = [
 /**
  * The draft block added after the status is in place: two lines, so the final
  * frame keeps the whole answer in view. Every claim in it is stated by the
- * Bring tracking status (forsinket hos transportør, ny leveringsdato onsdag 14. okt).
+ * Bring tracking status (forsinket hos Bring, ny leveringsdato onsdag 14. okt).
  * Wednesday 14 October 2026 is two days after the agreed Monday 12 October (the day the
  * e-mail says the fitters are ready), so it reads as a delay.
  */
 export const nordlysDraftChunks = [
   '\n\n> **Utkast til kunden:** ',
-  'Hei! Leveransen er forsinket hos transportøren. ',
+  'Hei! Leveransen er forsinket hos Bring. ',
   'Ny forventet levering er onsdag 14. oktober.',
 ]
 
@@ -160,7 +160,7 @@ export const nordlysArtifactTitle = 'Status · Nordlys-leveransen'
  * sources are cited.
  */
 export const nordlysStatusLines = [
-  { text: 'Forsinket hos transportør.', ref: 'Bring' },
+  { text: 'Forsinket hos Bring.', ref: 'Bring' },
   { text: 'Ny levering: onsdag 14. okt.', ref: 'Bring' },
   { text: 'Montering 12. okt må flyttes.', ref: 'E-post 9. okt' },
   { text: 'Varsle kunden i dag.', ref: 'Kundeavtale pkt. 4.2' },

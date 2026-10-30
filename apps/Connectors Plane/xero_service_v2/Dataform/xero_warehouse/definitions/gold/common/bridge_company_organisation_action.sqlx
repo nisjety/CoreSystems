@@ -1,0 +1,28 @@
+config {
+  type: "table",
+  schema: "xero_gold_common",
+  description: "Current action capabilities for the Xero integration connection by company. This bridge must not be used to infer organisation-wide policy or a human user's permissions.",
+  assertions: {
+    nonNull: ["company_organisation_action_key", "company_key", "tenant_id", "action_name", "source_receipt_id"],
+    uniqueKey: ["company_organisation_action_key"]
+  }
+}
+
+SELECT
+  FARM_FINGERPRINT(company_organisation_action_key) AS company_organisation_action_key,
+  FARM_FINGERPRINT(tenant_id) AS company_key,
+  tenant_id,
+  action_position,
+  action_name,
+  action_status,
+  is_allowed,
+  capability_scope,
+  action_observed_at,
+  source_record_id,
+  source_version_id,
+  source_receipt_id,
+  source_run_id,
+  source_payload_hash,
+  is_current_capability,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "bridge_company_organisation_action")}

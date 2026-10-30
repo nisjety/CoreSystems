@@ -1,0 +1,16 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero customer and supplier overpayment headers; source void and deleted states remain visible.",
+  assertions: { nonNull: ["tenant_id", "overpayment_id", "overpayment_key"], uniqueKey: ["overpayment_key"] }
+}
+
+SELECT CONCAT(tenant_id, '|', overpayment_id) AS overpayment_key,
+       tenant_id, overpayment_id, record_id AS overpayment_internal_id,
+       overpayment_type, status, COALESCE(status = 'DELETED', FALSE) AS is_deleted,
+       COALESCE(status = 'VOIDED', FALSE) AS is_voided,
+       reference, contact_id, contact_name, overpayment_date,
+       currency_code, currency_rate, line_amount_types, line_item_count,
+       allocation_count, payment_count, sub_total, total_tax, total,
+       remaining_credit, has_attachments, updated_at, first_seen_at, synced_at
+FROM ${ref("dw_bronze_xero", "xero_overpayments")}

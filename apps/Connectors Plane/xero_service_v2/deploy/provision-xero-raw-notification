@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Provision the one durable GCS -> Pub/Sub path for main Xero raw receipts.
+set -euo pipefail
+
+if [[ $# -ne 2 || ( $1 != --preview && $1 != --apply ) ]]; then
+  printf 'Usage: %s <--preview|--apply> MAIN_ENV_FILE\n' "$0" >&2
+  exit 2
+fi
+
+env_file=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
+if [[ ! -f "$env_file" ]]; then
+  printf 'Expected a private main-project environment file\n' >&2
+  exit 2
+fi
+
+set -a
+source "$env_file"
+set +a
+
+: "${GCP_PROJECT:?main project is required}"
+: "${GCS_BUCKET:?raw bucket is required}"
+: "${XERO_RAW_FINALIZED_TOPIC:=xero-raw-finalized}"
+
+if [[ "$GCP_PROJECT" != "aquatiq-datavarehus" \
+      || "$GCS_BUCKET" != "aquatiq-datavarehus-xero-raw" \
+      || "$XERO_RAW_FINALIZED_TOPIC" != "xero-raw-finalized" ]]; then
+  printf 'Refusing a non-main Xero raw notification deployment\n' >&2
+  exit 2
+fi
+
+bucket_url="gs://${GCS_BUCKET}"
+if [[ $1 == --preview ]]; then
+  printf 'Ensure %s receives exactly one OBJECT_FINALIZE JSON notification to %s in %s\n' \
+    "$bucket_url" "$XERO_RAW_FINALIZED_TOPIC" "$GCP_PROJECT"
+  printf 'Ensure the Cloud Storage service agent can publish to that Pub/Sub topic\n'
+  exit 0
+fi
+
+project_number=$(gcloud projects describe "$GCP_PROJECT" --format='value(projectNumber)')
+if [[ ! "$project_number" =~ ^[0-9]+$ ]]; then
+  printf 'Could not determine the numeric project number for %s\n' "$GCP_PROJECT" >&2
+  exit 1
+fi
+
+storage_service_agent="service-${project_number}@gs-project-accounts.iam.gserviceaccount.com"
+gcloud pubsub topics add-iam-policy-binding "$XERO_RAW_FINALIZED_TOPIC" \
+  --project="$GCP_PROJECT" \
+  --member="serviceAccount:${storage_service_agent}" \
+  --role='roles/pubsub.publisher' \
+  --quiet >/dev/null
+
+# The raw loader consumes the JSON API event envelope.  Same-topic unfiltered
+# finalize notifications without that payload are duplicates and are removed.
+notification_plan=$(gcloud storage buckets notifications list "$bucket_url" \
+  --project="$GCP_PROJECT" --format=json | \
+  python3 -c '
+import json
+import sys
+
+project, topic = sys.argv[1:]
+expected_topic = f"projects/{project}/topics/{topic}"
+notifications = json.load(sys.stdin)
+matching = []
+for item in notifications:
+    config = item.get("Notification Configuration", item)
+    current_topic = str(config.get("topic", "")).removeprefix("//pubsub.googleapis.com/")
+    if current_topic != expected_topic:
+        continue
+    if config.get("event_types") != ["OBJECT_FINALIZE"]:
+        continue
+    if config.get("object_name_prefix") or config.get("object_name_suffix") or config.get("custom_attributes"):
+        raise SystemExit("Refusing to alter a filtered Xero raw notification")
+    matching.append(config)
+
+json_notifications = [n for n in matching if n.get("payload_format") == "JSON_API_V1"]
+keep = sorted(json_notifications, key=lambda n: int(n.get("id", 0) or 0))[:1]
+keep_id = keep[0].get("id") if keep else None
+delete_ids = [str(n["id"]) for n in matching if n.get("id") != keep_id]
+print(json.dumps({"create": keep_id is None, "delete_ids": delete_ids}))
+' "$GCP_PROJECT" "$XERO_RAW_FINALIZED_TOPIC")
+
+delete_ids=$(printf '%s' "$notification_plan" | python3 -c '
+import json
+import sys
+print(" ".join(json.load(sys.stdin)["delete_ids"]))
+')
+for notification_id in $delete_ids; do
+  gcloud storage buckets notifications delete \
+    "projects/_/buckets/${GCS_BUCKET}/notificationConfigs/${notification_id}" \
+    --project="$GCP_PROJECT" --quiet
+done
+
+should_create=$(printf '%s' "$notification_plan" | python3 -c '
+import json
+import sys
+print("true" if json.load(sys.stdin)["create"] else "false")
+')
+if [[ "$should_create" == true ]]; then
+  gcloud storage buckets notifications create "$bucket_url" \
+    --topic="$XERO_RAW_FINALIZED_TOPIC" \
+    --event-types=OBJECT_FINALIZE \
+    --payload-format=json \
+    --project="$GCP_PROJECT"
+fi
+
+printf 'Xero raw notification path is configured for %s\n' "$bucket_url"

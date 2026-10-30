@@ -1,0 +1,79 @@
+config {
+  type: "table",
+  schema: "visma_silver",
+  name: "dim_warehouse",
+  description: "Warehouse master dimension from Visma logistics module.",
+  tags: ["silver", "visma", "dimension"]
+}
+
+-- =============================================================================
+-- Silver dimension: Warehouse master data
+-- Source: visma_warehouses
+-- Why: Central to all inventory operations (receipts, issues, transfers,
+--      shipments). Provides the warehouse context for stock valuation and
+--      quantity-on-hand calculations in the gold/sales layer.
+-- =============================================================================
+
+WITH source_data AS (
+  SELECT
+      tenantId                                    AS tenant_id,
+      SAFE_CAST(warehouseID AS STRING)            AS warehouse_id,
+      description                                 AS warehouse_name,
+      active                                      AS is_active,
+      -- Unpack the nested JSON objects into scalar columns. `branch` is the
+      -- company/legal branch the warehouse belongs to (branch.number = '1' =
+      -- the legal entity), NOT the warehouse number — warehouse_id above is the
+      -- Visma "Lagersted". receipt/ship location are the default in/out bins.
+      JSON_VALUE(branch, '$.number')              AS branch_number,
+      JSON_VALUE(branch, '$.name')                AS branch_name,
+      JSON_VALUE(receiptLocation, '$.id')         AS receipt_location_id,
+      JSON_VALUE(receiptLocation, '$.description') AS receipt_location_description,
+      JSON_VALUE(shipLocation, '$.id')            AS ship_location_id,
+      JSON_VALUE(shipLocation, '$.description')   AS ship_location_description
+      -- NB: the `locations` array (bin locations within the warehouse) is
+      -- exploded into its own child dimension dim_warehouse_location.
+  FROM ${ref("visma_warehouses")}
+  WHERE isDeleted = false OR isDeleted IS NULL
+),
+
+current_tenant_business_unit AS (
+  SELECT
+    tenant_id,
+    business_unit_id,
+    business_unit_name,
+    ROW_NUMBER() OVER (
+      PARTITION BY tenant_id
+      ORDER BY
+        CASE
+          WHEN source_segment_2_value = '0' THEN 1
+          WHEN source_segment_2_value IS NULL THEN 2
+          ELSE 3
+        END,
+        COALESCE(valid_to, DATE '9999-12-31') DESC,
+        valid_from DESC
+    ) AS row_num
+  FROM ${ref("visma_silver_excel", "business_unit_mapping")}
+  WHERE CURRENT_DATE() BETWEEN valid_from AND COALESCE(valid_to, DATE '9999-12-31')
+)
+
+SELECT
+  src.tenant_id,
+  bu.business_unit_id,
+  bu.business_unit_name,
+  src.warehouse_id,
+  src.warehouse_name,
+  src.is_active,
+  src.branch_number,
+  src.branch_name,
+  src.receipt_location_id,
+  src.receipt_location_description,
+  src.ship_location_id,
+  src.ship_location_description
+FROM source_data AS src
+LEFT JOIN current_tenant_business_unit AS bu
+  ON src.tenant_id = bu.tenant_id
+ AND bu.row_num = 1
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY src.tenant_id, src.warehouse_id
+  ORDER BY src.is_active DESC, src.warehouse_name DESC
+) = 1

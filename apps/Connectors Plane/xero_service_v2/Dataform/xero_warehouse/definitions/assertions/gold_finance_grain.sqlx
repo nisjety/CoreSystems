@@ -1,0 +1,40 @@
+config { type: "assertion", schema: "dw_1_silver_xero_assertions", name: "xero_gold_finance_grain_reconciliation" }
+
+WITH counts AS (
+SELECT 'customer_invoice' AS entity,
+       (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_invoice")} WHERE invoice_type = 'ACCREC') AS silver_count,
+       (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_customer_invoice")}) AS gold_count
+UNION ALL
+SELECT 'customer_payment',
+       (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_customer_payment")}),
+       (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_customer_payment")})
+UNION ALL
+SELECT 'supplier_invoice',
+       (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_invoice")} WHERE invoice_type = 'ACCPAY'),
+       (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_supplier_invoice")})
+UNION ALL
+SELECT 'customer_invoice_line',
+       (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_invoice_line")} WHERE invoice_type = 'ACCREC'),
+       (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_customer_invoice_line")})
+UNION ALL
+SELECT 'supplier_invoice_line',
+       (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_invoice_line")} WHERE invoice_type = 'ACCPAY'),
+       (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_supplier_invoice_line")})
+UNION ALL
+SELECT 'supplier_payment',
+       (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_payment")} WHERE payment_type = 'ACCPAYPAYMENT'),
+       (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_supplier_payment")})
+UNION ALL
+SELECT 'customer_credit_note',
+       (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_credit_note")} WHERE credit_note_type = 'ACCRECCREDIT'),
+       (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_customer_credit_note")})
+UNION ALL
+SELECT 'supplier_credit_note',
+       (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_credit_note")} WHERE credit_note_type = 'ACCPAYCREDIT'),
+       (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_supplier_credit_note")})
+UNION ALL
+SELECT 'general_ledger',
+       (SELECT COUNT(*) FROM ${ref("dw_1_silver_xero", "fact_general_ledger")}),
+       (SELECT COUNT(*) FROM ${ref("xero_gold_finance", "fact_general_ledger")})
+)
+SELECT * FROM counts WHERE silver_count != gold_count

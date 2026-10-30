@@ -1,0 +1,3 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+warehouses,,1,0,succeeded,15,15,15,1,0,15,14442,1079,
+warehouses,,2,0,succeeded,15,15,15,1,0,15,14441,1281,

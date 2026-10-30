@@ -25,13 +25,13 @@
 //!     [`async_nats::jetstream::Context::get_consumer_from_stream`], never
 //!     `get_stream(..).get_consumer(..)`. The latter issues a `STREAM.INFO`
 //!     request first, so it would additionally require
-//!     `$JS.API.STREAM.INFO.AQENCIA_CONTROLPLANE` — the exact permission gap
+//!     `$JS.API.STREAM.INFO.CONTROLPLANE` — the exact permission gap
 //!     that silently broke session-core's consumer once already. Runtime
 //!     credentials here can bind, pull and ACK; they cannot create or mutate
 //!     `JetStream` topology.
 //!   * Connects to `control-shared-nats` (Control Plane), NOT the Frontend
 //!     Plane's own `verevon-nats`. Both sit on `inter-plane-bus`, but only
-//!     `control-shared-nats` hosts the `AQENCIA_CONTROLPLANE` stream that
+//!     `control-shared-nats` hosts the `CONTROLPLANE` stream that
 //!     org-core and user-core publish erasure into. Pointing this at
 //!     `verevon-nats` would connect, bind nothing, and retry forever — a
 //!     consumer that looks healthy and receives nothing.
@@ -74,7 +74,7 @@ use crate::config::AppState;
 // carries a short TTL.
 use crate::upstream::invalidate_session_context_cache;
 
-pub(crate) const STREAM_NAME: &str = "AQENCIA_CONTROLPLANE";
+pub(crate) const STREAM_NAME: &str = "CONTROLPLANE";
 pub(crate) const SUBJECT: &str = "verevon.gdpr.erasure.requested";
 pub(crate) const DURABLE_NAME: &str = "verevon-gateway-gdpr-erasure-v1";
 

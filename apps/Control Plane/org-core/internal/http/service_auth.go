@@ -34,6 +34,7 @@ var orgServiceScopeAllowlist = map[string]struct{}{
 	"org:provision:self":            {},
 	"org:settings:write:self":       {},
 	"org:brreg:read":                {},
+	"org:website:read":              {},
 	"org:erase:self":                {},
 	"org:deletion:self":             {},
 	"org:tenant:read:any":           {},
@@ -299,6 +300,10 @@ func organizationAPIScopes(method string, rest []string) []string {
 		return []string{"org:settings:write:self"}
 	case len(rest) == 2 && method == http.MethodPatch && rest[1] == "brreg":
 		return []string{"org:settings:write:self"}
+	case len(rest) == 2 && method == http.MethodPatch && rest[1] == "website":
+		return []string{"org:settings:write:self"}
+	case len(rest) == 2 && method == http.MethodGet && rest[1] == "website":
+		return []string{"org:website:read"}
 	default:
 		return nil
 	}

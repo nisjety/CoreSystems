@@ -1,0 +1,33 @@
+config {
+  type: "assertion",
+  name: "assert_supplier_key_coverage",
+  description: "Every non-null supplier key in procurement and AP facts resolves to one supplier dimension row.",
+  tags: ["assertion", "gold", "supplier"]
+}
+
+WITH fact_keys AS (
+  SELECT supplier_key FROM ${ref("visma_gold_sales", "fact_purchase_order_line")}
+  UNION DISTINCT
+  SELECT supplier_key FROM ${ref("visma_gold_finance", "fact_supplier_invoice")}
+  UNION DISTINCT
+  SELECT supplier_key FROM ${ref("visma_gold_finance", "fact_supplier_invoice_line")}
+  UNION DISTINCT
+  SELECT supplier_key FROM ${ref("visma_gold_finance", "fact_supplier_payment")}
+),
+missing_keys AS (
+  SELECT 'missing_dimension' AS issue, f.supplier_key
+  FROM fact_keys AS f
+  LEFT JOIN ${ref("visma_gold_finance", "dim_supplier")} AS d
+    ON f.supplier_key = d.supplier_key
+  WHERE f.supplier_key IS NOT NULL AND d.supplier_key IS NULL
+),
+duplicate_keys AS (
+  SELECT 'duplicate_dimension' AS issue, supplier_key
+  FROM ${ref("visma_gold_finance", "dim_supplier")}
+  GROUP BY supplier_key
+  HAVING COUNT(*) > 1
+)
+
+SELECT * FROM missing_keys
+UNION ALL
+SELECT * FROM duplicate_keys

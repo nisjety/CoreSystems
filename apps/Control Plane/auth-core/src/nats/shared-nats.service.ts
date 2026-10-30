@@ -2,16 +2,16 @@
  * Shared NATS Service
  *
  * Connects to the cross-plane NATS broker (verevon-nats) and publishes
- * domain events on the `aqencia.controlplane.*` subject namespace so that
+ * domain events on the `controlplane.*` subject namespace so that
  * all other planes (Ingestion, Data, Reasoning) can subscribe to them.
  *
- * Subject convention: aqencia.controlplane.<entity>.<verb>
- *   aqencia.controlplane.org.created
- *   aqencia.controlplane.org.member_added
- *   aqencia.controlplane.org.member_removed
- *   aqencia.controlplane.user.registered
- *   aqencia.controlplane.user.signed_in
- *   aqencia.controlplane.user.provider_linked
+ * Subject convention: controlplane.<entity>.<verb>
+ *   controlplane.org.created
+ *   controlplane.org.member_added
+ *   controlplane.org.member_removed
+ *   controlplane.user.registered
+ *   controlplane.user.signed_in
+ *   controlplane.user.provider_linked
  */
 
 import {
@@ -97,7 +97,7 @@ export class SharedNatsService implements OnModuleInit, OnModuleDestroy {
   /**
    * Publish a cross-plane event to the shared NATS JetStream.
    *
-   * @param subject  Full subject, e.g. "aqencia.controlplane.org.created"
+   * @param subject  Full subject, e.g. "controlplane.org.created"
    * @param payload  Event payload (JSON-serialisable object)
    */
   async publish(

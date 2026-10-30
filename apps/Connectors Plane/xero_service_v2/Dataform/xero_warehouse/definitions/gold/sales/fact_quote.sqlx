@@ -1,0 +1,38 @@
+config {
+  type: "table",
+  schema: "xero_gold_sales",
+  description: "Xero sales quote headers; open pipeline is not booked revenue or a Visma sales order.",
+  assertions: { nonNull: ["tenant_id", "quote_id", "quote_key"], uniqueKey: ["quote_key"] }
+}
+
+WITH line_sets AS (
+  SELECT tenant_id, quote_id, COUNT(*) AS observed_line_count,
+         LOGICAL_OR(is_line_set_ambiguous) AS has_ambiguous_lines
+  FROM ${ref("dw_1_silver_xero", "fact_quote_line")}
+  GROUP BY tenant_id, quote_id
+), quotes AS (
+  SELECT q.*, COALESCE(s.observed_line_count, 0) AS observed_line_count,
+         (q.line_item_count IS DISTINCT FROM COALESCE(s.observed_line_count, 0)
+          OR COALESCE(s.has_ambiguous_lines, FALSE)) AS is_line_set_ambiguous
+  FROM ${ref("dw_1_silver_xero", "fact_quote")} AS q
+  LEFT JOIN line_sets AS s ON q.tenant_id = s.tenant_id AND q.quote_id = s.quote_id
+)
+SELECT FARM_FINGERPRINT(q.tenant_id) AS company_key,
+       FARM_FINGERPRINT(CAST(q.quote_date_local AS STRING)) AS date_key,
+       c.contact_key,
+       IF(c.is_customer IS TRUE, c.contact_key, NULL) AS customer_key,
+       IF(q.branding_theme_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(q.tenant_id, '|', q.branding_theme_id))) AS branding_theme_key,
+       q.quote_key, q.tenant_id, q.quote_id, q.quote_number,
+       q.reference, q.status, q.is_deleted, q.is_open_pipeline, q.is_line_set_ambiguous,
+       q.contact_id AS customer_id, q.contact_name AS customer_name, q.branding_theme_id,
+       q.quote_date_local AS quote_date, q.expiry_date_local AS expiry_date,
+       q.currency_code, q.currency_rate AS source_exchange_rate,
+       q.sub_total AS source_subtotal_in_currency,
+       q.total_tax AS source_vat_in_currency,
+       q.total AS source_total_in_currency,
+       IF(q.is_open_pipeline AND NOT q.is_line_set_ambiguous AND q.currency_code IS NOT NULL,
+          q.total, NULL) AS pipeline_amount_in_currency,
+       q.line_item_count, q.observed_line_count, q.synced_at, 'xero' AS source_system
+FROM quotes AS q
+LEFT JOIN ${ref("xero_gold_common", "dim_contact")} AS c
+  ON q.tenant_id = c.tenant_id AND q.contact_id = c.contact_id

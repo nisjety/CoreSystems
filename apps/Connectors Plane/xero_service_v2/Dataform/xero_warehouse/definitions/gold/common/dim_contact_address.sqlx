@@ -1,0 +1,27 @@
+config {
+  type: "table",
+  schema: "xero_gold_common",
+  description: "Xero contact addresses with a conformed contact foreign key when the copied source resolves it.",
+  assertions: { nonNull: ["tenant_id", "contact_address_key", "contact_address_natural_key"], uniqueKey: ["contact_address_key"] }
+}
+
+SELECT
+  FARM_FINGERPRINT(s.contact_address_key) AS contact_address_key,
+  s.contact_address_key AS contact_address_natural_key,
+  IF(s.is_contact_unresolved, NULL, FARM_FINGERPRINT(CONCAT(s.tenant_id, '|', s.contact_id))) AS contact_key,
+  s.tenant_id,
+  s.contact_id,
+  s.address_type,
+  s.attention_to,
+  s.address_line_1,
+  s.address_line_2,
+  s.address_line_3,
+  s.address_line_4,
+  s.city,
+  s.region,
+  s.postal_code,
+  s.country,
+  s.is_contact_unresolved,
+  s.synced_at,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_contact_address")} AS s

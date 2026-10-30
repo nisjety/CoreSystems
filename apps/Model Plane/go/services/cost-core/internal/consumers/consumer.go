@@ -19,8 +19,8 @@ import (
 // scoped to any single plane's own event namespace. Mirrors
 // conversation-core-go's and documents-api-go's identical constant and
 // audit-core's provisioner (ControlSharedStreamName / stream
-// "AQENCIA_CONTROLPLANE").
-const controlSharedStream = "AQENCIA_CONTROLPLANE"
+// "CONTROLPLANE").
+const controlSharedStream = "CONTROLPLANE"
 
 // DurableConsumer binds one durable push subscription and drains it on
 // shutdown. The binding uses manual ack so a handler has time to apply its

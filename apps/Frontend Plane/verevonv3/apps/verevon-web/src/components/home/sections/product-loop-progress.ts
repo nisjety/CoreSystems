@@ -85,8 +85,9 @@ export function getProductLoopScrollYForTime({
 	return sectionTop + pinnedFraction * safePinnedRange;
 }
 
-// The settled film frame: the largest 16:10-ish frame that fits the viewport, centred. Stage 04's
-// live demo sizes its app from this same frame, so the demo and the film share one geometry.
+// The settled film frame: the largest 16:10-ish frame that fits the viewport, centred, and never wider than
+// twice its height (the site's refined monitor crop on short, wide viewports). Stage 04's live demo
+// sizes its app from this same frame, so the demo and the film share one geometry.
 export function getProductLoopContentFrame({
 	height,
 	width,
@@ -95,11 +96,12 @@ export function getProductLoopContentFrame({
 	width: number;
 }) {
 	const inset = Math.max(Math.min(width * 0.077, 100), (width - 1512) / 2);
-	const frameWidth = width - inset * 2;
-	const frameHeight = Math.min(height - 160, frameWidth * 0.625);
+	const availableHeight = height - 160;
+	const frameWidth = Math.min(width - inset * 2, availableHeight * 2);
+	const frameHeight = Math.min(availableHeight, frameWidth * 0.625);
 	return {
 		height: frameHeight,
-		left: inset,
+		left: (width - frameWidth) / 2,
 		top: Math.max(96, (height - frameHeight) / 2),
 		width: frameWidth,
 	};

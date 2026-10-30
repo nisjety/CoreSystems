@@ -1,10 +1,4 @@
-import {
-  createMemo,
-  For,
-  Match,
-  Show,
-  Switch,
-} from 'solid-js'
+import { createMemo, For, Match, Show, Switch } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import {
   ChevronRight,

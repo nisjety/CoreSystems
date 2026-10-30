@@ -1,0 +1,9 @@
+{
+  "tenant_id": "bb6c024e-5567-11ee-960c-025417856183",
+  "tenant_name": "Aquatiq Sense AS",
+  "datamart_company_id": "4848397",
+  "status": "historical",
+  "valid_to": "2025-12-31",
+  "bu_label": "Food Technology & Aquaculture",
+  "notes": "Merged into Aquatiq AS as the business unit Food Technology & Aquaculture on 2026-01-01. No new data, but the credentials still work and the history is wanted. Registered in v1 scripts/add_tenants.py; DataMart company discovered with `vsv2 dm-companies` on 2026-10-01."
+}

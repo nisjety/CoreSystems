@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   getOrganizationAISettings,
+  recordOrganizationWebsite,
   getOrganizationZdr,
   getOrganizationSupportAIMode,
   getOrganizationZdrEntitled,
@@ -135,5 +136,36 @@ describe('organization client', () => {
     )
 
     await expect(getOrganizationZdrEntitled('org_1')).resolves.toBe(false)
+  })
+})
+
+describe('recordOrganizationWebsite', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('sends the website to the organisation and returns the address as the record kept it', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(
+      JSON.stringify({ id: 'org_1', website_url: 'https://firma.no/' }),
+      { headers: { 'Content-Type': 'application/json' } },
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const kept = await recordOrganizationWebsite('org_1', 'https://firma.no/')
+
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(String(url)).toContain('/api/v1/orgs/org_1/website')
+    expect(init?.method).toBe('PATCH')
+    expect(JSON.parse(String(init?.body))).toEqual({ website_url: 'https://firma.no/' })
+    expect(kept).toBe('https://firma.no/')
+  })
+
+  it('reports a refused address as the error the gateway sent, not as a recorded website', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => new Response(
+      JSON.stringify({ error: { code: 'invalid_url', message: 'Private or loopback URLs are not allowed.' } }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } },
+    )))
+
+    await expect(recordOrganizationWebsite('org_1', 'http://127.0.0.1/')).rejects.toThrow()
   })
 })

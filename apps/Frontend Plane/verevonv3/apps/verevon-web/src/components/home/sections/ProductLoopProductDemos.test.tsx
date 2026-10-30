@@ -8,6 +8,7 @@ import {
 	shouldPlayProductLoopVideo,
 	type ProductLoopMedia,
 } from './ProductLoopProductDemos';
+import playerStyles from './ProductLoopProductDemos.module.css';
 
 const film: ProductLoopMedia = {
 	alt: 'Verevon svarer med kilder synlige.',
@@ -91,6 +92,65 @@ const mount = (media: ProductLoopMedia, { nativeReduce = false }: { nativeReduce
 };
 
 describe('ProductLoopVideo playback', () => {
+	it('pauses on click and resumes on the next click without losing the manual choice on visibility updates', () => {
+		mount(film);
+		const control = container.querySelector<HTMLButtonElement>('button[aria-label="Sett video på pause"]');
+		expect(control).not.toBeNull();
+		expect(control?.parentElement?.getAttribute('data-product-video-controls')).toBe('');
+		expect(control?.parentElement?.className).toMatch(/bottom-.*right-|right-.*bottom-/);
+		play.mockClear();
+		pause.mockClear();
+
+		act(() => control?.click());
+		expect(pause).toHaveBeenCalled();
+		expect(container.querySelector('button')?.getAttribute('aria-label')).toBe('Fortsett video');
+		act(() => document.dispatchEvent(new Event('visibilitychange')));
+		expect(play).not.toHaveBeenCalled();
+
+		act(() => container.querySelector<HTMLButtonElement>('button')?.click());
+		expect(play).toHaveBeenCalled();
+		expect(container.querySelector('button')?.getAttribute('aria-label')).toBe('Sett video på pause');
+	});
+
+	it('provides a seekable timeline to the left of the pause button and updates elapsed time', () => {
+		const video = mount(film);
+		Object.defineProperty(video, 'duration', { configurable: true, value: 8 });
+		Object.defineProperty(video, 'currentTime', { configurable: true, writable: true, value: 2 });
+		act(() => video.dispatchEvent(new Event('loadedmetadata')));
+		const timeline = container.querySelector<HTMLInputElement>('input[type="range"][aria-label="Spol i video"]')!;
+		const control = container.querySelector<HTMLButtonElement>('button[aria-label="Sett video på pause"]')!;
+		expect(timeline).not.toBeNull();
+		expect(Boolean(timeline.compareDocumentPosition(control) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+		expect(timeline.max).toBe('8');
+		expect(timeline.value).toBe('2');
+		expect(container.querySelector('[data-product-video-time]')?.textContent).toContain('0:02 / 0:08');
+		act(() => {
+			timeline.value = '5';
+			timeline.dispatchEvent(new Event('input', { bubbles: true }));
+		});
+		expect(video.currentTime).toBe(5);
+	});
+
+	it('keeps the video unzoomed while the card owns the hover treatment and controls reveal', () => {
+		const video = mount(film);
+		expect(video.className).not.toContain('scale-110');
+		expect(video.closest('[data-product-video-card]')).not.toBeNull();
+		expect(container.querySelector('[data-product-video-controls]')?.classList.contains(playerStyles.controls)).toBe(true);
+		expect(container.innerHTML).not.toContain('bg-black/15');
+	});
+
+	it('lets an explicit click play a reduced-motion poster, then pause it', () => {
+		reduce = true;
+		mount(film);
+		expect(play).not.toHaveBeenCalled();
+		const control = container.querySelector<HTMLButtonElement>('button[aria-label="Spill video"]');
+		expect(control).not.toBeNull();
+		act(() => control?.click());
+		expect(play).toHaveBeenCalled();
+		act(() => container.querySelector<HTMLButtonElement>('button')?.click());
+		expect(pause).toHaveBeenCalled();
+	});
+
 	it('never calls play() under prefers-reduced-motion: reduce, and the poster stays', () => {
 		reduce = true;
 		const video = mount(film);
@@ -182,5 +242,6 @@ describe('ProductLoopVideo markup', () => {
 		const video = mount({ ...film, webm: undefined });
 		const types = [...video.querySelectorAll('source')].map((source) => source.getAttribute('type'));
 		expect(types).toEqual(['video/mp4']);
+		expect(video.className).toContain('object-cover');
 	});
 });

@@ -1,0 +1,72 @@
+query SupplierDocuments(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  supplierDocuments(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    documentType
+    referenceNumber
+    docDate
+    origInvoiceDate
+    status
+    appStatus
+    hold
+    financialPeriod
+    description
+    supplierId
+    locationId
+    currencyId
+    exchangeRate
+    dueDate
+    vatTotal
+    vatTotalInCurrency
+    vatTaxableTotal
+    vatTaxableTotalInCurrency
+    vatExemptTotal
+    vatExemptTotalInCurrency
+    withHoldingTax
+    withholdingTax
+    withHoldingTaxInCurrency
+    withholdingTaxInCurrency
+    cashDiscountInCurrency
+    cashDiscount
+    balance
+    balanceInCurrency
+    amount
+    amountInCurrency
+    detailTotal
+    detailTotalInCurrency
+    note
+    closedFinancialPeriod
+    accountId
+    subaccountId
+    paymentMessage
+    paymentRefNo
+    paymentMethodId
+    termsId
+    cashDiscountDate
+    batchNumber
+    payDate
+    supplierReference
+    branchId
+    paySelected
+    voucherId
+    createdDateTime
+    releasedDateTime
+    cashAccountId
+    lastModifiedDateTime
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+  }
+}

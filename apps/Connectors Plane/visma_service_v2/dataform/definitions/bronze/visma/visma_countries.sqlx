@@ -1,0 +1,16 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_countries",
+  description: "Bronze: Country reference data (code, name) from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.tenant_id AS `tenantId`,
+  s.updated_at AS `syncedAt`,
+  s.last_run_id AS `syncId`,
+  ${bronze.str("name")} AS `name`,
+  ${bronze.str("id")} AS `id`
+FROM ${ref("dw_staging_visma", "countries")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

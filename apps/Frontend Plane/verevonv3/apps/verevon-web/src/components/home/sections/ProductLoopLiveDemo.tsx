@@ -10,6 +10,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { Maximize2, Minimize2 } from "lucide-react";
 import { productLoopPrefersReducedMotion } from "./ProductLoopProductDemos";
 import {
   LIVE_DEMO_BAR_HEIGHT,
@@ -333,6 +334,59 @@ function useLiveDemo({
 
 type LiveDemo = ReturnType<typeof useLiveDemo>;
 
+type FullscreenControl = {
+  isFullscreen: boolean;
+  isSupported: boolean;
+  toggle: () => void;
+};
+
+// The browser owns full screen and restores it with its native Escape behaviour. The component
+// only mirrors that state for the toolbar label and never tries to emulate full screen in CSS.
+function useFullscreenControl(
+  targetRef: RefObject<HTMLElement | null>,
+): FullscreenControl {
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isSupported, setIsSupported] = useState(false);
+
+  useEffect(() => {
+    const target = targetRef.current;
+    if (!target) return;
+
+    const update = () => {
+      setIsFullscreen(document.fullscreenElement === target);
+    };
+    const supported =
+      typeof target.requestFullscreen === "function" &&
+      typeof document.exitFullscreen === "function";
+
+    setIsSupported(supported);
+    update();
+    document.addEventListener("fullscreenchange", update);
+    return () => document.removeEventListener("fullscreenchange", update);
+  }, [targetRef]);
+
+  const toggle = useCallback(() => {
+    const target = targetRef.current;
+    if (
+      !target ||
+      typeof target.requestFullscreen !== "function" ||
+      typeof document.exitFullscreen !== "function"
+    ) {
+      setIsSupported(false);
+      return;
+    }
+
+    const action =
+      document.fullscreenElement === target
+        ? document.exitFullscreen()
+        : target.requestFullscreen();
+
+    void action.catch(() => setIsSupported(false));
+  }, [targetRef]);
+
+  return { isFullscreen, isSupported, toggle };
+}
+
 // Sizes the demo app from the settled film frame and scales it to the frame as it morphs.
 // The app's CSS size changes only with the viewport, so the frame's morph never reflows the app.
 function useLiveDemoFit({
@@ -405,6 +459,33 @@ function LiveDemoButton({
       type="button"
     >
       {children}
+    </button>
+  );
+}
+
+function LiveDemoFullscreenButton({
+  fullscreen,
+}: {
+  fullscreen: FullscreenControl;
+}) {
+  const label = fullscreen.isFullscreen
+    ? "Avslutt fullskjerm"
+    : "Vis dashboard i fullskjerm";
+
+  return (
+    <button
+      aria-label={label}
+      aria-pressed={fullscreen.isFullscreen}
+      className="grid size-7 place-items-center rounded-full border border-verevon-j-text/15 bg-background text-verevon-j-text transition-colors hover:border-verevon-j-text/35 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-verevon-j-text"
+      onClick={fullscreen.toggle}
+      title={label}
+      type="button"
+    >
+      {fullscreen.isFullscreen ? (
+        <Minimize2 aria-hidden="true" size={14} strokeWidth={1.6} />
+      ) : (
+        <Maximize2 aria-hidden="true" size={14} strokeWidth={1.6} />
+      )}
     </button>
   );
 }
@@ -542,6 +623,7 @@ export function LoopLiveDemo({ live }: { live: ProductLoopLiveDemo }) {
     shieldRef,
     variant: "stage",
   });
+  const fullscreen = useFullscreenControl(scopeRef);
   useLiveDemoFit({ appRef, areaRef, config: live, scopeRef });
   const { state } = demo;
   const hint =
@@ -555,6 +637,7 @@ export function LoopLiveDemo({ live }: { live: ProductLoopLiveDemo }) {
     <section
       aria-label={LIVE_DEMO_COPY.region}
       className="absolute inset-0 overflow-hidden bg-[#f8f8f7] text-verevon-j-text motion-reduce:[--product-loop-motion:reduce]"
+		data-fullscreen={fullscreen.isFullscreen}
       data-product-loop-live=""
       data-state={state}
       ref={scopeRef}
@@ -579,6 +662,9 @@ export function LoopLiveDemo({ live }: { live: ProductLoopLiveDemo }) {
         </span>
         <p className="min-w-0 truncate">{hint}</p>
         <div className="ml-auto flex shrink-0 items-center gap-2">
+          {isLoaded(state) && fullscreen.isSupported && (
+            <LiveDemoFullscreenButton fullscreen={fullscreen} />
+          )}
           {isLoaded(state) && (
             <LiveDemoButton onClick={() => demo.reset(true)}>
               {LIVE_DEMO_COPY.reset}

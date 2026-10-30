@@ -94,11 +94,11 @@ test('Application compose no longer wires the removed Model Plane token', () => 
 test('uses the two Auth-canonical revisioned Control Plane subjects', () => {
   assert.equal(
     CONTROL_PLANE_SUBJECTS.organizationChanged,
-    'aqencia.controlplane.org.changed',
+    'controlplane.org.changed',
   );
   assert.equal(
     CONTROL_PLANE_SUBJECTS.memberChanged,
-    'aqencia.controlplane.org.member_changed',
+    'controlplane.org.member_changed',
   );
   assert.deepEqual(Object.keys(CONTROL_PLANE_SUBJECTS).sort(), [
     'memberChanged',

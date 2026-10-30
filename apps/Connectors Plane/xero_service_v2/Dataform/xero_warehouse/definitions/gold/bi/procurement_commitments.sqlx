@@ -1,0 +1,41 @@
+config {
+  type: "table",
+  schema: "xero_datamart",
+  description: "Xero procurement-commitments consumption mart at purchase-order grain. Commitments are not supplier invoices or booked costs.",
+  assertions: { nonNull: ["procurement_commitment_key", "tenant_id", "purchase_order_id"], uniqueKey: ["procurement_commitment_key"] }
+}
+
+SELECT
+  purchase_order_key AS procurement_commitment_key,
+  company_key,
+  date_key,
+  contact_key,
+  supplier_key,
+  branding_theme_key,
+  tenant_id,
+  purchase_order_id,
+  purchase_order_number,
+  purchase_order_type,
+  reference,
+  status,
+  is_deleted,
+  is_billed,
+  is_open_commitment,
+  is_line_set_ambiguous,
+  supplier_id,
+  supplier_name,
+  order_date,
+  currency_code,
+  source_exchange_rate,
+  source_subtotal_in_currency,
+  source_vat_in_currency,
+  source_total_in_currency,
+  committed_amount_in_currency,
+  committed_amount_in_currency IS NOT NULL AS is_commitment_amount_available,
+  CAST(NULL AS NUMERIC) AS amount_nok,
+  FALSE AS is_nok_amount_available,
+  line_item_count,
+  observed_line_count,
+  synced_at,
+  'xero' AS source_system
+FROM ${ref("xero_gold_procurement", "fact_purchase_order")}

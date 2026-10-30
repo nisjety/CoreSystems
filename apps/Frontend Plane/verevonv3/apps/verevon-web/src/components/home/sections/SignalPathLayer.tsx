@@ -86,9 +86,12 @@ type ProblemRouteTargets = {
 };
 
 const DEFAULT_PROBLEM_ROUTE_TARGETS: ProblemRouteTargets = {
-	left: 703,
-	middle: 914,
-	right: 1171,
+	// Keep the central handoff on the actual visual centre. The old values
+	// belonged to the retired three-tab layout and made the quiet horizontal
+	// route drift to one side on wider viewports.
+	left: 690,
+	middle: 960,
+	right: 1230,
 };
 
 function createProblemSignalRoutes({

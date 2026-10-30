@@ -1,0 +1,14 @@
+config {
+  type: "table",
+  schema: "xero_gold_common",
+  description: "All Xero contacts, including prospects without a customer or supplier role.",
+  assertions: { nonNull: ["tenant_id", "contact_id", "contact_key"], uniqueKey: ["contact_key"] }
+}
+
+SELECT FARM_FINGERPRINT(CONCAT(tenant_id, '|', contact_id)) AS contact_key,
+       FARM_FINGERPRINT(tenant_id) AS company_key,
+       tenant_id, contact_id, contact_number, contact_name,
+       is_customer, is_supplier, status, is_active,
+       default_currency, is_missing_from_staging,
+       'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_contact")}

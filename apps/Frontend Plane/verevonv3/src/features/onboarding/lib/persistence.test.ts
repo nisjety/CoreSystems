@@ -2,7 +2,7 @@
 
 import { createRoot } from 'solid-js'
 import { createStore } from 'solid-js'
-import type { StoreSetter } from 'solid-js'
+import { type StoreSetter } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createOnboardingPersistence } from '@/features/onboarding/lib/persistence'
 import { createInitialOnboardingState } from '@/features/onboarding/lib/state'

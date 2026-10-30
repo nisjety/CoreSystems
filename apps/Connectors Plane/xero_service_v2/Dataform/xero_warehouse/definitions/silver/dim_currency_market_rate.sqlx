@@ -1,0 +1,78 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Normalized external market currency rates. One row per ordered currency pair, rate date, and direct/inverse direction; no Xero CurrencyRate direction is assumed.",
+  assertions: {
+    nonNull: ["currency_market_rate_key", "from_currency_code", "to_currency_code", "rate_date", "market_exchange_rate_to_currency"],
+    uniqueKey: ["currency_market_rate_key"]
+  }
+}
+
+WITH source_rates AS (
+  SELECT
+    UPPER(TRIM(currency_code)) AS base_currency_code,
+    UPPER(TRIM(quote_currency)) AS quote_currency_code,
+    SAFE_CAST(rate AS NUMERIC) AS exchange_rate,
+    SAFE_CAST(date AS DATE) AS rate_date,
+    NULLIF(TRIM(source), '') AS rate_source,
+    SAFE_CAST(created_at AS TIMESTAMP) AS source_timestamp
+  FROM ${ref("dw_staging_currency", "HistoryratesPowerBI")}
+), valid_source_rates AS (
+  SELECT *
+  FROM source_rates
+  WHERE base_currency_code IS NOT NULL
+    AND quote_currency_code IS NOT NULL
+    AND exchange_rate > 0
+    AND rate_date IS NOT NULL
+), deduplicated_rates AS (
+  SELECT *
+  FROM valid_source_rates
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY base_currency_code, quote_currency_code, rate_date
+    ORDER BY source_timestamp DESC, rate_source DESC
+  ) = 1
+), direct_and_inverse_rates AS (
+  SELECT
+    base_currency_code AS from_currency_code,
+    quote_currency_code AS to_currency_code,
+    rate_date,
+    exchange_rate AS market_exchange_rate_to_currency,
+    SAFE_DIVIDE(1, exchange_rate) AS market_inverse_exchange_rate_from_currency,
+    rate_source,
+    source_timestamp,
+    FALSE AS is_inverse_rate
+  FROM deduplicated_rates
+
+  UNION ALL
+
+  SELECT
+    quote_currency_code,
+    base_currency_code,
+    rate_date,
+    SAFE_DIVIDE(1, exchange_rate),
+    exchange_rate,
+    rate_source,
+    source_timestamp,
+    TRUE
+  FROM deduplicated_rates
+)
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(
+    from_currency_code, '|', to_currency_code, '|',
+    CAST(rate_date AS STRING), '|', CAST(is_inverse_rate AS STRING)
+  )) AS currency_market_rate_key,
+  from_currency_code,
+  to_currency_code,
+  rate_date,
+  market_exchange_rate_to_currency,
+  market_inverse_exchange_rate_from_currency,
+  rate_source,
+  source_timestamp,
+  is_inverse_rate,
+  ROW_NUMBER() OVER (
+    PARTITION BY from_currency_code, to_currency_code, is_inverse_rate
+    ORDER BY rate_date DESC, source_timestamp DESC
+  ) = 1 AS is_latest_rate_for_pair,
+  'staging_currency_feed' AS source_system
+FROM direct_and_inverse_rates

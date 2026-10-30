@@ -727,7 +727,7 @@ services:
       # Dedicated shared-broker identity for the cross-plane GDPR erasure
       # consumer only (see gdpr_nats.rs). This is NOT the plane-local NATS_URL
       # above and must never be repointed at the Model Plane's own broker —
-      # AQENCIA_CONTROLPLANE only exists on control-shared-nats.
+      # CONTROLPLANE only exists on control-shared-nats.
       NATS_SHARED_URL: nats://control-shared-nats:4222
       NATS_SHARED_USER: session-core-gdpr
       NATS_SHARED_PASSWORD: ${SESSION_CORE_GDPR_NATS_PASSWORD:?SESSION_CORE_GDPR_NATS_PASSWORD is required}

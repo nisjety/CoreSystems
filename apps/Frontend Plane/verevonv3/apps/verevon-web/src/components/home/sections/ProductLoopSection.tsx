@@ -49,9 +49,9 @@ export const loopStages: LoopStage[] = [
 		kind: "media",
 		media: {
 			kind: "image",
-			src: "/verevon-mood/shared-surface-amber.jpg",
-			alt: "To personer holder den samme opplyste flaten mellom seg.",
-			objectPosition: "center 50%",
+			src: "/verevon-product-shots/verevon-dashboard-curtain.jpg",
+    alt: "Verevon-dashbord med søk i kunnskapsbasen, arbeidsflater og innganger til kunnskap og agenter, vist på en skjerm foran varme gardiner.",
+			objectPosition: "center 6%",
 		},
 	},
 	{ step: "02", state: "Plan", kind: "media",
@@ -94,13 +94,7 @@ function LoopComposerContent() {
 		<div className="relative h-full w-full text-verevon-j-text">
 			<div className="relative flex h-full w-full flex-col items-center justify-center overflow-visible px-[clamp(16px,2vw,28px)] py-[clamp(18px,2.4vh,30px)] text-center">
 				<div className="shrink-0" data-product-loop-composer-copy="">
-					<p
-						className="verevon-eyebrow text-verevon-coral"
-						data-product-loop-composer-label=""
-					>
-						{activeComposerCopy.label.replace("04 /", "05 /")}
-					</p>
-					<h2 className="verevon-home-heading mt-4 min-h-[1.8em] max-w-[14ch] text-verevon-j-text text-balance">
+					<h2 className="verevon-home-heading min-h-[1.8em] max-w-[14ch] text-verevon-j-text text-balance">
 						<span
 							className="block animate-[fade-in_300ms_ease-out]"
 							data-product-loop-composer-title=""
@@ -117,7 +111,7 @@ function LoopComposerContent() {
 					/>
 				</div>
 				<p
-					className="mt-[clamp(22px,4vh,44px)] min-h-[3em] max-w-[42rem] shrink-0 font-geist text-[clamp(0.96rem,1.04vw,1.16rem)] font-light leading-[1.48] text-verevon-text-muted"
+					className="mt-[clamp(22px,4vh,44px)] min-h-[3em] max-w-[42rem] shrink-0 font-manrope text-[clamp(1rem,1.05vw,1.125rem)] font-light leading-[1.5] tracking-[-0.015em] text-verevon-text-muted"
 					data-product-loop-composer-copy=""
 				>
 					<span
@@ -143,6 +137,7 @@ function LoopMediaLayer({
 	return (
 		<div
 			className="absolute inset-0 overflow-hidden"
+			data-active={index === 0}
 			data-product-loop-layer={index}
 			style={{
 				clipPath: index === 0 ? "inset(0% 0% 0%)" : "inset(0% 0% 100%)",
@@ -175,13 +170,10 @@ function LoopCopyPanel({ index, stage }: { index: number; stage: LoopStage }) {
 				visibility: index === 0 ? "visible" : "hidden",
 			}}
 		>
-			<p className="verevon-eyebrow mb-5 text-[color-mix(in_srgb,var(--verevon-a-earth)_78%,var(--verevon-j-text))]">
-				{stage.step} / {stage.state}
-			</p>
-			<h2 className="verevon-home-heading m-0 max-w-[10.5ch] text-verevon-j-text text-balance">
+			<h2 className="verevon-home-heading m-0 max-w-[10.5ch] pt-7 text-verevon-j-text text-balance">
 				{stage.title}
 			</h2>
-			<p className="mt-[clamp(22px,2.4vw,36px)] max-w-[416px] font-geist text-[clamp(1rem,1.02vw,1.18rem)] font-light leading-[1.5] text-verevon-text-muted text-pretty">
+			<p className="mt-[clamp(22px,2.4vw,36px)] max-w-[34ch] font-manrope text-[clamp(1rem,1.05vw,1.125rem)] font-light leading-[1.5] tracking-[-0.015em] text-verevon-text-muted text-pretty">
 				{stage.body}
 			</p>
 		</div>
@@ -222,25 +214,21 @@ function ProductLoopMobileFallback() {
 		>
 			<div className="grid gap-6 border-t border-verevon-j-text/10 pt-6">
 				<h2 className="verevon-home-heading max-w-[11ch] text-verevon-j-text">
-					Fra kunnskap til handling
+					Felles grunnlag. Styrt handling.
 				</h2>
 				<div className="relative aspect-[1.12] overflow-hidden rounded-[22px] bg-[#f4f3f0]">
 					<ProductLoopMediaContent
 						media={loopStages[0].media as ProductLoopMedia}
-						priority
 					/>
 				</div>
 			</div>
 
 			{loopStages.slice(1, 4).map((stage) => (
 				<article className="grid gap-5 border-t border-verevon-j-text/10 pt-6" key={stage.step}>
-					<p className="verevon-eyebrow text-verevon-coral">
-						{stage.step} / {stage.state}
-					</p>
-					<h3 className="m-0 max-w-[11ch] font-manrope text-[clamp(2.5rem,12vw,4.6rem)] font-light leading-[0.94] tracking-[-0.065em] text-verevon-j-text text-balance">
+					<h3 className="m-0 max-w-[11ch] font-manrope text-[clamp(1.875rem,7vw,2.75rem)] font-light leading-[0.96] tracking-[-0.045em] text-verevon-j-text text-balance">
 						{stage.title}
 					</h3>
-					<p className="max-w-[34rem] font-geist text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
+					<p className="max-w-[34rem] font-manrope text-[1rem] font-light leading-[1.5] tracking-[-0.015em] text-verevon-text-muted">
 						{stage.body}
 					</p>
                     {stage.kind === "live" && stage.live ? (
@@ -254,17 +242,14 @@ function ProductLoopMobileFallback() {
 			))}
 
 			<div className="grid gap-6 border-t border-verevon-j-text/10 pt-6">
-				<p className="verevon-eyebrow text-verevon-coral">
-					{activeComposerCopy.label.replace("04 /", "05 /")}
-				</p>
-				<h3 className="max-w-[14ch] font-manrope text-[clamp(2.5rem,11vw,4.4rem)] font-light leading-[0.92] tracking-[-0.065em] text-verevon-j-text">
+				<h3 className="max-w-[14ch] font-manrope text-[clamp(1.875rem,7vw,2.75rem)] font-light leading-[0.96] tracking-[-0.045em] text-verevon-j-text">
 					{activeComposerCopy.title}
 				</h3>
 				<FeatureComposerCycle
 					id="product-mobile-composer-control"
 					onModeChange={setActiveComposerMode}
 				/>
-				<p className="max-w-[34rem] font-geist text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
+				<p className="max-w-[34rem] font-manrope text-[1rem] font-light leading-[1.5] tracking-[-0.015em] text-verevon-text-muted">
 					{activeComposerCopy.body}
 				</p>
 			</div>
@@ -324,6 +309,7 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 							"[data-product-loop-layer]",
 						),
 					);
+					const monitorImage = layers[0]?.querySelector<HTMLImageElement>("img");
 					const panels = Array.from(
 						section.querySelectorAll<HTMLElement>(
 							"[data-product-loop-copy-panel]",
@@ -389,10 +375,12 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 					});
 					const entranceStartFrame = () => {
 						const markerRect = placeFrame(0);
+						const width = Math.min(markerRect.width, markerRect.height * 2);
 
 						return {
 							...markerRect,
-							left: (viewportRect.width - markerRect.width) / 2,
+							left: (viewportRect.width - width) / 2,
+							width,
 						};
 					};
 					const dynamicEntranceStartFrame = () => ({
@@ -458,7 +446,7 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 							rotation: -20,
 							xPercent: -50,
 							yPercent: -50,
-							...dynamicCircleGeometry(0.3, 0, 0.15),
+							...dynamicCircleGeometry(0.28, 0, 0.1),
 						});
 						gsap.set(connector, { autoAlpha: 1 });
 						gsap.set(copyFloat, {
@@ -476,6 +464,9 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 							autoAlpha: 1,
 							clipPath: "inset(0% 0% 0%)",
 						});
+						if (monitorImage) {
+							gsap.set(monitorImage, { scale: 1, transformOrigin: "50% 24%" });
+						}
 						gsap.set(panels, {
 							autoAlpha: 0,
 							y: 16,
@@ -503,6 +494,7 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
                                 layers.forEach((layer, index) => {
                                     layer.inert = index !== active;
                                     layer.setAttribute("aria-hidden", String(index !== active));
+						layer.dataset.active = String(index === active);
                                 });
                             },
 						});
@@ -609,7 +601,7 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 							.to(
 								circle,
 								{
-									...dynamicCircleGeometry(0.62, 0.14, -0.08),
+								...dynamicCircleGeometry(0.58, 0.08, -0.02),
 									duration: PRODUCT_LOOP_ENTRANCE_TIMELINE_DURATION,
 									ease: "power3.out",
 									rotation: 0,
@@ -623,16 +615,23 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 							)
 							.to(
 								header,
-								{ autoAlpha: 0, y: -18, duration: 0.28, ease: "power2.in" },
-								0.5,
+								{ autoAlpha: 0, y: -18, duration: 0.22, ease: "power2.in" },
+								0.28,
 							)
 							.to(chrome, { autoAlpha: 1, duration: 0.22 }, 0.52);
+
+						// Push into the photograph's actual screen before the HTML demo
+						// takes over. The image moves inside the existing frame, so the
+						// approved section geometry and opening crop remain unchanged.
+						if (monitorImage && (!window.matchMedia("(prefers-reduced-motion: reduce)").matches || document.documentElement.dataset.motion === "full")) {
+							loopTimeline.to(monitorImage, { scale: 1.42, duration: 0.72, ease: "power2.inOut" }, 0.5);
+						}
 
 						transition(0, 1, 1, 0, 0.92);
 						loopTimeline.to(
 							circle,
 							{
-								...dynamicCircleGeometry(0.78, -0.16, 0.1),
+								...dynamicCircleGeometry(0.68, -0.08, 0.05),
 								duration: 0.52,
 								rotation: 45,
 							},
@@ -642,7 +641,7 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 						loopTimeline.to(
 							circle,
 							{
-								...dynamicCircleGeometry(0.9, 0.18, -0.12),
+								...dynamicCircleGeometry(0.78, 0.1, -0.04),
 								duration: 0.52,
 								rotation: 90,
 							},
@@ -652,7 +651,7 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 						loopTimeline.to(
 							circle,
 							{
-								...dynamicCircleGeometry(1.05, 0, 0.05),
+								...dynamicCircleGeometry(0.86, 0, 0),
 								duration: 0.58,
 								rotation: 135,
 							},
@@ -812,7 +811,7 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 
 	if (recordings.length > 0) {
 		return <section id="produkt" ref={sectionRef} aria-labelledby="product-recordings-title" className="bg-background px-[var(--verevon-page-pad)] py-24 text-verevon-j-text">
-			<div className="mx-auto mb-10 max-w-6xl"><h2 id="product-recordings-title" className="verevon-home-heading max-w-[14ch]">Fra kunnskap til handling.</h2></div>
+			<div className="mx-auto mb-10 max-w-6xl"><h2 id="product-recordings-title" className="verevon-home-heading max-w-[14ch]">Felles grunnlag. Styrt handling.</h2></div>
 			<ProductRecordingPlayer recordings={recordings} />
 		</section>;
 	}
@@ -835,19 +834,19 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 				style={{ scrollMarginTop: PRODUCT_LOOP_ENTRANCE_SCROLL_MARGIN }}
 			/>
 
-			<div className="sticky top-0 min-h-svh overflow-hidden max-[899px]:relative max-[899px]:min-h-0" data-product-loop-pin="">
+			<div className="sticky top-0 min-h-svh overflow-visible max-[899px]:relative max-[899px]:min-h-0" data-product-loop-pin="">
 				<div
-					className="relative min-h-svh overflow-hidden max-[899px]:grid max-[899px]:min-h-0 max-[899px]:gap-12 max-[899px]:px-[var(--verevon-page-pad)] max-[899px]:py-24"
+					className="relative min-h-svh overflow-visible max-[899px]:grid max-[899px]:min-h-0 max-[899px]:gap-12 max-[899px]:px-[var(--verevon-page-pad)] max-[899px]:py-24"
 					data-product-loop-viewport=""
 				>
-					<div aria-hidden="true" className="absolute inset-0 bg-[radial-gradient(circle_at_78%_28%,rgba(238,122,80,0.08),transparent_27%),radial-gradient(circle_at_14%_74%,rgba(41,64,74,0.07),transparent_28%),linear-gradient(180deg,rgba(248,248,247,0),rgba(248,248,247,0.78))]" />
+					<div aria-hidden="true" className="absolute -inset-y-[14vh] inset-x-0 bg-[radial-gradient(circle_at_78%_28%,rgba(238,122,80,0.08),transparent_27%),radial-gradient(circle_at_14%_74%,rgba(41,64,74,0.07),transparent_28%),linear-gradient(180deg,rgba(248,248,247,0),rgba(248,248,247,0.78))]" />
 
 					<div
 						className="absolute left-[var(--verevon-edge)] top-[clamp(112px,15vh,176px)] z-40 max-w-[min(46.8vw,630px)] text-left max-[899px]:hidden"
 						data-product-loop-header=""
 					>
 						<h2 className="verevon-home-heading max-w-[10ch] text-verevon-j-text text-balance">
-							Fra kunnskap til handling
+							Felles grunnlag. Styrt handling.
 						</h2>
 					</div>
 
@@ -881,7 +880,7 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 					/>
 
 					<div
-						className="absolute left-0 top-0 z-20 h-full w-full overflow-hidden rounded-[24px] border border-verevon-j-text/8 bg-[#f8f8f7] shadow-[0_28px_96px_rgba(23,23,23,0.1)] max-[899px]:hidden"
+						className="absolute left-0 top-0 z-20 h-full w-full overflow-hidden max-[899px]:hidden"
 						data-product-loop-frame=""
 					>
 						<div className="relative h-full w-full">
@@ -907,7 +906,7 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 			</div>
 
 			<h2 className="sr-only" id="product-loop-title">
-				Produktflyten fra kunnskap til godkjent handling
+				Fra felles grunnlag til styrt handling
 			</h2>
 		</section>
 	);

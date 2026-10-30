@@ -1,0 +1,29 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_customer_classes",
+  description: "Bronze: Customer segmentation class definitions from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.str("attributes")} AS `attributes`,
+  ${bronze.str("description")} AS `description`,
+  ${bronze.str("id")} AS `id`,
+  ${bronze.bool("invoiceOrdersSeparately")} AS `invoiceOrdersSeparately`,
+  ${bronze.str("paymentMethodId")} AS `paymentMethodId`,
+  ${bronze.bool("requiredTaxzoneId")} AS `requiredTaxzoneId`,
+  ${bronze.str("taxZoneId")} AS `taxZoneId`
+FROM ${ref("dw_staging_visma", "customer_classes")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

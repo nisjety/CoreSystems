@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "dw_staging_xero",
+  name: "sync_run_entities",
+  description: "Ordered outcomes from Xero run manifests. Grain: run_id, outcome_index."
+}

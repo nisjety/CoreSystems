@@ -20,6 +20,7 @@ Host and container ports usually match, but **not always** — `shipping-core` m
 | **integration-api** | `3026 → 3026` | HTTP | ✅ 200 `/health` | OAuth and provider discovery |
 | **shipping-core** | `3156 → 8080` | HTTP | ✅ 200 `/healthz` | Health path is `/healthz` — `/health` 404s |
 | **finspo-api** | `3130 → 3130` | HTTP | ✅ 200 `/health` | SharePoint/Graph delta-sync connector API |
+| **anbud-api** | `3138 → 3138` | HTTP | ⏳ not yet deployed (scaffold, 2026-10-09) | Doffin/TED tender ingestion. Port 3138 was unused anywhere in `apps/` when chosen. Probe with `/health`, `/ready` |
 | **integration-webhook-normalizer** | `3036 → 3036` | HTTP | ✅ 200 `/health` | Inbound webhook normalizer |
 | **integration-engine-go-api** | `3126 → 3126` | HTTP | ❌ no listener | Mapped in compose but not up in current stack |
 | **connector-runtime-engine** | `3003 → 3003`, `3009 → 3009` | HTTP | ❌ no listener | Nango runtime; gated behind `legacy-nango` profile |

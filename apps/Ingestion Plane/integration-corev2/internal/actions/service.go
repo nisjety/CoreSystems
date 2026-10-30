@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
@@ -23,7 +24,10 @@ import (
 	"github.com/triodelab/integration-corev2/internal/store"
 )
 
-const defaultActionTimeout = 15 * time.Second
+const (
+	defaultActionTimeout           = 15 * time.Second
+	maxProviderActionResponseBytes = 5 << 20
+)
 
 // maxContentBytes is the one ceiling for connector content reads
 // (drive.file.content / mail.messages.get / gmail.messages.get), stated once
@@ -301,9 +305,202 @@ func (s *Service) executeGoogle(ctx context.Context, token, operation string, pa
 		// Binary download, or the export of a Docs Editors file as Office
 		// formats (default) or text (exportAs=text): see drive_read.go.
 		return s.googleDriveFileContent(ctx, token, base, params)
+	case "gsc.sites.list", "google.gsc.sites.list":
+		return s.getBearer(ctx, token, base+"/webmasters/v3/sites", nil)
+	case "ga4.account_summaries.list", "ga4.data_streams.list":
+		return s.executeGoogleAnalyticsRead(ctx, token, operation, params, body)
+	case "ga4.report.run":
+		return s.executeGoogleAnalyticsReport(ctx, token, params, body)
+	case "ga4.reporting_host.resolve":
+		return s.executeGoogleAnalyticsHost(ctx, token, params, body)
+	case "gsc.search_analytics.query", "google.gsc.search_analytics.query":
+		siteURL, err := gscSiteURL(params)
+		if err != nil {
+			return nil, err
+		}
+		payload, err := gscSearchAnalyticsPayload(body)
+		if err != nil {
+			return nil, err
+		}
+		return s.postBearer(ctx, token, base+"/webmasters/v3/sites/"+url.PathEscape(siteURL)+"/searchAnalytics/query", payload, nil)
 	default:
 		return nil, fmt.Errorf("unsupported Google operation %q", operation)
 	}
+}
+
+const (
+	gscMaxDateRangeDays = 366
+	gscDefaultRowLimit  = 1000
+	gscMaxRowLimit      = 5000
+	gscMaxStartRow      = 20000
+)
+
+var gscAllowedDimensions = map[string]struct{}{
+	"query": {}, "page": {}, "country": {}, "device": {}, "date": {}, "searchAppearance": {},
+}
+
+func gscSiteURL(params map[string]any) (string, error) {
+	siteURL, err := requiredStringParam(params, "siteUrl")
+	if err != nil {
+		return "", err
+	}
+	if len(siteURL) > 2048 || strings.ContainsAny(siteURL, "\r\n") {
+		return "", fmt.Errorf("siteUrl is invalid")
+	}
+	if strings.HasPrefix(siteURL, "sc-domain:") {
+		domain := strings.TrimSpace(strings.TrimPrefix(siteURL, "sc-domain:"))
+		if domain == "" || strings.ContainsAny(domain, "/?# \t") {
+			return "", fmt.Errorf("siteUrl must name a domain property")
+		}
+		return siteURL, nil
+	}
+	parsed, err := url.Parse(siteURL)
+	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("siteUrl must be a Search Console domain property or an http(s) URL-prefix property")
+	}
+	return siteURL, nil
+}
+
+func gscSearchAnalyticsPayload(body map[string]any) (map[string]any, error) {
+	startDate, err := gscDate(body, "startDate")
+	if err != nil {
+		return nil, err
+	}
+	endDate, err := gscDate(body, "endDate")
+	if err != nil {
+		return nil, err
+	}
+	if endDate.Before(startDate) {
+		return nil, fmt.Errorf("endDate must not be before startDate")
+	}
+	// Search Console dates are inclusive: a 366-day difference means 367
+	// requested calendar dates, so reject it at the same bound.
+	if endDate.Sub(startDate) >= gscMaxDateRangeDays*24*time.Hour {
+		return nil, fmt.Errorf("Search Console date range cannot exceed %d days", gscMaxDateRangeDays)
+	}
+	dimensions, err := gscDimensions(body["dimensions"])
+	if err != nil {
+		return nil, err
+	}
+	rowLimit, err := gscBoundedInt(body, "rowLimit", gscDefaultRowLimit, gscMaxRowLimit)
+	if err != nil {
+		return nil, err
+	}
+	startRow, err := gscBoundedInt(body, "startRow", 0, gscMaxStartRow)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{
+		"startDate": startDate.Format("2006-01-02"),
+		"endDate":   endDate.Format("2006-01-02"),
+		"rowLimit":  rowLimit,
+		"startRow":  startRow,
+	}
+	if len(dimensions) > 0 {
+		payload["dimensions"] = dimensions
+	}
+	if dataState, found := body["dataState"]; found {
+		value := stringFromAny(dataState)
+		if value != "final" && value != "all" {
+			return nil, fmt.Errorf("dataState must be final or all")
+		}
+		payload["dataState"] = value
+	}
+	return payload, nil
+}
+
+func gscDate(body map[string]any, key string) (time.Time, error) {
+	value := stringFromAny(body[key])
+	if value == "" {
+		return time.Time{}, fmt.Errorf("%s is required", key)
+	}
+	parsed, err := time.Parse("2006-01-02", value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s must use YYYY-MM-DD", key)
+	}
+	return parsed.UTC(), nil
+}
+
+func gscDimensions(value any) ([]string, error) {
+	if value == nil {
+		return nil, nil
+	}
+	var candidates []any
+	switch typed := value.(type) {
+	case []any:
+		candidates = append([]any{}, typed...)
+	case []string:
+		candidates = make([]any, 0, len(typed))
+		for _, dimension := range typed {
+			candidates = append(candidates, dimension)
+		}
+	default:
+		return nil, fmt.Errorf("dimensions must be an array")
+	}
+	if len(candidates) > 5 {
+		return nil, fmt.Errorf("dimensions supports at most 5 values")
+	}
+	dimensions := make([]string, 0, len(candidates))
+	seen := map[string]struct{}{}
+	for _, candidate := range candidates {
+		dimension, ok := candidate.(string)
+		dimension = strings.TrimSpace(dimension)
+		if !ok || dimension == "" {
+			return nil, fmt.Errorf("dimensions must contain non-empty strings")
+		}
+		if _, supported := gscAllowedDimensions[dimension]; !supported {
+			return nil, fmt.Errorf("unsupported Search Console dimension %q", dimension)
+		}
+		if _, duplicate := seen[dimension]; duplicate {
+			return nil, fmt.Errorf("dimensions must not repeat %q", dimension)
+		}
+		seen[dimension] = struct{}{}
+		dimensions = append(dimensions, dimension)
+	}
+	return dimensions, nil
+}
+
+func gscBoundedInt(body map[string]any, key string, fallback, maximum int) (int, error) {
+	value, found := body[key]
+	if !found {
+		return fallback, nil
+	}
+	var integer int
+	switch typed := value.(type) {
+	case int:
+		integer = typed
+	case int64:
+		if typed < 0 {
+			return 0, fmt.Errorf("%s must not be negative", key)
+		}
+		if typed > int64(maximum) {
+			return maximum, nil
+		}
+		integer = int(typed)
+	case float64:
+		if math.IsNaN(typed) || math.IsInf(typed, 0) || typed != math.Trunc(typed) {
+			return 0, fmt.Errorf("%s must be an integer", key)
+		}
+		if typed < 0 {
+			return 0, fmt.Errorf("%s must not be negative", key)
+		}
+		if typed > float64(maximum) {
+			return maximum, nil
+		}
+		integer = int(typed)
+	default:
+		return 0, fmt.Errorf("%s must be an integer", key)
+	}
+	if integer < 0 {
+		return 0, fmt.Errorf("%s must not be negative", key)
+	}
+	if key == "rowLimit" && integer == 0 {
+		return 0, fmt.Errorf("rowLimit must be at least 1")
+	}
+	if integer > maximum {
+		return maximum, nil
+	}
+	return integer, nil
 }
 
 func (s *Service) executeGitHub(ctx context.Context, token, operation string, params, body map[string]any) (any, error) {
@@ -1582,9 +1779,15 @@ func (s *Service) doJSON(req *http.Request) (any, error) {
 	if resp.StatusCode == http.StatusNoContent {
 		return map[string]any{"ok": true}, nil
 	}
-	data, err := io.ReadAll(resp.Body)
+	if resp.ContentLength > maxProviderActionResponseBytes {
+		return nil, fmt.Errorf("provider action response exceeds size limit")
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxProviderActionResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read provider action response: %w", err)
+	}
+	if len(data) > maxProviderActionResponseBytes {
+		return nil, fmt.Errorf("provider action response exceeds size limit")
 	}
 	// A refused credential or scope is classified before the body is decoded:
 	// an HTML or empty 401/403 must still say "reconnect", not "bad response".

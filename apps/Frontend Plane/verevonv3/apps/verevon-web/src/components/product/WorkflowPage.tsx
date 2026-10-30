@@ -1,5 +1,4 @@
 import Image from "next/image";
-import Link from "next/link";
 import { Footer } from "@/components/core/footer/Footer";
 import { ArrowButton } from "@/components/ui/ArrowButton";
 import { WorkflowExplorer } from "./WorkflowExplorer";
@@ -84,12 +83,9 @@ export function WorkflowPage() {
 							</p>
 							<div className="mt-10 flex flex-wrap items-center gap-x-8 gap-y-5">
 								<ArrowButton href="#arbeidsflyt">Se arbeidsløkken</ArrowButton>
-								<Link
-									className="font-geist text-[0.92rem] font-light text-verevon-j-text/62 underline-offset-4 transition-colors hover:text-verevon-j-text hover:underline"
-									href="/plattform/kontrollert-arbeid"
-								>
+								<ArrowButton href="/plattform/kontrollert-arbeid" variant="muted">
 									Se kontrollene rundt arbeidet
-								</Link>
+								</ArrowButton>
 							</div>
 						</div>
 

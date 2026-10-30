@@ -1,0 +1,14 @@
+tenant,name,endpoint,source,status,records,written,seconds,min_remaining,error,finished
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,employees,erp_rest,ok,6,0,5,14960,,2026-10-02T00:59:39Z
+d1507c4a-7717-11ee-970e-025417856183,Aquatiq Aps,dm_payment_methods,datamart_graphql,ok,8,0,5,,,2026-10-02T00:59:40Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_suppliers,datamart_graphql,ok,63,0,4,,,2026-10-02T00:59:44Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,cash_transactions,erp_rest,ok,657,0,7,14953,,2026-10-02T00:59:51Z
+bed46bb6-21cc-11e9-b307-0aa512338dd6,Aquatiq Food Automation ApS,dm_project_tasks,datamart_graphql,ok,59,0,5,,,2026-10-02T00:59:56Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,general_ledger_balances_v2,erp_rest,ok,17711,0,106,14782,,2026-10-02T01:01:21Z
+ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd,Aqua Pharma AS,general_ledger_transactions,erp_rest,ok,13210,0,67,14903,,2026-10-02T01:02:28Z
+61320c0a-102d-11ee-a0e0-0693d8a7c3dd,Aquatiq Hygiene Systems AS,customer_invoices,erp_rest,ok,2520,0,1380,14974,,2026-10-02T01:22:57Z
+9b1fa69b-5568-11ee-960c-025417856183,Consult AS,customer_invoices,erp_rest,ok,3708,0,1788,14963,,2026-10-02T01:29:28Z
+33f319b9-4d57-11ee-960c-025417856183,Aquatiq AS (pilot),customer_invoices,erp_rest,ok,22449,0,7043,14575,,2026-10-02T02:56:58Z
+33f319b9-4d57-11ee-960c-025417856183,Aquatiq AS (pilot),customer_documents,erp_rest,ok,23208,0,317,14345,,2026-10-02T03:02:16Z
+33f319b9-4d57-11ee-960c-025417856183,Aquatiq AS (pilot),general_ledger_balances_v2,erp_rest,ok,31069,0,153,14066,,2026-10-02T03:04:50Z
+33f319b9-4d57-11ee-960c-025417856183,Aquatiq AS (pilot),general_ledger_transactions,erp_rest,failed,0,0,240,14804,"Error: upstream returned non-success status 500: {""message"":""VismaId: 4f09f3f8-cfa7-45fd-89fa-e846a1a4e5f7. Execution Timeout Expired.  The timeout period elapsed prior to completion of the operation or the server is not responding.""}",2026-10-02T03:08:51Z

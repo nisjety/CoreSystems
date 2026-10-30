@@ -7,6 +7,7 @@ const publicRoutes = [
 	"/produkt/svartid",
 	"/plattform/felles-kontekst",
 	"/plattform/kontrollert-arbeid",
+	"/integrasjoner",
 	"/trust",
 ];
 

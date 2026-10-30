@@ -14,8 +14,10 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/triodelab/integration-corev2/internal/actions"
+	"github.com/triodelab/integration-corev2/internal/algoliamcp"
 	"github.com/triodelab/integration-corev2/internal/api"
 	"github.com/triodelab/integration-corev2/internal/attestation"
+	"github.com/triodelab/integration-corev2/internal/clarity"
 	"github.com/triodelab/integration-corev2/internal/codexsubscription"
 	"github.com/triodelab/integration-corev2/internal/config"
 	"github.com/triodelab/integration-corev2/internal/controlplane"
@@ -28,8 +30,13 @@ import (
 	"github.com/triodelab/integration-corev2/internal/hotpath"
 	"github.com/triodelab/integration-corev2/internal/mailtask"
 	"github.com/triodelab/integration-corev2/internal/oauth"
+	"github.com/triodelab/integration-corev2/internal/pagespeed"
+	"github.com/triodelab/integration-corev2/internal/publicsignals"
+	"github.com/triodelab/integration-corev2/internal/sitesources"
 	"github.com/triodelab/integration-corev2/internal/store"
+	"github.com/triodelab/integration-corev2/internal/trends"
 	"github.com/triodelab/integration-corev2/internal/webhookorg"
+	"github.com/triodelab/integration-corev2/internal/webvitals"
 	"github.com/triodelab/integration-corev2/internal/zdr"
 )
 
@@ -238,17 +245,65 @@ func main() {
 		Replay: mailtask.NewReplayGuard(30 * time.Minute),
 	}
 
+	pageSpeedService := pagespeed.NewService(pagespeed.NewClient(cfg.PageSpeedAPIKey, nil), nil)
+	defer pageSpeedService.Close()
+	clarityService, err := clarity.NewService(cfg.ClarityBindingsFile, nil, nil)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("initialize protected Clarity project bindings")
+	}
+	webVitalsService, err := webvitals.NewService(cfg.WebVitalsBindingsFile, cfg.Environment, nil, nil)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("initialize protected first-party performance bindings")
+	}
+	siteSourcesService, err := sitesources.NewService(cfg.MarketingProvidersBindingsFile, nil, nil)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("initialize protected marketing provider bindings")
+	}
 	app := api.NewServer(api.ServerConfig{
-		Config:      cfg,
-		Repo:        repo,
-		OAuth:       service,
-		Auth:        controlplane.NewAuthClient(cfg, controlPlaneClient),
-		Org:         controlplane.NewOrgClient(cfg, controlPlaneClient),
-		Billing:     controlplane.NewBillingClient(cfg, controlPlaneClient),
-		OrgZDR:      controlplane.NewOrgClient(cfg, controlPlaneClient),
-		Audit:       auditClient,
-		AuditOutbox: auditOutbox,
-		Events:      publisher,
+		Config:        cfg,
+		Repo:          repo,
+		OAuth:         service,
+		Auth:          controlplane.NewAuthClient(cfg, controlPlaneClient),
+		Org:           controlplane.NewOrgClient(cfg, controlPlaneClient),
+		Billing:       controlplane.NewBillingClient(cfg, controlPlaneClient),
+		OrgZDR:        controlplane.NewOrgClient(cfg, controlPlaneClient),
+		Audit:         auditClient,
+		AuditOutbox:   auditOutbox,
+		PageSpeed:     pageSpeedService,
+		Clarity:       clarityService,
+		PublicSignals: publicsignals.New(cfg.CrUXAPIKey, nil, nil),
+		Trends:        trends.New(cfg.Environment, cfg.PyTrendsDevEnabled),
+		WebVitals:     webVitalsService,
+		SiteSources:   siteSourcesService,
+		AlgoliaMCP: algoliamcp.New(repo, service, nil, nil, func(d algoliamcp.Diagnostic) {
+			event := logger.Warn().Str("phase", d.Phase)
+			if d.HTTPStatus > 0 {
+				event = event.Int("http_status", d.HTTPStatus)
+			}
+			if d.RPCCode != nil {
+				event = event.Int("jsonrpc_error_code", *d.RPCCode)
+			}
+			if d.SchemaShape != nil {
+				event = event.Interface("schema_shape", d.SchemaShape)
+			}
+			if d.CatalogShape != nil {
+				event = event.Interface("catalog_shape", d.CatalogShape)
+			}
+			if d.MetaShape != nil {
+				event = event.Interface("meta_shape", d.MetaShape)
+			}
+			if d.ResourceShape != nil {
+				event = event.Interface("resource_shape", d.ResourceShape)
+			}
+			if d.ApplicationProbe != nil {
+				event = event.Interface("application_probe", d.ApplicationProbe)
+			}
+			if d.ApplicationListProbe != nil {
+				event = event.Interface("application_list_probe", d.ApplicationListProbe)
+			}
+			event.Msg("Algolia read-only MCP request failed")
+		}),
+		Events: publisher,
 		// Discovery and Actions both dial Shopify hosts assembled from a
 		// connection's stored providerContext ("https://"+shop+"/...");
 		// egress.SafeClient vets that host instead of trusting net/http's

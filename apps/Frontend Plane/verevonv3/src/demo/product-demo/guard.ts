@@ -191,21 +191,26 @@ function installDeviceGuards(): void {
       POSITION_UNAVAILABLE: 2,
       TIMEOUT: 3,
     }) as unknown as GeolocationPositionError
-  Object.defineProperty(navigator, 'geolocation', {
-    configurable: true,
-    value: {
-      getCurrentPosition(_success: PositionCallback, error?: PositionErrorCallback | null): void {
-        setTimeout(() => error?.(unavailable()), 0)
+  try {
+    Object.defineProperty(navigator, 'geolocation', {
+      configurable: true,
+      value: {
+        getCurrentPosition(_success: PositionCallback, error?: PositionErrorCallback | null): void {
+          setTimeout(() => error?.(unavailable()), 0)
+        },
+        watchPosition(_success: PositionCallback, error?: PositionErrorCallback | null): number {
+          setTimeout(() => error?.(unavailable()), 0)
+          return 0
+        },
+        clearWatch(): void {
+          // No watch was started.
+        },
       },
-      watchPosition(_success: PositionCallback, error?: PositionErrorCallback | null): number {
-        setTimeout(() => error?.(unavailable()), 0)
-        return 0
-      },
-      clearWatch(): void {
-        // No watch was started.
-      },
-    },
-  })
+    })
+  } catch (error) {
+    // A browser whose `geolocation` is non-configurable keeps its own; the demo must still boot.
+    if (Object.getOwnPropertyDescriptor(navigator, 'geolocation')?.configurable !== false) throw error
+  }
 
   // Clipboard: in memory, so copy buttons work and nothing leaves the page.
   let clipboardText = ''

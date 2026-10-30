@@ -192,6 +192,22 @@
       "treatment": "inert"
     },
     {
+      "basis": "audit_page::capture touches no cache, artifact store, index or event sink",
+      "detail": {
+        "reason": "fetches robots and one page and returns bounded evidence; nothing is stored"
+      },
+      "enforced_by": [],
+      "id": "audit_page",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/audit/page"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
       "basis": "audio_routes::raise_to_zdr_floor forwards the posture to the Model Plane, which owns retention for audio",
       "detail": null,
       "enforced_by": [

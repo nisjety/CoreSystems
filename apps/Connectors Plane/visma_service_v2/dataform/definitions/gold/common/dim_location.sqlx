@@ -1,0 +1,47 @@
+config {
+  type: "table",
+  schema: "visma_gold_common",
+  name: "dim_location",
+  description: "Conformed location dimension with surrogate key.",
+  tags: ["gold", "common", "dimension", "conformed"]
+}
+
+SELECT
+    -- A location id repeats across business accounts: the account is part of
+    -- the key, and facts join on (tenant, customer or supplier, location id).
+    FARM_FINGERPRINT(CONCAT(
+        CAST(tenant_id AS STRING), '|',
+        CAST(business_unit_id AS STRING), '|',
+        CAST(business_account_id AS STRING), '|',
+        CAST(location_id AS STRING)
+    ))                                          AS location_key,
+  -- Not unique: every account's location with this id shares it. For facts
+  -- that carry only a location id (warehouse bins).
+  FARM_FINGERPRINT(CONCAT(
+    CAST(tenant_id AS STRING), '|',
+    CAST(location_id AS STRING)
+  ))                                          AS location_tenant_key,
+    tenant_id,
+    business_unit_id,
+    business_account_id,
+    location_id,
+    location_name,
+    is_active,
+    address_id,
+    address_line1,
+    address_line2,
+    address_line3,
+    postal_code,
+    city,
+    country_id,
+    country_name,
+    county_id,
+    county_name,
+    vat_zone_id,
+    vat_zone_description,
+    vat_zone_default_vat_category,
+    vat_registration_id,
+    corporate_id,
+    'visma' AS source_system
+
+FROM ${ref("visma_silver", "dim_location")}

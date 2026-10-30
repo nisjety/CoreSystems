@@ -1,0 +1,27 @@
+query GeneralLedgerBalancesForwardByGroup(
+  $lastGroupKey: String,
+  $updatedInDataMart: DateTime,
+  $pageSize: Int! = 100,
+  $periodsUpTo: String,
+  $toggleBalanceSign: Boolean! = false,
+  $includeDeleted: Boolean! = false
+) {
+  generalLedgerBalancesForwardByGroup(
+    lastGroupKey: $lastGroupKey,
+    updatedInDataMart: $updatedInDataMart,
+    pageSize: $pageSize,
+    periodsUpTo: $periodsUpTo,
+    toggleBalanceSign: $toggleBalanceSign,
+    includeDeleted: $includeDeleted
+  ) {
+    lastGroupKey
+    hasMore
+    items {
+      id
+      companyId
+      updatedInDataMartDateTime
+      deletedDatabaseRecord
+      branchId
+    }
+  }
+}

@@ -1,0 +1,11 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Tenant-scoped Xero tracking categories. Their business meaning remains source-defined rather than assumed to be a department or project.",
+  assertions: { nonNull: ["tenant_id", "tracking_category_id", "tracking_category_key"], uniqueKey: ["tracking_category_key"] }
+}
+
+SELECT CONCAT(tenant_id, '|', tracking_category_id) AS tracking_category_key,
+       tenant_id, tracking_category_id, record_id AS tracking_category_internal_id,
+       category_name, status, is_active, option_count, first_seen_at, synced_at
+FROM ${ref("dw_bronze_xero", "xero_tracking_categories")}

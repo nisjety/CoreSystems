@@ -619,9 +619,14 @@ export const scene03Undersok: SceneDefinition = {
       image.src = src
       await image.decode()
     }))
-    // «Utfør»: the composer's own «Arbeidsmodus» segment.
-    await click(DO_MODE)
-    await waitFor(() => document.querySelector('.dashboard-composer-intent-segment button.is-active')?.textContent?.trim() === 'Utfør' ? true : null)
+    // «Utfør»: the composer's own «Arbeidsmodus» segment. Some checkouts have Planmodus in its place.
+    if (document.querySelector('.dashboard-composer-intent-segment button')) {
+      await click(DO_MODE)
+      await waitFor(() => document.querySelector('.dashboard-composer-intent-segment button.is-active')?.textContent?.trim() === 'Utfør' ? true : null)
+    } else {
+      await click({ selector: 'button[aria-label^="Planmodus"]' })
+      await waitFor(() => document.querySelector('button[aria-label^="Planmodus"]')?.getAttribute('aria-pressed') === 'true' ? true : null)
+    }
     // The run summons the Work canvas; close it with its own button the
     // moment it mounts (before paint), so the run is watched in the live
     // split. Kept for the whole scene, so a later summon is closed the same way.

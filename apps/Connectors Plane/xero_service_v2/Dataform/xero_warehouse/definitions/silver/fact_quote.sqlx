@@ -1,0 +1,16 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero sales quotes, distinct from posted invoices and Visma sales orders.",
+  assertions: { nonNull: ["tenant_id", "quote_id", "quote_key"], uniqueKey: ["quote_key"] }
+}
+
+SELECT CONCAT(tenant_id, '|', quote_id) AS quote_key,
+       tenant_id, quote_id, record_id AS quote_internal_id,
+       quote_number, reference, status, status = 'DELETED' AS is_deleted,
+       status IN ('SENT', 'ACCEPTED') AS is_open_pipeline,
+       contact_id, contact_name, contact_email, quote_date_local,
+       expiry_date_local, branding_theme_id, currency_code, currency_rate, line_amount_types,
+       line_item_count, sub_total, total_tax, total_discount, total,
+       updated_at, first_seen_at, synced_at
+FROM ${ref("dw_bronze_xero", "xero_quotes")}

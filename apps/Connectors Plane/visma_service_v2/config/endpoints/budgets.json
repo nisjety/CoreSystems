@@ -1,0 +1,77 @@
+{
+  "endpoint_name": "budgets",
+  "bigquery_table": "visma_budgets",
+  "primary_key": [
+    "financialYear",
+    "branchNumber.number",
+    "account.number",
+    "subaccount.id"
+  ],
+  "source": "erp_rest",
+  "api_method": "get_budgets",
+  "api_endpoint": "/v1/budget",
+  "pagination_profile": "numbertoread_skip",
+  "default_query": {
+    "ledger": "ACTUAL"
+  },
+  "partitioning": {
+    "mode": "cartesian",
+    "max_partitions": 10000,
+    "dimensions": [
+      {
+        "query_param": "branch",
+        "source_endpoint": "/v1/branch",
+        "source_path": "number"
+      },
+      {
+        "query_param": "ledger",
+        "source_endpoint": "/v1/ledger",
+        "source_path": "number",
+        "fallback_values": [
+          "ACTUAL"
+        ]
+      },
+      {
+        "query_param": "financialYear",
+        "source_endpoint": "/v1/financialPeriod",
+        "source_path": "year"
+      }
+    ]
+  },
+  "required_query": [
+    "branch",
+    "ledger",
+    "financialYear"
+  ],
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "financialYear",
+    "released",
+    "releasedAmount",
+    "account.number",
+    "account.description",
+    "subaccount.id",
+    "description",
+    "amount",
+    "distributedAmount",
+    "lastModifiedDateTime",
+    "branchNumber.number",
+    "branchNumber.name"
+  ],
+  "datamart": {
+    "ready": false,
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    },
+    "query_file": "config/queries/datamart/budgets.graphql",
+    "type_name": "Budget",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_budget",
+    "fallback_source": "erp_rest",
+    "root_field": "budgets"
+  }
+}

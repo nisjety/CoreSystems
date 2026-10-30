@@ -1,0 +1,87 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Same-run reconciliation of Xero getAccount direct responses to getAccounts collection observations. Shared account fields must agree; direct-only attachment detail is intentionally not compared and never controls lifecycle.",
+  assertions: {
+    nonNull: ["direct_detail_reconciliation_key", "tenant_id", "account_id", "direct_detail_source_run_id"],
+    uniqueKey: ["direct_detail_reconciliation_key"]
+  }
+}
+
+WITH collection_observations AS (
+  SELECT
+    raw.tenant_id,
+    raw.record_id AS account_id,
+    raw.run_id AS source_run_id,
+    raw.observed_at AS account_observed_at,
+    raw.version_id AS source_version_id,
+    raw.receipt_id AS source_receipt_id,
+    TO_HEX(SHA256(TO_JSON_STRING(STRUCT(
+      JSON_VALUE(raw.payload_json, '$.AccountID') AS account_id,
+      JSON_VALUE(raw.payload_json, '$.Code') AS account_code,
+      JSON_VALUE(raw.payload_json, '$.Name') AS account_name,
+      JSON_VALUE(raw.payload_json, '$.Type') AS account_type,
+      JSON_VALUE(raw.payload_json, '$.Class') AS account_class,
+      JSON_VALUE(raw.payload_json, '$.Status') AS account_status,
+      JSON_VALUE(raw.payload_json, '$.TaxType') AS tax_type,
+      JSON_VALUE(raw.payload_json, '$.UpdatedDateUTC') AS updated_date_utc
+    )))) AS shared_account_fingerprint
+  FROM ${ref("dw_bronze_xero", "xero_raw_record_history_canonical")} AS raw
+  WHERE raw.endpoint = 'accounts'
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY raw.tenant_id, raw.record_id, raw.run_id
+    ORDER BY raw.observed_at DESC, raw.receipt_id DESC, raw.version_id DESC
+  ) = 1
+), direct_detail_observations AS (
+  SELECT
+    observation.tenant_id,
+    observation.account_id,
+    observation.account_detail_observation_id,
+    observation.payload_account_id,
+    observation.payload_account_count,
+    observation.shared_account_fingerprint AS direct_detail_shared_account_fingerprint,
+    observation.account_detail_observed_at AS direct_detail_observed_at,
+    observation.source_version_id AS direct_detail_source_version_id,
+    observation.source_receipt_id AS direct_detail_source_receipt_id,
+    observation.source_run_id AS direct_detail_source_run_id
+  FROM ${ref("dw_bronze_xero", "xero_account_detail_observations")} AS observation
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY observation.tenant_id, observation.account_id, observation.source_run_id
+    ORDER BY observation.account_detail_observed_at DESC, observation.source_receipt_id DESC,
+             observation.source_version_id DESC
+  ) = 1
+)
+SELECT
+  CONCAT(detail.tenant_id, '|', detail.account_id, '|', detail.direct_detail_source_run_id,
+         '|', detail.direct_detail_source_version_id) AS direct_detail_reconciliation_key,
+  detail.tenant_id,
+  detail.account_id,
+  detail.account_detail_observation_id,
+  detail.payload_account_id,
+  detail.payload_account_count,
+  detail.direct_detail_observed_at,
+  detail.direct_detail_source_version_id,
+  detail.direct_detail_source_receipt_id,
+  detail.direct_detail_source_run_id,
+  detail.direct_detail_shared_account_fingerprint,
+  collection.account_observed_at AS collection_observed_at,
+  collection.source_version_id AS collection_source_version_id,
+  collection.source_receipt_id AS collection_source_receipt_id,
+  collection.shared_account_fingerprint AS collection_shared_account_fingerprint,
+  detail.payload_account_count = 1 AS has_singleton_direct_account_payload,
+  detail.payload_account_id = detail.account_id AS has_parent_scoped_payload_identity,
+  collection.account_id IS NOT NULL AS has_same_run_collection_counterpart,
+  collection.shared_account_fingerprint IS NOT NULL AS has_collection_shared_fingerprint,
+  detail.direct_detail_shared_account_fingerprint IS NOT NULL AS has_direct_detail_shared_fingerprint,
+  detail.payload_account_count = 1
+    AND detail.payload_account_id = detail.account_id
+    AND collection.account_id IS NOT NULL
+    AND collection.shared_account_fingerprint IS NOT NULL
+    AND detail.direct_detail_shared_account_fingerprint IS NOT NULL
+    AND collection.shared_account_fingerprint = detail.direct_detail_shared_account_fingerprint
+    AS is_direct_detail_reconciled
+FROM direct_detail_observations AS detail
+LEFT JOIN collection_observations AS collection
+  ON detail.tenant_id = collection.tenant_id
+ AND detail.account_id = collection.account_id
+ AND detail.direct_detail_source_run_id = collection.source_run_id

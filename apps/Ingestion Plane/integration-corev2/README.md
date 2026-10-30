@@ -1,5 +1,14 @@
 # integration-corev2
 
+Pulse's connection picker can read protected installation metadata through
+`POST /api/v1/insights/site-sources/binding` and
+`POST /api/v1/insights/web-vitals/binding`. These accept the same strict
+site/website-ID/revision/provider or environment context as their reporting
+counterparts, under the existing verified organization and read scopes. They
+return only `data.configured` in the standard envelope. They reload protected
+bindings without fetching reports, launching tracking or exposing keys, origins,
+tokens, paths or credential fingerprints.
+
 First-party Verevon integration broker. This service replaces the existing
 Ingestion Plane `integration-core` v1 and removes Nango as the owner of OAuth
 sessions, token storage, capability consent, provider connections, and internal
@@ -16,6 +25,117 @@ The implementation is first-party and Verevon-owned. It does not depend on
 Nango packages or Nango runtime services.
 
 ## Current scope
+
+### Algolia user-authorized analytics and search-term shortlists
+
+Live compatibility status (23 October 2026): OAuth consent, MCP initialization
+and authenticated tool listing work. The provider currently advertises only
+`algolia_discover_tools`, `algolia_describe_tool` and
+`algolia_call_read_tool`; its documented leaf operations are not direct MCP
+tools. The bounded discover/describe/read-call adapter is implemented and its
+discover/describe/read transport has been checked against the live account.
+Hosted application discovery uses the fixed read operation
+`algolia_application_list` and the verified `applications[].applicationId`
+envelope, not an enum inferred from list-indices. Pulse automatically received
+Aquatiq's `JL96OC7GC2` application and its real `development`/`everything`
+indices. A real read-only service probe for Aquatiq's `everything` index then
+returned connected aggregate, top-search and no-result-term components for
+16–22 October 2026, with twenty provider rows in each bounded term list. No
+query values were logged. This proves Integration's provider receipt, not that
+a downstream site mapping or background job has been saved successfully.
+Provider-authorized reporting does not require our own DNS
+ownership gate; this does not remove Algolia's permissions or prove that an app
+belongs to a domain. Do not broaden generic token leasing, infer permissions
+from prose/defaults or automatically map Aquatiq resources to Triodelab.
+
+`ALGOLIA_MCP_OAUTH_CLIENT_FILE` points to an absolute private mode-0600 regular
+JSON file: exactly `{version:1,clientId,redirectUri,resource}`. Resource is fixed
+to `https://mcp.algolia.com/mcp`; redirect equals `PUBLIC_BASE_URL` plus
+`/api/v1/providers/algolia/callback`. This is an Integration-owned public client,
+not the Algolia CLI client. OAuth uses PKCE S256, scope `public`, resource
+indicators, no secret, and existing encrypted grant/session/refresh storage.
+The user must enable Productivity MCP and approve account access. Every consent
+creates an independent grant instead of overwriting an unidentified account.
+
+User/org-verified discovery (grant owner or org administrator):
+
+- `GET /api/v1/providers/algolia/connections/:id/applications`
+- `GET /api/v1/providers/algolia/connections/:id/indices?applicationId=...`
+
+Verified org bearers with `integration:read`, without internal-key bypass:
+
+- `POST /api/v1/insights/algolia/access`: exact `{connectionId}`, returns local
+  `{connectionId,status,generation}`; status `active|reconnect_required`.
+- `POST /api/v1/insights/algolia/resources`: exact
+  `{connectionId,applicationId,indexName}`, returns those fields plus
+  `status:"allowed"|"unavailable"` after real discovery.
+- `POST /api/v1/insights/algolia/report`: exact
+  `{websiteId,site,websiteRevision,connectionId,applicationId,indexName}`,
+  returns the minimal site-source Report with Algolia region `provider`.
+
+Responses are exactly `{success:true,data:...}`. Unknown/duplicate fields,
+unsafe schemas, wrong organizations and unmapped resources fail closed. Calls
+target only the fixed MCP endpoint: no redirects/cookies, 2 MiB responses,
+concurrency two, a 20-second/fourteen-RPC metadata budget and a bounded
+30-second/eighteen-RPC report budget. Both direct
+logical tools and the hosted `algolia_discover_tools` → `algolia_describe_tool` →
+`algolia_call_read_tool` transport are implemented. Wrapper calls require actual
+outer schemas; only fixed metadata queries are sent, never user prompts or the
+optional `originalQuery`/`userIntent` fields. Described operations must exactly
+match the six fixed account/index/analytics operations and have independently confirmed `read`
+effects. Unsupported schema composition/references fail closed. Description
+caches exist only within the current grant-checked request. Hosted application
+discovery validates the no-argument read and projects at most 128 unique IDs;
+direct-leaf compatibility can still use a validated enum. An explicit user ID
+may attempt a schema-validated fixed index list, but only the successful provider
+response proves resource access. Any present enum still restricts the request.
+Schema defaults or prose descriptions are never permission evidence.
+
+User-authorized reports may include at most twenty actual search terms per
+component; raw hit records, user identifiers, tool descriptions, schemas and
+tokens never leave Integration. Search terms never appear in logs. Safe
+troubleshooting projects bounded counts/type/presence flags
+and narrowly filtered protocol identifiers, never metadata values. Wrapper
+transport and hosted application/index enumeration have been exercised with real
+account consent; the aggregate and term envelopes have also passed the real
+read-only service probe described above. Unsupported shapes stay unavailable;
+fixtures are not live data.
+
+New Algolia receipts include independent optional `topSearches` and
+`noResultTerms` components; old stored reports may omit them. Each is
+`{status:"connected"|"unavailable",limit:20,rows?:[{query,count,averageResults?}]}`.
+A connected receipt always has an explicit rows array, including `[]` only when
+the provider observed an empty array. Unavailable components omit rows. Query
+text is preserved, including empty searches, within 512 Unicode code points /
+2048 UTF-8 bytes without C0/C1 controls. Counts and average results are bounded
+to JavaScript-safe nonnegative values; averages must be finite. The known
+Analytics source envelope is `searches:[{search,count,nbHits?}]`; other source
+metadata such as `withFilterCount` is discarded. Duplicate/oversized lists,
+ambiguous envelopes and malformed metrics fail closed without partial rows.
+
+The fixed `algolia_analytics_top_searches` and
+`algolia_analytics_searches_no_results` operations must be independently
+discovered/described with read effects and verified schemas. Application,
+index and the same seven completed UTC days are fixed by the authenticated
+request. A typed limit is set to twenty where exposed; source lists exceeding
+twenty rows are rejected, never silently truncated. `direction:"desc"` and
+`orderBy:"searchCount"` are requested only when the actual schema exposes and
+permits them. Missing analytics permission or one failed component does not
+erase independently measured components. A report is connected when any
+component is connected, but revocation, organization mismatch or a UTC rollover
+discards the whole receipt. Private snapshots remain the downstream owning
+core's organization-scoped, grant-checked responsibility.
+
+Generic token leases explicitly deny this resource-bound grant. Local disconnect
+and provider-observed HTTP 401 hide access; stale rejections cannot poison a
+concurrent replacement. Nonsecret grant generations remain stable across normal
+refresh. Provider-side revocation is not claimed until its endpoint contract is
+verified; users can revoke in Algolia's dashboard. Existing restricted analytics
+key bindings remain a separate fallback. This flow creates no applications,
+indices, keys, subscriptions or tracking tags.
+
+Sources: [Productivity MCP documentation](https://www.algolia.com/doc/guides/model-context-protocol/productivity-mcp),
+[advertised OAuth metadata](https://dashboard.algolia.com/.well-known/oauth-authorization-server).
 
 - Go API service on `:3026`.
 - Control Plane integration matching v1:
@@ -80,6 +200,8 @@ Nango packages or Nango runtime services.
   - `POST /api/v1/connections/{id}/consents`
   - `GET /api/v1/connections/{id}/discovery`
   - `POST /api/v1/connections/{id}/actions`
+  - `POST /api/v1/connections/{id}/readiness` (fixed, read-only Google Search
+    Console or Meta Ads connection test; no body or query parameters)
   - `POST /api/v1/actions/execute`
   - `POST /api/v1/connections/{id}/sync`
   - `POST /api/v1/sync-jobs`
@@ -102,6 +224,37 @@ Nango packages or Nango runtime services.
   - selected `/integrations/...` compatibility routes from the old NestJS
     integration-service, backed by the named action executor.
 - OAuth callback that posts a browser message back to Verevon UI.
+
+## OAuth browser-return rollout
+
+Before any browser client sends `returnUrl` to a connect-session endpoint,
+configure these deployment-owned values and deploy them together:
+
+- `INTEGRATION_PUBLIC_BASE_URL` is the stable public callback origin. Register
+  its exact callback paths, such as
+  `https://integrations.example/oauth/callback/google` and
+  `https://integrations.example/oauth/callback/meta`, in the provider consoles.
+- `INTEGRATION_ALLOWED_RETURN_ORIGINS` is a comma-separated list of exact UI
+  origins permitted to receive the post-OAuth return, for example
+  `https://app.example`. Wildcards, paths, queries, fragments, and credentials
+  are rejected.
+- Production URLs must use HTTPS. Local HTTP is accepted only for loopback
+  hosts (`localhost`, `127.0.0.1`, or `::1`) when `ENVIRONMENT` explicitly
+  names `local`, `dev`, `development`, or `test`. `ENVIRONMENT` defaults to
+  `dev`; set `ENVIRONMENT=production` explicitly for every deployed
+  environment.
+- When `INTEGRATION_ALLOWED_RETURN_ORIGINS` is unset in a local/dev/test
+  environment it defaults to `http://localhost:5173` (the Vite dev server), so
+  the local frontend flow works without extra configuration. Outside those
+  environments there is no default and every `returnUrl` is rejected until
+  origins are set.
+
+Clients that do not need a browser redirect may omit `returnUrl` and poll
+`GET /api/v1/connect-sessions/{id}/status`. During a rollout, update existing
+clients to an allowed origin before removing an older origin. If an in-flight
+session contains an origin that has since been removed, the connection still
+completes safely and is visible through the status endpoint, but the callback
+window remains open and does not redirect or send `postMessage` to that origin.
 
 ## Microsoft capability bundles
 
@@ -265,7 +418,9 @@ Supported operation families:
 - Slack: `channels.list`, `users.list`, `user`, `messages.list`,
   `message.send`
 - Google: `profile`, `gmail.messages`, `gmail.send`, `calendar.events`,
-  `drive.files`, `drive.file.content`
+  `drive.files`, `drive.file.content`, `gsc.sites.list`,
+  `gsc.search_analytics.query`, `ga4.account_summaries.list`,
+  `ga4.data_streams.list`, `ga4.report.run`, `ga4.reporting_host.resolve`
 - GitHub: `user`, `orgs`, `teams`, `repos`, `repo`
 - Notion: `user`, `databases`, `pages`
 - Shopify: `shop`, `products`, `orders`
@@ -384,6 +539,23 @@ that go into a URL path are percent-escaped.
   site and drive ids, `$select` on the sites search, the exact shape of a drive
   `nextLink`, a slash inside a search text, and shared-drive listing with
   `corpora=drive`.
+
+### Marketing connection readiness
+
+`POST /api/v1/connections/{id}/readiness` is an explicit, protected test after
+an OAuth connection exists. It has no request body or query parameters, so it
+cannot be used as a provider proxy. The service selects one fixed read-only
+action from the stored provider connection:
+
+- Google Search Console: `GET /webmasters/v3/sites` through `gsc.sites.list`.
+- Meta Ads: `GET /me/adaccounts` through `ads.adaccounts`, bounded to one
+  account.
+
+The response exposes only normalized state, aggregate count, required next
+step, and timestamp. It never returns OAuth tokens, provider account IDs,
+property URLs, names, scopes, or the upstream response. Each completed check
+is recorded as `connection.readiness.checked` with its fixed operation and
+normalized state.
 
 ### Provider-write attestation v1
 
@@ -877,3 +1049,187 @@ The old unified-service profile and real-time features are split by ownership:
 `GET /api/v1/projections/integration-profile` is a lightweight integration read
 model for Verevon UI/BFF composition. It is not a replacement user profile store
 and does not own matching or AI interpretation.
+
+## Read-only website measurement
+
+`ga4.reporting_host.resolve` is an `analytics.read` connection action. It accepts
+only `site`, `propertyId`, and `streamId` with an empty body. It verifies the web
+stream's default URI against the exact www/non-www pair, then requests at most
+two hostname rows with a fixed stream filter over the last 28 completed UTC
+days. It returns only the chosen `reportingSite`; counts are not exposed. GA4
+report access is authorized by the connected Analytics resource, independently
+of Search Console ownership. No provider edits or additional OAuth scopes are
+used. Ambiguous streams remain a resource-selection state in Marketing Core.
+
+Google connections granting `analytics.read` can execute `ga4.report.run` through
+the existing organization-authorized connection action endpoint. Its only
+parameters are numeric `propertyId`, numeric `streamId`, and canonical HTTPS
+website `site`; its body contains `startDate` and `endDate` (at most 366 days,
+ending before today UTC). Integration first verifies the existing web stream's
+default URI. It then requests fixed Analytics Data API summary and daily reports
+with exact hostname and stream filters. The action returns `{ summary, daily }`
+provider report objects; consumers must normalize their fixed metric headers,
+property timezone, and data-quality metadata. Unique users come from the
+dimensionless summary, never a sum of daily users. The six fixed metrics are
+`totalUsers`, `sessions`, `engagedSessions`, `screenPageViews`, `keyEvents`, and
+`userEngagementDuration`. No properties, tags, events, or settings are created.
+
+`GET /api/v1/insights/clarity?site=https%3A%2F%2Fexample.com%2F&numOfDays=3`
+requires a verified organization principal (`integration:read` for services).
+It never accepts a token, project identifier, dimensions, or provider URL from
+the caller. Configure `CLARITY_BINDINGS_FILE` as an absolute deployment-owned
+manifest path. Both manifest and token must be regular mode-`0600` files; token
+filenames are basenames resolved beside the manifest:
+
+```json
+{
+  "version": 1,
+  "bindings": [{
+    "organizationId": "approved-organization-id",
+    "site": "https://example.com/",
+    "projectId": "approvedprojectid",
+    "tokenFile": "clarity_export_token_example",
+    "confirmedAt": "2026-10-21T00:00:00Z"
+  }]
+}
+```
+
+`confirmedAt` records the operator's confirmation of the organization/project/
+website mapping; API success alone cannot verify Clarity project identity or
+website ownership. Tokens are generated by a Clarity project admin through an
+explicitly approved provider workflow, then mounted through the deployment's
+protected secret path. Do not put tokens in `.env`, source, browser storage, or
+HTTP request bodies. Google/Microsoft sign-in is not a substitute for this token.
+
+Clarity reports are explicitly `scope: "clarity_project"`: the mapping selects
+the correct project credential but does not filter its metrics to one URL.
+The API exposes only normalized Traffic metrics (`sessions`, `botSessions`,
+`users`, `pagesPerSession`); absent metrics remain null. Its rolling window is
+1, 2, or 3 days in UTC, not the selected Pulse quarter. Successful reports are
+cached for six hours; failures have a one-hour cooldown. The local quota guard
+allows at most eight provider requests per project per UTC day **per process**;
+it resets on restart and does not claim to enforce a distributed quota. Provider
+429 remains authoritative. Cached observation timestamps do not change on reads.
+No replay URLs, visitor identifiers, page URLs, or raw provider errors are exposed.
+
+### First-party Web Vitals exports
+
+`POST /api/v1/insights/web-vitals` is a read-only export operation requiring a
+verified organization principal (`integration:read` for services). Its only body
+fields are `websiteId`, canonical HTTPS `site`, positive `websiteRevision`, and
+`environment` (`production` or `development`); the body is bounded to 2 KiB.
+Query parameters, unknown or duplicate keys, internal-key tenant bypasses, and
+caller-selected upstream URLs or credentials are rejected.
+
+Set `WEB_VITALS_BINDINGS_FILE` to an absolute regular mode-`0600` deployment
+manifest. Its version-1 `installations` list is bounded to 32 records:
+
+```json
+{
+  "version": 1,
+  "installations": [{
+    "organizationId": "approved-organization-id",
+    "websiteId": "web_12345678901234567890123456789012",
+    "websiteRevision": 1,
+    "site": "https://example.com/",
+    "environment": "production",
+    "reportingOrigin": "https://www.example.com",
+    "tokenFile": "/run/secrets/website_vitals_export_token",
+    "paths": ["/", "/public-insights"]
+  }]
+}
+```
+
+The dedicated export token is read from its own absolute regular mode-`0600`
+file, never from browser input. A production reporting origin must exactly match
+the registered site host or its `www` alias. Integration issues only a GET to
+that origin's `/api/web-vitals/export`, with that installation's bearer. No
+cookies, organization headers, redirects, or global egress allowlist exceptions
+are forwarded. Bindings and token fingerprints are rechecked after each read.
+Missing bindings return `not_configured`; configured-source failures return
+generic HTTP 503, not a fabricated empty report. Two concurrent exports and a
+15-second deadline bound upstream work.
+
+Exports are bounded to 2 MiB / 5,000 latest metric samples in the last seven
+days. Measurements are client-reported `LCP`, `INP`, or `CLS`, not CrUX or
+verified visitor identities. An ephemeral page-load UUID may be shared by its
+three metric series; `(sampleId, metric)` must be unique, with consistent
+approved path and coarse viewport. Unknown export fields are discarded. No IP,
+query string, referrer, DOM entry, persistent visitor ID, or raw error is
+returned. Marketing Core owns report aggregation and website authorization;
+this adapter does not install tracking, provision site storage, or publish it.
+
+The sole local exception requires Integration's explicit
+`ENVIRONMENT=development` and an installation with
+`environment: "development"`, `reportingOrigin: "http://localhost:3000"`.
+Optionally set its protected `developmentBackendOrigin` to exactly
+`http://host.docker.internal:3000` for Docker-to-host access. This uses an
+isolated exact-host egress allowlist, cannot be selected by an API caller, and
+is refused in production. Production and local measurements remain distinct.
+
+### Cookiebot and Algolia read-only site sources
+
+`POST /api/v1/insights/site-sources` accepts only
+`{websiteId,site,websiteRevision,provider}` with `provider` equal to `cookiebot`
+or `algolia`. A verified organization bearer with `integration:read` is
+mandatory; internal-key tenant overrides are refused. Its bounded response is
+exactly `{success:true,data:Report}`, without provider JSON or credentials.
+
+Set `MARKETING_PROVIDERS_BINDINGS_FILE` to an absolute private regular
+mode-`0600` file. Empty installations are a valid unconfigured deployment:
+
+```json
+{
+  "version": 1,
+  "installations": [{
+    "organizationId": "approved-organization-id",
+    "websiteId": "web_12345678901234567890123456789012",
+    "websiteRevision": 1,
+    "site": "https://example.com/",
+    "cookiebot": {
+      "domainGroupId": "12345678-1234-4234-8234-123456789012",
+      "domain": "www.example.com",
+      "culture": "en",
+      "apiKeyFile": "/run/secrets/cookiebot_data_api_key"
+    },
+    "algolia": {
+      "applicationId": "ABCDEFGHIJ",
+      "indexName": "existing_index",
+      "region": "de",
+      "analyticsKeyFile": "/run/secrets/algolia_analytics_api_key"
+    }
+  }]
+}
+```
+
+Omit a provider until its installation mapping and key are available. Bound key
+files must be absolute regular mode-`0600` files, not symlinks or empty
+placeholders. At most 32 website bindings are accepted. Bindings and key
+fingerprints are rechecked before and after each upstream request; changing
+ownership, revision, mapping or key invalidates an in-flight receipt.
+
+Reports cover the last seven completed UTC dates, not the selected Pulse
+quarter. Cookiebot returns consent-event totals and inventory category counts;
+it never forwards cookie values, IPs or script contents. Consent days omitted by
+the provider are not filled with zeros. Inventory includes the provider's scan
+timestamp and is not proof of current compliance. See Cookiebot's documented
+[consent statistics](https://support.cookiebot.com/hc/en-us/articles/4405045044882-Extracting-consent-data-via-API)
+and [inventory API](https://support.cookiebot.com/hc/en-us/articles/360006346473-Extracting-cookie-information-via-API).
+
+Algolia reads only aggregate searches/no-result rates for the explicitly mapped
+existing index and `us`/`de` analytics region. The operator must provide an
+analytics-ACL key restricted to that index, not an Admin key; this adapter does
+not create keys or inspect/change their ACLs. An observed zero-search window
+has zero counts and an explicit null rate. Search-term reads and search
+installation are out of scope for this manual REST fallback; bounded authorized
+terms use the separate OAuth/MCP report above. The provider's [regional Analytics API guidance](https://support.algolia.com/hc/en-us/articles/15066949059857-Why-is-the-analytics-API-returning-null-response)
+explains region selection.
+
+Fixed HTTPS hosts, disabled redirects/cookie jars, 8-second request timeouts,
+20-second collection deadlines, two concurrent collections and 2 MiB upstream
+body limits constrain work. Transport errors and provider messages are never
+logged or returned: Cookiebot places its API key in the documented URL path.
+Cookiebot remains a manual API-key provider. Algolia's catalog additionally
+exposes OAuth readiness when the protected Integration-owned client registration
+is configured. Neither readiness nor a browser session substitutes for the
+organization-scoped grant and actual resource-access checks.

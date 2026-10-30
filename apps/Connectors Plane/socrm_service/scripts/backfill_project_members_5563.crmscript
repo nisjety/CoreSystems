@@ -1,0 +1,136 @@
+// Backfill project members for project 5563 (Seafood Expo Global 2026)
+// Reads all members from selection 3862 (LEAD_SELECTION_ID) and ensures
+// each person is a member of project 5563.
+//
+// Run once manually via SuperOffice CRMScript executor.
+// Safe to re-run: existing members are skipped.
+
+Integer PROJECT_ID = 5563;
+Integer LEAD_SELECTION_ID = 3862;
+
+// ─── 1. Load existing project members ────────────────────────────────────────
+
+NSProjectAgent projectAgent;
+NSProjectMember[] existingMembers = projectAgent.GetProjectMembers(PROJECT_ID);
+
+// Build a lookup set of personIds already in the project
+Map existingPersonIds;
+Integer i = 0;
+while (i < existingMembers.length()) {
+  NSProjectMember m = existingMembers[i];
+  existingPersonIds.insert(m.GetPersonId().toString(), "1");
+  i++;
+}
+
+print("Existing project members: " + existingMembers.length().toString());
+
+// ─── 2. Load selection members via SearchEngine and identify missing ones ────
+
+SearchEngine se;
+se.addFields("selectionmember", "person_id,contact_id");
+se.addCriteria("selectionmember.selection_id", "OperatorEquals", LEAD_SELECTION_ID.toString());
+
+NSProjectMember[] toAdd;
+Integer added = 0;
+Integer skipped = 0;
+Integer selectionCount = 0;
+Integer invalid = 0;
+Integer resolvedFromPerson = 0;
+Integer contactResolveFailures = 0;
+NSPersonAgent personAgent;
+Map resolvedContactIds;
+
+if (se.select() > 0) {
+  for (se.first(); !se.eof(); se.next()) {
+    Integer personId  = se.getField("selectionmember.person_id").toInteger();
+    Integer contactId = se.getField("selectionmember.contact_id").toInteger();
+    selectionCount++;
+
+    if (personId > 0 && contactId <= 0) {
+      String personKey = personId.toString();
+
+      if (resolvedContactIds.exists(personKey)) {
+        contactId = resolvedContactIds.getWithFallback(personKey, "0").toInteger();
+      }
+      else {
+        Integer resolvedContactId = 0;
+        Bool lookupFailed = false;
+
+        try {
+          NSPersonEntity person = personAgent.GetPersonEntity(personId);
+          NSContact contact = person.GetContact();
+          resolvedContactId = contact.GetContactId();
+        }
+        catch {
+          lookupFailed = true;
+          contactResolveFailures++;
+          print("WARNING: Failed to resolve contact for personId " + personKey);
+        }
+
+        if (!lookupFailed) {
+          resolvedContactIds.insert(personKey, resolvedContactId.toString());
+        }
+        contactId = resolvedContactId;
+      }
+
+      if (contactId > 0) {
+        resolvedFromPerson++;
+      }
+    }
+
+    if (personId > 0 && contactId > 0) {
+      if (existingPersonIds.exists(personId.toString())) {
+        skipped++;
+      }
+      else {
+        NSProjectMember pm;
+        pm.SetPersonId(personId);
+        pm.SetContactId(contactId);
+        pm.SetProjectId(PROJECT_ID);
+        toAdd.pushBack(pm);
+        existingPersonIds.insert(personId.toString(), "1"); // prevent duplicates within batch
+      }
+    }
+    else {
+      invalid++;
+    }
+  }
+}
+
+print("Selection members found: " + selectionCount.toString());
+print("To add: " + toAdd.length().toString() + " | Already in project: " + skipped.toString() + " | Resolved missing contact IDs: " + resolvedFromPerson.toString() + " | Contact lookup failures: " + contactResolveFailures.toString() + " | Invalid rows: " + invalid.toString());
+
+// ─── 4. Add members in batches of 50 ─────────────────────────────────────────
+
+Integer BATCH_SIZE = 50;
+Integer total = toAdd.length();
+Integer batchStart = 0;
+
+while (batchStart < total) {
+  NSProjectMember[] batch;
+  Integer batchEnd = batchStart + BATCH_SIZE;
+  if (batchEnd > total) {
+    batchEnd = total;
+  }
+
+  Integer k = batchStart;
+  while (k < batchEnd) {
+    batch.pushBack(toAdd[k]);
+    k++;
+  }
+
+  try {
+    projectAgent.AddProjectMembers(PROJECT_ID, batch);
+    added = added + batch.length();
+    print("Batch " + batchStart.toString() + "-" + batchEnd.toString() + ": OK");
+  }
+  catch {
+    print("Batch " + batchStart.toString() + "-" + batchEnd.toString() + ": FAILED – retry individually or check logs");
+  }
+
+  batchStart = batchEnd;
+}
+
+// ─── 5. Summary ───────────────────────────────────────────────────────────────
+
+print("Done. Added: " + added.toString() + " | Skipped (already member): " + skipped.toString() + " | Resolved missing contact IDs: " + resolvedFromPerson.toString() + " | Contact lookup failures: " + contactResolveFailures.toString() + " | Invalid rows: " + invalid.toString());

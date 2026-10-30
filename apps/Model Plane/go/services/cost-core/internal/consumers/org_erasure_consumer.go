@@ -19,7 +19,7 @@ const orgErasureDurable = "cost-core-org-erasure"
 
 // orgErasureSubject is the platform-wide GDPR erasure fan-out subject. org-core
 // publishes it on the shared Control-Plane bus (control-shared-nats, stream
-// AQENCIA_CONTROLPLANE) both from its explicit hard-delete-organization path
+// CONTROLPLANE) both from its explicit hard-delete-organization path
 // and from its 30-day auto-purge cron, so this consumer must be
 // pre-provisioned on controlSharedStream (see audit-core's provisioner)
 // before Start can bind.

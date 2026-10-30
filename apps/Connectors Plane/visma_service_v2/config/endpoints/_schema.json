@@ -1,0 +1,297 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "vsv2 endpoint config",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "endpoint_name",
+    "bigquery_table",
+    "primary_key",
+    "source",
+    "api_method",
+    "modified_field",
+    "merge_type",
+    "sync_pattern",
+    "validation_fields"
+  ],
+  "properties": {
+    "endpoint_name": { "type": "string", "minLength": 1 },
+    "bigquery_table": { "type": "string", "minLength": 1 },
+    "primary_key": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        }
+      ],
+      "description": "MERGE join key — what enters the SQL ON clause. Comma-separated string or array. Every component MUST be present and non-NULL on every record; null components are how Visma v1 Bug E happened. Use `logical_keys` to document additional natural-key parts that are NOT in the MERGE ON because they may be NULL or absent."
+    },
+    "logical_keys": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1,
+      "uniqueItems": true,
+      "description": "Optional. Declares the canonical natural-key set for this entity, INCLUDING parts that are not in the MERGE ON-clause (e.g. tenant-scoping keys, optional sub-identifiers). Every component of `primary_key` should also appear here. Lets reviewers see at a glance which fields are intentionally outside the MERGE join — the Bug E lesson made config-level explicit."
+    },
+    "source": {
+      "type": "string",
+      "enum": ["erp_rest", "datamart_graphql", "expense_api"]
+    },
+    "enabled": {
+      "type": "boolean",
+      "description": "When false, the endpoint remains documented but is excluded from normal sync/scheduler/reconcile flows."
+    },
+    "api_method": { "type": "string", "minLength": 1 },
+    "api_endpoint": { "type": "string", "minLength": 1 },
+    "fallback_api_method": { "type": "string", "minLength": 1 },
+    "pagination_profile": {
+      "type": "string",
+      "enum": [
+        "finance_page_number",
+        "salesorder_page_index",
+        "journaltx_page_index",
+        "numbertoread_skip",
+        "none"
+      ],
+      "description": "Runtime pagination/query profile. Finance uses pageNumber, except numbertoread_skip (numberToRead and skipRecords) for Finance endpoints that declare no pageNumber; SalesOrder and JournalTx use zero-based pageIndex; none reads the whole list in one request."
+    },
+    "page_size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "description": "Endpoint-specific page size. Defaults to the adapter page size when omitted."
+    },
+    "background_mode": {
+      "type": "string",
+      "enum": ["off", "none", "subscription"],
+      "description": "Visma Finance background API mode. `none` sends erp-api-background:none and polls background content."
+    },
+    "background_poll_secs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3600
+    },
+    "background_timeout_secs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 86400
+    },
+    "default_query": {
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          { "type": "string" },
+          { "type": "number" },
+          { "type": "boolean" },
+          {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                { "type": "string" },
+                { "type": "number" },
+                { "type": "boolean" }
+              ]
+            }
+          }
+        ]
+      },
+      "description": "Static query parameters sent on every request. Arrays become repeated query parameters."
+    },
+    "required_query": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true,
+      "description": "Query parameters that must have a value after defaults and runtime pagination/watermark values are applied."
+    },
+    "period_scan": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["first_period", "query_params"],
+          "properties": {
+            "first_period": {
+              "type": "string",
+              "pattern": "^(19|20)[0-9]{2}(0[1-9]|1[0-2])$",
+              "description": "First financial period (YYYYMM) that can hold data. Walked from here to the current month, one request walk per month, on every run without an explicit window."
+            },
+            "query_params": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 },
+              "description": "Query parameters that each receive the period being fetched: fromPeriod + toPeriod for a range endpoint, periodId for a single-period one."
+            },
+            "look_ahead_months": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 24,
+              "description": "Months after the current one that are walked as well, for data posted to future periods."
+            },
+            "resume": {
+              "type": "boolean",
+              "description": "Apply the checkpoint's lastModifiedDateTime inside each period instead of re-reading every period on every run. Needs a modified_field that moves whenever a row changes."
+            },
+            "period_field": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "description": "Field added to every row with the period it was fetched under. Put it in primary_key when one key comes back in several periods with different content (ModulePM project transactions repeat their refNbr each month)."
+            }
+          }
+        }
+      ],
+      "description": "Fetch the endpoint one financial period at a time (see PeriodScanConfig in the orchestrator)."
+    },
+    "partitioning": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["dimensions"],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["cartesian"],
+              "description": "Build one request per cartesian product of tenant-discovered dimension values."
+            },
+            "max_partitions": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100000
+            },
+            "row_copies": {
+              "type": "object",
+              "additionalProperties": { "type": "string", "minLength": 1 },
+              "description": "New row field -> path of an existing field of the same row, added after the partition fields."
+            },
+            "dimensions": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["query_param", "source_endpoint", "source_path"],
+                "properties": {
+                  "query_param": { "type": "string", "minLength": 1 },
+                  "source_endpoint": { "type": "string", "minLength": 1 },
+                  "source_path": { "type": "string", "minLength": 1 },
+                  "in_path": {
+                    "type": "boolean",
+                    "description": "The value replaces {query_param} in api_endpoint instead of being sent as a query parameter. It is also added to every fetched row under the same name, since the API does not repeat it."
+                  },
+                  "source_pagination_profile": {
+                    "type": "string",
+                    "enum": ["finance_page_number", "salesorder_page_index", "journaltx_page_index", "none"],
+                    "description": "Pagination profile for listing source_endpoint when it differs from the endpoint's own."
+                  },
+                  "carry": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string", "minLength": 1 },
+                    "description": "Row field -> path in the dimension's source record; added to every row fetched for that value."
+                  },
+                  "fallback_values": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "uniqueItems": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "modified_field": { "type": ["string", "null"] },
+    "merge_type": { "type": "string", "enum": ["upsert", "replace"] },
+    "sync_pattern": {
+      "type": "string",
+      "enum": [
+        "full_refresh_upsert",
+        "incremental_upsert",
+        "watermark_upsert",
+        "scoped_wrapper_only"
+      ]
+    },
+    "validation_fields": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1
+    },
+    "tier": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5,
+      "description": "Sync tier (1=hourly operational, 5=reference). Tier 1 is REST-only per Invariant #4."
+    },
+    "open_set": {
+      "type": "boolean",
+      "description": "Reconcile the open documents once a day per tenant, after the endpoint's hourly sync: compare the documents staging holds as open (status Open) with Visma's own list of open documents (GET <api_endpoint>?status=Open) and fetch the differences by key (GET <api_endpoint>/<primary key values in order>). Catches a payment that closes a document without moving modified_field, and a part payment that only moves its balance (compared with the balance of Visma's list row). Needs source erp_rest, tier 1, finance_page_number pagination, no partitioning or period_scan, a status field and a balance field on the documents and a key of top-level fields that is a path of the document. vsv2-validate-config enforces the same rules as the Rust registry (open_set_problem in config_validate.py). Default false. See core/crates/vsv2-orchestrator/src/open_set.rs."
+    },
+    "notes": {
+      "type": "string",
+      "description": "Free-form documentation for operators. No runtime impact."
+    },
+    "datamart": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ready"],
+          "properties": {
+            "ready": { "type": "boolean" },
+            "pilot_override": {
+              "type": "boolean",
+              "description": "Legacy flag — superseded by tenant_overrides. Ignored by orchestrator."
+            },
+            "tenant_overrides": {
+              "type": "object",
+              "additionalProperties": false,
+              "patternProperties": {
+                "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "query_file": { "type": "string", "minLength": 1 },
+            "type_name": { "type": "string", "minLength": 1 },
+            "root_field": { "type": "string", "minLength": 1 },
+            "cursor_field": { "type": "string", "minLength": 1 },
+            "id_field": { "type": "string", "minLength": 1 },
+            "company_filter": { "type": "boolean" },
+            "join_normalizer": { "type": "string", "minLength": 1 },
+            "compare_excludes": {
+              "type": "array",
+              "description": "Bronze fields omitted from sample shadow diffs only; not a cutover-parity waiver.",
+              "items": { "type": "string", "minLength": 1, "pattern": "\\S" },
+              "minItems": 1,
+              "uniqueItems": true
+            },
+            "fallback_source": {
+              "type": "string",
+              "enum": ["erp_rest", "datamart_graphql", "expense_api"]
+            }
+          }
+        }
+      ]
+    }
+  },
+  "if": {
+    "properties": { "open_set": { "const": true } },
+    "required": ["open_set"]
+  },
+  "then": {
+    "required": ["api_endpoint", "tier"],
+    "properties": {
+      "source": { "const": "erp_rest" },
+      "tier": { "const": 1 },
+      "pagination_profile": { "const": "finance_page_number" },
+      "partitioning": { "type": "null" },
+      "period_scan": { "type": "null" }
+    }
+  }
+}

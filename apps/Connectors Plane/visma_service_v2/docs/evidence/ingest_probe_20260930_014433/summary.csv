@@ -1,0 +1,2 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+general_ledger_transactions,,1,0,succeeded,573553,573553,573553,574,0,553,13134,59057,2026-09-30 03:15:28+00

@@ -17,6 +17,7 @@ type FakeWindow = {
 let container: HTMLElement;
 let root: Root | null = null;
 let fake: FakeWindow;
+let restoreFullscreen = () => {};
 
 beforeAll(() => {
 	(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -47,12 +48,73 @@ afterEach(() => {
 	if (root) act(() => root?.unmount());
 	root = null;
 	container?.remove();
+	restoreFullscreen();
+	restoreFullscreen = () => {};
 	vi.useRealTimers();
 	vi.restoreAllMocks();
 	Reflect.deleteProperty(navigator, "connection");
 	Reflect.deleteProperty(document, "hidden");
 	document.documentElement.style.overflow = "";
 });
+
+const installFullscreenApi = () => {
+	const documentFullscreenDescriptor = Object.getOwnPropertyDescriptor(
+		document,
+		"fullscreenElement",
+	);
+	const documentExitDescriptor = Object.getOwnPropertyDescriptor(
+		document,
+		"exitFullscreen",
+	);
+	const elementRequestDescriptor = Object.getOwnPropertyDescriptor(
+		HTMLElement.prototype,
+		"requestFullscreen",
+	);
+	let fullscreenElement: Element | null = null;
+	const requestFullscreen = vi.fn(() => {
+		fullscreenElement = document.querySelector("[data-product-loop-live]");
+		document.dispatchEvent(new Event("fullscreenchange"));
+		return Promise.resolve();
+	});
+	const exitFullscreen = vi.fn(() => {
+		fullscreenElement = null;
+		document.dispatchEvent(new Event("fullscreenchange"));
+		return Promise.resolve();
+	});
+
+	Object.defineProperty(document, "fullscreenElement", {
+		configurable: true,
+		get: () => fullscreenElement,
+	});
+	Object.defineProperty(document, "exitFullscreen", {
+		configurable: true,
+		value: exitFullscreen,
+	});
+	Object.defineProperty(HTMLElement.prototype, "requestFullscreen", {
+		configurable: true,
+		value: requestFullscreen,
+	});
+
+	restoreFullscreen = () => {
+		if (documentFullscreenDescriptor) {
+			Object.defineProperty(document, "fullscreenElement", documentFullscreenDescriptor);
+		} else {
+			Reflect.deleteProperty(document, "fullscreenElement");
+		}
+		if (documentExitDescriptor) {
+			Object.defineProperty(document, "exitFullscreen", documentExitDescriptor);
+		} else {
+			Reflect.deleteProperty(document, "exitFullscreen");
+		}
+		if (elementRequestDescriptor) {
+			Object.defineProperty(HTMLElement.prototype, "requestFullscreen", elementRequestDescriptor);
+		} else {
+			Reflect.deleteProperty(HTMLElement.prototype, "requestFullscreen");
+		}
+	};
+
+	return { exitFullscreen, requestFullscreen };
+};
 
 const mount = (element: ReturnType<typeof createElement>) => {
 	container = document.createElement("div");
@@ -95,6 +157,8 @@ const demoSays = (type: string, extra: Record<string, unknown> = {}, source: unk
 };
 const posted = () => fake.postMessage.mock.calls.map(([message]) => (message as { type: string }).type);
 const shield = () => container.querySelector<HTMLButtonElement>('button[aria-label^="Klikk for å prøve"]');
+const fullscreenButton = () =>
+	container.querySelector<HTMLButtonElement>('[aria-label="Vis dashboard i fullskjerm"]');
 const buttonText = (text: string) =>
 	[...container.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent?.trim() === text) ?? null;
 const pressButton = (element: HTMLElement | null) => {
@@ -161,6 +225,29 @@ describe("LoopLiveDemo on the stage", () => {
 		expect(settleEvent.mock.calls[0]?.[0]).toMatchObject({ detail: { reducedMotion: false } });
 		expect(buttonText("Avslutt demo")).not.toBeNull();
 		window.removeEventListener(PRODUCT_LOOP_SETTLE_EVENT, settleEvent);
+	});
+
+	it("opens and closes the dashboard in native full screen from the demo toolbar", async () => {
+		fake = { location: { replace: vi.fn() }, postMessage: vi.fn() };
+		const fullscreen = installFullscreenApi();
+		mountStage();
+		await settle();
+		demoSays("ready");
+
+		const open = fullscreenButton();
+		expect(open).not.toBeNull();
+		expect(open?.getAttribute("title")).toBe("Vis dashboard i fullskjerm");
+		pressButton(open);
+		expect(fullscreen.requestFullscreen).toHaveBeenCalledTimes(1);
+		expect(container.querySelector<HTMLElement>("[data-product-loop-live]")?.dataset.fullscreen).toBe("true");
+
+		const close = container.querySelector<HTMLButtonElement>(
+			'[aria-label="Avslutt fullskjerm"]',
+		);
+		expect(close).not.toBeNull();
+		pressButton(close);
+		expect(fullscreen.exitFullscreen).toHaveBeenCalledTimes(1);
+		expect(container.querySelector<HTMLElement>("[data-product-loop-live]")?.dataset.fullscreen).toBe("false");
 	});
 
 	it("counts only messages from the frame's own window with the envelope", async () => {

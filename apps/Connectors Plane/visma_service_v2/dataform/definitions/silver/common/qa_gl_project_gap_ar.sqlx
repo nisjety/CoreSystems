@@ -1,0 +1,119 @@
+config {
+  type: "table",
+  schema: "visma_silver_common",
+  name: "qa_gl_project_gap_ar",
+  description: "QA: income general-ledger lines (NS account class 3) still missing project_id after AR customer-invoice enrichment. Mirror of qa_gl_project_gap_ap for the revenue side. Driven by account class rather than a single module so journal-/cash-posted income (e.g. kick-backs and rebates posted on module=GL, which no customer invoice can attribute to a project) is surfaced rather than silently dropped. Explains the remaining gap reason per line.",
+  tags: ["silver", "common", "qa", "gl", "project", "ar", "income"]
+}
+
+WITH gl_income_missing AS (
+  SELECT
+    tenant_id,
+    organization_name,
+    module,
+    batch_number,
+    ref_number,
+    line_number,
+    transaction_date,
+    financial_period,
+    account_cd,
+    subaccount_id,
+    branch_id,
+    description,
+    debit_amount,
+    credit_amount
+  FROM ${ref("visma_silver", "fact_general_ledger")}
+  WHERE account_cd LIKE '3%'        -- NS chart class 3: sales & operating revenue
+    AND project_id IS NULL
+),
+
+customer_doc AS (
+  SELECT
+    tenant_id,
+    reference_number AS ref_number,
+    COUNT(*) AS customer_invoice_line_count,
+    COUNTIF(project_id IS NOT NULL) AS customer_invoice_doc_line_with_project_count,
+    COUNT(DISTINCT project_id) AS customer_invoice_doc_project_count,
+    STRING_AGG(DISTINCT project_id, '|' ORDER BY project_id LIMIT 20) AS customer_invoice_doc_project_ids
+  FROM ${ref("visma_silver", "fact_customer_invoice_line")}
+  GROUP BY 1, 2
+),
+
+customer_line AS (
+  SELECT
+    tenant_id,
+    reference_number AS ref_number,
+    CAST(line_number AS STRING) AS line_number,
+    COUNT(*) AS customer_invoice_line_match_count,
+    COUNTIF(project_id IS NOT NULL) AS customer_invoice_line_match_with_project_count,
+    COUNT(DISTINCT project_id) AS customer_invoice_line_project_count,
+    STRING_AGG(DISTINCT project_id, '|' ORDER BY project_id LIMIT 20) AS customer_invoice_line_project_ids,
+    ANY_VALUE(line_description) AS customer_invoice_line_description
+  FROM ${ref("visma_silver", "fact_customer_invoice_line")}
+  GROUP BY 1, 2, 3
+),
+
+gl_doc_counts AS (
+  SELECT
+    tenant_id,
+    ref_number,
+    COUNT(*) AS gl_income_doc_line_count
+  FROM ${ref("visma_silver", "fact_general_ledger")}
+  WHERE account_cd LIKE '3%'
+  GROUP BY 1, 2
+)
+
+SELECT
+  g.tenant_id,
+  g.organization_name,
+  g.module,
+  g.batch_number,
+  g.ref_number,
+  g.line_number,
+  g.transaction_date,
+  g.financial_period,
+  g.account_cd,
+  g.subaccount_id,
+  g.branch_id,
+  g.description,
+  g.debit_amount,
+  g.credit_amount,
+  dc.gl_income_doc_line_count,
+  cd.customer_invoice_line_count,
+  cd.customer_invoice_doc_line_with_project_count,
+  cd.customer_invoice_doc_project_count,
+  cd.customer_invoice_doc_project_ids,
+  cl.customer_invoice_line_match_count,
+  cl.customer_invoice_line_match_with_project_count,
+  cl.customer_invoice_line_project_count,
+  cl.customer_invoice_line_project_ids,
+  cl.customer_invoice_line_description,
+  CASE
+    WHEN cd.ref_number IS NULL THEN 'no_customer_invoice_line_match'
+    WHEN COALESCE(cd.customer_invoice_doc_project_count, 0) = 0 THEN 'customer_invoice_lines_without_project'
+    WHEN COALESCE(cl.customer_invoice_line_project_count, 0) > 1 THEN 'line_level_multi_project_conflict'
+    WHEN COALESCE(cd.customer_invoice_doc_project_count, 0) > 1 THEN 'document_level_multi_project_conflict'
+    WHEN COALESCE(cl.customer_invoice_line_match_count, 0) = 0 THEN 'no_matching_line_number_in_customer_invoice'
+    WHEN COALESCE(cd.customer_invoice_doc_project_count, 0) = 1 THEN 'unexpected_missing_despite_unique_doc_project'
+    ELSE 'unclassified'
+  END AS gap_reason,
+  CASE
+    WHEN cd.ref_number IS NULL THEN 'No customer invoice line found for tenant + ref_number (journal- or cash-posted income, e.g. kick-backs/rebates on module=GL)'
+    WHEN COALESCE(cd.customer_invoice_doc_project_count, 0) = 0 THEN 'Customer invoice exists, but none of its lines carry project_id'
+    WHEN COALESCE(cl.customer_invoice_line_project_count, 0) > 1 THEN 'This exact customer invoice line has multiple project candidates'
+    WHEN COALESCE(cd.customer_invoice_doc_project_count, 0) > 1 THEN 'Document contains multiple project_ids, so safe doc-level fallback is blocked'
+    WHEN COALESCE(cl.customer_invoice_line_match_count, 0) = 0 THEN 'Document exists, but GL line_number does not match any customer invoice line_number'
+    WHEN COALESCE(cd.customer_invoice_doc_project_count, 0) = 1 THEN 'Should have been backfilled by unique document project; investigate edge-case join'
+    ELSE 'Review manually'
+  END AS gap_reason_detail
+FROM gl_income_missing AS g
+LEFT JOIN customer_doc AS cd
+  ON g.tenant_id = cd.tenant_id
+ AND g.ref_number = cd.ref_number
+LEFT JOIN customer_line AS cl
+  ON g.tenant_id = cl.tenant_id
+ AND g.ref_number = cl.ref_number
+ AND g.line_number = cl.line_number
+LEFT JOIN gl_doc_counts AS dc
+  ON g.tenant_id = dc.tenant_id
+ AND g.ref_number = dc.ref_number

@@ -1,0 +1,48 @@
+query Contacts(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  contacts(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    contactId
+    bAccountId
+    contactType
+    fullName
+    displayName
+    title
+    salutation
+    firstName
+    midName
+    lastName
+    dateOfBirth
+    email
+    webSite
+    fax
+    faxType
+    phone1
+    phone1Type
+    phone2
+    phone2Type
+    phone3
+    phone3Type
+    defAddressId
+    isActive
+    languageId
+    extRefNbr
+    isDefaultContact
+    deletedDatabaseRecord
+    lastModifiedDateTime
+    createdInDataMartDateTime
+  }
+}
