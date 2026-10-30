@@ -1049,6 +1049,10 @@ services:
     build:
       context: "../Engagement plane/anbud-core"
       dockerfile: Dockerfile
+      # The Dockerfile copies the shared plane client from this named context,
+      # as the Engagement plane's own compose provides it.
+      additional_contexts:
+        studio-plane-client: "../Engagement plane/pkg/planeclient"
       args: *build-metadata
     container_name: anbud-api
     restart: unless-stopped
