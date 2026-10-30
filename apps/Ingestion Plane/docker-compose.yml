@@ -1044,6 +1044,11 @@ services:
   # The one exception is DOFFIN_API_KEY_SECONDARY, which is blanked below on
   # purpose: env_file would otherwise hand the running service a key it never uses.
   anbud-api:
+    # Opt-in only. anbud-core now runs in the Engagement plane against
+    # engagement-postgres with dedicated anbud_migrator/anbud_app roles and its
+    # own migration job; this copy connects as ingestion_user, which the current
+    # anbud-core refuses ("use the dedicated anbud_app role").
+    profiles: ["legacy-anbud"]
     env_file:
       - "../Engagement plane/anbud-core/.env"
     build:
