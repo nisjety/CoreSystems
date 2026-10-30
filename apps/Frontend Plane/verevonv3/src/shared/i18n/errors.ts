@@ -138,6 +138,18 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
   INVITATION_NOT_FOUND: { no: 'Fant ikke invitasjonen. Be om en ny.', en: 'Invitation not found. Ask for a new one.' },
   plan_upgrade_required: { no: 'Oppgrader planen din for å fortsette.', en: 'Upgrade your plan to continue.' },
   entitlement_required: { no: 'Denne funksjonen er ikke inkludert i planen din.', en: 'This feature is not included in your plan.' },
+  // Tender matching: the core's answers and the gateway's own refusals.
+  rate_limited: { no: 'Søket er opptatt akkurat nå. Prøv igjen om litt.', en: 'Search is busy right now. Try again shortly.' },
+  timeout: { no: 'Søket tok for lang tid. Prøv igjen.', en: 'The search took too long. Try again.' },
+  not_configured: { no: 'Anbud er ikke koblet til i dette miljøet.', en: 'Tender search is not connected in this environment.' },
+  tender_service_misconfigured: { no: 'Anbud-tjenesten er ikke riktig satt opp. Kontakt support.', en: 'The tender service is not set up correctly. Contact support.' },
+  payload_too_large: { no: 'Profilen er for stor.', en: 'The profile is too large.' },
+  validation_failed: { no: 'Sjekk profilen: noen felt er ikke gyldige.', en: 'Check the profile: some fields are not valid.' },
+  bad_request: { no: 'Forespørselen er ikke gyldig.', en: 'The request is not valid.' },
+  not_found: { no: 'Kunngjøringen finnes ikke lenger i lageret.', en: 'This notice is no longer in the store.' },
+  unsupported_notice: { no: 'Formatet på kunngjøringen støttes ikke.', en: 'This notice format is not supported.' },
+  unreadable_notice: { no: 'Kunngjøringen kunne ikke leses.', en: 'The notice could not be read.' },
+  not_an_opportunity: { no: 'Dette er en tildeling, ikke et anbud du kan by på.', en: 'This is an award, not a tender you can bid on.' },
 }
 
 /**

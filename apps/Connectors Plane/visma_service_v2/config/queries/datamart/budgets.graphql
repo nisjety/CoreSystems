@@ -1,0 +1,40 @@
+query Budgets(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false,
+  $includeUnreleased: Boolean! = false
+) {
+  budgets(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted,
+    includeUnreleased: $includeUnreleased
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    branchId
+    groupId
+    parentGroupId
+    ledgerId
+    financialYear
+    released
+    releasedAmount
+    accountId
+    subaccountId
+    description
+    amount
+    distributedAmount
+    lastModifiedDateTime
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+    periods {
+      periodId
+      amount
+    }
+  }
+}

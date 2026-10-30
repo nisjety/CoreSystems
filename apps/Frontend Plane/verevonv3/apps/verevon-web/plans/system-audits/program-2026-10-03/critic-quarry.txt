@@ -1,0 +1,192 @@
+VERDICT: sound after the corrections below, with two caveats.
+
+- The core is consistent with the owner rules. That core is Option B, a service-only /v1/rerank in retrieval-engine, paid Azure Cohere only, no Model Plane or subscription route, and ZDR/sovereign skip with an explicit marker.
+- The Quarry vector-leg scoping (T10, D7) is unsound as written, and the contract-test plan would silently not run in the real build contexts.
+- The design JSON I received is truncated mid-T05 (`tests_first`). I could not review T06-T16, T05's live_proof, or the owner_decisions list.
+
+Tags: FACT means observed in code or live. INFERENCE means reasoned, not exercised. DECISION means the owner's call.
+
+CORRECTIONS
+
+1. FACT, blocker: the vector-leg corpus scope cannot work (D7 is not fixed).
+   - Quarry's filter `filters.sources=["quarry"]` maps to a Qdrant payload key `source` (filters.rs:34). It is applied only in the dense arm (orchestrator.rs:1157-1170).
+   - A live scroll of `dataplane_knowledge_embedv4` (100 of 207 points, keys only) shows payload keys {knowledge_id, document_id, org_id, chunk_index, text, document_date}. There is no `source` or `visibility`.
+   - The writer confirms it: embedding-engine `qdrant_writer/mod.rs:90-125` and `batch/mod.rs:104-111`.
+   - Sparse and keyword arms never read `filters.sources`; I grepped sparse, keyword and postprocess.
+   - Net effect: the dense arm returns zero candidates for every Quarry search. The sparse arm stays unscoped and can return other org-visible documents. Live there are 1 sharepoint, 1 chat-upload and 2 quarry org-visible docs.
+   - Every non-ZDR search still pays a Cohere Embed query call.
+   - The comment at orchestrator.rs:1140 describes this exact failure class for Space filters.
+   - Fix:
+     - Make the scope server-enforced per service principal in the T03 route table (forced source=quarry), not a client filter.
+     - Implement it as a SQL predicate on `documents.source` in the post-fusion gate (visibility gate at postprocess.rs:~499), covering every arm. Alternatively write `source` into the payload with a backfill and sparse support, which means a reindex.
+     - Test it against real Postgres and Qdrant seeded with a mixed corpus.
+
+2. FACT, blocker: the "real rules" tests skip or cannot read their fixtures in the real build contexts.
+   - The existing policy spec says "outside this service's Docker build context, so the spec is a no-op wherever it is absent" (`plane-service-principals-policy.contract.spec.ts:20-37`, `describeIfPolicy`).
+   - The auth-core build context is `./auth-core` (Control Plane compose:229). The Quarry build context is `./Quarry-v2` (Ingestion compose:13-14). The DP Dockerfile copies only Cargo.toml, proto/ and services/.
+   - Design C1, C2, C3 and C5 cross those boundaries and say "skip when absent". That recreates the permissive-double failure by absence.
+   - Fix:
+     - Vendor each golden into the consuming plane's tree, pin it by sha256 on both sides, and add a repo-level drift check.
+     - Make the specs fail rather than skip when `CI` or a `REQUIRE_CONTRACT` flag is set.
+     - Quarry crates build only in Docker (project memory), so its tests must run through the documented Docker target.
+
+3. FACT, ZDR: the "belt and braces" claim is false.
+   - quarry-edge's data-plane token carries zdr=false statically. The live registry has `retentionByAudience data-plane=persistent`, and `authorizePlaneServicePrincipal` takes zdr from the registry.
+   - The DP's "merge with signed token zdr" therefore adds nothing. Both sides depend on the same caller-set body flag.
+   - Omission means non-ZDR: `SearchRequest.zdr` is `#[serde(default)] bool` with `effective_zdr(requested)=requested`, and quarry-edge `Claims` has no zdr field.
+   - Fix:
+     - Make `zdr_mode` required on /v1/rerank (400, no default).
+     - Require `zdr` from service callers on Quarry /v1/search. Model-gateway's Body already always sends a bool.
+     - Define the flag as the run-level effective ZDR after any per-connection BYO downgrade, never org-level. This follows the owner rule.
+     - If independent enforcement is wanted, have Auth Core mint the rerank token with the org posture. `resolveInteractiveRetentionPosture` exists, but `plane-token.controller.ts` has another session's uncommitted edits.
+   - Raise D17 from low:
+     - `retrieval.start` logs raw query text at INFO next to `zdr_mode` (orchestrator.rs:1086; live log lines confirm).
+     - ZDR requests included. That breaks the owner's ZDR rule in operator logs.
+     - Schedule a redaction when the mode is restrictive.
+
+4. FACT, new regression the design missed (D19): `rrf_fuse` drops engine metadata.
+   - `fusion.rs:59-90` rebuilds each result from url/title/snippet with `..Default::default()`. That drops `engines` and `fusion_score` (serp.rs:50-67).
+   - relevance.rs uses `engines` for the engine-agreement bonus (relevance.rs:44-46, 864-872).
+   - Once D1/D3/D6 are fixed and the vector leg returns any hit, all results in that response lose the signal.
+   - Dedup is by raw URL string, so canonical stored URLs will not merge with SERP URLs.
+   - Add the fix and a test with real engines populated.
+
+5. FACT plus INFERENCE: the Wave 3 → Wave 4 ordering exposes uncalibrated scores.
+   - The gate computes 0.6×provider + 0.4×lexical against a 0.30 keep threshold (relevance.rs:1019-1040, 109, 210).
+   - Raw Cohere scores are not calibrated, so relevant hits can fall below the threshold.
+   - Quarry (T09, Wave 3) emits scores before model-gateway T12 (Wave 4) understands `score_kind`.
+   - Fix:
+     - Have Quarry attach `score` and `score_kind` only when the caller negotiates it, or deploy T12 first.
+     - Shadow mode must emit no score or highlights.
+   - T12 also collides with the uncommitted tool_loop.rs (see item 12).
+
+6. FACT: the registry has a third copy.
+   - `scripts/bootstrap_runtime_environment.sh:891-1056` embeds an inline jq registry of 14 principals. Its quarry-edge scopes would not include data:rerank. Its `upsert_env` writes `PLANE_SERVICE_PRINCIPALS_JSON`.
+   - The live registry has 17 principals. The launcher assembles from `config/plane-service-principals.json` (`plane_principals_registry`).
+   - T01 must retire or sync the bootstrap copy and add a spec asserting they agree. Otherwise a fresh bootstrap silently reverts the grant.
+   - T01 test (4) hard-codes "quarry-edge refused for model-gateway/models:invoke". That blocks the repair of D16:
+     - autoprompt, answer synthesis, ai-formats and extract all use the Model Plane client (main.rs:946-1170, search_routes.rs:1445, extract_routes.rs:207, ai_formats.rs, answer.rs).
+     - Commit 932b30d2 flipped AUTOPROMPT and SEMANTIC_RERANK from 0 to 1 together.
+   - Pin the rerank manifest entry instead, and give D16 an owner-assigned task (fix, or flip the defaults off). It is not "out of scope".
+
+7. FACT: the highlight design does not match the available data.
+   - Live `search.result_shape` shows snippets of 70 to 274 chars, median 138-172.
+   - Design windows are up to 320 chars, and a window is suppressed when it is about the whole text. A SERP snippet is a single window.
+   - Highlights will be suppressed or duplicate the snippet, which lexical overlap already counts.
+   - The ≥0.7 highlight-precision gate and the doubled provider documents are meaningless there.
+   - Windows only make sense for DP vector chunks or fetched page text. Specify the source or defer.
+
+8. FACT: the processor gate and the "public text" premise are wrong.
+   - GDPR_SUMMARY.md:106-107 requires the processor to be approved AND `allow_third_party_processing=true`. The design has only the deployment env `WEB_RERANK_PROCESSOR_APPROVED`.
+   - Quarry's `PrivacyPolicy.allow_third_party_processing` (privacy.rs:39, default false) is not carried on the search path.
+   - Vector hits sent to rerank are tenant-stored chunk text (up to 4000 chars), not public web text. `SourceRef` does not expose `zdr_classification`.
+   - State a rule instead of assuming public.
+
+9. INFERENCE: service-principal viewers hit the user-core visibility facade.
+   - For viewer `service:quarry-edge` the pipeline calls `HttpVisibilityClient`/user-core `/authz/visible` with the service bearer as "verified user proof" (visibility.rs fetch; api/mod.rs:53-62).
+   - That is a refused, fail-open call per search, with up to 3 s of added latency and log noise.
+   - It was never exercised live because every call died at 403. T03 should skip grant resolution for service principals and test it with a counting double.
+
+10. FACT: the vector leg has no kill switch, no budget, no metering and an unmapped ZDR vocabulary.
+    - `vector_index` is built whenever DATA_PLANE_URL is set (main.rs:1058-1075), and it is shared with find-similar.
+    - Each non-ZDR search makes a paid Cohere Embed query call. Only 'rerank' cost events exist today (orchestrator.rs:65-94). It also writes a `retrieval_runs` row with the query and an INFO log line.
+    - Add a `QUARRY_EDGE__VECTOR_RETRIEVAL` flag, a per-org budget and metering for query embeds.
+    - Add a typed map from Quarry `ZdrMode{Off,On}` (quarry-core zdr.rs) to DP `{disabled,reject,ephemeral}`, with a golden of accepted values. The literal "off" came from this mismatch.
+
+11. FACT: production viability.
+    - The loader refuses allowAnyOrg registries outside dev/test (`plane-service-principal.ts:~173-188`), and every committed principal is allowAnyOrg:true.
+    - T01 adds a scope into a shape that cannot load in production. The design notes this but schedules nothing.
+    - Add a tenancy-model task for quarry-edge. Token exchange is hard-limited to session-core subjects today (`TOKEN_EXCHANGE_ALLOWED_SUBJECT_AUDIENCES`).
+    - Bypassing the membership check is not new: documents-api-go already does it for service principals. The DP deviates from matrix rule 9 for service callers, so record that in the ledger.
+
+12. FACT, stale or wrong claims in the design:
+    - tool_loop.rs is NOT clean: `git diff --stat` shows +628/-28 uncommitted. execution-core `quarry_auth.rs` is also modified. relevance.rs and quarry.rs are clean.
+    - `plane-service-principals-policy.contract.spec.ts` and `plane-token-exchange.composition.spec.ts` are untracked, so T01 edits another session's unreviewed file.
+    - Modified files are now 373, not 350.
+    - Matrix rows are 70-71 (69 is Embedding generation).
+    - Live corpus also has 1 org-visible chat-upload document.
+    - The container is `data-plane-v2-retrieval-engine-1`, not "retrieval-engine".
+
+13. Ambiguities that would make two implementers diverge:
+    - Default for `sovereign_required` when absent. The existing retrieve path treats absent as strict true (orchestrator.rs:880-892). The design says optional and merged, with no default.
+    - "Refuses to enable" at startup must mean route-only 503, not aborting the engine and tenant retrieval.
+    - The idempotency key `rerank:{org}:{request_id}` uses a caller-chosen id, so reuse with different content under-records cost. Include a content hash. The 120 s cache is also per replica.
+    - The new route needs the same x-org-id mismatch check.
+    - The main.rs wiring tuple currently gates the reranker on `model_plane_url`. State that it must now gate on the DP URL and token provider.
+    - The Cohere mock is itself a permissive double. Capture one real provider response as a golden during T15, plus an `#[ignore]` live contract test.
+
+14. Metering:
+    - cost-core requires user attribution ("user attribution is required", cmd/main.go ~437) and allows only the `model-gateway` producer (`usageEnvelopeProducer`).
+    - Service-principal rerank events carry no user, so T16 needs a new envelope kind.
+    - Another session is adding an Azure Cost Management actual-cost sync in cost-core (`azurecost`, uncommitted). Align with it.
+
+15. ZDR orgs:
+    - Skip-with-marker is correct as an interim.
+    - The owner said ZDR must be "workable". Make the compliant path (self-hosted text cross-encoder profile, or an attested route modelled on `ZdrAttestation`) a task with exit criteria, not an open question.
+    - Docs conflict: `sovereign-rag-blueprint-reconciliation.md:79-82` calls Embed v4 on Azure-EU DataZone "ZDR", while the phased plan lists contractual ZDR as a TODO. Record the conflict and rely on neither.
+    - The rerank deployment's region is unverified (host `core-ai-rg.services.ai.azure.com`).
+
+16. Capacity:
+    - Measured loss is about 19% of queries to 429s (`scripts/eval-gate.py:33-35`), plus the S0 quota notes in rerank.rs.
+    - A ≤2% degraded gate is unrealistic on the shared deployment. Make the dedicated deployment or quota a precondition for default-ON, not "before GA".
+    - A +0.04 nDCG with CI>0 gate on 80 queries needs a power check.
+
+CLAIMS VERIFIED (source, method)
+
+- quarry-edge has audiences [data-plane] only, scopes data:read, documents:write, org:data:read_all, persistent retention. No principal other than verevon-gateway holds the model-gateway audience. Verified by reading the live auth-service registry with credentials stripped.
+- The rerank 403 is an Auth Core mint refusal. Verified in quarry-edge logs, and in service_tokens.rs.
+- The retrieve 403 is membership. Verified by `data_plane_authorization_decision ... service:quarry-edge ... not_member` in auth-service logs, `dpv2_authz_denials_total=15`, and 51 `denied:no_membership` audit rows in `access_audit_log`.
+- Quarry's retrieve body sends `zdr_mode:"off"`, sends no sovereign_required, sends `filters:{}`, and uses `reqwest::Client::new()` with no timeout (vector_index.rs:56-64, 86-98, 142). Wiremock tests use invented aliases (source_url, uri, score).
+- The engine's response has no URL and no score (types.rs:225-258). All 2 quarry documents have `metadata.url` and `idx_documents_crawl_url_dedup` exists (psql).
+- Cohere-on-Azure rerank: the live endpoint host is azure.com, RERANKER_MODEL=Cohere-rerank-v4.0-pro, key present. The last cost_events rerank rows are 2026-09-23. There are 38 retrieval runs since 09-26, all zero candidates. The last candidate_count_reranked>0 day is 09-23.
+- The `cost_events` columns match the design. The Go verifier decodes strictly, binds the retrieval producer to 'rerank', and the cost-core producer is model-gateway only.
+- `reranker_model` on the request is only copied (grep).
+- Compose default flipped by 932b30d2 on 2026-09-23. The original reranker is from 42d7fed7 (2026-06-17).
+- Owner-rule text found at matrix :155 and CODEBASE_INFORMATION_SYSTEM.md:119. The ledger 2026-09-03 ZDR-egress precedent is real.
+- Stale Quarry docs confirmed: Features.md:37-41 and 177-181, CROSS_PLANE_AUTH.md:9-10.
+- Not verified:
+  - the "metrics crate inert" claim in quarry-edge telemetry
+  - Frontend `cost.rs:7`
+  - Cohere pricing
+  - gRPC behaviour
+  - anything in T06-T16
+
+MISSING TASKS
+
+- Server-enforced source scope in the DP, plus a mixed-corpus real-store test (correction 1).
+- Fix `rrf_fuse` metadata loss and URL normalization (4).
+- Score negotiation, with shadow emitting no scores (5).
+- Retire or sync `bootstrap_runtime_environment.sh` and add a spec asserting parity (6).
+- A D16 owner and decision (6).
+- Vector-leg flag, budget and embed metering, plus the typed ZDR vocabulary map (10).
+- Skip the visibility facade for service principals (9).
+- Redact query text in `retrieval.start` for restrictive modes (3).
+- Make `zdr` and `zdr_mode` required (3).
+- Production tenancy model for quarry-edge (11).
+- ZDR-compliant rerank path (15).
+- Cost-core attribution and Azure-actual-cost alignment (14).
+- Real provider golden (13).
+
+FILE COLLISIONS (other sessions or designs)
+
+- `plane-service-principals.json`, `config/README.md`, `run-control-plane.sh`, `plane-token.controller.ts`, `convex-token.service.ts` and its spec, `plane-token.controller.spec.ts`: uncommitted edits by another session.
+- `Ingestion Plane/docker-compose.yml`: uncommitted integration-api hunk.
+- cost-core `cmd/main.go`, `ledger.go`, `store.go`, `server.go`: uncommitted.
+- model-gateway `tool_loop.rs`: uncommitted.
+- Any contextual-retrieval or ZDR design will also touch:
+  - retrieval-engine `config.rs`, `main.rs`, `api/mod.rs`, `metrics`, `pipeline/orchestrator.rs`, `pipeline/types.rs`
+  - the cost consumer plus `cost_events` DDL in both `infra/postgres/init.sql` and `migrations/`
+  - the matrix, CODEBASE_INFORMATION_SYSTEM, GDPR_SUMMARY and the ledger (newest first)
+  - `scripts/auth-regression-matrix.sh`
+
+OWNER DECISIONS ALREADY ANSWERED BY THE OWNER RULES
+
+- Paid Azure Cohere rerank, never a subscription or BYO route: answered, and the design complies.
+- Option B: answered.
+- Contextual retrieval stays on: answered. Do not reuse this design's kill switches for it.
+- No org-wide ZDR downgrade: answered. Only per-connection or per-run, so the ZDR flag on the wire must be the run-level effective one (correction 3).
+- The dedicated Azure deployment question (O1) is effectively answered by "paid is okay, no shortcuts" (correction 16).
+- O11, labelling the judged set with an LLM on Terra: answered by the project rule that live tests run on gpt-5.6-terra via the subscription. Labels must never feed runtime ranking.
+- Still genuinely open: O5 (Cohere price), O6 (gRPC), and the legal Art. 28 confirmation inside O2.
+
+Files read are all under C:/dev/CoresSystem; no files were edited.

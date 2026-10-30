@@ -1,0 +1,15 @@
+# Apply only when the optional separate legacy Facebook pair is complete.
+# Facebook, WhatsApp, and legacy Meta Ads use this app; the unified Meta app
+# continues to use its own dedicated pair from the Meta overlay.
+services:
+  integration-api:
+    environment:
+      FACEBOOK_CLIENT_ID: ${INTEGRATION_LOCAL_FACEBOOK_CLIENT_ID:?set the canonical legacy Facebook app ID}
+      FACEBOOK_CLIENT_SECRET: ""
+      FACEBOOK_CLIENT_SECRET_FILE: /run/secrets/facebook_client_secret
+    secrets:
+      - facebook_client_secret
+
+secrets:
+  facebook_client_secret:
+    file: ${INTEGRATION_LOCAL_FACEBOOK_SECRET_FILE:?set a protected legacy Facebook app secret file}

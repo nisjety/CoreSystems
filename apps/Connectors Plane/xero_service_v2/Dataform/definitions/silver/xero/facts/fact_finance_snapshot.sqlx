@@ -1,0 +1,19 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero_sensitive",
+  name: "fact_finance_snapshot",
+  disabled: dataform.projectConfig.vars.enable_xero_sensitive !== "true",
+  description: "Point-in-time Xero Finance API responses; one row per tenant, endpoint and request key.",
+  tags: ["silver", "xero", "fact"]
+}
+
+SELECT
+  tenant_id,
+  endpoint,
+  record_id,
+  SAFE_CAST(snapshot_date AS DATE) AS snapshot_date,
+  request_key,
+  SAFE.PARSE_JSON(payload_json) AS payload,
+  synced_at
+FROM ${ref("staging_xero_sensitive", "extended_records")}
+WHERE api_family = 'finance'

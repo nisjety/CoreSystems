@@ -1,0 +1,39 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+dm_accounts,,1,0,succeeded,614,614,614,2,0,114,,574,2026-09-29 11:42:51.361+00
+dm_addresses,,1,0,succeeded,37699,37699,37699,76,0,199,,658,2026-09-29 20:09:32.17+00
+dm_ar_historical_data,,1,0,succeeded,0,0,0,1,0,0,,453,
+dm_branches,,1,0,succeeded,1,1,1,1,0,1,,499,2026-09-29 22:04:33.218+00
+dm_budgets,,1,0,succeeded,0,0,0,1,0,0,,463,
+dm_contacts,,1,0,succeeded,36843,36843,36843,74,0,343,,585,2026-09-29 20:09:32.728+00
+dm_countries,,1,0,succeeded,260,260,260,1,0,260,,573,2026-09-29 11:04:29.173+00
+dm_customer_document_lines,,1,0,succeeded,71975,71975,71975,144,0,475,,818,2026-09-29 12:17:38.618+00
+dm_customer_documents,,1,0,succeeded,23185,23185,23185,47,0,185,,770,2026-09-29 22:26:34.238+00
+dm_customer_payment_lines,,1,0,succeeded,21699,21699,21699,44,0,199,,720,2026-09-29 13:40:36.766+00
+dm_customer_payments,,1,0,succeeded,21392,21392,21392,43,0,392,,597,2026-09-29 22:10:10.933+00
+dm_customers,,1,0,succeeded,6587,6587,6587,14,0,87,,606,2026-09-29 19:14:41.245+00
+dm_employees,,1,0,succeeded,0,0,0,1,0,0,,511,
+dm_financial_periods,,1,0,succeeded,0,0,0,1,0,0,,459,
+dm_general_ledger_balances,,1,0,succeeded,2419,2419,2419,5,0,419,,643,2026-09-29 13:50:31.889+00
+dm_general_ledger_balances_v2,,1,0,succeeded,15066,15066,15066,31,0,66,,691,2026-09-29 13:50:31.889+00
+dm_inventory_items,,1,0,succeeded,0,0,0,1,0,0,,526,
+dm_journal_transactions,,1,124,running,0,0,0,1147,0,369,,5485,
+dm_locations,,1,0,succeeded,20295,20295,20295,41,0,295,,621,2026-09-29 20:09:38.309+00
+dm_payment_methods,,1,0,succeeded,13,13,13,1,0,13,,482,2026-08-19 06:16:50.75+00
+dm_project_tasks,,1,0,succeeded,3108,3108,3108,7,0,108,,592,2026-09-29 17:39:48.981+00
+dm_sales_order_lines_v2,,1,0,succeeded,67378,67378,67378,135,0,378,,836,2026-09-29 13:57:37.644+00
+dm_sales_orders,,1,0,succeeded,22137,22137,22137,45,0,137,,922,2026-09-29 19:14:36.1+00
+dm_sales_persons,,1,0,succeeded,114,114,114,1,0,114,,499,2026-09-25 09:19:13.784+00
+dm_sales_prices,,1,0,succeeded,20965,20965,20965,42,0,465,,696,2026-09-28 12:23:36.596+00
+dm_states,,1,0,succeeded,806,806,806,2,0,306,,520,2026-02-15 00:42:08.923+00
+dm_subaccounts,,1,0,succeeded,11802,11802,11802,24,0,302,,631,2026-09-07 13:14:31.798+00
+dm_supplier_classes,,1,0,succeeded,16,16,16,1,0,16,,509,2026-09-29 17:06:22.383+00
+dm_supplier_document_lines,,1,0,succeeded,42298,42298,42298,85,0,298,,707,2026-09-29 13:50:35.241+00
+dm_supplier_documents,,1,0,succeeded,11561,11561,11561,24,0,61,,727,2026-09-29 18:34:53.676+00
+dm_supplier_payment_lines,,1,0,succeeded,9054,9054,9054,19,0,54,,604,2026-09-29 13:30:40.252+00
+dm_supplier_payments,,1,0,succeeded,9187,9187,9187,19,0,187,,593,2026-09-29 13:30:39.851+00
+dm_suppliers,,1,0,succeeded,1276,1276,1276,3,0,276,,785,2026-09-29 11:53:27.869+00
+dm_terms,,1,0,succeeded,22,22,22,1,0,22,,563,2026-09-01 08:21:36.184+00
+dm_vat_categories,,1,0,succeeded,48,48,48,1,0,48,,461,2026-09-29 17:06:24.468+00
+dm_vat_zones,,1,0,succeeded,15,15,15,1,0,15,,629,2026-02-15 00:42:30.321+00
+dm_warehouse_locations,,1,0,succeeded,0,0,0,1,0,0,,519,
+dm_warehouses,,1,1,failed,0,0,0,0,0,0,,0,

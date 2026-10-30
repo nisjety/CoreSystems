@@ -1,0 +1,113 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_gold_document_parent_reference_safety",
+  description: "Every retained Gold child row must resolve to its retained Gold parent. Lifecycle markers do not permit an orphaned document child."
+}
+
+WITH orphan_references AS (
+  SELECT 'customer_invoice_line_parent' AS relationship,
+         CAST(child.invoice_line_key AS STRING) AS record_id
+  FROM ${ref("xero_gold_finance", "fact_customer_invoice_line")} AS child
+  LEFT JOIN ${ref("xero_gold_finance", "fact_customer_invoice")} AS parent
+    ON child.invoice_key = parent.invoice_key
+  WHERE parent.invoice_key IS NULL
+
+  UNION ALL
+
+  SELECT 'supplier_invoice_line_parent', CAST(child.invoice_line_key AS STRING)
+  FROM ${ref("xero_gold_finance", "fact_supplier_invoice_line")} AS child
+  LEFT JOIN ${ref("xero_gold_finance", "fact_supplier_invoice")} AS parent
+    ON child.invoice_key = parent.invoice_key
+  WHERE parent.invoice_key IS NULL
+
+  UNION ALL
+
+  SELECT 'customer_credit_note_line_parent', CAST(child.credit_note_line_key AS STRING)
+  FROM ${ref("xero_gold_finance", "fact_customer_credit_note_line")} AS child
+  LEFT JOIN ${ref("xero_gold_finance", "fact_customer_credit_note")} AS parent
+    ON child.credit_note_key = parent.credit_note_key
+  WHERE parent.credit_note_key IS NULL
+
+  UNION ALL
+
+  SELECT 'supplier_credit_note_line_parent', CAST(child.credit_note_line_key AS STRING)
+  FROM ${ref("xero_gold_finance", "fact_supplier_credit_note_line")} AS child
+  LEFT JOIN ${ref("xero_gold_finance", "fact_supplier_credit_note")} AS parent
+    ON child.credit_note_key = parent.credit_note_key
+  WHERE parent.credit_note_key IS NULL
+
+  UNION ALL
+
+  SELECT 'customer_credit_note_allocation_parent', CAST(child.allocation_key AS STRING)
+  FROM ${ref("xero_gold_finance", "fact_customer_credit_note_allocation")} AS child
+  LEFT JOIN ${ref("xero_gold_finance", "fact_customer_credit_note")} AS parent
+    ON child.credit_note_key = parent.credit_note_key
+  WHERE parent.credit_note_key IS NULL
+
+  UNION ALL
+
+  SELECT 'supplier_credit_note_allocation_parent', CAST(child.allocation_key AS STRING)
+  FROM ${ref("xero_gold_finance", "fact_supplier_credit_note_allocation")} AS child
+  LEFT JOIN ${ref("xero_gold_finance", "fact_supplier_credit_note")} AS parent
+    ON child.credit_note_key = parent.credit_note_key
+  WHERE parent.credit_note_key IS NULL
+
+  UNION ALL
+
+  SELECT 'customer_overpayment_line_parent', CAST(child.overpayment_line_key AS STRING)
+  FROM ${ref("xero_gold_finance", "fact_customer_overpayment_line")} AS child
+  LEFT JOIN ${ref("xero_gold_finance", "fact_customer_overpayment")} AS parent
+    ON child.overpayment_key = parent.overpayment_key
+  WHERE parent.overpayment_key IS NULL
+
+  UNION ALL
+
+  SELECT 'supplier_overpayment_line_parent', CAST(child.overpayment_line_key AS STRING)
+  FROM ${ref("xero_gold_finance", "fact_supplier_overpayment_line")} AS child
+  LEFT JOIN ${ref("xero_gold_finance", "fact_supplier_overpayment")} AS parent
+    ON child.overpayment_key = parent.overpayment_key
+  WHERE parent.overpayment_key IS NULL
+
+  UNION ALL
+
+  SELECT 'bank_transaction_line_parent', CAST(child.bank_transaction_line_key AS STRING)
+  FROM ${ref("xero_gold_finance", "fact_bank_transaction_line")} AS child
+  LEFT JOIN ${ref("xero_gold_finance", "fact_bank_transaction")} AS parent
+    ON child.bank_transaction_key = parent.bank_transaction_key
+  WHERE parent.bank_transaction_key IS NULL
+
+  UNION ALL
+
+  SELECT 'batch_payment_line_parent', CAST(child.batch_payment_line_key AS STRING)
+  FROM ${ref("xero_gold_finance", "fact_batch_payment_line")} AS child
+  LEFT JOIN ${ref("xero_gold_finance", "fact_batch_payment")} AS parent
+    ON child.batch_payment_key = parent.batch_payment_key
+  WHERE parent.batch_payment_key IS NULL
+
+  UNION ALL
+
+  SELECT 'repeating_invoice_line_parent', CAST(child.repeating_invoice_line_key AS STRING)
+  FROM ${ref("xero_gold_finance", "dim_repeating_invoice_line")} AS child
+  LEFT JOIN ${ref("xero_gold_finance", "dim_repeating_invoice")} AS parent
+    ON child.repeating_invoice_key = parent.repeating_invoice_key
+  WHERE parent.repeating_invoice_key IS NULL
+
+  UNION ALL
+
+  SELECT 'quote_line_parent', CAST(child.quote_line_key AS STRING)
+  FROM ${ref("xero_gold_sales", "fact_quote_line")} AS child
+  LEFT JOIN ${ref("xero_gold_sales", "fact_quote")} AS parent
+    ON child.quote_key = parent.quote_key
+  WHERE parent.quote_key IS NULL
+
+  UNION ALL
+
+  SELECT 'purchase_order_line_parent', CAST(child.purchase_order_line_key AS STRING)
+  FROM ${ref("xero_gold_procurement", "fact_purchase_order_line")} AS child
+  LEFT JOIN ${ref("xero_gold_procurement", "fact_purchase_order")} AS parent
+    ON child.purchase_order_key = parent.purchase_order_key
+  WHERE parent.purchase_order_key IS NULL
+)
+SELECT relationship, record_id
+FROM orphan_references

@@ -1,0 +1,33 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Xero batch-payment control facts. Totals are explicitly non-additive because the underlying payments are modelled separately.",
+  assertions: { nonNull: ["tenant_id", "batch_payment_id", "batch_payment_key"], uniqueKey: ["batch_payment_key"] }
+}
+
+WITH line_sets AS (
+  SELECT tenant_id, batch_payment_id, COUNT(*) AS observed_line_count,
+         LOGICAL_OR(is_line_set_ambiguous) AS has_ambiguous_lines,
+         LOGICAL_OR(is_line_snapshot_stale) AS has_stale_line_snapshot
+  FROM ${ref("dw_1_silver_xero", "fact_batch_payment_line")}
+  GROUP BY tenant_id, batch_payment_id
+)
+SELECT FARM_FINGERPRINT(b.tenant_id) AS company_key,
+       FARM_FINGERPRINT(CAST(b.payment_date_local AS STRING)) AS date_key,
+       IF(b.bank_account_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(b.tenant_id, '|', b.bank_account_id))) AS bank_account_key,
+       b.batch_payment_key, b.tenant_id, b.batch_payment_id, b.batch_payment_type,
+       b.status, b.is_deleted, b.code, b.reference, b.narrative, b.particulars, b.details,
+       b.payment_date, b.payment_date_local, b.bank_account_id, b.account_currency_code,
+       TRUE AS is_payment_aggregate, TRUE AS is_non_additive,
+       COALESCE(l.has_stale_line_snapshot, FALSE) AS has_stale_line_snapshot,
+       (b.payment_count IS DISTINCT FROM COALESCE(l.observed_line_count, 0)
+        OR COALESCE(l.has_ambiguous_lines, FALSE)) AS is_line_set_ambiguous,
+       b.status = 'AUTHORISED'
+         AND b.payment_count = COALESCE(l.observed_line_count, 0)
+         AND NOT COALESCE(l.has_ambiguous_lines, FALSE) AS is_detail_reconciled,
+       b.total_amount AS source_total_amount,
+       b.payment_count, COALESCE(l.observed_line_count, 0) AS observed_line_count,
+       b.is_reconciled, b.reconciled_statement_line_id, b.synced_at, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_batch_payment")} AS b
+LEFT JOIN line_sets AS l
+  ON b.tenant_id = l.tenant_id AND b.batch_payment_id = l.batch_payment_id

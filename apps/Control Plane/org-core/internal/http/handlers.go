@@ -1062,3 +1062,45 @@ func (s *Server) searchMembers(c *gin.Context) {
 		"count":   len(suggestions),
 	})
 }
+
+// updateOrgWebsite records the organisation's own website.
+// PATCH /api/v1/organizations/:id/website, body: { "website_url": "https://..." }
+func (s *Server) updateOrgWebsite(c *gin.Context) {
+	orgID := c.Param("id")
+	var req struct {
+		WebsiteURL string `json:"website_url" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "website_url is required"})
+		return
+	}
+	orgData, err := s.orgService.SetWebsite(c.Request.Context(), orgID, req.WebsiteURL, c.GetHeader("x-user-id"))
+	if err != nil {
+		switch err {
+		case org.ErrInvalidWebsite:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "website_url must be an http or https address with a host name"})
+		case org.ErrNotFound:
+			c.JSON(http.StatusNotFound, gin.H{"error": "organization not found"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update organization website"})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, orgData)
+}
+
+// getOrgWebsite returns the organisation's own website as org-core holds it. A service that holds the
+// org:website:read scope reads it, visibility-core among them, to mark the organisation's primary site.
+// GET /api/v1/organizations/:id/website
+func (s *Server) getOrgWebsite(c *gin.Context) {
+	orgData, err := s.orgService.GetOrganization(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		if err == org.ErrNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "organization not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get organization website"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"website_url": orgData.WebsiteURL, "website_updated_at": orgData.WebsiteUpdatedAt})
+}

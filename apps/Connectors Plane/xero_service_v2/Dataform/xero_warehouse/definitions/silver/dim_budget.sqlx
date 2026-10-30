@@ -1,0 +1,14 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Xero budget metadata. The current source has no budget-balance rows, so this model never fabricates budget measures.",
+  assertions: { nonNull: ["tenant_id", "budget_id", "budget_key"], uniqueKey: ["budget_key"] }
+}
+
+SELECT CONCAT(tenant_id, '|', budget_id) AS budget_key,
+       tenant_id, budget_id, record_id AS budget_internal_id, description,
+       budget_type, status, tracking_category_id, tracking_category_name,
+       tracking_option_id, tracking_option_name, tracking_json,
+       budget_line_count, budget_line_count > 0 AS is_detail_available,
+       updated_at, first_seen_at, synced_at
+FROM ${ref("dw_bronze_xero", "xero_budgets")}

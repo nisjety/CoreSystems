@@ -193,8 +193,8 @@ function normalizePreferences(payload: unknown): UserPreferences {
   }
 }
 
-export function getMe(): Promise<UserProfile> {
-  return requestJson<unknown>('/api/v1/me').then(normalizeUserProfile)
+export function getMe(signal?: AbortSignal): Promise<UserProfile> {
+  return requestJson<unknown>('/api/v1/me', { signal }).then(normalizeUserProfile)
 }
 
 export function updateMe(patch: UpdateUserProfileRequest): Promise<UserProfile> {

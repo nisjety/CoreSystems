@@ -1,0 +1,251 @@
+{
+    "uri": "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages/101800-2026?limit=100&updatedTo=2026-10-29T09:30:52",
+    "version": "1.1",
+    "extensions": [
+        "https://standard.open-contracting.org/profiles/eu/latest/en/extension.json",
+        "https://raw.githubusercontent.com/open-contracting-extensions/ocds_amendment_rationale_classifications_extension/master/extension.json",
+        "https://raw.githubusercontent.com/open-contracting-extensions/ocds_budget_breakdown_extension/master/extension.json",
+        "https://raw.githubusercontent.com/open-contracting-extensions/ocds_contract_completion_extension/master/extension.json",
+        "https://raw.githubusercontent.com/open-contracting-extensions/ocds_documentation_extension/master/extension.json",
+        "https://raw.githubusercontent.com/open-contracting-extensions/ocds_pagination_extension/master/extension.json",
+        "https://raw.githubusercontent.com/open-contracting-extensions/ocds_suitability_extension/master/extension.json",
+        "https://raw.githubusercontent.com/portaledcahn/ocds_Links_extension/main/extension.json",
+        "https://raw.githubusercontent.com/cabinetoffice/ocds_uk_extension/main/extension.json",
+        "https://raw.githubusercontent.com/open-contracting-extensions/ocds_performance_failures_extension/master/extension.json"
+    ],
+    "publishedDate": "2026-10-27T22:02:03Z",
+    "publisher": {
+        "name": "Cabinet Office",
+        "scheme": "GB-GOR",
+        "uid": "D2",
+        "uri": "https://www.gov.uk/government/organisations/cabinet-office"
+    },
+    "license": "http://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/",
+    "publicationPolicy": "https://www.gov.uk/government/publications/open-contracting",
+    "releases": [
+        {
+            "ocid": "ocds-h6vhtk-0791ce",
+            "buyerID": [],
+            "id": "101800-2026",
+            "tag": [
+                "tender"
+            ],
+            "date": "2026-10-27T22:02:03Z",
+            "initiationType": "tender",
+            "parties": [
+                {
+                    "name": "New Wave Federation",
+                    "id": "GB-PPON-PNVN-6383-DBCG",
+                    "identifier": {
+                        "scheme": "GB-PPON",
+                        "id": "PNVN-6383-DBCG"
+                    },
+                    "address": {
+                        "streetAddress": "Hackney Service Centre",
+                        "locality": "Hackney",
+                        "postalCode": "E8 1DY",
+                        "country": "GB",
+                        "countryName": "United Kingdom",
+                        "region": "UKI41"
+                    },
+                    "contactPoint": {
+                        "name": "Ashaki Bailey",
+                        "email": "ashaki.bailey@hackney.gov.uk"
+                    },
+                    "roles": [
+                        "buyer"
+                    ],
+                    "details": {
+                        "url": "http://www.hackney.gov.uk",
+                        "classifications": [
+                            {
+                                "scheme": "UK_CA_TYPE",
+                                "id": "publicAuthoritySubCentralGovernment",
+                                "description": "Public authority - sub-central government"
+                            }
+                        ]
+                    }
+                },
+                {
+                    "name": "London Borough of Hackney",
+                    "id": "GB-PPON-PRZC-5592-DDDV",
+                    "identifier": {
+                        "scheme": "GB-PPON",
+                        "id": "PRZC-5592-DDDV"
+                    },
+                    "address": {
+                        "streetAddress": "1 Hillman Street",
+                        "locality": "London",
+                        "postalCode": "E8 1DY",
+                        "country": "GB",
+                        "countryName": "United Kingdom",
+                        "region": "UKI41"
+                    },
+                    "contactPoint": {
+                        "name": "Ashaki Bailey",
+                        "email": "ashaki.bailey@hackney.gov.uk"
+                    },
+                    "roles": [
+                        "buyer"
+                    ],
+                    "details": {
+                        "classifications": [
+                            {
+                                "scheme": "UK_CA_TYPE",
+                                "id": "publicAuthoritySubCentralGovernment",
+                                "description": "Public authority - sub-central government"
+                            }
+                        ]
+                    }
+                }
+            ],
+            "buyer": {
+                "id": "GB-PPON-PNVN-6383-DBCG",
+                "name": "New Wave Federation"
+            },
+            "planning": {
+                "noEngagementNoticeRationale": "Due to time scales it was not possible to carry out preliminary market engagement for this procurement."
+            },
+            "tender": {
+                "id": "DN834122",
+                "legalBasis": {
+                    "id": "2023/54",
+                    "scheme": "UKPGA",
+                    "uri": "https://www.legislation.gov.uk/ukpga/2023/54/contents"
+                },
+                "title": "Catering Service (non staff)for New Wave Federation Primary Schools",
+                "description": "The New Wave Federation of schools are seeking a contractor to provide a catering service (non staff) for their primary schools. This will be a 2 year contract with an option to extend for a further 2 years.\nWe are seeking an experienced Provider to work in partnership with the school Catering teams to deliver a high quality, nutritious catering service that meets the needs of the Schools and its pupils.\nThe estimated maximum budget for the contract is £600,000 per annum and up to £2,880,000 if the contract is extended up to 4 years.",
+                "status": "active",
+                "items": [
+                    {
+                        "id": "1",
+                        "additionalClassifications": [
+                            {
+                                "scheme": "CPV",
+                                "id": "55524000",
+                                "description": "School catering services"
+                            }
+                        ],
+                        "deliveryAddresses": [
+                            {
+                                "region": "UKI41",
+                                "country": "GB",
+                                "countryName": "United Kingdom"
+                            }
+                        ],
+                        "relatedLot": "1"
+                    }
+                ],
+                "value": {
+                    "amountGross": 2880000.00,
+                    "amount": 2400000.00,
+                    "currency": "GBP"
+                },
+                "procurementMethod": "open",
+                "procurementMethodDetails": "Competitive flexible procedure",
+                "procedure": {
+                    "features": "This procurement will use the competitive flexible procedure.\nPlease see tender documents for details."
+                },
+                "mainProcurementCategory": "services",
+                "specialRegime": [
+                    "lightTouch"
+                ],
+                "aboveThreshold": true,
+                "coveredBy": [
+                    "GPA"
+                ],
+                "submissionMethodDetails": "Tenders must be submitted electronically via the London Tender Portal\nhttps://www.londontenders.org/",
+                "submissionTerms": {
+                    "electronicSubmissionPolicy": "allowed",
+                    "languages": [
+                        "en"
+                    ]
+                },
+                "tenderPeriod": {
+                    "endDate": "2026-11-23T12:00:00+00:00"
+                },
+                "enquiryPeriod": {
+                    "endDate": "2026-11-13T12:00:00+00:00"
+                },
+                "awardPeriod": {
+                    "endDate": "2027-01-18T23:59:59+00:00"
+                },
+                "lots": [
+                    {
+                        "id": "1",
+                        "status": "active",
+                        "value": {
+                            "amountGross": 2880000.00,
+                            "amount": 2400000.00,
+                            "currency": "GBP"
+                        },
+                        "awardCriteria": {
+                            "weightingDescription": "Quality:Price ratio 65% quality and 35% price",
+                            "criteria": [
+                                {
+                                    "type": "quality",
+                                    "name": "Quality",
+                                    "description": "65%"
+                                },
+                                {
+                                    "type": "price",
+                                    "name": "Price",
+                                    "description": "35%"
+                                }
+                            ]
+                        },
+                        "selectionCriteria": {
+                            "criteria": [
+                                {
+                                    "type": "economic",
+                                    "description": "See tender documents"
+                                },
+                                {
+                                    "type": "technical",
+                                    "description": "Experienced in providing catering services to primary schools\nSee tender documents for further details"
+                                }
+                            ]
+                        },
+                        "suitability": {
+                            "sme": true
+                        },
+                        "contractPeriod": {
+                            "startDate": "2027-04-01T00:00:00+01:00",
+                            "endDate": "2029-03-31T23:59:59+01:00",
+                            "maxExtentDate": "2031-03-31T23:59:59+01:00"
+                        },
+                        "hasRenewal": true,
+                        "renewal": {
+                            "description": "The contract includes the option to extend by a further 2 years in annual increments"
+                        },
+                        "description": null
+                    }
+                ],
+                "documents": [
+                    {
+                        "id": "L-1",
+                        "documentType": "biddingDocuments",
+                        "description": "Project reference DN8354122 Catering Service (non staff) for New Wave Federation Primary Schools",
+                        "url": "https://www.londontenders.org/"
+                    },
+                    {
+                        "id": "conflictOfInterest",
+                        "documentType": "conflictOfInterest",
+                        "description": "Not published"
+                    },
+                    {
+                        "id": "101800-2026",
+                        "documentType": "tenderNotice",
+                        "noticeType": "UK4",
+                        "description": "Tender notice on Find a Tender",
+                        "url": "https://www.find-tender.service.gov.uk/Notice/101800-2026",
+                        "datePublished": "2026-10-27T22:02:03Z",
+                        "format": "text/html"
+                    }
+                ],
+                "riskDetails": "The supplier must meet the key performance indicators set.\nFailure to meet these may result in the contract being terminated early."
+            },
+            "language": "en"
+        }
+    ]
+}

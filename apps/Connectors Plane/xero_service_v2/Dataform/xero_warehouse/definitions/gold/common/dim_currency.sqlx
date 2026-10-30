@@ -1,0 +1,12 @@
+config {
+  type: "table",
+  schema: "xero_gold_common",
+  description: "Tenant-scoped Xero currency dimension; the key is intentionally company-scoped for reliable joins.",
+  assertions: { nonNull: ["tenant_id", "currency_code", "currency_key"], uniqueKey: ["currency_key"] }
+}
+
+SELECT FARM_FINGERPRINT(CONCAT(tenant_id, '|', currency_code)) AS currency_key,
+       FARM_FINGERPRINT(tenant_id) AS company_key,
+       tenant_id, currency_code, currency_description,
+       currency_internal_id, first_seen_at, synced_at, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_currency")}

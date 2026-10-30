@@ -1,0 +1,24 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero contact-group membership bridge. Group and contact source gaps are explicit flags, never dropped rows.",
+  assertions: { nonNull: ["tenant_id", "contact_group_id", "contact_id", "contact_group_membership_key"], uniqueKey: ["contact_group_membership_key"] }
+}
+
+SELECT
+  CONCAT(m.tenant_id, '|', m.contact_group_id, '|', m.contact_id) AS contact_group_membership_key,
+  m.tenant_id,
+  m.contact_group_id,
+  m.contact_id,
+  m.group_name AS source_group_name,
+  m.group_status AS source_group_status,
+  m.synced_at,
+  g.contact_group_key IS NULL AS is_group_unresolved,
+  c.contact_key IS NULL AS is_contact_unresolved
+FROM ${ref("dw_bronze_xero", "xero_contact_group_memberships")} AS m
+LEFT JOIN ${ref("dw_1_silver_xero", "dim_contact_group")} AS g
+  ON m.tenant_id = g.tenant_id
+ AND m.contact_group_id = g.contact_group_id
+LEFT JOIN ${ref("dw_1_silver_xero", "dim_contact")} AS c
+  ON m.tenant_id = c.tenant_id
+ AND m.contact_id = c.contact_id

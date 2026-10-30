@@ -1,99 +1,44 @@
-//! Minimal sitemap.xml parser.
-//!
-//! Supports both `<urlset>` (regular sitemaps) and `<sitemapindex>` (nested
-//! indexes). Returns a flat list of URLs and a list of nested sitemap URLs
-//! that the caller should fetch and parse next.
-
+//! Namespace-aware sitemap parsing. No DTD or external entity expansion.
 use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Sitemap {
-    pub urls: Vec<SitemapEntry>,
-    pub nested: Vec<String>,
-}
-
+pub struct Sitemap { pub urls: Vec<SitemapEntry>, pub nested: Vec<String>, pub valid: bool, pub truncated: bool }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SitemapEntry {
-    pub loc: String,
-    pub lastmod: Option<DateTime<Utc>>,
-    pub changefreq: Option<String>,
-    pub priority: Option<String>,
-}
+pub struct SitemapEntry { pub loc: String, pub lastmod: Option<DateTime<Utc>>, pub changefreq: Option<String>, pub priority: Option<String> }
 
-/// Parse a sitemap XML document. Tolerant of malformed input — returns an
-/// empty `Sitemap` rather than failing, since sitemaps are advisory.
+/// Malformed/unsupported XML is reported as invalid, never as a complete map.
 pub fn parse(xml: &str) -> Sitemap {
-    let lower = xml.to_lowercase();
-    let is_index = lower.contains("<sitemapindex");
-    if is_index {
-        parse_index(xml)
-    } else {
-        parse_urlset(xml)
-    }
-}
-
-fn parse_urlset(xml: &str) -> Sitemap {
-    let mut sm = Sitemap::default();
-    for url_block in extract_blocks(xml, "<url>", "</url>") {
-        let loc = match extract_inner(url_block, "<loc>", "</loc>") {
-            Some(s) => s.trim().to_string(),
-            None => continue,
-        };
-        let lastmod = extract_inner(url_block, "<lastmod>", "</lastmod>")
-            .and_then(|s| DateTime::parse_from_rfc3339(s.trim()).ok())
-            .map(|dt| dt.with_timezone(&Utc));
-        let changefreq =
-            extract_inner(url_block, "<changefreq>", "</changefreq>").map(|s| s.trim().to_string());
-        let priority =
-            extract_inner(url_block, "<priority>", "</priority>").map(|s| s.trim().to_string());
-        sm.urls.push(SitemapEntry {
-            loc,
-            lastmod,
-            changefreq,
-            priority,
-        });
-    }
-    sm
-}
-
-fn parse_index(xml: &str) -> Sitemap {
-    let mut sm = Sitemap::default();
-    for sitemap_block in extract_blocks(xml, "<sitemap>", "</sitemap>") {
-        if let Some(loc) = extract_inner(sitemap_block, "<loc>", "</loc>") {
-            sm.nested.push(loc.trim().to_string());
+    let options = roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: 100_000 };
+    let Ok(doc) = roxmltree::Document::parse_with_options(xml, options) else { return Sitemap::default(); };
+    let root = doc.root_element();
+    let index = root.tag_name().name() == "sitemapindex";
+    if !index && root.tag_name().name() != "urlset" { return Sitemap::default(); }
+    let mut sm = Sitemap { valid: true, ..Default::default() };
+    for node in root.children().filter(|n| n.is_element() && n.tag_name().name() == if index { "sitemap" } else { "url" }) {
+        if sm.urls.len() + sm.nested.len() >= 2000 { sm.truncated = true; break; }
+        let field = |name: &str| node.children().find(|n| n.is_element() && n.tag_name().name() == name).and_then(|n| n.text()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
+        let Some(loc) = field("loc").filter(|v| v.len() <= 4096) else { sm.truncated = true; continue; };
+        if index { sm.nested.push(loc); } else {
+            sm.urls.push(SitemapEntry { loc, lastmod: field("lastmod").and_then(|s| DateTime::parse_from_rfc3339(&s).ok()).map(|d| d.with_timezone(&Utc)), changefreq: field("changefreq"), priority: field("priority") });
         }
     }
     sm
-}
-
-fn extract_blocks<'a>(xml: &'a str, open: &str, close: &str) -> Vec<&'a str> {
-    let mut out = Vec::new();
-    let mut cursor = 0;
-    while cursor < xml.len() {
-        let Some(start) = xml[cursor..].find(open) else {
-            break;
-        };
-        let abs_start = cursor + start + open.len();
-        let Some(end_rel) = xml[abs_start..].find(close) else {
-            break;
-        };
-        let abs_end = abs_start + end_rel;
-        out.push(&xml[abs_start..abs_end]);
-        cursor = abs_end + close.len();
-    }
-    out
-}
-
-fn extract_inner<'a>(xml: &'a str, open: &str, close: &str) -> Option<&'a str> {
-    let s = xml.find(open)? + open.len();
-    let e_rel = xml[s..].find(close)?;
-    Some(&xml[s..s + e_rel])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn namespaces_entities_and_dtd_are_handled_without_network_expansion() {
+        let value=parse(r#"<s:urlset xmlns:s="urn:sitemap"><s:url><s:loc>https://example.com/a?x=1&amp;y=2</s:loc></s:url></s:urlset>"#);
+        assert!(value.valid);assert_eq!(value.urls[0].loc,"https://example.com/a?x=1&y=2");
+        assert!(!parse(r#"<!DOCTYPE urlset [<!ENTITY ext SYSTEM "file:///etc/passwd">]><urlset><url><loc>&ext;</loc></url></urlset>"#).valid);
+    }
+    #[test]
+    fn entries_are_bounded_and_truncation_is_explicit() {
+        let xml=format!("<urlset>{}</urlset>","<url><loc>https://example.com/a</loc></url>".repeat(2001));let sm=parse(&xml);assert!(sm.valid&&sm.truncated);assert_eq!(sm.urls.len(),2000);
+    }
     #[test]
     fn parses_basic_urlset() {
         let xml = r#"<?xml version="1.0"?><urlset>

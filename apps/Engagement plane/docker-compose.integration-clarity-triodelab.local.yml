@@ -1,0 +1,10 @@
+# Optional second credential; the shared base Clarity manifest explicitly binds
+# each site to its own project and token basename. Mounted only into Integration.
+services:
+  integration-api:
+    secrets:
+      - clarity_triodelab_export_token
+
+secrets:
+  clarity_triodelab_export_token:
+    file: ${INTEGRATION_LOCAL_CLARITY_TRIODELAB_TOKEN_FILE:?set a protected Triodelab Clarity export token file}

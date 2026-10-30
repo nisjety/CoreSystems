@@ -34,17 +34,7 @@ import {
   Trash2,
   X,
 } from '@/shared/icons'
-import {
-  createEffect,
-  createSignal,
-  createUniqueId,
-  For,
-  Match,
-  onCleanup,
-  Show,
-  Switch,
-  untrack,
-} from 'solid-js'
+import { createEffect, createSignal, createUniqueId, For, Match, onCleanup, Show, Switch, untrack } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import type {
   BrowserAction,

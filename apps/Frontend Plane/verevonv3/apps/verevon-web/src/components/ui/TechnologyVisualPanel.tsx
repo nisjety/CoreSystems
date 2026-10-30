@@ -27,11 +27,11 @@ export function TechnologyVisualPanel() {
 
 			<div className="relative z-[2] flex min-h-[96svh] flex-col justify-between px-[clamp(28px,4vw,72px)] pb-[clamp(42px,5vw,74px)] pt-[clamp(56px,7vw,92px)] max-[1100px]:min-h-[720px] max-[760px]:min-h-[640px]">
 				<div>
-					<h2 className="m-0 max-w-[760px] font-arbeit text-[clamp(3.2rem,4.6vw,6rem)] font-light leading-[0.96] tracking-[-0.07em] text-verevon-j-text/20">
+					<h2 className="m-0 max-w-[760px] font-manrope text-[clamp(3.2rem,4.6vw,6rem)] font-light leading-[0.96] tracking-[-0.07em] text-verevon-j-text/20">
 						Pioneering technology
 					</h2>
 
-					<p className="m-0 mt-7 max-w-[560px] font-protokoll text-[clamp(1rem,1vw,1.18rem)] font-light leading-[1.45] text-verevon-j-text/38">
+					<p className="m-0 mt-7 max-w-[560px] font-geist text-[clamp(1rem,1vw,1.18rem)] font-light leading-[1.45] text-verevon-j-text/38">
 						Verevon turns monitored signals into source-backed briefs,
 						reviewable actions, and auditable execution paths.
 					</p>
@@ -39,39 +39,39 @@ export function TechnologyVisualPanel() {
 
 				<div className="grid w-full max-w-[980px] grid-cols-3 gap-[clamp(18px,2vw,34px)] max-[760px]:grid-cols-1">
 					<div>
-						<strong className="font-arbeit text-[clamp(2.1rem,2.2vw,3.1rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/88">
+						<strong className="font-manrope text-[clamp(2.1rem,2.2vw,3.1rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/88">
 							<span className="mr-2 text-[0.82em]">›</span>4{" "}
-							<sup className="relative top-[-0.14em] font-protokoll text-[0.38em] font-light tracking-normal text-verevon-j-text/72">
+							<sup className="relative top-[-0.14em] font-geist text-[0.38em] font-light tracking-normal text-verevon-j-text/72">
 								steps
 							</sup>
 						</strong>
-						<span className="mt-4 block font-protokoll text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.3] text-verevon-j-text/48">
+						<span className="mt-4 block font-geist text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.3] text-verevon-j-text/48">
 							AI worker loop
 						</span>
 						<span className="mt-8 block h-px w-full bg-verevon-j-text/18" />
 					</div>
 
 					<div>
-						<strong className="font-arbeit text-[clamp(2.1rem,2.2vw,3.1rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/88">
+						<strong className="font-manrope text-[clamp(2.1rem,2.2vw,3.1rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/88">
 							100{" "}
-							<sup className="relative top-[-0.14em] font-protokoll text-[0.38em] font-light tracking-normal text-verevon-j-text/72">
+							<sup className="relative top-[-0.14em] font-geist text-[0.38em] font-light tracking-normal text-verevon-j-text/72">
 								%
 							</sup>
 						</strong>
-						<span className="mt-4 block font-protokoll text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.3] text-verevon-j-text/48">
+						<span className="mt-4 block font-geist text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.3] text-verevon-j-text/48">
 							Manual parity
 						</span>
 						<span className="mt-8 block h-px w-full bg-verevon-j-text/18" />
 					</div>
 
 					<div>
-						<strong className="font-arbeit text-[clamp(2.1rem,2.2vw,3.1rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/88">
+						<strong className="font-manrope text-[clamp(2.1rem,2.2vw,3.1rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/88">
 							HITL{" "}
-							<sup className="relative top-[-0.14em] font-protokoll text-[0.38em] font-light tracking-normal text-verevon-j-text/72">
+							<sup className="relative top-[-0.14em] font-geist text-[0.38em] font-light tracking-normal text-verevon-j-text/72">
 								approved
 							</sup>
 						</strong>
-						<span className="mt-4 block font-protokoll text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.3] text-verevon-j-text/48">
+						<span className="mt-4 block font-geist text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.3] text-verevon-j-text/48">
 							Risky actions
 						</span>
 						<span className="mt-8 block h-px w-full bg-verevon-j-text/18" />

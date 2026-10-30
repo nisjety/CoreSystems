@@ -4,10 +4,13 @@ import type { JSX } from '@solidjs/web'
 import { AppShell } from '@/app/shell/AppShell'
 import { hasWorkspaceAdminAccess } from '@/shared/session/access'
 import { getSession } from '@/shared/session/session-store'
+import { shouldEnableSceneMode } from '@/demo/scene-mode'
 
 const DashboardPage = lazy(() => import('@/features/dashboard/components/DashboardPage'))
 const ChatPage = lazy(() => import('@/features/chat/components/ChatPage'))
 const StudioPage = lazy(() => import('@/features/studio/components/StudioPage'))
+const EngagementPage = lazy(() => import('@/features/visibility/components/EngagementPage'))
+const VisibilityPage = lazy(() => import('@/features/visibility/components/VisibilityPage'))
 const InboxPage = lazy(() => import('@/features/inbox/components/InboxPage'))
 const TicketingPage = lazy(() => import('@/features/tickets/components/TicketingPage'))
 const SupportPage = lazy(() => import('@/features/support/components/SupportPage'))
@@ -27,6 +30,7 @@ const SharedWithMePage = lazy(() => import('@/features/knowledge/components/Shar
 const SpacePage = lazy(() => import('@/features/spaces/components/SpacePage'))
 const SpacesIndexPage = lazy(() => import('@/features/spaces/components/SpacesIndexPage'))
 const LeadsPage = lazy(() => import('@/features/leads/components/LeadsPage'))
+const AnbudPage = lazy(() => import('@/features/anbud/components/AnbudPage'))
 const VerevonIngestionsPage = lazy(() => import('@/features/ingestions/components/VerevonIngestionsPage'))
 const AuthPage = lazy(() => import('@/features/auth/components/AuthPage'))
 const AcceptInvitationPage = lazy(() => import('@/features/auth/components/AcceptInvitationPage'))
@@ -34,6 +38,10 @@ const OnboardingPage = lazy(() => import('@/features/onboarding/components/Onboa
 const AccountSettingsPage = lazy(() => import('@/features/settings/components/AccountSettingsPage'))
 const SettingsPage = lazy(() => import('@/features/settings/components/SettingsPage'))
 const NotFoundPage = lazy(() => import('@/app/routes/NotFoundPage'))
+// Scene capture is available only in the explicitly enabled development build.
+const ScenePage = import.meta.env.DEV && shouldEnableSceneMode(import.meta.env.VITE_SCENE_MODE, true, window.location.pathname)
+  ? lazy(() => import('@/demo/ScenePage'))
+  : undefined
 
 function SessionLoading() {
   return (
@@ -149,6 +157,7 @@ function createEffectRedirect<T>(compute: () => T, effect: (value: T) => void): 
 
 export const Router = createRouter({
   routes: [
+    ...(ScenePage ? [{ path: '/scene/:id', component: ScenePage }] : []),
     { path: '/auth', component: AuthPage },
     { path: '/login', component: AuthPage },
     { path: '/reset-password', component: AuthPage },
@@ -174,6 +183,14 @@ export const Router = createRouter({
         { path: '/studio/canvas', component: () => <StudioPage section="canvas" /> },
         { path: '/studio/campaigns', component: () => <StudioPage section="campaigns" /> },
         { path: '/studio/templates', component: () => <StudioPage section="templates" /> },
+        { path: '/engagement', component: EngagementPage },
+        { path: '/engagement/visibility', component: VisibilityPage },
+        { path: '/engagement/visibility/pages', component: VisibilityPage },
+        { path: '/engagement/visibility/groups', component: VisibilityPage },
+        { path: '/engagement/visibility/links', component: VisibilityPage },
+        { path: '/engagement/visibility/competitors', component: VisibilityPage },
+        { path: '/anbud', component: () => <AnbudPage section="matches" /> },
+        { path: '/anbud/radar', component: () => <AnbudPage section="radar" /> },
         { path: '/inbox', component: InboxPage },
         { path: '/tickets', component: TicketingPage },
         { path: '/support', component: SupportPage },

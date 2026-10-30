@@ -1,0 +1,16 @@
+.trends-panel__badge { border: 1px solid var(--border-color, #e8e8e8); padding: 7px 10px; border-radius: 16px; font-size: 11px; color: var(--text-secondary, #777); }
+.trends-panel__form { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; margin: 24px 0 10px; }
+.trends-panel__form label { display: grid; gap: 8px; color: var(--text-secondary, #777); font-size: 12px; }
+.trends-panel__form label:first-child { flex: 1 1 250px; }
+.trends-panel__form input, .trends-panel__form select, .trends-panel__form button { font: inherit; padding: 11px 12px; border: 1px solid var(--border-color, #e8e8e8); border-radius: 10px; background: var(--panel-background, #fff); color: var(--text-primary, #252525); min-height: 42px; }
+.trends-panel__form input { width: 100%; min-width: 0; }
+.trends-panel__form button { cursor: pointer; background: var(--text-primary, #252525); color: var(--panel-background, #fff); }
+.trends-panel__form button:disabled { opacity: .45; cursor: default; }
+.trends-panel__result { border-top: 1px solid var(--border-color, #e8e8e8); margin-top: 22px; padding-top: 16px; }
+.trends-panel__legend { display: flex; flex-wrap: wrap; gap: 18px; font-size: 12px; margin: 22px 0 12px; }
+.trends-panel__chart { width: 100%; height: auto; min-height: 120px; color: var(--text-secondary, #777); }
+.trends-panel__dates { display: flex; justify-content: space-between; padding-left: 4%; font-size: 11px; color: var(--text-secondary, #777); }
+.trends-panel details { font-size: 12px; margin-top: 16px; }
+.trends-panel__refresh { padding: 9px 12px; border: 1px solid var(--border-color, #e8e8e8); border-radius: 9px; font: inherit; font-size: 12px; background: var(--panel-background, #fff); color: var(--text-primary, #252525); cursor: pointer; }
+.trends-panel__advanced { border-top: 1px solid var(--border-color, #e8e8e8); padding-top: 16px; }
+@media (max-width: 640px) { .trends-panel__form { align-items: stretch; } .trends-panel__form label { flex: 1 1 130px; } .trends-panel > header { flex-direction: column; gap: 12px; } }

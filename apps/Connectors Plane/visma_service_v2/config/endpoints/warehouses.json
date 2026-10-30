@@ -1,0 +1,39 @@
+{
+  "endpoint_name": "warehouses",
+  "bigquery_table": "visma_warehouses",
+  "primary_key": "warehouseID",
+  "source": "erp_rest",
+  "api_method": "get_warehouses",
+  "api_endpoint": "/v1/warehouse",
+  "pagination_profile": "finance_page_number",
+  "modified_field": null,
+  "merge_type": "replace",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": [
+    "warehouseID",
+    "description",
+    "active",
+    "lockSitePICountEntry",
+    "timestamp",
+    "locationEntry",
+    "avgDefaultCost",
+    "fifoDefaultCost",
+    "branch.number",
+    "branch.name",
+    "contact",
+    "address",
+    "locations"
+  ],
+  "notes": "Warehouse master data for inventory management, keyed by warehouseID. Full refresh only: /v1/warehouse exposes no lastModifiedDateTime filter parameter (WarehouseDto has a 'timestamp' field but it is not a query filter), so incremental sync is impossible — each sync fully replaces the table. Counts are small (<50 typical). Defines storage locations, default receipt/ship/return/drop-ship locations, cost valuation method, and branch association. DataMart query is config/queries/warehouse.graphql WITHOUT the nested `locations` selection: the field is typed WarehouseLocation! (non-null) but is null for warehouses without locations, and Visma then fails the WHOLE query with 'Cannot return null for non-nullable field' (measured 2026-09-29: every scalar field queries fine on its own; only `locations` breaks it). Normalizer parity vs the ERP on 15 shared keys (scripts/normalizer_parity.py): warehouseID, description, active, lockSitePICountEntry, locationEntry, avgDefaultCost, fifoDefaultCost equal; replenishmentClass matches on id; ZERO wrong values. branch and the four location fields stay null on purpose: DataMart holds INTERNAL ids (branchId 13, receiptLocationId 5435) where the ERP holds codes ('1'), 0 of 15 matched. contact, address, locations, timestamp do not exist on DataMart's root.",
+  "datamart": {
+    "ready": false,
+    "query_file": "config/queries/warehouse.graphql",
+    "root_field": "warehouses",
+    "type_name": "Warehouse",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "erp_rest",
+    "join_normalizer": "normalize_warehouse"
+  }
+}

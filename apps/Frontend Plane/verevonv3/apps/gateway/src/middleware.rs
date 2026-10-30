@@ -319,6 +319,7 @@ fn is_pre_org_onboarding_route(path: &str) -> bool {
             | "/api/v1/onboarding/theme"
             | "/api/v1/onboarding/brreg/search"
             | "/api/v1/onboarding/crawl-preview"
+            | "/api/v1/onboarding/audit-preview"
             | "/api/v1/onboarding/recommend-plan"
             | "/api/v1/onboarding/translate-recommendation"
             | "/api/v1/onboarding/actions/create-organization"
@@ -786,6 +787,7 @@ mod tests {
             "/api/v1/onboarding/theme",
             "/api/v1/onboarding/brreg/search",
             "/api/v1/onboarding/crawl-preview",
+            "/api/v1/onboarding/audit-preview",
             "/api/v1/onboarding/recommend-plan",
             "/api/v1/onboarding/translate-recommendation",
             "/api/v1/onboarding/actions/create-organization",

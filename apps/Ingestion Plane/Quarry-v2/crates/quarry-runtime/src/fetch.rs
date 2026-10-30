@@ -16,6 +16,9 @@ use crate::driver::{Driver, FetchHints};
 use crate::egress_broker::{EgressBroker, EgressDecision, EgressIdentity};
 use crate::proxy_pool::{ProxyEntry, ProxyPool};
 
+/// Stable public discovery identity; robots parsing must use this same token.
+pub const DISCOVERY_USER_AGENT: &str = "QuarryBot";
+
 #[derive(Debug, Clone)]
 pub struct FetchResponse {
     pub status: u16,
@@ -57,6 +60,9 @@ pub struct StaticDriver {
     /// connection level at all (EgressBroker::plan only selects a proxy; it
     /// never validates the URL).
     pinned_client: reqwest::Client,
+    /// Public discovery never inherits the general fetch cookie jar or a
+    /// configured/environment proxy. It uses the same pinned DNS boundary.
+    bounded_client: reqwest::Client,
     pinned_resolver: Arc<PinnedDnsResolver>,
     /// Pool of proxies and pre-built clients. Empty when no
     /// `QUARRY_PROXY_POOL` is configured. Each entry is built once at
@@ -108,6 +114,12 @@ impl StaticDriver {
             None,
             Some(Arc::clone(&pinned_resolver)),
         )?;
+        let bounded_client = bounded_client_builder(timeout, DISCOVERY_USER_AGENT)
+            .dns_resolver(Arc::clone(&pinned_resolver))
+            .build()
+            .map_err(|_| {
+                QuarryError::new(ErrorCode::Internal, "bounded client construction failed")
+            })?;
         let mut proxy_clients = HashMap::with_capacity(pool.len());
         let mut proxy_pin_resolvers = HashMap::new();
         for entry in pool.entries() {
@@ -130,6 +142,7 @@ impl StaticDriver {
         }
         Ok(Self {
             pinned_client,
+            bounded_client,
             pinned_resolver,
             proxy_clients,
             proxy_pin_resolvers,
@@ -381,8 +394,11 @@ impl StaticDriver {
         // 304 Not Modified bodies are empty by spec — don't try to
         // read them. Returning the empty body + 304 status lets the
         // caller detect cache-hit cheaply.
-        let body = if status == 304 {
+        let max_bytes: Option<usize> = None;
+        let body = if (300..400).contains(&status) {
             Vec::new()
+        } else if let Some(limit) = max_bytes {
+            read_bounded_body(resp, limit).await?
         } else {
             resp.bytes()
                 .await
@@ -398,6 +414,109 @@ impl StaticDriver {
             served_by: DriverKind::Static,
         }))
     }
+    async fn send_single_hop(
+        &self,
+        client: &reqwest::Client,
+        url: &Url,
+        hints: &FetchHints,
+        max_bytes: Option<usize>,
+        expose_redirect: bool,
+    ) -> QuarryResult<FetchResponse> {
+        let start = std::time::Instant::now();
+        let mut req = client.get(url.clone());
+        if let Some(etag) = hints.if_none_match.as_deref() {
+            // ETag values arrive with quotes already in place per
+            // RFC 9110 — pass through verbatim.
+            req = req.header(reqwest::header::IF_NONE_MATCH, etag);
+        }
+        if hints.if_none_match.is_none() {
+            // Only send If-Modified-Since when we DON'T have an ETag.
+            // Servers must honor If-None-Match in preference per the
+            // RFC; sending both is legal but redundant and some
+            // misbehaving CDNs respond inconsistently to the pair.
+            if let Some(lm) = hints.if_modified_since.as_deref() {
+                req = req.header(reqwest::header::IF_MODIFIED_SINCE, lm);
+            }
+        }
+        let resp = req.send().await.map_err(|e| {
+            let code = if e.is_timeout() {
+                ErrorCode::Timeout
+            } else if e.is_connect() {
+                ErrorCode::UpstreamBlocked
+            } else {
+                ErrorCode::DriverFailed
+            };
+            QuarryError::new(code, format!("static fetch: {e}"))
+        })?;
+        let status = resp.status().as_u16();
+        // Redirect targets have not passed Quarry's URL preflight or DNS guard.
+        // Do not hand them to reqwest's implicit redirect engine: the target
+        // could resolve to a private or metadata address after an otherwise
+        // safe public URL was accepted. A caller can surface the original
+        // redirect and submit a separately reviewed target later.
+        if resp.status().is_redirection() && !expose_redirect {
+            return Err(QuarryError::new(
+                ErrorCode::SecurityBlocked,
+                "static fetch redirect blocked pending target validation",
+            ));
+        }
+        let final_url = resp.url().clone();
+        let headers = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        // 304 Not Modified bodies are empty by spec — don't try to
+        // read them. Returning the empty body + 304 status lets the
+        // caller detect cache-hit cheaply.
+        let body = if (300..400).contains(&status) {
+            Vec::new()
+        } else if let Some(limit) = max_bytes {
+            read_bounded_body(resp, limit).await?
+        } else {
+            resp.bytes()
+                .await
+                .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("read body: {e}")))?
+                .to_vec()
+        };
+        Ok(FetchResponse {
+            status,
+            final_url,
+            headers,
+            body,
+            duration_ms: start.elapsed().as_millis() as u64,
+            served_by: DriverKind::Static,
+        })
+    }
+}
+
+/// Count decoded chunks, including responses without Content-Length and
+/// compressed responses whose expanded body is larger than the wire length.
+async fn read_bounded_body(mut response: reqwest::Response, limit: usize) -> QuarryResult<Vec<u8>> {
+    let too_large = || {
+        QuarryError::new(
+            ErrorCode::BadRequest,
+            "upstream body exceeds bounded fetch limit",
+        )
+    };
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(too_large());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| QuarryError::new(ErrorCode::DriverFailed, "bounded body read failed"))?
+    {
+        if chunk.len() > limit.saturating_sub(body.len()) {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn is_retryable_egress_error(code: ErrorCode) -> bool {
@@ -458,6 +577,36 @@ impl Driver for StaticDriver {
         self.do_fetch(url, &FetchHints::default()).await
     }
 
+    async fn fetch_bounded(&self, url: &Url, max_bytes: usize) -> QuarryResult<FetchResponse> {
+        let target = resolve_public_url(url).await?;
+        self.pinned_resolver.pin(target)?;
+        self.send_single_hop(
+            &self.bounded_client,
+            url,
+            &FetchHints::default(),
+            Some(max_bytes),
+            false,
+        )
+        .await
+    }
+
+    async fn fetch_discovery_hop(
+        &self,
+        url: &Url,
+        max_bytes: usize,
+    ) -> QuarryResult<FetchResponse> {
+        let target = resolve_public_url(url).await?;
+        self.pinned_resolver.pin(target)?;
+        self.send_single_hop(
+            &self.bounded_client,
+            url,
+            &FetchHints::default(),
+            Some(max_bytes),
+            true,
+        )
+        .await
+    }
+
     async fn fetch_conditional(
         &self,
         url: &Url,
@@ -465,6 +614,15 @@ impl Driver for StaticDriver {
     ) -> QuarryResult<FetchResponse> {
         self.do_fetch(url, hints).await
     }
+}
+
+fn bounded_client_builder(timeout: Duration, user_agent: &str) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .user_agent(user_agent)
+        .no_proxy()
+        .cookie_store(false)
+        .redirect(reqwest::redirect::Policy::none())
 }
 
 /// True for proxy URI schemes where reqwest resolves the destination
@@ -541,6 +699,129 @@ mod tests {
             },
             ..FetchHints::default()
         }
+    }
+
+    #[tokio::test]
+    async fn bounded_static_body_accepts_limit_and_rejects_oversize() {
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_string("123456789"))
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        let response = client.get(server.uri()).send().await.unwrap();
+        assert_eq!(read_bounded_body(response, 9).await.unwrap(), b"123456789");
+        let response = client.get(server.uri()).send().await.unwrap();
+        assert_eq!(
+            read_bounded_body(response, 8).await.unwrap_err().code,
+            ErrorCode::BadRequest
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_static_body_rejects_chunked_overflow_without_content_length() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 2048];
+            socket.read(&mut buf).await.unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\n1234\r\n5\r\n56789\r\n0\r\n\r\n").await.unwrap();
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            read_bounded_body(response, 8).await.unwrap_err().code,
+            ErrorCode::BadRequest
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_static_fetch_still_rejects_private_destinations() {
+        let driver = StaticDriver::new(Duration::from_secs(1), "QuarryTest").unwrap();
+        let error = driver
+            .fetch_bounded(&Url::parse("http://127.0.0.1:9/").unwrap(), 1024)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::SecurityBlocked);
+        let error = driver
+            .fetch_discovery_hop(&Url::parse("http://127.0.0.1:9/").unwrap(), 1024)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::SecurityBlocked);
+    }
+
+    #[tokio::test]
+    async fn discovery_hop_returns_redirect_without_following_or_reading_body() {
+        let target = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&target)
+            .await;
+        let source = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(
+                ResponseTemplate::new(308)
+                    .insert_header("location", target.uri())
+                    .insert_header("set-cookie", "private=value")
+                    .set_body_string("body larger than the one-byte bound"),
+            )
+            .mount(&source)
+            .await;
+        let driver = StaticDriver::new(Duration::from_secs(1), "QuarryTest").unwrap();
+        let client = bounded_client_builder(Duration::from_secs(1), DISCOVERY_USER_AGENT)
+            .build()
+            .unwrap();
+        let response = driver
+            .send_single_hop(
+                &client,
+                &Url::parse(&source.uri()).unwrap(),
+                &FetchHints::default(),
+                Some(1),
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status, 308);
+        assert!(response.body.is_empty());
+        assert_eq!(response.final_url.as_str(), format!("{}/", source.uri()));
+        assert!(target.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bounded_discovery_client_never_retains_or_sends_cookies() {
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("set-cookie", "session=private; Path=/")
+                    .set_body_string("public"),
+            )
+            .mount(&server)
+            .await;
+        // Test only the shared builder's cookie policy; production additionally
+        // installs the fail-closed public-address resolver.
+        let client = bounded_client_builder(Duration::from_secs(1), DISCOVERY_USER_AGENT)
+            .build()
+            .unwrap();
+        for _ in 0..2 {
+            client.get(server.uri()).send().await.unwrap();
+        }
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests
+            .iter()
+            .all(|request| !request.headers.contains_key("cookie")));
+        assert!(requests.iter().all(|request| request
+            .headers
+            .get("user-agent")
+            .and_then(|value| value.to_str().ok())
+            == Some(DISCOVERY_USER_AGENT)));
     }
 
     #[tokio::test]

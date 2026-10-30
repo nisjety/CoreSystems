@@ -1,0 +1,43 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_business_unit_resolved",
+  description: "Every row of the facts that Power BI splits by business unit must have one. Returns, per fact, the number of rows without a business_unit_id or without a business_unit_name. A sales order that spans several business units has no single header unit by design (header_business_unit_selection_method = mixed_multi_bu_order) and is left out. Ported from v1's assert_bu_mapping_coverage_by_tenant_date and assert_bu_name_null_rate_threshold, which read columns that no longer exist.",
+  tags: ["assertion", "silver", "business_unit"]
+}
+
+WITH unioned AS (
+  SELECT 'fact_general_ledger' AS source_table, tenant_id, business_unit_id, business_unit_name
+  FROM ${ref("visma_silver", "fact_general_ledger")}
+
+  UNION ALL
+
+  SELECT 'fact_customer_invoice', tenant_id, business_unit_id, business_unit_name
+  FROM ${ref("visma_silver", "fact_customer_invoice")}
+
+  UNION ALL
+
+  SELECT 'fact_supplier_invoice', tenant_id, business_unit_id, business_unit_name
+  FROM ${ref("visma_silver", "fact_supplier_invoice")}
+
+  UNION ALL
+
+  SELECT 'fact_project_transaction_line', tenant_id, business_unit_id, business_unit_name
+  FROM ${ref("visma_silver", "fact_project_transaction_line")}
+
+  UNION ALL
+
+  SELECT 'fact_sales_order', tenant_id, business_unit_id, business_unit_name
+  FROM ${ref("visma_silver", "fact_sales_order")}
+  WHERE header_business_unit_selection_method IS DISTINCT FROM 'mixed_multi_bu_order'
+)
+
+SELECT
+  source_table,
+  tenant_id,
+  COUNT(*) AS rows_checked,
+  COUNTIF(business_unit_id IS NULL) AS without_business_unit_id,
+  COUNTIF(business_unit_id IS NOT NULL AND business_unit_name IS NULL) AS without_business_unit_name
+FROM unioned
+GROUP BY source_table, tenant_id
+HAVING without_business_unit_id > 0 OR without_business_unit_name > 0

@@ -1,0 +1,159 @@
+config {
+  type: "table",
+  schema: "visma_silver_common",
+  name: "qa_gl_project_gap_pm",
+  description: "QA: PM general-ledger lines STILL missing project_id after the journal-line linkage. gap_reason classifies each via the journal line — 'contra_or_clearing_line_no_project' (the X sentinel; expected/legitimate, not a recoverable gap) is the dominant case. Legacy project-transaction candidate columns retained for history.",
+  tags: ["silver", "common", "qa", "gl", "project", "pm"]
+}
+
+WITH pm_gl_missing AS (
+  SELECT
+    tenant_id,
+    organization_name,
+    batch_number,
+    ref_number,
+    line_number,
+    transaction_date,
+    financial_period,
+    account_cd,
+    subaccount_id,
+    branch_id,
+    description,
+    debit_amount,
+    credit_amount
+  FROM ${ref("visma_silver", "fact_general_ledger")}
+  WHERE module = 'PM'
+    AND project_id IS NULL
+),
+
+pt_tenant AS (
+  SELECT
+    tenant_id,
+    COUNT(*) AS project_transaction_line_count,
+    COUNTIF(project_id IS NOT NULL) AS project_transaction_line_with_project_count,
+    STRING_AGG(DISTINCT module, '|' ORDER BY module) AS project_transaction_modules_seen
+  FROM ${ref("visma_silver", "fact_project_transaction_line")}
+  GROUP BY 1
+),
+
+pt_candidate_exact_ref_line AS (
+  SELECT
+    g.tenant_id,
+    g.ref_number,
+    g.line_number,
+    COUNT(*) AS candidate_count,
+    STRING_AGG(DISTINCT pt.project_id, '|' ORDER BY pt.project_id LIMIT 20) AS candidate_project_ids
+  FROM pm_gl_missing AS g
+  JOIN ${ref("visma_silver", "fact_project_transaction_line")} AS pt
+    ON g.tenant_id = pt.tenant_id
+   AND g.ref_number = pt.reference_number
+   AND g.line_number = pt.line_number
+  GROUP BY 1, 2, 3
+),
+
+pt_candidate_batch_line AS (
+  SELECT
+    g.tenant_id,
+    g.batch_number,
+    g.line_number,
+    COUNT(*) AS candidate_count,
+    STRING_AGG(DISTINCT pt.project_id, '|' ORDER BY pt.project_id LIMIT 20) AS candidate_project_ids
+  FROM pm_gl_missing AS g
+  JOIN ${ref("visma_silver", "fact_project_transaction_line")} AS pt
+    ON g.tenant_id = pt.tenant_id
+   AND g.batch_number = pt.batch_number
+   AND g.line_number = pt.line_number
+  GROUP BY 1, 2, 3
+),
+
+pt_candidate_date_amount AS (
+  SELECT
+    g.tenant_id,
+    g.batch_number,
+    g.ref_number,
+    g.line_number,
+    COUNT(*) AS candidate_count,
+    STRING_AGG(DISTINCT pt.project_id, '|' ORDER BY pt.project_id LIMIT 20) AS candidate_project_ids
+  FROM pm_gl_missing AS g
+  JOIN ${ref("visma_silver", "fact_project_transaction_line")} AS pt
+    ON g.tenant_id = pt.tenant_id
+   AND g.transaction_date = pt.transaction_date
+   AND ABS(ABS(COALESCE(g.debit_amount, 0) - COALESCE(g.credit_amount, 0)) - ABS(COALESCE(pt.amount, 0))) < 0.0001
+  GROUP BY 1, 2, 3, 4
+),
+
+-- Journal-line truth (post-2026-06 fix): the GL PM project now resolves from the
+-- journal line (journalTransactionLines[].project.id) at the (tenant,batch,line)
+-- grain. For rows STILL unlinked, this explains why — almost always the line's
+-- project is the 'X' contra/clearing sentinel (legitimately no project), which is
+-- NOT a recoverable gap. The legacy project-transaction candidate columns below
+-- are retained for history but are no longer the primary signal.
+journal_pm_line AS (
+  SELECT
+    tenantId AS tenant_id,
+    batchNumber AS batch_number,
+    JSON_VALUE(ln, '$.lineNumber') AS line_number,
+    ANY_VALUE(JSON_VALUE(ln, '$.project.id')) AS journal_project_raw
+  FROM ${ref("visma_bronze", "visma_journal_transactions")},
+       UNNEST(JSON_EXTRACT_ARRAY(journalTransactionLines)) AS ln
+  WHERE isDeleted IS DISTINCT FROM TRUE
+    AND module = 'ModulePM'
+  GROUP BY 1, 2, 3
+)
+
+SELECT
+  g.tenant_id,
+  g.organization_name,
+  g.batch_number,
+  g.ref_number,
+  g.line_number,
+  g.transaction_date,
+  g.financial_period,
+  g.account_cd,
+  g.subaccount_id,
+  g.branch_id,
+  g.description,
+  g.debit_amount,
+  g.credit_amount,
+  pt.project_transaction_line_count,
+  pt.project_transaction_line_with_project_count,
+  pt.project_transaction_modules_seen,
+  COALESCE(er.candidate_count, 0) AS exact_ref_line_candidate_count,
+  er.candidate_project_ids AS exact_ref_line_candidate_project_ids,
+  COALESCE(bl.candidate_count, 0) AS batch_line_candidate_count,
+  bl.candidate_project_ids AS batch_line_candidate_project_ids,
+  COALESCE(da.candidate_count, 0) AS date_amount_candidate_count,
+  da.candidate_project_ids AS date_amount_candidate_project_ids,
+  jl.journal_project_raw AS journal_line_project,
+  CASE
+    WHEN jl.tenant_id IS NULL THEN 'no_journal_line_in_bronze'
+    WHEN UPPER(jl.journal_project_raw) = 'X' THEN 'contra_or_clearing_line_no_project'
+    WHEN jl.journal_project_raw IS NULL THEN 'journal_line_has_no_project'
+    ELSE 'unexpected_real_project_unlinked'
+  END AS gap_reason,
+  CASE
+    WHEN jl.tenant_id IS NULL THEN 'No ModulePM journal line in bronze for this (tenant,batch,line) — would indicate a journal backfill gap; investigate.'
+    WHEN UPPER(jl.journal_project_raw) = 'X' THEN 'Journal line project is the X sentinel (contra/clearing posting) — legitimately has no project; NOT a recoverable gap.'
+    WHEN jl.journal_project_raw IS NULL THEN 'Journal line carries no project at all — legitimately unlinkable.'
+    ELSE 'Journal line HAS a real project but the GL row is unlinked — unexpected; fact_general_ledger.journal_pm_line_map should have linked it; investigate.'
+  END AS gap_reason_detail
+FROM pm_gl_missing AS g
+LEFT JOIN pt_tenant AS pt
+  ON g.tenant_id = pt.tenant_id
+LEFT JOIN pt_candidate_exact_ref_line AS er
+  ON g.tenant_id = er.tenant_id
+ AND g.ref_number = er.ref_number
+ AND g.line_number = er.line_number
+LEFT JOIN pt_candidate_batch_line AS bl
+  ON g.tenant_id = bl.tenant_id
+ AND g.batch_number = bl.batch_number
+ AND g.line_number = bl.line_number
+LEFT JOIN pt_candidate_date_amount AS da
+  ON g.tenant_id = da.tenant_id
+ AND g.batch_number = da.batch_number
+ AND g.ref_number = da.ref_number
+ AND g.line_number = da.line_number
+LEFT JOIN journal_pm_line AS jl
+  ON g.tenant_id = jl.tenant_id
+ AND g.batch_number = jl.batch_number
+ AND g.line_number = jl.line_number

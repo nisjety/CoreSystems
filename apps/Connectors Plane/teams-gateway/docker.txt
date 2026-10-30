@@ -1,0 +1,416 @@
+
+services:
+  # ===========================================
+  # INFRASTRUCTURE SERVICES
+  # ===========================================
+  
+  # PostgreSQL Database
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: aquatiq-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: aquatiq_hub
+      POSTGRES_USER: aquatiq_user
+      POSTGRES_PASSWORD: aquatiq_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - aquatiq-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aquatiq_user -d aquatiq_hub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: aquatiq-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - aquatiq-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: redis-server --appendonly yes
+
+  # ===========================================
+  # FRONTEND
+  # ===========================================
+  
+  # Frontend - Next.js React Application
+  frontend:
+    build:
+      context: ./apps/hub
+      dockerfile: Dockerfile
+    container_name: aquatiq-frontend
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      NODE_ENV: development
+      PORT: 3001
+      NEXT_PUBLIC_AUTH_URL: http://localhost:3011
+      NEXT_PUBLIC_APP_URL: http://localhost:3001
+      CHAT_URL: http://localhost:3017
+      AI_ORCHESTRATOR_URL: http://localhost:3021
+      HR_SERVICE_URL: http://localhost:3022
+      USER_SERVICE_URL: http://localhost:3012
+      ASSETS_SERVICE_URL: http://localhost:3041
+      PROCUREMENT_SERVICE_URL: http://localhost:3042
+      APPROVALS_SERVICE_URL: http://localhost:3051
+      # Internal container URLs for server-side calls
+      INTERNAL_API_URL: http://chat-server:3017
+      INTERNAL_AUTH_URL: http://auth-service:3011
+      INTERNAL_CHAT_URL: http://chat-server:3017
+      INTERNAL_AI_ORCHESTRATOR_URL: http://ai-orchestrator:3021
+      INTERNAL_USER_SERVICE_URL: http://user-service:3012
+      INTERNAL_HR_SERVICE_URL: http://hr-service:3022
+      INTERNAL_TIMEBANK_SERVICE_URL: http://timebank-service:3023
+      INTERNAL_COREBAR_SERVICE_URL: http://corebar-service:3013
+      INTERNAL_ASSETS_SERVICE_URL: http://assets-service:3041
+      INTERNAL_PROCUREMENT_SERVICE_URL: http://procurement-service:3042
+      INTERNAL_APPROVALS_SERVICE_URL: http://approvals-service:3051
+    depends_on:
+      - chat-server
+      - auth-service
+    networks:
+      - aquatiq-network
+
+  # ===========================================
+  # AI SERVICES
+  # ===========================================
+  
+  # AI Orchestrator - Core AI processing service
+  ai-orchestrator:
+    build:
+      context: ./apps/services/ai-orchestrator
+      dockerfile: Dockerfile
+    container_name: aquatiq-ai-orchestrator
+    restart: unless-stopped
+    env_file:
+      - ./apps/services/ai-orchestrator/.env
+    ports:
+      - "3021:3021"
+    environment:
+      NODE_ENV: development
+      PORT: 3021
+      # Docker-specific overrides for container networking
+      DATABASE_URL: postgresql://aquatiq_user:aquatiq_password@postgres:5432/aquatiq_hub
+      REDIS_URL: redis://redis:6379
+      postgres_host: postgres
+      redis_url: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - aquatiq-network
+
+  # Teams Gateway - Microsoft Teams bot service
+  teams-gateway:
+    build:
+      context: ./apps/services/teams-gateway
+      dockerfile: Dockerfile
+    container_name: aquatiq-teams-gateway
+    restart: unless-stopped
+    env_file:
+      - ./apps/services/teams-gateway/.env
+    ports:
+      - "3033:3033"
+    environment:
+      NODE_ENV: development
+      PORT: 3033
+      # Docker-specific overrides for container networking
+      AI_ORCHESTRATOR_URL: http://ai-orchestrator:3021
+      database_url: postgresql://aquatiq_user:aquatiq_password@postgres:5432/aquatiq_hub
+      postgres_host: postgres
+      ORCHESTRATOR_SERVICE_URL: "http://ai-orchestrator:3021"
+      orchestrator_service_url: "http://ai-orchestrator:3021"
+      orchestrator_websocket_url: "http://ai-orchestrator:3021"
+    depends_on:
+      - ai-orchestrator
+      - postgres
+    networks:
+      - aquatiq-network
+
+  # ===========================================
+  # BUSINESS PROCESS SERVICES
+  # ===========================================
+  
+  # Chat Server - Gateway service for frontend
+  chat-server:
+    build:
+      context: ./apps/services/chat-server
+      dockerfile: Dockerfile
+    container_name: aquatiq-chat-server
+    restart: unless-stopped
+    env_file:
+      - ./apps/services/chat-server/.env
+    ports:
+      - "3031:3031"
+    environment:
+      NODE_ENV: development
+      PORT: 3031
+      AI_ORCHESTRATOR_URL: http://ai-orchestrator:3021
+      FRONTEND_URL: http://localhost:3001
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      ai-orchestrator:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    networks:
+      - aquatiq-network
+
+  # Auth Service - Authentication service
+  auth-service:
+    build:
+      context: ./apps/services/auth
+      dockerfile: Dockerfile
+    container_name: aquatiq-auth-service
+    restart: unless-stopped
+    env_file:
+      - ./apps/services/auth/.env
+    ports:
+      - "3011:3011"
+    environment:
+      NODE_ENV: development
+      PORT: 3011
+      DATABASE_URL: postgresql://aquatiq_user:aquatiq_password@postgres:5432/aquatiq_hub
+      REDIS_URL: redis://redis:6379
+      BETTER_AUTH_URL: http://localhost:3011
+      NATS_URL: nats://nats:4222
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - aquatiq-network
+
+  # User Service - User management and event handling
+  user-service:
+    build:
+      context: ./apps/services/user-service
+      dockerfile: Dockerfile
+    container_name: aquatiq-user-service
+    restart: unless-stopped
+    ports:
+      - "3012:3012"
+    environment:
+      NODE_ENV: development
+      PORT: 3012
+      DATABASE_URL: postgresql://aquatiq_user:aquatiq_password@postgres:5432/aquatiq_hub
+      NATS_URL: nats://nats:4222
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USERNAME: aquatiq_user
+      DB_PASSWORD: aquatiq_password
+      DB_NAME: aquatiq_hub
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    networks:
+      - aquatiq-network
+
+  # HR Service - Human resources service
+  hr-service:
+    build:
+      context: ./apps/services/hr-service
+      dockerfile: Dockerfile
+    container_name: aquatiq-hr-service
+    restart: unless-stopped
+    env_file:
+      - ./apps/services/hr-service/.env
+    ports:
+      - "3022:3022"
+    environment:
+      NODE_ENV: development
+      PORT: 3022
+      DATABASE_URL: postgresql://aquatiq_user:aquatiq_password@postgres:5432/aquatiq_hub
+      REDIS_URL: redis://redis:6379
+      USER_SERVICE_URL: http://user-service:3012
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      user-service:
+        condition: service_started
+    networks:
+      - aquatiq-network
+
+  # Time Bank Service - Time banking service
+  timebank-service:
+    build:
+      context: ./apps/services/timebank-service
+      dockerfile: Dockerfile
+    container_name: aquatiq-timebank-service
+    restart: unless-stopped
+    ports:
+      - "3023:3023"
+    environment:
+      NODE_ENV: development
+      PORT: 3023
+      DATABASE_URL: postgresql://aquatiq_user:aquatiq_password@postgres:5432/aquatiq_hub
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - aquatiq-network
+
+  # Corebare Service - Core backend service
+  corebar-service:
+    build:
+      context: ./apps/services/corebar
+      dockerfile: Dockerfile
+    container_name: aquatiq-corebar-service
+    restart: unless-stopped
+    env_file:
+      - ./apps/services/corebar/.env
+    ports:
+      - "3013:3013"
+    environment:
+      NODE_ENV: development
+      PORT: 3013
+      DATABASE_URL: postgresql://aquatiq_user:aquatiq_password@postgres:5432/aquatiq_hub
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USERNAME: aquatiq_user
+      DB_PASSWORD: aquatiq_password
+      DB_DATABASE: aquatiq_hub
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - aquatiq-network
+
+  # Connectors - Data connectors from external sources
+  connectors-service:
+    build:
+      context: ./apps/services/connectors
+      dockerfile: Dockerfile
+    container_name: aquatiq-connectors-service
+    restart: unless-stopped
+    ports:
+      - "3032:3032"
+    environment:
+      NODE_ENV: development
+      PORT: 3032
+    networks:
+      - aquatiq-network
+
+  # Assets Service - Asset management service
+  assets-service:
+    build:
+      context: ./apps/services/assets-service
+      dockerfile: Dockerfile
+    container_name: aquatiq-assets-service
+    restart: unless-stopped
+    ports:
+      - "3041:3041"
+    environment:
+      NODE_ENV: development
+      PORT: 3041
+      DATABASE_URL: postgresql://aquatiq_user:aquatiq_password@postgres:5432/aquatiq_hub
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - aquatiq-network
+
+  # Procurement Service - Procurement management service
+  procurement-service:
+    build:
+      context: ./apps/services/procurement-service
+      dockerfile: Dockerfile
+    container_name: aquatiq-procurement-service
+    restart: unless-stopped
+    ports:
+      - "3042:3042"
+    environment:
+      NODE_ENV: development
+      PORT: 3042
+      DATABASE_URL: postgresql://aquatiq_user:aquatiq_password@postgres:5432/aquatiq_hub
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - aquatiq-network
+
+  # Approvals Service - Approval workflow service
+  approvals-service:
+    build:
+      context: ./apps/services/approvals-service
+      dockerfile: Dockerfile
+    container_name: aquatiq-approvals-service
+    restart: unless-stopped
+    ports:
+      - "3051:3051"
+    environment:
+      NODE_ENV: development
+      PORT: 3051
+      DATABASE_URL: postgresql://aquatiq_user:aquatiq_password@postgres:5432/aquatiq_hub
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - aquatiq-network
+
+  # ===========================================
+  # MESSAGING SERVICES
+  # ===========================================
+  
+  # NATS - Messaging system for event-driven architecture
+  nats:
+    image: nats:2.10-alpine
+    container_name: aquatiq-nats
+    restart: unless-stopped
+    ports:
+      - "4222:4222"  # Client connections
+      - "8222:8222"  # HTTP management
+      - "6222:6222"  # Cluster connections
+    command: ["--js", "--http_port", "8222"]
+    networks:
+      - aquatiq-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8222/varz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================
+  # OPTIONAL SERVICES
+  # ===========================================
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  aquatiq-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

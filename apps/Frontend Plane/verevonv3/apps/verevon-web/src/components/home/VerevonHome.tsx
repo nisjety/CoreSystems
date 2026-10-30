@@ -9,6 +9,7 @@ import { ProblemCardsSection } from "./sections/ProblemCardsSection";
 import { ProblemSection } from "./sections/ProblemSection";
 import { ProductLoopSection } from "./sections/ProductLoopSection";
 import { SensesSection } from "./sections/SensesSection";
+import { getProductRecordings } from "@/lib/product-recordings.server";
 
 /**
  * Server composition of the homepage. Browser behavior lives in
@@ -22,7 +23,7 @@ export function VerevonHome() {
 					<BrandLogosSection />
 					<ProblemSection />
 					<ProblemCardsSection />
-					<ProductLoopSection />
+					<ProductLoopSection recordings={getProductRecordings()} />
 					<SensesSection />
 					<FeaturesSection />
 					<LayerSection />

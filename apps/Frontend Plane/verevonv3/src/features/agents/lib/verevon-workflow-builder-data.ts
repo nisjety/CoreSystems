@@ -4,7 +4,7 @@ import {
   Split,
   type LucideProps,
 } from '@/shared/icons'
-import type { Component } from 'solid-js'
+import { type Component } from 'solid-js'
 import type { WorkflowBuilderToolId } from '@/features/agents/lib/agent-roles'
 
 export type CanvasNodeId =

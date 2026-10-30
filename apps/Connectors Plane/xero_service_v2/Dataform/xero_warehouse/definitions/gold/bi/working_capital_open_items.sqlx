@@ -1,0 +1,83 @@
+config {
+  type: "table",
+  schema: "xero_datamart",
+  description: "Current Xero working-capital open items at tenant and document grain. AR and AP positions are deliberately separate, native-currency measures; this is not a certified as-of portfolio or NOK consolidation mart.",
+  assertions: {
+    nonNull: ["working_capital_open_item_key", "tenant_id", "open_item_category", "source_document_id", "currency_code", "as_of_date"],
+    uniqueKey: ["working_capital_open_item_key"]
+  }
+}
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(tenant_id, '|accounts_receivable|', CAST(receivable_open_item_key AS STRING))) AS working_capital_open_item_key,
+  company_key,
+  customer_key AS counterparty_key,
+  document_date_key,
+  due_date_key,
+  as_of_date_key,
+  currency_key,
+  tenant_id,
+  'accounts_receivable' AS open_item_category,
+  source_document_type,
+  source_document_id,
+  source_document_key,
+  reference_number,
+  customer_id AS counterparty_id,
+  customer_name AS counterparty_name,
+  document_date,
+  document_due_date,
+  as_of_date,
+  currency_code,
+  source_exchange_rate,
+  source_document_amount_in_currency,
+  unsigned_open_balance_in_currency,
+  open_balance_in_currency AS source_open_balance_in_currency,
+  open_balance_in_currency AS working_capital_position_in_currency,
+  open_item_direction,
+  days_past_due,
+  age_bucket,
+  source_observed_at,
+  is_source_document_reconciled,
+  is_portfolio_snapshot_complete,
+  CAST(NULL AS NUMERIC) AS amount_nok,
+  FALSE AS is_nok_amount_available,
+  'xero' AS source_system
+FROM ${ref("xero_gold_finance", "fact_accounts_receivable_open_item")}
+
+UNION ALL
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(tenant_id, '|accounts_payable|', CAST(payable_open_item_key AS STRING))),
+  company_key,
+  supplier_key,
+  document_date_key,
+  due_date_key,
+  as_of_date_key,
+  currency_key,
+  tenant_id,
+  'accounts_payable',
+  source_document_type,
+  source_document_id,
+  source_document_key,
+  reference_number,
+  supplier_id,
+  supplier_name,
+  document_date,
+  document_due_date,
+  as_of_date,
+  currency_code,
+  source_exchange_rate,
+  source_document_amount_in_currency,
+  unsigned_open_balance_in_currency,
+  open_balance_in_currency,
+  -open_balance_in_currency,
+  open_item_direction,
+  days_past_due,
+  age_bucket,
+  source_observed_at,
+  is_source_document_reconciled,
+  is_portfolio_snapshot_complete,
+  CAST(NULL AS NUMERIC),
+  FALSE,
+  'xero'
+FROM ${ref("xero_gold_finance", "fact_accounts_payable_open_item")}

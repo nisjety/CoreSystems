@@ -33,11 +33,13 @@ func (r *PGRepository) RecordMetricEvent(ctx context.Context, event MetricEvent)
 	}
 	if _, err := r.pool.Exec(ctx, `
 INSERT INTO insight_core.insight_metric_events
-	(id, org_id, actor_user_id, surface, metric, value, unit, source, connector_type, dimensions, occurred_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
+	(id, org_id, actor_user_id, surface, metric, value, unit, source, connector_type, dimensions,
+	 time_window_from, time_window_to, observed_at, source_trace_ref, retention_class, occurred_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16)
 ON CONFLICT (id) DO NOTHING`,
 		event.ID, event.OrgID, event.ActorUserID, event.Surface, event.Metric, event.Value, event.Unit,
-		event.Source, event.ConnectorType, dims, event.OccurredAt); err != nil {
+		event.Source, event.ConnectorType, dims, timeWindowFrom(event.TimeWindow), timeWindowTo(event.TimeWindow),
+		event.ObservedAt, event.SourceTraceRef, event.RetentionClass, event.OccurredAt); err != nil {
 		return nil, err
 	}
 	stored := copyMetricEvent(event)
@@ -53,7 +55,8 @@ func (r *PGRepository) ListMetricEvents(ctx context.Context, query OverviewQuery
 		actorUserID = &candidate
 	}
 	rows, err := r.pool.Query(ctx, `
-SELECT id, org_id, actor_user_id, surface, metric, value, unit, source, connector_type, dimensions, occurred_at
+SELECT id, org_id, actor_user_id, surface, metric, value, unit, source, connector_type, dimensions,
+       time_window_from, time_window_to, observed_at, source_trace_ref, retention_class, occurred_at
 FROM insight_core.insight_metric_events
 WHERE org_id = $1
   AND ($2::text IS NULL OR actor_user_id = $2)
@@ -71,9 +74,11 @@ ORDER BY occurred_at DESC`,
 	for rows.Next() {
 		var e MetricEvent
 		var dims []byte
+		var windowFrom, windowTo *time.Time
 		if err := rows.Scan(
 			&e.ID, &e.OrgID, &e.ActorUserID, &e.Surface, &e.Metric, &e.Value, &e.Unit,
-			&e.Source, &e.ConnectorType, &dims, &e.OccurredAt,
+			&e.Source, &e.ConnectorType, &dims, &windowFrom, &windowTo, &e.ObservedAt,
+			&e.SourceTraceRef, &e.RetentionClass, &e.OccurredAt,
 		); err != nil {
 			return nil, err
 		}
@@ -83,9 +88,26 @@ ORDER BY occurred_at DESC`,
 		if e.Dimensions == nil {
 			e.Dimensions = map[string]any{}
 		}
+		if windowFrom != nil || windowTo != nil {
+			e.TimeWindow = &TimeWindow{From: windowFrom, To: windowTo}
+		}
 		events = append(events, e)
 	}
 	return events, rows.Err()
+}
+
+func timeWindowFrom(window *TimeWindow) *time.Time {
+	if window == nil {
+		return nil
+	}
+	return window.From
+}
+
+func timeWindowTo(window *TimeWindow) *time.Time {
+	if window == nil {
+		return nil
+	}
+	return window.To
 }
 
 // ListConnectorSlots returns the static connector registry (org-independent).

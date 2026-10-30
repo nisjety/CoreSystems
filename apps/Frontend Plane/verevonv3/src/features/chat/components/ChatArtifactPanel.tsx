@@ -24,16 +24,7 @@ import {
   Globe,
   Image as ImageIcon,
 } from '@/shared/icons'
-import {
-  For,
-  Match,
-  Show,
-  Switch,
-  createEffect,
-  createMemo,
-  createSignal,
-  onCleanup,
-} from 'solid-js'
+import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup } from 'solid-js'
 import {
   ChatMarkdown,
   DiffView,

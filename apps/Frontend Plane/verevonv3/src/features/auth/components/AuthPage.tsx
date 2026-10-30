@@ -1,10 +1,5 @@
 import { useNavigate } from '@solidjs/router'
-import {
-  createEffect,
-  createMemo,
-  createSignal,
-  Show,
-} from 'solid-js'
+import { createEffect, createMemo, createSignal, Show } from 'solid-js'
 import { AuthFormPanel } from '@/features/auth/components/sections/AuthFormPanel'
 import { AuthVisualPanel } from '@/features/auth/components/sections/AuthVisualPanel'
 import { AuthScreen } from '@/features/auth/components/shared/AuthScreen'

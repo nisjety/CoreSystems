@@ -40,19 +40,7 @@ import {
 	Zap,
 	type LucideProps,
 } from "@/shared/icons";
-import {
-	createEffect,
-	createMemo,
-	createSignal,
-	flush,
-	For,
-	Match,
-	onCleanup,
-	Show,
-	Switch,
-	untrack,
-	type Component,
-} from "solid-js";
+import { createEffect, createMemo, createSignal, flush, For, Match, onCleanup, Show, Switch, untrack, type Component } from 'solid-js'
 import { Dynamic, Portal, type JSX } from "@solidjs/web";
 import { createResource } from "@/shared/lib/create-resource-compat";
 import { dictateAudioBlob } from "@/shared/api/audio-client";

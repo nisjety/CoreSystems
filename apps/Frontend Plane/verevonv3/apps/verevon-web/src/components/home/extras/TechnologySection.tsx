@@ -3,8 +3,8 @@ import { CpuArchitecture } from "@/components/ui/cpu-architecture";
 
 const stats = [
 	{ label: "Overvåk · brief · godkjenn · handle", unit: "steg", value: "4" },
-	{ label: "Data behandles i EU som standard", unit: "EØS", value: "EU" },
-	{ label: "Risikofylte handlinger stoppes", unit: "først", value: "Ja" },
+	{ label: "EU-region på standardmodellene", unit: "EØS", value: "EU" },
+	{ label: "Utplasserte agenter stopper risikofylte handlinger", unit: "først", value: "Ja" },
 ];
 
 export function TechnologySection() {
@@ -42,7 +42,7 @@ export function TechnologySection() {
 				<div className="grid min-h-[calc(100svh-clamp(152px,12.8vw,236px))] grid-rows-[auto_1fr_auto]">
 					<div className="max-w-[520px]">
 						<h1
-							className="fade-out-top m-0 max-w-[500px] font-arbeit text-[clamp(3rem,3.9vw,4.7rem)] font-light leading-[1.02] tracking-[-0.055em] text-verevon-j-text"
+							className="fade-out-top m-0 max-w-[500px] font-manrope text-[clamp(2.35rem,3.4vw,3.5rem)] font-light leading-[0.94] tracking-[-0.045em] text-verevon-j-text"
 							data-fade-out-top
 						>
 							Se, forstå,
@@ -54,7 +54,7 @@ export function TechnologySection() {
 							className="fade-out-top mt-[clamp(28px,2.7vw,44px)] max-w-[440px]"
 							data-fade-out-top
 						>
-							<p className="m-0 font-protokoll text-[clamp(1.02rem,1vw,1.18rem)] font-light leading-[1.55] text-verevon-text-muted">
+							<p className="m-0 font-manrope text-[clamp(1rem,1.05vw,1.125rem)] font-light leading-[1.5] tracking-[-0.015em] text-verevon-text-muted">
 								Verevon starter med et signal: en kundemelding, en oppdatert
 								nettside eller en konflikt i kunnskapen. Derfra lager den et
 								kort grunnlag, foreslår neste steg og venter når godkjenning
@@ -72,14 +72,14 @@ export function TechnologySection() {
 									className="border-b border-verevon-j-text/18 pb-[clamp(20px,2vw,28px)]"
 									key={stat.label}
 								>
-									<strong className="flex items-baseline gap-3 whitespace-nowrap font-arbeit text-[clamp(2.35rem,2.9vw,4rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/82">
+									<strong className="flex items-baseline gap-3 whitespace-nowrap font-manrope text-[clamp(2.35rem,2.9vw,4rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/82">
 										{stat.value}
-										<sup className="relative top-[-0.08em] font-protokoll text-[0.32em] font-light tracking-normal text-verevon-j-text/64">
+										<sup className="relative top-[-0.08em] font-geist text-[0.32em] font-medium tracking-normal text-verevon-j-text/64">
 											{stat.unit}
 										</sup>
 									</strong>
 
-									<span className="mt-5 block font-protokoll text-[clamp(0.98rem,0.95vw,1.12rem)] font-light leading-[1.25] text-verevon-text-muted">
+									<span className="mt-5 block font-manrope text-[clamp(1rem,0.95vw,1.0625rem)] font-light leading-[1.4] tracking-[-0.015em] text-verevon-text-muted">
 										{stat.label}
 									</span>
 								</div>

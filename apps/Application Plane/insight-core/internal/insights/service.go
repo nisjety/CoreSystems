@@ -76,6 +76,30 @@ func (s *Service) ListConnectorSlots(ctx context.Context, orgID string) ([]Conne
 	return s.repository.ListConnectorSlots(ctx, orgID)
 }
 
+// ListGroundableMarketingEvidence returns only marketing observations that
+// meet marketing_evidence.v1. It is the sole query surface Model Plane code
+// should use for marketing grounding; dashboards retain legacy observations
+// for historical continuity without treating them as AI evidence.
+func (s *Service) ListGroundableMarketingEvidence(ctx context.Context, query OverviewQuery) ([]MetricEvent, error) {
+	normalized, err := normalizeOverviewQuery(query)
+	if err != nil {
+		return nil, err
+	}
+	normalized.Surfaces = []string{SurfaceExternalAnalytics}
+	events, err := s.repository.ListMetricEvents(ctx, normalized)
+	if err != nil {
+		return nil, err
+	}
+	evidence := make([]MetricEvent, 0, len(events))
+	for _, event := range events {
+		if !isGroundableMarketingEvidence(event) {
+			continue
+		}
+		evidence = append(evidence, copyMetricEvent(event))
+	}
+	return evidence, nil
+}
+
 // OrgsWithRecentMetrics returns the org_ids that recorded at least one metric
 // event within the trailing `window` (measured from the service clock). It is
 // the server-side org discovery the scheduled-brief delivery iterates: orgs are
@@ -104,23 +128,78 @@ func normalizeMetricEvent(input IngestMetricEventInput, now func() time.Time) (M
 	} else {
 		occurredAt = occurredAt.UTC()
 	}
+	observedAt := input.ObservedAt
+	if observedAt.IsZero() {
+		observedAt = occurredAt
+	} else {
+		observedAt = observedAt.UTC()
+	}
+	timeWindow, err := normalizeMetricTimeWindow(input.TimeWindow)
+	if err != nil {
+		return MetricEvent{}, err
+	}
 	event := MetricEvent{
-		ID:            strings.TrimSpace(input.ID),
-		OrgID:         orgID,
-		ActorUserID:   strings.TrimSpace(input.ActorUserID),
-		Surface:       surface,
-		Metric:        metric,
-		Value:         input.Value,
-		Unit:          normalizeToken(input.Unit),
-		Source:        strings.TrimSpace(input.Source),
-		ConnectorType: normalizeToken(input.ConnectorType),
-		Dimensions:    copyMap(input.Dimensions),
-		OccurredAt:    occurredAt,
+		ID:             strings.TrimSpace(input.ID),
+		OrgID:          orgID,
+		ActorUserID:    strings.TrimSpace(input.ActorUserID),
+		Surface:        surface,
+		Metric:         metric,
+		Value:          input.Value,
+		Unit:           normalizeToken(input.Unit),
+		Source:         strings.TrimSpace(input.Source),
+		ConnectorType:  normalizeToken(input.ConnectorType),
+		Dimensions:     copyMap(input.Dimensions),
+		TimeWindow:     timeWindow,
+		ObservedAt:     observedAt,
+		SourceTraceRef: strings.TrimSpace(input.SourceTraceRef),
+		RetentionClass: normalizeToken(input.RetentionClass),
+		OccurredAt:     occurredAt,
+	}
+	if requiresMarketingEvidence(event.ConnectorType) {
+		if event.TimeWindow == nil || event.TimeWindow.From == nil || event.TimeWindow.To == nil || event.SourceTraceRef == "" || event.RetentionClass != "durable" {
+			return MetricEvent{}, fmt.Errorf("%w: marketing metrics require a time_window, observed_at, source_trace_ref, and durable retention_class", ErrInvalidInput)
+		}
+		if len(event.SourceTraceRef) > 512 || strings.ContainsAny(event.SourceTraceRef, "\r\n") {
+			return MetricEvent{}, fmt.Errorf("%w: source_trace_ref is invalid", ErrInvalidInput)
+		}
 	}
 	if event.ID == "" {
 		event.ID = stableEventID(event)
 	}
 	return event, nil
+}
+
+func normalizeMetricTimeWindow(input *TimeWindow) (*TimeWindow, error) {
+	if input == nil {
+		return nil, nil
+	}
+	if input.From == nil || input.To == nil {
+		return nil, fmt.Errorf("%w: time_window requires from and to", ErrInvalidInput)
+	}
+	from := input.From.UTC()
+	to := input.To.UTC()
+	if from.After(to) {
+		return nil, fmt.Errorf("%w: time_window from must be before to", ErrInvalidInput)
+	}
+	return &TimeWindow{From: &from, To: &to}, nil
+}
+
+func requiresMarketingEvidence(connectorType string) bool {
+	switch connectorType {
+	case "google_analytics_4", "google_search_console", "google_ads", "meta", "meta_ads", "semrush", "first_party_seo":
+		return true
+	default:
+		return false
+	}
+}
+
+func isGroundableMarketingEvidence(event MetricEvent) bool {
+	return event.Surface == SurfaceExternalAnalytics &&
+		requiresMarketingEvidence(event.ConnectorType) &&
+		event.TimeWindow != nil && event.TimeWindow.From != nil && event.TimeWindow.To != nil &&
+		!event.ObservedAt.IsZero() &&
+		strings.TrimSpace(event.SourceTraceRef) != "" &&
+		event.RetentionClass == "durable"
 }
 
 func normalizeOverviewQuery(query OverviewQuery) (OverviewQuery, error) {
@@ -262,6 +341,24 @@ func connectorGaps(connectors []ConnectorSlot) []ConnectorGap {
 				Type:      connector.Type,
 				Reason:    "connector slot is defined but requires integration-core token leasing before provider calls are allowed",
 				NextOwner: "integration-corev2 token lease plus provider worker",
+			})
+		case ConnectorStatusRequiresGovernedAction:
+			gaps = append(gaps, ConnectorGap{
+				Type:      connector.Type,
+				Reason:    "connector requires an allowlisted integration-core governed action before provider data can be projected",
+				NextOwner: "integration-corev2 provider action adapter",
+			})
+		case ConnectorStatusRequiresCredentialBroker:
+			gaps = append(gaps, ConnectorGap{
+				Type:      connector.Type,
+				Reason:    "connector requires encrypted credential storage and a brokered API-key lease before use",
+				NextOwner: "integration-corev2 credential broker",
+			})
+		case ConnectorStatusRequiresEvidenceAdapter:
+			gaps = append(gaps, ConnectorGap{
+				Type:      connector.Type,
+				Reason:    "connector requires an authorized Ingestion/Data Plane evidence adapter; insight-core cannot persist crawls",
+				NextOwner: "Quarry-v2 and Data Plane v2 evidence contract",
 			})
 		case ConnectorStatusDisabled:
 			gaps = append(gaps, ConnectorGap{

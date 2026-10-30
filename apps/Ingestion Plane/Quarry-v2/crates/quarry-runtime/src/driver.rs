@@ -82,6 +82,30 @@ pub struct RenderHints {
 pub trait Driver: Send + Sync {
     fn kind(&self) -> DriverKind;
     async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse>;
+    /// Fetch with a transport-enforced decoded-body bound. Implementations
+    /// must stop reading before exceeding the bound, not truncate afterwards.
+    /// Unsupported drivers fail closed: discovery must never silently fall
+    /// back to an unbounded browser/provider fetch.
+    async fn fetch_bounded(&self, _url: &Url, _max_bytes: usize) -> QuarryResult<FetchResponse> {
+        Err(quarry_core::error::QuarryError::new(
+            quarry_core::error::ErrorCode::Unsupported,
+            "driver does not support bounded fetch",
+        ))
+    }
+    /// One credentialless bounded discovery hop. Never follow redirects here:
+    /// the discovery caller must validate and preflight every target first.
+    /// Unsupported drivers fail closed rather than inheriting an unknown
+    /// bounded transport's redirect, cookie, or proxy behaviour.
+    async fn fetch_discovery_hop(
+        &self,
+        _url: &Url,
+        _max_bytes: usize,
+    ) -> QuarryResult<FetchResponse> {
+        Err(quarry_core::error::QuarryError::new(
+            quarry_core::error::ErrorCode::Unsupported,
+            "driver does not support bounded discovery hops",
+        ))
+    }
     /// Conditional GET: send `If-None-Match` / `If-Modified-Since`
     /// when validators are provided. Default impl ignores the hints
     /// and delegates to `fetch` — backward-compatible for drivers

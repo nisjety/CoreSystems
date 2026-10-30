@@ -1,10 +1,12 @@
 "use client";
 
+import Image from "next/image";
 import { animate, motion, useMotionValue, useReducedMotion } from "motion/react";
 import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useState } from "react";
 import useMeasure from "react-use-measure";
 import { usePrefersReducedMotion } from "@/shared/hooks/usePrefersReducedMotion";
+import { LIVE_CONNECTORS } from "./brand-connector-data";
 
 type InfiniteSliderProps = {
 	children: ReactNode;
@@ -113,7 +115,7 @@ function InfiniteSlider({
 				}}
 			>
 				{children}
-				{children}
+				<span aria-hidden="true" className="contents">{children}</span>
 			</motion.div>
 		</div>
 	);
@@ -142,48 +144,17 @@ function BlurredInfiniteSlider({
 	);
 }
 
-// Curated to the genuinely-live connector + grounding set (see VEREVON.md):
-// Brreg/Enhetsregisteret lookup is live; Slack/Gmail/Notion/SharePoint/
-// OneDrive/Outlook are live connectors. Roadmap sources (e.g. Zendesk) are
-// deliberately omitted — the honesty gate applies to logos too.
-const logoMarks = [
-	"Enhetsregisteret",
-	"Slack",
-	"Gmail",
-	"Notion",
-	"SharePoint",
-	"OneDrive",
-	"Outlook",
-	"Microsoft 365",
-];
-
-function getLogoClassName(index: number) {
-	if ((index + 1) % 5 === 0) {
-		return "font-arbeit text-[clamp(1rem,1.55vw,1.48rem)] font-medium tracking-[-0.01em]";
-	}
-
-	if ((index + 1) % 3 === 0) {
-		return "font-arbeit text-[clamp(1.12rem,1.45vw,1.7rem)] font-light tracking-[0.02em]";
-	}
-
-	if ((index + 1) % 2 === 0) {
-		return "font-arbeit text-[clamp(0.92rem,1.35vw,1.28rem)] font-medium uppercase tracking-[0.025em]";
-	}
-
-	return "font-arbeit text-[clamp(1.12rem,1.45vw,1.7rem)] font-medium tracking-[-0.045em]";
-}
-
 export function BrandLogosSection() {
 	const prefersReducedMotion = usePrefersReducedMotion();
-	const marks = logoMarks.map((logo, index) => (
+	const marks = LIVE_CONNECTORS.map((connector) => (
 		<span
-			className={[
-				"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)]",
-				getLogoClassName(index),
-			].join(" ")}
-			key={`${logo}-${index}`}
+			className="inline-flex min-w-max flex-none items-center gap-3 font-manrope text-[clamp(1rem,1.3vw,1.3rem)] font-medium leading-none tracking-[-0.035em] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)]"
+			key={connector.name}
 		>
-			{logo}
+			{connector.logo ? (
+				<Image alt="" className="size-[clamp(26px,2.3vw,36px)] object-contain grayscale opacity-65" height={36} src={`/brand-logos/${connector.logo}`} width={36} />
+			) : null}
+			{connector.name}
 		</span>
 	));
 
@@ -191,8 +162,9 @@ export function BrandLogosSection() {
 		<section
 			aria-label="Systemer Verevon kobler til"
 			className="grid h-[clamp(112px,12vw,154px)] grid-cols-[minmax(138px,220px)_minmax(0,1fr)] items-center gap-[clamp(34px,4.8vw,92px)] overflow-hidden bg-background px-[var(--verevon-edge)] max-[760px]:h-auto max-[760px]:grid-cols-1 max-[760px]:gap-4 max-[760px]:px-[var(--verevon-page-pad)] max-[760px]:py-7"
+			style={prefersReducedMotion ? { height: "auto", minHeight: 112, paddingBlock: 24 } : undefined}
 		>
-			<p className="m-0 grid justify-self-start border-r border-[color-mix(in_srgb,var(--verevon-j-text)_10%,transparent)] pr-[clamp(18px,2vw,34px)] text-left font-protokoll text-[clamp(0.78rem,0.72vw,0.92rem)] font-medium uppercase leading-[1.12] tracking-[0.025em] text-[color-mix(in_srgb,var(--verevon-j-text)_58%,transparent)] max-[760px]:flex max-[760px]:gap-1.5 max-[760px]:border-r-0 max-[760px]:pr-0">
+			<p className="m-0 grid justify-self-start border-r border-[color-mix(in_srgb,var(--verevon-j-text)_10%,transparent)] pr-[clamp(18px,2vw,34px)] text-left font-geist text-[clamp(0.78rem,0.72vw,0.92rem)] font-medium uppercase leading-[1.12] tracking-[0.025em] text-[color-mix(in_srgb,var(--verevon-j-text)_58%,transparent)] max-[760px]:flex max-[760px]:gap-1.5 max-[760px]:border-r-0 max-[760px]:pr-0">
 				<span>Koblet til</span>
 				<span>systemene deres</span>
 			</p>
@@ -205,9 +177,9 @@ export function BrandLogosSection() {
 				<BlurredInfiniteSlider
 					containerClassName="flex h-full min-w-0 items-center overflow-hidden max-[760px]:h-12"
 					fadeWidth={80}
-					gap={112}
-					speed={40}
-					speedOnHover={20}
+					gap={88}
+					speed={36}
+					speedOnHover={14}
 				>
 					{marks}
 				</BlurredInfiniteSlider>

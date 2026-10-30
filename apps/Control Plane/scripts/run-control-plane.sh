@@ -379,6 +379,8 @@ required_credentials=(
   APPLICATION_NATS_PROVISIONER_PASSWORD
   APPLICATION_RECONCILER_AUTH_TOKEN APPLICATION_SPACE_LIFECYCLE_TOKEN
   APPLICATION_ORG_CORE_SERVICE_TOKEN
+  ANBUD_ORG_CORE_SERVICE_TOKEN
+  VISIBILITY_ORG_CORE_SERVICE_TOKEN
   AUDIT_APPLICATION_NATS_PASSWORD
   AUDIT_CONTROL_NATS_PASSWORD AUDIT_MODEL_NATS_PASSWORD AUTH_BILLING_CORE_SERVICE_TOKEN
   AUTH_NATS_PASSWORD AUTH_ORG_CORE_SERVICE_TOKEN AUTH_SHARED_NATS_PASSWORD
@@ -458,6 +460,16 @@ case " ${*:-} " in
         inter-plane-bus >/dev/null
     fi
     ;;
+esac
+
+case "${SHARED_NATS_ENABLED:-0}" in
+  0) ;;
+  1)
+    export SHARED_NATS_SECRETS_DIR="${SHARED_NATS_SECRETS_DIR:-$root/../Engagement plane/.local/secrets}"
+    sh "$root/../Engagement plane/scripts/shared-nats-preflight.sh" "$SHARED_NATS_SECRETS_DIR/shared_nats_control_leaf_password"
+    set -- -f "$root/docker-compose.shared-nats.yml" "$@"
+    ;;
+  *) printf 'SHARED_NATS_ENABLED must be 0 or 1\n' >&2; exit 1 ;;
 esac
 
 exec docker compose "${compose_env_args[@]}" -f docker-compose.yml "$@"

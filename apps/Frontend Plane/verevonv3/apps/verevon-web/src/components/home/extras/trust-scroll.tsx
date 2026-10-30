@@ -30,7 +30,7 @@ const mediaLayers: MediaLayer[] = [
 		kind: "video",
 		src: "/verevon-product-shots/verevon-dashboard-typing.mp4",
 		poster: "/verevon-product-shots/dashboard-expanded-prompt.png",
-		alt: "EU-residens som standard",
+		alt: "EU-region på standardmodellene",
 	},
 	{
 		kind: "image",
@@ -46,17 +46,17 @@ const mediaLayers: MediaLayer[] = [
 
 const copyPanels = [
 	{
-		body: "Verevon kjører chat, søk og agentoppgaver i EU som standard, uten at promptene dine lagres hos modell-leverandøren.",
+		body: "Standardmodellene i Verevon kjører med EU-region (Sweden Central), og du kan slå på Zero Data Retention, som sender forespørselen bare til en leverandør med registrert ZDR-godkjenning.",
 		cta: undefined,
 		align: "left",
 	},
 	{
-		body: "Når Verevon vil sende et svar, publisere noe eller bruke et risikofylt verktøy, stopper det for Godkjenn eller Avvis.",
+		body: "Når en utplassert agent skal sende et svar, publisere noe eller bruke et risikofylt verktøy, stopper den for Godkjenn eller Avvis.",
 		cta: "Tillitssenter",
 		align: "left",
 	},
 	{
-		body: "I Verevon tillitssenter ser du hvilke kilder AI-en brukte, hvilke data som ble berørt, og at norske selskaper kobles mot Enhetsregisteret.",
+		body: "Tillitssenteret i Verevon er bygget for å vise hvilke verktøy og datakategorier AI-en har brukt per tilkobling. Norske virksomheter kan slås opp i Enhetsregisteret.",
 		cta: undefined,
 		align: "center",
 	},
@@ -168,7 +168,7 @@ function CopyPanel({
 				visibility: index === 0 ? "visible" : "hidden",
 			}}
 		>
-			<p className="m-0 font-protokoll text-[clamp(1.12rem,1.34vw,1.52rem)] font-light leading-[1.34] text-pretty">
+			<p className="m-0 font-geist text-[clamp(1.12rem,1.34vw,1.52rem)] font-light leading-[1.34] text-pretty">
 				{panel.body}
 			</p>
 
@@ -202,11 +202,11 @@ function FeatureOutputCard({
 	return (
 		<a
 			aria-label={card.link}
-			className="group flex min-w-0 flex-col gap-3"
+			className="verevon-cta-card group flex min-w-0 flex-col gap-3"
 			href={card.href}
 			{...(animated ? { "data-feature-card": "" } : {})}
 		>
-			<div className="flex h-[15px] select-none items-center justify-between font-protokoll text-[10px] leading-none text-verevon-j-text/42">
+			<div className="flex h-[15px] select-none items-center justify-between font-geist text-[10px] leading-none text-verevon-j-text/42">
 				<span className="flex items-center gap-1">
 					<span className="size-[5px] rounded-full bg-verevon-coral/70" />
 					{card.kicker}
@@ -225,13 +225,13 @@ function FeatureOutputCard({
 				/>
 				<div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(248,248,247,0.08),rgba(248,248,247,0.72))]" />
 				<div className="absolute bottom-4 left-4 right-4">
-					<h3 className="m-0 font-arbeit text-[clamp(1.45rem,2vw,2.2rem)] font-light leading-[1.04] tracking-[-0.055em] text-verevon-j-text">
+					<h3 className="m-0 font-manrope text-[clamp(1.45rem,2vw,2.2rem)] font-light leading-[1.04] tracking-[-0.055em] text-verevon-j-text">
 						{card.title}
 					</h3>
 				</div>
 			</div>
 
-			<p className="m-0 min-h-[4.2em] font-protokoll text-[clamp(0.92rem,0.92vw,1.02rem)] font-light leading-[1.38] text-verevon-text-muted/90">
+			<p className="m-0 min-h-[4.2em] font-geist text-[clamp(0.92rem,0.92vw,1.02rem)] font-light leading-[1.38] text-verevon-text-muted/90">
 				{card.text}
 			</p>
 
@@ -332,15 +332,15 @@ function FeatureHandoffIntro() {
 				className="absolute left-1/2 top-[clamp(150px,16.5vh,172px)] w-[min(760px,calc(100%-48px))] -translate-x-1/2 text-center"
 				data-trust-feature-copy=""
 			>
-				<p className="mb-4 font-protokoll text-[0.72rem] font-medium uppercase leading-none tracking-[0.34em] text-verevon-j-text/38">
+				<p className="mb-4 font-geist text-[0.7rem] font-medium uppercase leading-none tracking-[0.08em] text-verevon-j-text/38">
 					Forankret handling
 				</p>
 
-				<h2 className="m-0 font-arbeit text-[clamp(2.75rem,4vw,5.35rem)] font-light leading-[0.94] tracking-[-0.068em] text-verevon-j-text">
+				<h2 className="m-0 font-manrope text-[clamp(2.35rem,3.4vw,3.5rem)] font-light leading-[0.94] tracking-[-0.045em] text-verevon-j-text">
 					Tenking, satt i arbeid
 				</h2>
 
-				<p className="mx-auto mt-4 max-w-[540px] font-protokoll text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.42] text-verevon-text-muted">
+				<p className="mx-auto mt-4 max-w-[42ch] font-manrope text-[clamp(1rem,1.05vw,1.125rem)] font-light leading-[1.5] tracking-[-0.015em] text-verevon-text-muted">
 					Ett kundesignal kan bli et svar, en rute, en policy-sjekk og
 					en revidert handling — alt med kildene synlige.
 				</p>
@@ -366,7 +366,7 @@ function FeatureSourceChrome() {
 			].join(" ")}
 			data-trust-feature-source-chrome=""
 		>
-			<div className="absolute inset-x-0 top-[-20px] flex h-[15px] select-none items-center justify-between font-protokoll text-[10px] leading-none text-verevon-j-text/38">
+			<div className="absolute inset-x-0 top-[-20px] flex h-[15px] select-none items-center justify-between font-geist text-[10px] leading-none text-verevon-j-text/38">
 				<span className="flex items-center gap-1">
 					<span className="size-[5px] rounded-full bg-verevon-coral/70" />
 					signal
@@ -391,13 +391,13 @@ function FeatureMobileFallback() {
 	return (
 		<div className="hidden max-[899px]:grid max-[899px]:gap-10 max-[899px]:pt-10">
 			<div className="text-center">
-				<p className="mb-4 font-protokoll text-[0.7rem] font-medium uppercase leading-none tracking-[0.3em] text-verevon-j-text/38">
+				<p className="mb-4 font-geist text-[0.7rem] font-medium uppercase leading-none tracking-[0.08em] text-verevon-j-text/38">
 					Forankret handling
 				</p>
-				<h2 className="m-0 font-arbeit text-[clamp(3rem,14vw,5rem)] font-light leading-[0.95] tracking-[-0.07em] text-verevon-j-text">
+				<h2 className="m-0 font-manrope text-[clamp(2rem,7vw,2.75rem)] font-light leading-[0.96] tracking-[-0.045em] text-verevon-j-text">
 					Kundearbeid, klart til godkjenning
 				</h2>
-				<p className="mx-auto mt-5 max-w-[34rem] font-protokoll text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
+				<p className="mx-auto mt-5 max-w-[34rem] font-manrope text-[1rem] font-light leading-[1.5] tracking-[-0.015em] text-verevon-text-muted">
 					Verevon samler kilder, lager forslag og viser hva som må godkjennes
 					før noe skjer ute hos kunden.
 				</p>
@@ -1004,10 +1004,10 @@ export function TrustScrollSection() {
 								className="border-t border-verevon-j-text/10 pt-5"
 								key={panel.body}
 							>
-								<span className="mb-4 block font-arbeit text-[0.76rem] text-verevon-coral">
+								<span className="mb-4 block font-manrope text-[0.76rem] text-verevon-coral">
 									{String(index + 1).padStart(2, "0")}
 								</span>
-								<p className="m-0 font-protokoll text-[1.08rem] font-light leading-[1.45] text-verevon-j-text/68">
+								<p className="m-0 font-geist text-[1.08rem] font-light leading-[1.45] text-verevon-j-text/68">
 									{panel.body}
 								</p>
 							</div>

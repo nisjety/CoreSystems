@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -14,16 +15,16 @@ import (
 )
 
 type Config struct {
-	Port                             string
-	ServiceName                      string
-	Environment                      string
-	DatabaseURL                      string
-	InternalAPIKey                   string
-	InternalAPIKeyHeader             string
-	AllowLegacyTenantKey             bool
-	AuthCoreURL                      string
-	AuthCoreInternalAPIKey           string
-	AuthCoreJWKSURL                  string
+	Port                   string
+	ServiceName            string
+	Environment            string
+	DatabaseURL            string
+	InternalAPIKey         string
+	InternalAPIKeyHeader   string
+	AllowLegacyTenantKey   bool
+	AuthCoreURL            string
+	AuthCoreInternalAPIKey string
+	AuthCoreJWKSURL        string
 	// AuthCoreOAuth* identify integration-corev2 to auth-core's scoped
 	// `/internal/oauth/*` surface (principal registry
 	// AUTH_INTERNAL_SERVICE_CREDENTIALS). Used to re-mint a Microsoft
@@ -58,6 +59,7 @@ type Config struct {
 	WebhookHotPathURL                string
 	IntegrationCoreURL               string
 	PublicBaseURL                    string
+	OAuthAllowedReturnOrigins        []string
 	MetaJSSDKAppID                   string
 	MetaJSSDKAPIVersion              string
 	MetaJSSDKLocale                  string
@@ -88,46 +90,48 @@ type Config struct {
 	CodexSubscriptionLoginTTL          time.Duration
 	CodexSubscriptionInvocationTimeout time.Duration
 
-	MicrosoftTenantID         string
-	MicrosoftClientID         string
-	MicrosoftClientSecret     string
-	MicrosoftClientAuthMode   string
-	MicrosoftTokenOrigin      string
-	MicrosoftAuthorizationURL string
-	MicrosoftTokenURL         string
-	MicrosoftGraphBaseURL     string
-	SlackClientID             string
-	SlackClientSecret         string
-	SlackSigningSecret        string
-	SlackAuthorizationURL     string
-	SlackTokenURL             string
-	SlackAPIBaseURL           string
-	GoogleClientID            string
-	GoogleClientSecret        string
-	GoogleAuthorizationURL    string
-	GoogleTokenURL            string
-	GoogleAPIBaseURL          string
-	NotionClientID            string
-	NotionClientSecret        string
-	NotionAuthorizationURL    string
-	NotionTokenURL            string
-	NotionAPIBaseURL          string
-	GitHubClientID            string
-	GitHubClientSecret        string
-	GitHubWebhookSecret       string
-	GitHubAuthorizationURL    string
-	GitHubTokenURL            string
-	GitHubAPIBaseURL          string
-	ShopifyClientID           string
-	ShopifyClientSecret       string
-	ShopifyWebhookSecret      string
-	ShopifyAPIBaseURL         string
-	StripeClientID            string
-	StripeClientSecret        string
-	StripeAuthorizationURL    string
-	StripeTokenURL            string
-	StripeAPIBaseURL          string
-	StripeWebhookSecret       string
+	MicrosoftTenantID              string
+	MicrosoftClientID              string
+	MicrosoftClientSecret          string
+	MicrosoftClientAuthMode        string
+	MicrosoftTokenOrigin           string
+	MicrosoftAuthorizationURL      string
+	MicrosoftTokenURL              string
+	MicrosoftGraphBaseURL          string
+	SlackClientID                  string
+	SlackClientSecret              string
+	SlackSigningSecret             string
+	SlackAuthorizationURL          string
+	SlackTokenURL                  string
+	SlackAPIBaseURL                string
+	GoogleClientID                 string
+	GoogleClientSecret             string
+	GoogleAuthorizationURL         string
+	GoogleTokenURL                 string
+	GoogleAPIBaseURL               string
+	NotionClientID                 string
+	NotionClientSecret             string
+	NotionAuthorizationURL         string
+	NotionTokenURL                 string
+	NotionAPIBaseURL               string
+	GitHubClientID                 string
+	GitHubClientSecret             string
+	GitHubWebhookSecret            string
+	GitHubAuthorizationURL         string
+	GitHubTokenURL                 string
+	GitHubAPIBaseURL               string
+	ShopifyClientID                string
+	ShopifyClientSecret            string
+	ShopifyWebhookSecret           string
+	ShopifyAPIBaseURL              string
+	StripeClientID                 string
+	StripeClientSecret             string
+	StripeAuthorizationURL         string
+	StripeTokenURL                 string
+	StripeAPIBaseURL               string
+	StripeWebhookSecret            string
+	GoogleAnalyticsAdminAPIBaseURL string
+	GoogleAnalyticsDataAPIBaseURL  string
 	// AllowUnverifiedWebhooks is a dev-only escape hatch: provider webhooks
 	// are rejected fail-closed when their signature scheme is unconfigured
 	// or unimplemented, unless this is explicitly true (never in production).
@@ -194,16 +198,23 @@ type Config struct {
 	// GoogleAdsDeveloperToken is the Google Ads API developer token (sent as a
 	// `developer-token` header on Ads API calls — separate from OAuth). Ads
 	// capability is offered without it, but API calls require it.
-	GoogleAdsDeveloperToken string
-	OktaDomain              string
-	OktaClientID            string
-	OktaClientSecret        string
-	OktaAPIToken            string
-	OktaAPIBaseURL          string
-	SCIMBearerToken         string
-	SCIMBearerTokens        map[string]string
-	SessionTTL              time.Duration
-	TokenRefreshSkew        time.Duration
+	GoogleAdsDeveloperToken        string
+	PageSpeedAPIKey                string
+	CrUXAPIKey                     string
+	PyTrendsDevEnabled             bool
+	ClarityBindingsFile            string
+	WebVitalsBindingsFile          string
+	MarketingProvidersBindingsFile string
+	AlgoliaMCPOAuthClientFile      string
+	OktaDomain                     string
+	OktaClientID                   string
+	OktaClientSecret               string
+	OktaAPIToken                   string
+	OktaAPIBaseURL                 string
+	SCIMBearerToken                string
+	SCIMBearerTokens               map[string]string
+	SessionTTL                     time.Duration
+	TokenRefreshSkew               time.Duration
 }
 
 func Load() (Config, error) {
@@ -211,13 +222,57 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	googleClientSecret, err := loadOptionalSecret("GOOGLE_CLIENT_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
+	cruxAPIKey, err := loadCrUXKey()
+	if err != nil {
+		return Config{}, err
+	}
+	if strings.TrimSpace(os.Getenv("PAGESPEED_API_KEY")) != "" {
+		return Config{}, fmt.Errorf("PAGESPEED_API_KEY must be provided through PAGESPEED_API_KEY_FILE")
+	}
+	pageSpeedAPIKey, err := loadOptionalSecret("PAGESPEED_API_KEY")
+	if err != nil {
+		return Config{}, err
+	}
+	for _, name := range []string{"CLARITY_API_TOKEN", "CLARITY_TOKEN"} {
+		if strings.TrimSpace(os.Getenv(name)) != "" {
+			return Config{}, fmt.Errorf("Clarity tokens must use protected CLARITY_BINDINGS_FILE token-file bindings")
+		}
+	}
+	metaAppClientSecret, err := loadOptionalSecret("META_APP_CLIENT_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
+	azureClientSecretValue, err := loadOptionalSecret("AZURE_CLIENT_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
+	legacyMicrosoftSecretValue, err := loadOptionalSecret("MICROSOFT_CLIENT_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
+	metaLegacyClientSecret, err := loadOptionalSecret("META_CLIENT_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
+	facebookClientSecretValue, err := loadOptionalSecret("FACEBOOK_CLIENT_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
+	instagramClientSecretValue, err := loadOptionalSecret("INSTAGRAM_CLIENT_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
 
 	publicBaseURL := strings.TrimRight(envOr("INTEGRATION_PUBLIC_BASE_URL", "http://localhost:3026"), "/")
 	tenant := envOr("AZURE_TENANT_ID", "common")
 	rawFacebookClientID := strings.TrimSpace(os.Getenv("FACEBOOK_CLIENT_ID"))
-	rawFacebookClientSecret := strings.TrimSpace(os.Getenv("FACEBOOK_CLIENT_SECRET"))
+	rawFacebookClientSecret := facebookClientSecretValue
 	rawInstagramClientID := strings.TrimSpace(os.Getenv("INSTAGRAM_CLIENT_ID"))
-	rawInstagramClientSecret := strings.TrimSpace(os.Getenv("INSTAGRAM_CLIENT_SECRET"))
+	rawInstagramClientSecret := instagramClientSecretValue
 	facebookClientID := firstNonEmpty(rawFacebookClientID, rawInstagramClientID)
 	facebookClientSecret := firstNonEmpty(rawFacebookClientSecret, rawInstagramClientSecret)
 	// Instagram inbox consent belongs to a distinct Meta product/client. Falling
@@ -227,15 +282,17 @@ func Load() (Config, error) {
 	instagramClientSecret := rawInstagramClientSecret
 	metaClientID := firstNonEmpty(strings.TrimSpace(os.Getenv("META_APP_CLIENT_ID")), facebookClientID)
 	metaClientSecret := firstNonEmpty(
-		strings.TrimSpace(os.Getenv("META_APP_CLIENT_SECRET")),
-		strings.TrimSpace(os.Getenv("META_CLIENT_SECRET")),
+		metaAppClientSecret,
+		metaLegacyClientSecret,
 		facebookClientSecret,
 	)
 
 	return Config{
-		Port:                             envOr("PORT", "3026"),
-		ServiceName:                      envOr("SERVICE_NAME", "integration-corev2"),
-		Environment:                      envOr("ENVIRONMENT", "dev"),
+		Port:        envOr("PORT", "3026"),
+		ServiceName: envOr("SERVICE_NAME", "integration-corev2"),
+		// Treat an omitted environment as production. Local HTTP OAuth callbacks
+		// require an explicit development environment and a loopback host.
+		Environment:                      envOr("ENVIRONMENT", "production"),
 		DatabaseURL:                      strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		InternalAPIKey:                   strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")),
 		InternalAPIKeyHeader:             envOr("INTERNAL_API_KEY_HEADER", "X-Internal-API-Key"),
@@ -273,6 +330,7 @@ func Load() (Config, error) {
 		WebhookHotPathURL:                strings.TrimRight(strings.TrimSpace(envOr("INTEGRATION_WEBHOOK_HOTPATH_URL", "")), "/"),
 		IntegrationCoreURL:               strings.TrimRight(envOr("INTEGRATION_CORE_URL", publicBaseURL), "/"),
 		PublicBaseURL:                    publicBaseURL,
+		OAuthAllowedReturnOrigins:        envCSV("INTEGRATION_ALLOWED_RETURN_ORIGINS", ""),
 		MetaJSSDKAppID:                   strings.TrimSpace(envOr("META_JS_SDK_APP_ID", metaClientID)),
 		MetaJSSDKAPIVersion:              normalizeGraphAPIVersion(envOr("META_JS_SDK_API_VERSION", "v25.0")),
 		MetaJSSDKLocale:                  envOr("META_JS_SDK_LOCALE", "en_US"),
@@ -304,60 +362,69 @@ func Load() (Config, error) {
 		CodexSubscriptionLoginTTL:          envDuration("CODEX_SUBSCRIPTION_LOGIN_TTL", 10*time.Minute),
 		CodexSubscriptionInvocationTimeout: envDuration("CODEX_SUBSCRIPTION_INVOCATION_TIMEOUT", 90*time.Second),
 
-		MicrosoftTenantID:         tenant,
-		MicrosoftClientID:         envOr("AZURE_CLIENT_ID", os.Getenv("MICROSOFT_CLIENT_ID")),
-		MicrosoftClientSecret:     envOr("AZURE_CLIENT_SECRET", os.Getenv("MICROSOFT_CLIENT_SECRET")),
-		MicrosoftClientAuthMode:   normalizeMicrosoftClientAuthMode(envOr("MICROSOFT_CLIENT_AUTH_MODE", "public")),
-		MicrosoftTokenOrigin:      envOr("MICROSOFT_TOKEN_ORIGIN", urlOrigin(publicBaseURL)),
-		MicrosoftAuthorizationURL: microsoftAuthorizeURL(tenant),
-		MicrosoftTokenURL:         microsoftTokenURL(tenant),
-		MicrosoftGraphBaseURL:     envOr("MICROSOFT_GRAPH_BASE_URL", "https://graph.microsoft.com"),
-		SlackClientID:             strings.TrimSpace(os.Getenv("SLACK_CLIENT_ID")),
-		SlackClientSecret:         strings.TrimSpace(os.Getenv("SLACK_CLIENT_SECRET")),
-		SlackSigningSecret:        strings.TrimSpace(os.Getenv("SLACK_SIGNING_SECRET")),
-		SlackAuthorizationURL:     envOr("SLACK_AUTHORIZATION_URL", "https://slack.com/oauth/v2/authorize"),
-		SlackTokenURL:             envOr("SLACK_TOKEN_URL", "https://slack.com/api/oauth.v2.access"),
-		SlackAPIBaseURL:           envOr("SLACK_API_BASE_URL", "https://slack.com/api"),
-		GoogleClientID:            strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_ID")),
-		GoogleClientSecret:        strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_SECRET")),
-		GoogleAuthorizationURL:    envOr("GOOGLE_AUTHORIZATION_URL", "https://accounts.google.com/o/oauth2/v2/auth"),
-		GoogleTokenURL:            envOr("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token"),
-		GoogleAPIBaseURL:          envOr("GOOGLE_API_BASE_URL", "https://www.googleapis.com"),
-		NotionClientID:            strings.TrimSpace(os.Getenv("NOTION_CLIENT_ID")),
-		NotionClientSecret:        strings.TrimSpace(os.Getenv("NOTION_CLIENT_SECRET")),
-		NotionAuthorizationURL:    envOr("NOTION_AUTHORIZATION_URL", "https://api.notion.com/v1/oauth/authorize"),
-		NotionTokenURL:            envOr("NOTION_TOKEN_URL", "https://api.notion.com/v1/oauth/token"),
-		NotionAPIBaseURL:          envOr("NOTION_API_BASE_URL", "https://api.notion.com"),
-		GitHubClientID:            strings.TrimSpace(os.Getenv("GITHUB_CLIENT_ID")),
-		GitHubClientSecret:        strings.TrimSpace(os.Getenv("GITHUB_CLIENT_SECRET")),
-		GitHubWebhookSecret:       strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
-		GitHubAuthorizationURL:    envOr("GITHUB_AUTHORIZATION_URL", "https://github.com/login/oauth/authorize"),
-		GitHubTokenURL:            envOr("GITHUB_TOKEN_URL", "https://github.com/login/oauth/access_token"),
-		GitHubAPIBaseURL:          normalizeGitHubAPIBaseURL(envOr("GITHUB_API_BASE_URL", "https://api.github.com")),
-		ShopifyClientID:           strings.TrimSpace(os.Getenv("SHOPIFY_CLIENT_ID")),
-		ShopifyClientSecret:       strings.TrimSpace(os.Getenv("SHOPIFY_CLIENT_SECRET")),
-		ShopifyWebhookSecret:      strings.TrimSpace(os.Getenv("SHOPIFY_WEBHOOK_SECRET")),
-		ShopifyAPIBaseURL:         envOr("SHOPIFY_API_BASE_URL", "https://{shop}"),
-		StripeClientID:            strings.TrimSpace(os.Getenv("STRIPE_CLIENT_ID")),
-		StripeClientSecret:        strings.TrimSpace(os.Getenv("STRIPE_CLIENT_SECRET")),
-		StripeAuthorizationURL:    envOr("STRIPE_AUTHORIZATION_URL", "https://connect.stripe.com/oauth/authorize"),
-		StripeTokenURL:            envOr("STRIPE_TOKEN_URL", "https://connect.stripe.com/oauth/token"),
-		StripeAPIBaseURL:          envOr("STRIPE_API_BASE_URL", "https://api.stripe.com"),
-		StripeWebhookSecret:       strings.TrimSpace(os.Getenv("STRIPE_WEBHOOK_SECRET")),
-		AllowUnverifiedWebhooks:   envBool("ALLOW_UNVERIFIED_WEBHOOKS", false),
-		LinkedInClientID:          strings.TrimSpace(os.Getenv("LINKEDIN_CLIENT_ID")),
-		LinkedInClientSecret:      strings.TrimSpace(os.Getenv("LINKEDIN_CLIENT_SECRET")),
-		LinkedInAuthorizationURL:  envOr("LINKEDIN_AUTHORIZATION_URL", "https://www.linkedin.com/oauth/v2/authorization"),
-		LinkedInTokenURL:          envOr("LINKEDIN_TOKEN_URL", "https://www.linkedin.com/oauth/v2/accessToken"),
-		LinkedInAPIBaseURL:        envOr("LINKEDIN_API_BASE_URL", "https://api.linkedin.com"),
-		LinkedInMarketingVersion:  envOr("LINKEDIN_MARKETING_VERSION", "202606"),
-		XClientID:                 strings.TrimSpace(os.Getenv("X_CLIENT_ID")),
-		XClientSecret:             strings.TrimSpace(os.Getenv("X_CLIENT_SECRET")),
-		XAuthorizationURL:         envOr("X_AUTHORIZATION_URL", "https://x.com/i/oauth2/authorize"),
-		XTokenURL:                 envOr("X_TOKEN_URL", "https://api.x.com/2/oauth2/token"),
-		XAPIBaseURL:               envOr("X_API_BASE_URL", "https://api.x.com"),
-		InstagramClientID:         instagramClientID,
-		InstagramClientSecret:     instagramClientSecret,
+		MicrosoftTenantID:              tenant,
+		MicrosoftClientID:              envOr("AZURE_CLIENT_ID", os.Getenv("MICROSOFT_CLIENT_ID")),
+		MicrosoftClientSecret:          firstNonEmpty(azureClientSecretValue, legacyMicrosoftSecretValue),
+		MicrosoftClientAuthMode:        normalizeMicrosoftClientAuthMode(envOr("MICROSOFT_CLIENT_AUTH_MODE", "public")),
+		MicrosoftTokenOrigin:           envOr("MICROSOFT_TOKEN_ORIGIN", urlOrigin(publicBaseURL)),
+		MicrosoftAuthorizationURL:      microsoftAuthorizeURL(tenant),
+		MicrosoftTokenURL:              microsoftTokenURL(tenant),
+		MicrosoftGraphBaseURL:          envOr("MICROSOFT_GRAPH_BASE_URL", "https://graph.microsoft.com"),
+		SlackClientID:                  strings.TrimSpace(os.Getenv("SLACK_CLIENT_ID")),
+		SlackClientSecret:              strings.TrimSpace(os.Getenv("SLACK_CLIENT_SECRET")),
+		SlackSigningSecret:             strings.TrimSpace(os.Getenv("SLACK_SIGNING_SECRET")),
+		SlackAuthorizationURL:          envOr("SLACK_AUTHORIZATION_URL", "https://slack.com/oauth/v2/authorize"),
+		SlackTokenURL:                  envOr("SLACK_TOKEN_URL", "https://slack.com/api/oauth.v2.access"),
+		SlackAPIBaseURL:                envOr("SLACK_API_BASE_URL", "https://slack.com/api"),
+		GoogleClientID:                 strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_ID")),
+		GoogleClientSecret:             googleClientSecret,
+		GoogleAuthorizationURL:         envOr("GOOGLE_AUTHORIZATION_URL", "https://accounts.google.com/o/oauth2/v2/auth"),
+		GoogleTokenURL:                 envOr("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token"),
+		GoogleAPIBaseURL:               envOr("GOOGLE_API_BASE_URL", "https://www.googleapis.com"),
+		NotionClientID:                 strings.TrimSpace(os.Getenv("NOTION_CLIENT_ID")),
+		NotionClientSecret:             strings.TrimSpace(os.Getenv("NOTION_CLIENT_SECRET")),
+		NotionAuthorizationURL:         envOr("NOTION_AUTHORIZATION_URL", "https://api.notion.com/v1/oauth/authorize"),
+		NotionTokenURL:                 envOr("NOTION_TOKEN_URL", "https://api.notion.com/v1/oauth/token"),
+		NotionAPIBaseURL:               envOr("NOTION_API_BASE_URL", "https://api.notion.com"),
+		GitHubClientID:                 strings.TrimSpace(os.Getenv("GITHUB_CLIENT_ID")),
+		GitHubClientSecret:             strings.TrimSpace(os.Getenv("GITHUB_CLIENT_SECRET")),
+		GitHubWebhookSecret:            strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
+		GitHubAuthorizationURL:         envOr("GITHUB_AUTHORIZATION_URL", "https://github.com/login/oauth/authorize"),
+		GitHubTokenURL:                 envOr("GITHUB_TOKEN_URL", "https://github.com/login/oauth/access_token"),
+		GitHubAPIBaseURL:               normalizeGitHubAPIBaseURL(envOr("GITHUB_API_BASE_URL", "https://api.github.com")),
+		ShopifyClientID:                strings.TrimSpace(os.Getenv("SHOPIFY_CLIENT_ID")),
+		ShopifyClientSecret:            strings.TrimSpace(os.Getenv("SHOPIFY_CLIENT_SECRET")),
+		ShopifyWebhookSecret:           strings.TrimSpace(os.Getenv("SHOPIFY_WEBHOOK_SECRET")),
+		ShopifyAPIBaseURL:              envOr("SHOPIFY_API_BASE_URL", "https://{shop}"),
+		StripeClientID:                 strings.TrimSpace(os.Getenv("STRIPE_CLIENT_ID")),
+		StripeClientSecret:             strings.TrimSpace(os.Getenv("STRIPE_CLIENT_SECRET")),
+		StripeAuthorizationURL:         envOr("STRIPE_AUTHORIZATION_URL", "https://connect.stripe.com/oauth/authorize"),
+		StripeTokenURL:                 envOr("STRIPE_TOKEN_URL", "https://connect.stripe.com/oauth/token"),
+		StripeAPIBaseURL:               envOr("STRIPE_API_BASE_URL", "https://api.stripe.com"),
+		StripeWebhookSecret:            strings.TrimSpace(os.Getenv("STRIPE_WEBHOOK_SECRET")),
+		AllowUnverifiedWebhooks:        envBool("ALLOW_UNVERIFIED_WEBHOOKS", false),
+		LinkedInClientID:               strings.TrimSpace(os.Getenv("LINKEDIN_CLIENT_ID")),
+		LinkedInClientSecret:           strings.TrimSpace(os.Getenv("LINKEDIN_CLIENT_SECRET")),
+		LinkedInAuthorizationURL:       envOr("LINKEDIN_AUTHORIZATION_URL", "https://www.linkedin.com/oauth/v2/authorization"),
+		LinkedInTokenURL:               envOr("LINKEDIN_TOKEN_URL", "https://www.linkedin.com/oauth/v2/accessToken"),
+		LinkedInAPIBaseURL:             envOr("LINKEDIN_API_BASE_URL", "https://api.linkedin.com"),
+		LinkedInMarketingVersion:       envOr("LINKEDIN_MARKETING_VERSION", "202606"),
+		XClientID:                      strings.TrimSpace(os.Getenv("X_CLIENT_ID")),
+		XClientSecret:                  strings.TrimSpace(os.Getenv("X_CLIENT_SECRET")),
+		XAuthorizationURL:              envOr("X_AUTHORIZATION_URL", "https://x.com/i/oauth2/authorize"),
+		XTokenURL:                      envOr("X_TOKEN_URL", "https://api.x.com/2/oauth2/token"),
+		XAPIBaseURL:                    envOr("X_API_BASE_URL", "https://api.x.com"),
+		InstagramClientID:              instagramClientID,
+		InstagramClientSecret:          instagramClientSecret,
+		PageSpeedAPIKey:                pageSpeedAPIKey,
+		CrUXAPIKey:                     cruxAPIKey,
+		PyTrendsDevEnabled:             envBool("PYTRENDS_DEV_ENABLED", false),
+		ClarityBindingsFile:            strings.TrimSpace(os.Getenv("CLARITY_BINDINGS_FILE")),
+		WebVitalsBindingsFile:          strings.TrimSpace(os.Getenv("WEB_VITALS_BINDINGS_FILE")),
+		MarketingProvidersBindingsFile: strings.TrimSpace(os.Getenv("MARKETING_PROVIDERS_BINDINGS_FILE")),
+		AlgoliaMCPOAuthClientFile:      strings.TrimSpace(os.Getenv("ALGOLIA_MCP_OAUTH_CLIENT_FILE")),
+		GoogleAnalyticsAdminAPIBaseURL: envOr("GOOGLE_ANALYTICS_ADMIN_API_BASE_URL", "https://analyticsadmin.googleapis.com"),
+		GoogleAnalyticsDataAPIBaseURL:  envOr("GOOGLE_ANALYTICS_DATA_API_BASE_URL", "https://analyticsdata.googleapis.com"),
 		// Instagram API with Instagram Login uses Instagram OAuth and the
 		// graph.instagram.com host. Facebook Login's graph.facebook.com API and
 		// instagram_* permissions are a separate product with a different token
@@ -471,6 +538,14 @@ func (c Config) ValidateRuntime() error {
 	if c.PublicBaseURL == "" {
 		return fmt.Errorf("INTEGRATION_PUBLIC_BASE_URL is required")
 	}
+	if err := validatePublicBaseURL(c.PublicBaseURL, c.Environment); err != nil {
+		return fmt.Errorf("INTEGRATION_PUBLIC_BASE_URL is invalid: %w", err)
+	}
+	for _, origin := range c.OAuthAllowedReturnOrigins {
+		if _, err := normalizeOAuthAllowedReturnOrigin(origin, c.Environment); err != nil {
+			return fmt.Errorf("INTEGRATION_ALLOWED_RETURN_ORIGINS is invalid: %w", err)
+		}
+	}
 	if c.DatabaseURL == "" && !c.AllowInMemoryStore {
 		return fmt.Errorf("DATABASE_URL is required unless INTEGRATION_ALLOW_IN_MEMORY_STORE=true")
 	}
@@ -555,6 +630,9 @@ func (c Config) ControlPlaneInternalAPIKey() string {
 
 func (c Config) ValidateProvider(providerKey string) error {
 	switch providerKey {
+	case "algolia":
+		_, err := c.AlgoliaRegistration()
+		return err
 	case "microsoft":
 		if c.MicrosoftClientID == "" {
 			return fmt.Errorf("AZURE_CLIENT_ID is required for Microsoft OAuth")
@@ -693,6 +771,12 @@ func (c Config) ValidateProvider(providerKey string) error {
 
 func (c Config) ProviderReadiness() map[string][]string {
 	readiness := map[string][]string{}
+	// A global catalog cannot establish a tenant/site API-key binding. Reports
+	// enforce the protected mapping; these providers never offer an OAuth flow.
+	readiness["cookiebot"] = []string{"SITE_SCOPED_API_KEY_BINDING"}
+	if _, err := c.AlgoliaRegistration(); err != nil {
+		readiness["algolia"] = []string{"ALGOLIA_MCP_OAUTH_CLIENT_FILE"}
+	}
 	microsoftChecks := map[string]string{
 		"AZURE_CLIENT_ID": c.MicrosoftClientID,
 	}
@@ -851,6 +935,34 @@ func loadEncryptionKey(key string) ([]byte, error) {
 	return nil, fmt.Errorf("%s must be 32 raw bytes or base64-encoded 32 bytes", key)
 }
 
+// loadOptionalSecret accepts either KEY or KEY_FILE, never both. File-backed
+// values allow container runtimes to mount sensitive provider secrets without
+// materializing them in the process environment or Compose configuration.
+func loadOptionalSecret(key string) (string, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	path := strings.TrimSpace(os.Getenv(key + "_FILE"))
+	if value != "" && path != "" {
+		return "", fmt.Errorf("%s and %s_FILE cannot both be set", key, key)
+	}
+	if path == "" {
+		return value, nil
+	}
+
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s_FILE must reference a readable regular file", key)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("%s_FILE must reference a readable regular file", key)
+	}
+	secret := strings.TrimSpace(string(raw))
+	if secret == "" {
+		return "", fmt.Errorf("%s_FILE must not be empty", key)
+	}
+	return secret, nil
+}
+
 func envOr(key, fallback string) string {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
@@ -906,6 +1018,99 @@ func urlOrigin(raw string) string {
 		return ""
 	}
 	return parsed.Scheme + "://" + parsed.Host
+}
+
+// NormalizeOAuthReturnURL permits a browser destination only when its exact
+// origin appears in the deployment-owned allowlist. Empty is supported for
+// callers that poll connect-session status instead of using a browser return.
+func (c Config) NormalizeOAuthReturnURL(raw string) (string, string, error) {
+	destination := strings.TrimSpace(raw)
+	if destination == "" {
+		return "", "", nil
+	}
+	parsed, err := url.Parse(destination)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" || parsed.User != nil || parsed.Fragment != "" {
+		return "", "", fmt.Errorf("returnUrl must be an absolute HTTP(S) URL without credentials or a fragment")
+	}
+	origin, err := normalizedHTTPOAuthOrigin(parsed, c.Environment)
+	if err != nil {
+		return "", "", fmt.Errorf("returnUrl is invalid: %w", err)
+	}
+	for _, allowed := range c.OAuthAllowedReturnOrigins {
+		allowedOrigin, allowedErr := normalizeOAuthAllowedReturnOrigin(allowed, c.Environment)
+		if allowedErr != nil {
+			return "", "", fmt.Errorf("return URL allowlist is invalid")
+		}
+		if origin == allowedOrigin {
+			return parsed.String(), origin, nil
+		}
+	}
+	return "", "", fmt.Errorf("returnUrl origin is not allowed")
+}
+
+func validatePublicBaseURL(raw, environment string) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("must be an absolute HTTP(S) origin without credentials, query, or fragment")
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return fmt.Errorf("must not include a path")
+	}
+	_, err = normalizedHTTPOAuthOrigin(parsed, environment)
+	return err
+}
+
+func normalizeOAuthAllowedReturnOrigin(raw, environment string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("allowlist entries must be absolute HTTP(S) origins")
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return "", fmt.Errorf("allowlist entries must not include a path")
+	}
+	return normalizedHTTPOAuthOrigin(parsed, environment)
+}
+
+func normalizedHTTPOAuthOrigin(parsed *url.URL, environment string) (string, error) {
+	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	if scheme != "https" && scheme != "http" {
+		return "", fmt.Errorf("must use HTTP or HTTPS")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "" {
+		return "", fmt.Errorf("must include a host")
+	}
+	if scheme == "http" && (!isLocalDevelopmentEnvironment(environment) || !isLoopbackOAuthHost(host)) {
+		return "", fmt.Errorf("must use HTTPS except for loopback hosts in an explicit local development environment")
+	}
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	port := parsed.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	return scheme + "://" + host, nil
+}
+
+func isLocalDevelopmentEnvironment(environment string) bool {
+	switch strings.ToLower(strings.TrimSpace(environment)) {
+	case "dev", "development", "local", "test":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLoopbackOAuthHost(host string) bool {
+	if strings.EqualFold(strings.TrimSpace(host), "localhost") {
+		return true
+	}
+	parsedIP := net.ParseIP(strings.TrimSpace(host))
+	return parsedIP != nil && parsedIP.IsLoopback()
 }
 
 func envBool(key string, fallback bool) bool {

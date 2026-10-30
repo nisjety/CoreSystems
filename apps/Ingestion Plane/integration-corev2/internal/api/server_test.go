@@ -43,6 +43,66 @@ func TestProvidersCatalogIsPublic(t *testing.T) {
 	}
 }
 
+func TestIntegrationLandingPageIsPublicStaticHTML(t *testing.T) {
+	app := testServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/html; charset=utf-8") {
+		t.Fatalf("Content-Type = %q, want HTML", got)
+	}
+	for header, want := range map[string]string{
+		"Content-Security-Policy": "default-src 'none'",
+		"X-Content-Type-Options":  "nosniff",
+		"X-Frame-Options":         "DENY",
+	} {
+		if got := resp.Header.Get(header); !strings.Contains(got, want) {
+			t.Errorf("%s = %q, want %q", header, got, want)
+		}
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	page := string(body)
+	for _, expected := range []string{"<title>Integration Core</title>", "<main>", "<h1>Integration Core</h1>"} {
+		if !strings.Contains(page, expected) {
+			t.Errorf("landing page missing %q: %s", expected, page)
+		}
+	}
+	for _, forbidden := range []string{"<script", "<form", "access_token", "refresh_token", "client_secret", "api_key", "connectionId", "dev-key"} {
+		if strings.Contains(strings.ToLower(page), strings.ToLower(forbidden)) {
+			t.Errorf("landing page leaked or enabled %q: %s", forbidden, page)
+		}
+	}
+}
+
+func TestCallbackHTMLPostsOnlyToTrustedReturnOrigin(t *testing.T) {
+	trusted := callbackHTML(oauth.CallbackResult{Success: true, ReturnURL: "https://app.example/integrations?provider=google", ReturnOrigin: "https://app.example"})
+	if !strings.Contains(trusted, `var returnOrigin = "https://app.example"`) || !strings.Contains(trusted, `postMessage(payload, returnOrigin)`) {
+		t.Fatalf("trusted callback did not use exact return origin: %s", trusted)
+	}
+	if strings.Contains(trusted, `postMessage(payload, "*")`) {
+		t.Fatalf("trusted callback used wildcard target origin: %s", trusted)
+	}
+
+	untrusted := callbackHTML(oauth.CallbackResult{Success: true})
+	if strings.Contains(untrusted, "evil.example") || !strings.Contains(untrusted, `var returnURL = ""`) || !strings.Contains(untrusted, `var returnOrigin = ""`) {
+		t.Fatalf("untrusted return URL reached callback HTML: %s", untrusted)
+	}
+
+	revoked := callbackHTML(oauth.CallbackResult{Success: true, ReturnURLRejected: true})
+	if strings.Contains(revoked, "window.setTimeout") || !strings.Contains(revoked, "return to the application and refresh") {
+		t.Fatalf("revoked callback did not remain readable: %s", revoked)
+	}
+}
+
 func TestProvidersCatalogIncludesMetaSDKConfig(t *testing.T) {
 	cfg, repo, service := testOAuthStack(t)
 	cfg.MetaJSSDKAppID = "meta-app-id"
@@ -268,6 +328,51 @@ func TestCreateConnectSessionReturnsDirectOAuthURL(t *testing.T) {
 	}
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestCreateConnectSessionRejectsUntrustedReturnURLWithoutReflection(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	app := NewServer(ServerConfig{
+		Config: cfg,
+		Repo:   repo,
+		OAuth:  service,
+		Auth: fakeVerifier{principal: auth.Principal{
+			UserID: "user-1", OrganizationID: "org-1", WorkspaceID: "workspace-1", Email: "user@example.com",
+		}},
+		Org: fakeOrgClient{plan: "pro"},
+	})
+
+	const untrustedReturnURL = "https://untrusted.example/after-connect"
+	body := `{"bundles":["inbox"],"returnUrl":"` + untrustedReturnURL + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/providers/microsoft/connect-session", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer valid-token")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != fiber.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(responseBody, &envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Error.Code != "invalid_return_url" {
+		t.Fatalf("error code = %q, want invalid_return_url", envelope.Error.Code)
+	}
+	if strings.Contains(string(responseBody), untrustedReturnURL) || strings.Contains(string(responseBody), "untrusted.example") {
+		t.Fatalf("response reflected rejected return URL: %s", responseBody)
 	}
 }
 
@@ -3120,6 +3225,133 @@ func TestGDPRDeleteRollsBackAllLocalMutationsWhenAuditIntentFails(t *testing.T) 
 	}
 	if len(consents) != 1 || !consents[0].Granted || consents[0].RevokedAt != nil {
 		t.Fatalf("consents committed without audit: %#v", consents)
+	}
+}
+
+func TestGoogleSearchConsoleActionsRequireReadCapability(t *testing.T) {
+	for _, operation := range []string{"gsc.sites.list", "google.gsc.sites.list", "gsc.search_analytics.query", "google.gsc.search_analytics.query"} {
+		capability, sensitive := requiredCapabilityForOperation("google", operation)
+		if capability != "search_console.read" {
+			t.Errorf("required capability for %q = %q, want search_console.read", operation, capability)
+		}
+		if !sensitive {
+			t.Errorf("GSC operation %q must be marked sensitive", operation)
+		}
+	}
+}
+
+func TestMarketingReadinessEndpointUsesFixedReadOnlyGoogleAndMetaEndpoints(t *testing.T) {
+	providerCalls := map[string]int{}
+	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer marketing-access-token" {
+			t.Fatalf("Authorization = %q, want readiness bearer token", got)
+		}
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %s, want GET", r.Method)
+		}
+		switch r.URL.Path {
+		case "/webmasters/v3/sites":
+			providerCalls["google"]++
+			_ = json.NewEncoder(w).Encode(map[string]any{"siteEntry": []any{map[string]any{"siteUrl": "sc-domain:private.example"}}})
+		case "/me/adaccounts":
+			providerCalls["meta"]++
+			if got := r.URL.Query().Get("limit"); got != "1" {
+				t.Fatalf("Meta readiness limit = %q, want 1", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"id": "act_123", "name": "Private Meta account"}}})
+		default:
+			t.Fatalf("unexpected provider request path %q", r.URL.Path)
+		}
+	}))
+	defer providerServer.Close()
+
+	cfg, repo, service := testOAuthStack(t)
+	cfg.GoogleAPIBaseURL = providerServer.URL
+	cfg.FacebookAPIBaseURL = providerServer.URL
+	vault, err := secretcrypto.NewVault(cfg.EncryptionKey)
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	for _, connection := range []store.Connection{
+		{
+			ID: "google-readiness", ProviderKey: "google", ConnectorType: "google", OrganizationID: "org-1", UserID: "user-1",
+			Status: "active", Capabilities: []string{"search_console.read"},
+			AccessTokenExpiresAt: time.Now().Add(time.Hour),
+		},
+		{
+			ID: "meta-readiness", ProviderKey: "meta", ConnectorType: "meta", OrganizationID: "org-1", UserID: "user-1",
+			Status: "active", Capabilities: []string{"social.ads.manage", "social.analytics.read"},
+			AccessTokenExpiresAt: time.Now().Add(time.Hour),
+		},
+	} {
+		encryptedToken, err := vault.Encrypt("marketing-access-token", []byte(connection.ID))
+		if err != nil {
+			t.Fatalf("Encrypt token for %s: %v", connection.ID, err)
+		}
+		connection.EncryptedAccessToken = encryptedToken
+		if _, err := repo.UpsertConnection(t.Context(), connection); err != nil {
+			t.Fatalf("UpsertConnection(%s): %v", connection.ID, err)
+		}
+	}
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service, Actions: actions.NewService(cfg, providerServer.Client())})
+
+	for _, connectionID := range []string{"google-readiness", "meta-readiness"} {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/connections/"+connectionID+"/readiness", nil)
+		req.Header.Set("X-Internal-API-Key", "dev-key")
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("app.Test(%s): %v", connectionID, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != fiber.StatusOK {
+			t.Fatalf("%s status = %d, want 200 body=%s", connectionID, resp.StatusCode, body)
+		}
+		for _, forbidden := range []string{"marketing-access-token", "private.example", "act_123", "Private Meta account", "siteEntry"} {
+			if strings.Contains(string(body), forbidden) {
+				t.Fatalf("%s readiness response leaked %q: %s", connectionID, forbidden, body)
+			}
+		}
+	}
+	if providerCalls["google"] != 1 || providerCalls["meta"] != 1 {
+		t.Fatalf("provider calls = %#v, want one fixed call per provider", providerCalls)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/connections/google-readiness/readiness?operation=gsc.search_analytics.query", nil)
+	req.Header.Set("X-Internal-API-Key", "dev-key")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("query-override app.Test: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		t.Fatalf("query-override status = %d, want 400 body=%s", resp.StatusCode, body)
+	}
+	if code := readAPIErrorCode(t, resp); code != "readiness_request_not_allowed" {
+		t.Fatalf("query-override error code = %q, want readiness_request_not_allowed", code)
+	}
+	if providerCalls["google"] != 1 {
+		t.Fatalf("query-override triggered provider request: %#v", providerCalls)
+	}
+
+	bodyOverride := httptest.NewRequest(http.MethodPost, "/api/v1/connections/meta-readiness/readiness", strings.NewReader(`{"operation":"ads.insights"}`))
+	bodyOverride.Header.Set("Content-Type", "application/json")
+	bodyOverride.Header.Set("X-Internal-API-Key", "dev-key")
+	resp, err = app.Test(bodyOverride)
+	if err != nil {
+		t.Fatalf("body-override app.Test: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		t.Fatalf("body-override status = %d, want 400 body=%s", resp.StatusCode, body)
+	}
+	if code := readAPIErrorCode(t, resp); code != "readiness_request_not_allowed" {
+		t.Fatalf("body-override error code = %q, want readiness_request_not_allowed", code)
+	}
+	if providerCalls["meta"] != 1 {
+		t.Fatalf("body-override triggered provider request: %#v", providerCalls)
 	}
 }
 

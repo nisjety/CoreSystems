@@ -11,6 +11,7 @@ import (
 )
 
 func NewProviderClients(cfg config.Config, microsoft *MicrosoftClient, httpClient *http.Client) map[string]ProviderOAuthClient {
+	algoliaHTTPClient := httpClient
 	if httpClient == nil {
 		// Several of the clients built below dial a host assembled from
 		// caller-influenced data rather than a fixed config URL — most
@@ -30,6 +31,7 @@ func NewProviderClients(cfg config.Config, microsoft *MicrosoftClient, httpClien
 	metaTokenURL := firstNonEmpty(cfg.MetaTokenURL, cfg.FacebookTokenURL)
 	metaAPIBaseURL := firstNonEmpty(cfg.MetaAPIBaseURL, cfg.FacebookAPIBaseURL)
 	return map[string]ProviderOAuthClient{
+		"algolia":   NewAlgoliaOAuthClient(cfg, algoliaHTTPClient),
 		"microsoft": &MicrosoftProviderClient{base: microsoft},
 		"slack": NewOAuth2Client(OAuth2ClientConfig{
 			ProviderKey:      "slack",
@@ -55,7 +57,8 @@ func NewProviderClients(cfg config.Config, microsoft *MicrosoftClient, httpClien
 				// Google documents a space-delimited combination of consent and
 				// select_account. This keeps refresh-token consent while allowing
 				// an operator to choose a different Google account on reconnect.
-				"prompt": "select_account consent",
+				"prompt":                 "select_account consent",
+				"include_granted_scopes": "true",
 			},
 			HTTPClient: httpClient,
 		}),

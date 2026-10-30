@@ -1,0 +1,43 @@
+# Local integration test against aquatiq-datavarehus. Use with docker-compose.yml.
+# PKCE secrets and Google ADC stay on the host and are mounted only at runtime.
+services:
+  onboarding:
+    env_file:
+      - .env.bff
+      - .env.main
+    user: "${HOST_UID:?set HOST_UID}:${HOST_GID:?set HOST_GID}"
+    environment:
+      XERO_AUTH_MODE: pkce
+      GCP_PROJECT: aquatiq-datavarehus
+      GCS_BUCKET: aquatiq-datavarehus-xero-raw
+      GCS_PREFIX: raw/xero
+      XERO_STAGING_DATASET: dw_staging_xero
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/adc.json
+      XERO_REDIRECT_URI: http://localhost:5002/api/xero/callback
+    ports: !override
+      - "127.0.0.1:5002:8080"
+    volumes:
+      - ./data:/app/data
+      - ${HOME}/.config/gcloud/application_default_credentials.json:/secrets/adc.json:ro
+
+  # One-shot CLI using the same local PKCE store and GCP destination as the BFF.
+  # Run with: docker compose -f docker-compose.yml -f docker-compose.local-main.yml run --rm local-sync sync --window-days 30
+  local-sync:
+    image: xero-onboarding:local
+    entrypoint: ["/app/xero"]
+    profiles: ["manual"]
+    env_file:
+      - .env.bff
+      - .env.main
+    user: "${HOST_UID:?set HOST_UID}:${HOST_GID:?set HOST_GID}"
+    environment:
+      XERO_AUTH_MODE: pkce
+      GCP_PROJECT: aquatiq-datavarehus
+      GCS_BUCKET: aquatiq-datavarehus-xero-raw
+      GCS_PREFIX: raw/xero
+      XERO_STAGING_DATASET: dw_staging_xero
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/adc.json
+      XERO_CONNECTION_STORE_PATH: /app/data/connections.json
+    volumes:
+      - ./data:/app/data
+      - ${HOME}/.config/gcloud/application_default_credentials.json:/secrets/adc.json:ro

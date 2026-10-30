@@ -49,15 +49,7 @@ import {
 import type { AutonomyRung, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
 import { readChatThreadHistory } from '../lib/chat-thread-history'
 import { MIN_PLAN_JUSTIFICATION_CHARS } from '@/shared/api/chat-client'
-import {
-  For,
-  Match,
-  Show,
-  Switch,
-  createEffect,
-  createMemo,
-  createSignal,
-} from 'solid-js'
+import { For, Match, Show, Switch, createEffect, createMemo, createSignal } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import {
   dataUriByteSize,

@@ -75,7 +75,7 @@ describe('item 16 — streaming is announced to a screen reader', () => {
 
   it('clears the heartbeat by returning a cleanup from the effect', async () => {
     const page = await read(PAGE)
-    // Solid 2 runs a cleanup RETURNED from the effect fn; `onCleanup` inside
+    // Solid 2 runs a cleanup RETURNED from the effect fn; `` inside
     // one is silently dropped, which would leak an interval per turn.
     expect(page).toContain('return () => clearInterval(heartbeat)')
   })

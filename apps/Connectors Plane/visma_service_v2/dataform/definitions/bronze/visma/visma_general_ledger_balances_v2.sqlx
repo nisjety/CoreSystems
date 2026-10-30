@@ -1,0 +1,44 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_general_ledger_balances_v2",
+  description: "Bronze: Period-level GL account balances (opening, debit, credit, closing) from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.str("account")} AS `account`,
+  ${bronze.str("balanceType")} AS `balanceType`,
+  ${bronze.float("beginningBalance")} AS `beginningBalance`,
+  ${bronze.float("beginningBalanceInCurrency")} AS `beginningBalanceInCurrency`,
+  ${bronze.str("branch")} AS `branch`,
+  ${bronze.str("currencyId")} AS `currencyId`,
+  ${bronze.str("financialPeriod")} AS `financialPeriod`,
+  ${bronze.str("lastModifiedDateTime")} AS `lastModifiedDateTime`,
+  ${bronze.str("ledger")} AS `ledger`,
+  ${bronze.str("metadata")} AS `metadata`,
+  ${bronze.float("periodToDateCredit")} AS `periodToDateCredit`,
+  ${bronze.float("periodToDateCreditInCurrency")} AS `periodToDateCreditInCurrency`,
+  ${bronze.float("periodToDateDebit")} AS `periodToDateDebit`,
+  ${bronze.float("periodToDateDebitInCurrency")} AS `periodToDateDebitInCurrency`,
+  ${bronze.str("subAccountCd")} AS `subAccountCd`,
+  ${bronze.str("subaccountId")} AS `subaccountId`,
+  ${bronze.bool("yearClosed")} AS `yearClosed`,
+  ${bronze.float("yearToDateBalance")} AS `yearToDateBalance`,
+  ${bronze.float("yearToDateBalanceInCurrency")} AS `yearToDateBalanceInCurrency`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`,  -- v2 does not fetch this field
+  ${bronze.str("subaccount")} AS `subaccount`
+FROM ${ref("dw_staging_visma", "general_ledger_balances_v2")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

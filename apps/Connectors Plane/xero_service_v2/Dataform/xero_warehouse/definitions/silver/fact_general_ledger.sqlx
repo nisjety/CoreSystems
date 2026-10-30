@@ -1,0 +1,26 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Xero posted journal lines; NetAmount is debit-positive and credit-negative. Manual journals are already in Journals.",
+  assertions: { nonNull: ["tenant_id", "journal_line_id", "journal_line_key"], uniqueKey: ["journal_line_key"] }
+}
+
+WITH headers AS (
+  SELECT * FROM ${ref("dw_bronze_xero", "xero_journals")}
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY tenant_id, record_id ORDER BY synced_at DESC, version_id DESC) = 1
+)
+SELECT CONCAT(l.tenant_id, '|', l.journal_line_id) AS journal_line_key,
+       l.tenant_id, l.journal_id, l.journal_line_id, h.journal_number,
+       h.source_type, h.source_id, h.reference,
+       DATE(h.journal_date) AS transaction_date, h.journal_date, h.synced_at,
+       l.account_id, l.account_code, l.account_name, l.account_type,
+       l.description, l.net_amount AS signed_net_amount,
+       IF(l.net_amount > 0, l.net_amount, 0) AS debit_amount,
+       IF(l.net_amount < 0, -l.net_amount, 0) AS credit_amount,
+       l.gross_amount, l.tax_amount,
+       l.tracking_category_1_id, l.tracking_option_1_name,
+       l.tracking_category_2_id, l.tracking_option_2_name,
+       h.journal_id IS NULL AS is_orphan_line,
+       l.version_id
+FROM ${ref("dw_bronze_xero", "xero_journal_lines")} AS l
+LEFT JOIN headers AS h ON l.tenant_id = h.tenant_id AND l.journal_id = h.journal_id

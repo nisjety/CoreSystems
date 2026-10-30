@@ -1,15 +1,5 @@
-import {
-  createEffect,
-  createMemo,
-  createSignal,
-  onCleanup,
-  untrack,
-} from 'solid-js'
-import {
-  createStore,
-  deep,
-  snapshot,
-} from 'solid-js'
+import { createEffect, createMemo, createSignal, onCleanup, untrack } from 'solid-js'
+import { createStore, deep, snapshot } from 'solid-js'
 import {
   beginNewVersion,
   lastUserIndex,

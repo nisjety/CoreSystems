@@ -1,0 +1,28 @@
+# This Vercel project builds only frontend/. Never upload the legacy backend,
+# local credential files, dependencies or generated deployment/build output.
+# Vercel walks directories incrementally: ignore only root entries, then allow
+# frontend itself. A recursive ** deny prunes the CLI walk before source files.
+/*
+!frontend
+frontend/**/.env*
+frontend/**/*.pem
+frontend/**/*.key
+frontend/**/*.p12
+frontend/**/*.pfx
+frontend/**/*.keystore
+frontend/**/id_rsa
+frontend/**/id_ecdsa
+frontend/**/id_ed25519
+frontend/**/.npmrc
+frontend/**/.pypirc
+frontend/**/.netrc
+frontend/**/.git
+frontend/**/.local
+frontend/**/.vercel
+frontend/**/.next
+frontend/**/.fallow
+frontend/**/node_modules
+frontend/**/coverage
+frontend/**/test-results
+frontend/**/playwright-report
+frontend/**/*.tsbuildinfo

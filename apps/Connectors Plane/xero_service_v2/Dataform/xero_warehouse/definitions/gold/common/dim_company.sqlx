@@ -1,0 +1,14 @@
+config {
+  type: "table",
+  schema: "xero_gold_common",
+  description: "Xero organization as company; comparable company key to Visma without inventing a business unit.",
+  assertions: { nonNull: ["tenant_id", "company_key"], uniqueKey: ["company_key"] }
+}
+
+SELECT FARM_FINGERPRINT(tenant_id) AS company_key,
+       tenant_id, organisation_id, organisation_name, legal_name,
+       organisation_name AS entity_name, country_code, base_currency,
+       financial_year_end_day, financial_year_end_month,
+       registration_number, tax_number, status, is_demo_company,
+       is_missing_from_staging, synced_at, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_company")}

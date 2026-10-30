@@ -34,6 +34,7 @@ tower-http = { workspace = true }
 hyper = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+scraper = { workspace = true }
 url = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }

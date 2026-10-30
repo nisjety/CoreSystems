@@ -18,7 +18,7 @@ export default tseslint.config(
     // `packages/*` (remote-core) and `apps/remote-dev` are workspace sub-projects
     // with their own eslint.config.js and tsconfig; linting them from here both
     // double-lints them and confuses the parser's tsconfig-root detection.
-    ignores: ['dist', 'coverage', 'node_modules', 'apps', 'packages', '**/.claude/worktrees/**'],
+    ignores: ['dist', 'dist-studio-demo', 'coverage', 'node_modules', 'apps', 'packages', '**/.claude/worktrees/**'],
   },
   {
     files: ['**/*.{ts,tsx,js,mjs,cjs}'],

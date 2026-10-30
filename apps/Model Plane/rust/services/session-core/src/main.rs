@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
         },
     ));
     let gdpr_pool = pool.clone();
-    // The GDPR erasure consumer binds to AQENCIA_CONTROLPLANE on the shared
+    // The GDPR erasure consumer binds to CONTROLPLANE on the shared
     // cross-plane broker (control-shared-nats), not session-core's own
     // Model-Plane-local NATS_URL — that broker never carries this subject.
     // NATS_SHARED_URL/NATS_SHARED_USER/NATS_SHARED_PASSWORD are the dedicated

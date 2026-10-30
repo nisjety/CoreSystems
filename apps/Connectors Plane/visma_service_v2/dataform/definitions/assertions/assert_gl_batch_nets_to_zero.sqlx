@@ -1,0 +1,45 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_gl_batch_nets_to_zero",
+  description: "Every general ledger batch must net to zero: for each (tenant_id, module, batch_number) the debit and credit amounts agree within half a cent. Returns the lines of each batch that does not.",
+  tags: ["assertion", "silver", "general_ledger", "integrity"]
+}
+
+-- Grain: (tenant_id, module, batch_number). ledger and financial_period are not in the key:
+-- no batch spans more than one ledger or period (checked on v2 and v1 on 2026-10-09), so adding
+-- them would change nothing today. NULL amounts count as 0. Threshold: 0.005 (half a cent).
+-- Amounts are cast to NUMERIC before they are summed: FLOAT64 sums depend on the order of
+-- summation, so a difference of exactly one cent could fall on either side of the threshold.
+-- Each failing line carries its batch totals so the imbalance can be traced from the row.
+SELECT
+  tenant_id,
+  module,
+  batch_number,
+  ledger,
+  financial_period,
+  ref_number,
+  line_number,
+  account_cd,
+  debit_amount,
+  credit_amount,
+  batch_debit,
+  batch_credit,
+  batch_debit - batch_credit AS batch_difference
+FROM (
+  SELECT
+    tenant_id,
+    module,
+    batch_number,
+    ledger,
+    financial_period,
+    ref_number,
+    line_number,
+    account_cd,
+    CAST(COALESCE(debit_amount, 0) AS NUMERIC) AS debit_amount,
+    CAST(COALESCE(credit_amount, 0) AS NUMERIC) AS credit_amount,
+    SUM(CAST(COALESCE(debit_amount, 0) AS NUMERIC)) OVER (PARTITION BY tenant_id, module, batch_number) AS batch_debit,
+    SUM(CAST(COALESCE(credit_amount, 0) AS NUMERIC)) OVER (PARTITION BY tenant_id, module, batch_number) AS batch_credit
+  FROM ${ref("visma_silver", "fact_general_ledger")}
+)
+WHERE ABS(batch_debit - batch_credit) > NUMERIC '0.005'

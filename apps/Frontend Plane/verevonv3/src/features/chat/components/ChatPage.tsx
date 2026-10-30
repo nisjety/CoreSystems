@@ -1,14 +1,4 @@
-import {
-  For,
-  Match,
-  Show,
-  Switch,
-  createMemo,
-  createEffect,
-  createSignal,
-  onCleanup,
-  untrack,
-} from 'solid-js'
+import { For, Match, Show, Switch, createMemo, createEffect, createSignal, onCleanup, untrack } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { createElementHeight } from '@/shared/ui/verevon/createElementHeight'
 import {

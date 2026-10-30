@@ -1,0 +1,50 @@
+config {
+  type: "table",
+  schema: "xero_gold_common",
+  description: "Conformed Xero calendar spine derived from observed business dates, with one-year reporting runway on both sides.",
+  assertions: { nonNull: ["date_key", "date_day"], uniqueKey: ["date_key"] }
+}
+
+WITH observed_dates AS (
+  SELECT invoice_date_local AS date_day FROM ${ref("dw_1_silver_xero", "fact_invoice")}
+  UNION ALL SELECT due_date_local FROM ${ref("dw_1_silver_xero", "fact_invoice")}
+  UNION ALL SELECT credit_note_date_local FROM ${ref("dw_1_silver_xero", "fact_credit_note")}
+  UNION ALL SELECT DATE(payment_date) FROM ${ref("dw_1_silver_xero", "fact_payment")}
+  UNION ALL SELECT transaction_date_local FROM ${ref("dw_1_silver_xero", "fact_bank_transaction")}
+  UNION ALL SELECT DATE(transfer_date) FROM ${ref("dw_1_silver_xero", "fact_bank_transfer")}
+  UNION ALL SELECT transaction_date FROM ${ref("dw_1_silver_xero", "fact_general_ledger")}
+  UNION ALL SELECT order_date_local FROM ${ref("dw_1_silver_xero", "fact_purchase_order")}
+  UNION ALL SELECT quote_date_local FROM ${ref("dw_1_silver_xero", "fact_quote")}
+  UNION ALL SELECT expiry_date_local FROM ${ref("dw_1_silver_xero", "fact_quote")}
+  UNION ALL SELECT DATE(overpayment_date) FROM ${ref("dw_1_silver_xero", "fact_overpayment")}
+  UNION ALL SELECT payment_date_local FROM ${ref("dw_1_silver_xero", "fact_batch_payment")}
+  UNION ALL SELECT DATE(allocation_date) FROM ${ref("dw_1_silver_xero", "fact_credit_note_allocation")}
+  UNION ALL SELECT report_to FROM ${ref("dw_1_silver_xero", "fact_financial_report_snapshot")}
+  UNION ALL SELECT SAFE_CAST(report_date AS DATE) FROM ${ref("dw_1_silver_xero", "fact_financial_report_snapshot")}
+  UNION ALL SELECT report_to FROM ${ref("dw_1_silver_xero", "fact_financial_report_cell")}
+  UNION ALL SELECT SAFE_CAST(report_date AS DATE) FROM ${ref("dw_1_silver_xero", "fact_financial_report_cell")}
+), bounds AS (
+  SELECT
+    COALESCE(DATE_SUB(MIN(date_day), INTERVAL 1 YEAR), DATE_SUB(CURRENT_DATE(), INTERVAL 1 YEAR)) AS first_date,
+    COALESCE(DATE_ADD(MAX(date_day), INTERVAL 1 YEAR), DATE_ADD(CURRENT_DATE(), INTERVAL 1 YEAR)) AS last_date
+  FROM observed_dates
+), date_spine AS (
+  SELECT date_day
+  FROM bounds, UNNEST(GENERATE_DATE_ARRAY(first_date, last_date)) AS date_day
+)
+
+SELECT
+  FARM_FINGERPRINT(CAST(date_day AS STRING)) AS date_key,
+  date_day,
+  EXTRACT(YEAR FROM date_day) AS year,
+  EXTRACT(QUARTER FROM date_day) AS quarter,
+  EXTRACT(MONTH FROM date_day) AS month,
+  FORMAT_DATE('%B', date_day) AS month_name,
+  EXTRACT(DAY FROM date_day) AS day_of_month,
+  EXTRACT(DAYOFWEEK FROM date_day) AS day_of_week,
+  FORMAT_DATE('%A', date_day) AS day_name,
+  EXTRACT(ISOWEEK FROM date_day) AS week_of_year,
+  EXTRACT(DAYOFWEEK FROM date_day) IN (1, 7) AS is_weekend,
+  FORMAT_DATE('%Y-%m', date_day) AS year_month,
+  'xero' AS source_system
+FROM date_spine

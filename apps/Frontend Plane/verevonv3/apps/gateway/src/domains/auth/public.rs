@@ -498,6 +498,20 @@ pub(super) async fn oauth_initiate(
     Path(provider): Path<String>,
     Query(query): Query<OAuthInitiateQuery>,
 ) -> Response {
+    // OAuth state cookies must be issued on the same host as Auth Core's callback.
+    // Normalize the local browser alias before starting the provider flow.
+    match canonical_sign_in_start(
+        &state.verevon_public_origin,
+        query.callback_url.as_deref(),
+        &format!("/api/v1/auth/oauth/{provider}"),
+        &[],
+    ) {
+        Ok(Some(url)) => return Redirect::to(&url).into_response(),
+        Err(()) => {
+            return (StatusCode::BAD_REQUEST, "invalid sign-in callback origin").into_response()
+        }
+        Ok(None) => {}
+    }
     let url = format!("{}/api/auth/sign-in/social", state.auth_core_url);
     let mut body = serde_json::json!({ "provider": provider });
     if let Some(callback_url) = query.callback_url.filter(|value| !value.is_empty()) {
@@ -648,4 +662,90 @@ fn redirect_with_cookies(location: &str, set_cookies: &[Vec<u8>]) -> Response {
         }
     }
     response
+}
+
+fn canonical_sign_in_start(
+    public_origin: &str,
+    callback: Option<&str>,
+    path: &str,
+    extra: &[(&str, &str)],
+) -> Result<Option<String>, ()> {
+    let Some(callback) = callback else {
+        return Ok(None);
+    };
+    let base = reqwest::Url::parse(public_origin).map_err(|_| ())?;
+    let mut callback = reqwest::Url::parse(callback).map_err(|_| ())?;
+    if !callback.username().is_empty() || callback.password().is_some() {
+        return Err(());
+    }
+    if base.origin() == callback.origin() {
+        return Ok(None);
+    }
+    let loopback =
+        |url: &reqwest::Url| matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+    if !loopback(&base)
+        || !loopback(&callback)
+        || base.scheme() != callback.scheme()
+        || base.port_or_known_default() != callback.port_or_known_default()
+    {
+        return Err(());
+    }
+    callback.set_host(base.host_str()).map_err(|_| ())?;
+    let mut start = base.join(path).map_err(|_| ())?;
+    start
+        .query_pairs_mut()
+        .append_pair("callbackURL", callback.as_str())
+        .extend_pairs(extra.iter().copied());
+    Ok(Some(start.to_string()))
+}
+
+#[cfg(test)]
+mod canonical_sign_in_tests {
+    use super::canonical_sign_in_start;
+
+    #[test]
+    fn keeps_the_canonical_host_and_normalizes_only_matching_local_aliases() {
+        assert_eq!(
+            canonical_sign_in_start(
+                "http://localhost:5273",
+                Some("http://localhost:5273/onboarding"),
+                "/api/v1/auth/oauth/microsoft",
+                &[]
+            ),
+            Ok(None)
+        );
+        let result = canonical_sign_in_start(
+            "http://localhost:5273",
+            Some("http://127.0.0.1:5273/onboarding?returnTo=%2Fdashboard"),
+            "/api/v1/auth/oauth/microsoft",
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+        let url = reqwest::Url::parse(&result).unwrap();
+        assert_eq!(url.host_str(), Some("localhost"));
+        assert_eq!(
+            url.query_pairs()
+                .find(|(k, _)| k == "callbackURL")
+                .unwrap()
+                .1,
+            "http://localhost:5273/onboarding?returnTo=%2Fdashboard"
+        );
+    }
+    #[test]
+    fn rejects_other_origins_ports_and_embedded_credentials() {
+        for callback in [
+            "https://evil.test/",
+            "http://localhost:5274/",
+            "http://evil@localhost:5273/",
+        ] {
+            assert!(canonical_sign_in_start(
+                "http://localhost:5273",
+                Some(callback),
+                "/api/v1/auth/oauth/microsoft",
+                &[]
+            )
+            .is_err());
+        }
+    }
 }

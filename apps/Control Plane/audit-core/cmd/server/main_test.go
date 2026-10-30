@@ -76,13 +76,13 @@ func TestDeploymentWiresNamedCredentialedExtraPlaneBuses(t *testing.T) {
 	if !composeNetworkHasAlias(natsBlock, "inter-plane-bus", "application-nats") {
 		t.Fatal("Application NATS is not reachable by stable alias on inter-plane-bus")
 	}
-	leadsBlock, err := composeServiceBlock(applicationText, "leads-core")
+	insightBlock, err := composeServiceBlock(applicationText, "insight-core")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(leadsBlock, "NATS_URL: nats://application-nats:4222") ||
-		!strings.Contains(leadsBlock, "NATS_USER: application-leads") ||
-		!strings.Contains(leadsBlock, "NATS_PASSWORD: ${APPLICATION_LEADS_NATS_PASSWORD:") {
+	if !strings.Contains(insightBlock, "NATS_URL: nats://application-nats:4222") ||
+		!strings.Contains(insightBlock, "NATS_USER: application-insight") ||
+		!strings.Contains(insightBlock, "NATS_PASSWORD: ${APPLICATION_INSIGHT_NATS_PASSWORD:") {
 		t.Fatal("Application audit producer is not pinned to the Application plane broker")
 	}
 	for _, path := range []string{
@@ -717,9 +717,7 @@ func TestApplicationLocalBrokerUsesPerServicePrincipals(t *testing.T) {
 		password string
 	}{
 		{service: "conversation-core-go", user: "application-conversation", password: "APPLICATION_CONVERSATION_NATS_PASSWORD"},
-		{service: "social-core", user: "application-social", password: "APPLICATION_SOCIAL_NATS_PASSWORD"},
 		{service: "insight-core", user: "application-insight", password: "APPLICATION_INSIGHT_NATS_PASSWORD"},
-		{service: "leads-core", user: "application-leads", password: "APPLICATION_LEADS_NATS_PASSWORD"},
 		{service: "notification-core", user: "application-notification", password: "APPLICATION_NOTIFICATION_NATS_PASSWORD"},
 	}
 	for _, principal := range principals {
@@ -751,6 +749,70 @@ func TestApplicationLocalBrokerUsesPerServicePrincipals(t *testing.T) {
 	}
 	if strings.Contains(broker, `user: "application-runtime"`) || strings.Contains(compose, "APPLICATION_NATS_RUNTIME_PASSWORD") {
 		t.Fatal("shared Application runtime principal remains in release configuration")
+	}
+}
+
+// Social and Leads moved out of Application Plane. Their deployment identities
+// stay scoped to the Engagement broker; do not restore the retired App services.
+func TestEngagementLocalBrokerUsesPerServicePrincipals(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test path")
+	}
+	controlRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+	engagementRoot := filepath.Join(controlRoot, "..", "Engagement plane")
+	composeBytes, err := os.ReadFile(filepath.Join(engagementRoot, "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	brokerBytes, err := os.ReadFile(filepath.Join(engagementRoot, "nats.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose, broker := string(composeBytes), string(brokerBytes)
+	natsBlock, err := composeServiceBlock(compose, "nats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !composeNetworkHasAlias(natsBlock, "inter-plane-bus", "engagement-nats") {
+		t.Fatal("Engagement broker is missing its stable inter-plane alias")
+	}
+	for _, principal := range []struct{ service, user, password, urlKey, subject string }{
+		{"social-core", "studio-social", "STUDIO_SOCIAL_NATS_PASSWORD", "VEREVON_NATS_URL", "verevon.application.social.>"},
+		{"leads-core", "studio-leads", "STUDIO_LEADS_NATS_PASSWORD", "NATS_URL", "verevon.audit.v2.application.leads-core.>"},
+	} {
+		t.Run(principal.service, func(t *testing.T) {
+			block, err := composeServiceBlock(compose, principal.service)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, required := range []string{
+				principal.urlKey + ": nats://engagement-nats:4222",
+				"NATS_USER: " + principal.user,
+				principal.password + ": ${" + principal.password + ":?",
+			} {
+				if !strings.Contains(block, required) {
+					t.Fatalf("%s scoped broker wiring missing %q", principal.service, required)
+				}
+			}
+			for _, forbidden := range []string{"NATS_TOKEN", "VEREVON_NATS_TOKEN", "APPLICATION_NATS_RUNTIME_PASSWORD"} {
+				if composeDeclaresEnvKey(block, forbidden) {
+					t.Fatalf("%s receives shared broker credential %q", principal.service, forbidden)
+				}
+			}
+			userBlock, err := natsUserConfigBlock(broker, principal.user)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(userBlock, "password: $"+principal.password) || !strings.Contains(userBlock, `publish: "`+principal.subject+`"`) {
+				t.Fatalf("%s broker principal is not bound to its own credential and publish namespace", principal.service)
+			}
+			for _, forbidden := range []string{"$JS.API.STREAM.>", "$JS.API.CONSUMER.>", `"_INBOX.>"`, `publish: ">"`, `subscribe: ">"`} {
+				if strings.Contains(userBlock, forbidden) {
+					t.Fatalf("%s retains broad broker capability %q", principal.user, forbidden)
+				}
+			}
+		})
 	}
 }
 
@@ -896,7 +958,7 @@ func TestFreshControlSharedBrokerAllowsOnlyThePreprovisionedConvexProjection(t *
 	}
 	received := make(chan struct{}, 1)
 	subscription, err := convexJS.QueueSubscribe(
-		"aqencia.controlplane.org.member_changed",
+		"controlplane.org.member_changed",
 		"convex-org-member-changed-v2",
 		func(message *nats.Msg) {
 			_ = message.Ack()
@@ -908,7 +970,7 @@ func TestFreshControlSharedBrokerAllowsOnlyThePreprovisionedConvexProjection(t *
 		t.Fatalf("bind scoped Convex consumer: %v", err)
 	}
 	t.Cleanup(func() { _ = subscription.Unsubscribe() })
-	if err := producer.Publish("aqencia.controlplane.org.member_changed", []byte(`{"org_id":"org-1","user_id":"user-1","revision":2}`)); err != nil {
+	if err := producer.Publish("controlplane.org.member_changed", []byte(`{"org_id":"org-1","user_id":"user-1","revision":2}`)); err != nil {
 		t.Fatal(err)
 	}
 	if err := producer.Flush(); err != nil {
@@ -933,7 +995,7 @@ func TestFreshControlSharedBrokerAllowsOnlyThePreprovisionedConvexProjection(t *
 	}
 	t.Cleanup(orgProducer.Close)
 	assertMainPermissionDenied(t, orgProducer, orgPermissionErrors, "Org canonical projection forgery", func() error {
-		return orgProducer.Publish("aqencia.controlplane.org.member_changed", []byte(`{"forged":true}`))
+		return orgProducer.Publish("controlplane.org.member_changed", []byte(`{"forged":true}`))
 	})
 
 	if err := convex.Publish(provisioner.ConvexControlDLQSubject, []byte(`{"event_id":"event-1"}`)); err != nil {
@@ -946,7 +1008,7 @@ func TestFreshControlSharedBrokerAllowsOnlyThePreprovisionedConvexProjection(t *
 		return convex.Publish("$JS.API.STREAM.CREATE.FORGED", []byte(`{"name":"FORGED","subjects":["forged.>"]}`))
 	})
 	assertMainPermissionDenied(t, convex, permissionErrors, "Control event forgery", func() error {
-		return convex.Publish("aqencia.controlplane.org.member_removed", []byte(`{"forged":true}`))
+		return convex.Publish("controlplane.org.member_removed", []byte(`{"forged":true}`))
 	})
 
 	userProducer, err := nats.Connect(instance.ClientURL(),

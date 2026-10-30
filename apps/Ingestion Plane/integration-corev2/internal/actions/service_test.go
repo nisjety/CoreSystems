@@ -897,3 +897,154 @@ func TestExecuteInstagramMessagesSendNoLinkedPageFailsClosed(t *testing.T) {
 		t.Fatal("want error when no linked page matches the IG account")
 	}
 }
+
+func TestExecuteGoogleSearchConsoleListSitesUsesReadOnlyEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/webmasters/v3/sites" {
+			t.Fatalf("path = %s, want /webmasters/v3/sites", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer gsc-token" {
+			t.Fatalf("Authorization = %q, want bearer token", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"siteEntry": []any{map[string]any{"siteUrl": "sc-domain:example.com"}}})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{GoogleAPIBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "google"},
+		AccessToken: "gsc-token",
+		Operation:   "gsc.sites.list",
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
+func TestExecuteGoogleSearchConsoleListSitesRejectsOversizedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/webmasters/v3/sites" {
+			t.Fatalf("path = %s, want /webmasters/v3/sites", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(strings.Repeat("x", maxProviderActionResponseBytes+1)))
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{GoogleAPIBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection: store.Connection{ProviderKey: "google"}, AccessToken: "gsc-token", Operation: "gsc.sites.list",
+	})
+	if err == nil || !strings.Contains(err.Error(), "response exceeds size limit") {
+		t.Fatalf("Execute error = %v, want response-size rejection", err)
+	}
+}
+
+func TestExecuteGoogleSearchAnalyticsQueryOnlySendsBoundedAllowlistedFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if r.URL.EscapedPath() != "/webmasters/v3/sites/sc-domain:example.com/searchAnalytics/query" {
+			t.Fatalf("escaped path = %s, want encoded Search Analytics endpoint", r.URL.EscapedPath())
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("Decode body error: %v", err)
+		}
+		if got := payload["startDate"]; got != "2026-09-01" {
+			t.Fatalf("startDate = %#v", got)
+		}
+		if got := payload["endDate"]; got != "2026-09-28" {
+			t.Fatalf("endDate = %#v", got)
+		}
+		if got := payload["rowLimit"]; got != float64(5000) {
+			t.Fatalf("rowLimit = %#v, want capped 5000", got)
+		}
+		if _, found := payload["untrustedUpstreamOption"]; found {
+			t.Fatalf("payload forwarded an untrusted field: %#v", payload)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"rows": []any{}})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{GoogleAPIBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "google"},
+		AccessToken: "gsc-token",
+		Operation:   "gsc.search_analytics.query",
+		Params:      map[string]any{"siteUrl": "sc-domain:example.com"},
+		Body: map[string]any{
+			"startDate":               "2026-09-01",
+			"endDate":                 "2026-09-28",
+			"dimensions":              []any{"query", "page"},
+			"rowLimit":                9999,
+			"untrustedUpstreamOption": "must-not-be-forwarded",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
+func TestExecuteGoogleSearchAnalyticsQueryRejectsInvalidInputBeforeNetwork(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		called = true
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{GoogleAPIBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "google"},
+		AccessToken: "gsc-token",
+		Operation:   "gsc.search_analytics.query",
+		Params:      map[string]any{"siteUrl": "sc-domain:example.com"},
+		Body: map[string]any{
+			"startDate":  "2026-10-01",
+			"endDate":    "2026-09-01",
+			"dimensions": []any{"query", "unsupported_dimension"},
+		},
+	})
+	if err == nil {
+		t.Fatal("Execute error = nil, want invalid query error")
+	}
+	if called {
+		t.Fatal("provider was called for invalid query")
+	}
+}
+
+func TestGoogleSearchAnalyticsRejectsMoreThan366InclusiveDays(t *testing.T) {
+	_, err := gscSearchAnalyticsPayload(map[string]any{
+		"startDate": "2025-01-01",
+		"endDate":   "2026-01-02",
+	})
+	if err == nil {
+		t.Fatal("gscSearchAnalyticsPayload error = nil, want inclusive date range rejection")
+	}
+}
+
+func TestGoogleSearchAnalyticsCapsHugeRowLimitWithoutIntegerOverflow(t *testing.T) {
+	payload, err := gscSearchAnalyticsPayload(map[string]any{
+		"startDate": "2026-01-01",
+		"endDate":   "2026-01-01",
+		"rowLimit":  1e100,
+	})
+	if err != nil {
+		t.Fatalf("gscSearchAnalyticsPayload error: %v", err)
+	}
+	if got := payload["rowLimit"]; got != gscMaxRowLimit {
+		t.Errorf("rowLimit = %#v, want cap %d", got, gscMaxRowLimit)
+	}
+}
+
+func TestGoogleSearchConsoleRejectsMalformedDomainProperty(t *testing.T) {
+	for _, siteURL := range []string{"sc-domain:", "sc-domain:example.com/path", "sc-domain:example.com?query=1", "sc-domain:example.com\nother"} {
+		_, err := gscSiteURL(map[string]any{"siteUrl": siteURL})
+		if err == nil {
+			t.Errorf("gscSiteURL(%q) error = nil, want invalid domain property", siteURL)
+		}
+	}
+}

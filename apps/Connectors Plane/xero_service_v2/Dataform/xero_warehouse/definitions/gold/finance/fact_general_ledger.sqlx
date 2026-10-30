@@ -1,0 +1,31 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Posted Xero journal lines; source net amount is already signed in organization functional currency.",
+  assertions: { nonNull: ["tenant_id", "journal_line_id", "journal_line_key"], uniqueKey: ["journal_line_key"] }
+}
+
+SELECT FARM_FINGERPRINT(g.tenant_id) AS company_key,
+       FARM_FINGERPRINT(CAST(g.transaction_date AS STRING)) AS date_key,
+       period.financial_period_key,
+       period.financial_period_basis,
+       period.is_derived AS is_financial_period_derived,
+       IF(g.account_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(g.tenant_id, '|', g.account_id))) AS account_key,
+       g.journal_line_key, g.tenant_id, g.journal_id, g.journal_line_id,
+       g.journal_number, g.source_type, g.source_id, g.reference,
+       g.transaction_date, g.account_id, g.account_code, g.account_name,
+       g.description, c.base_currency AS functional_currency,
+       g.tracking_category_1_id, g.tracking_option_1_name,
+       g.tracking_category_2_id, g.tracking_option_2_name,
+       g.signed_net_amount, g.debit_amount, g.credit_amount,
+       CAST(NULL AS NUMERIC) AS amount_nok, g.is_orphan_line,
+       g.synced_at, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_general_ledger")} AS g
+LEFT JOIN ${ref("xero_gold_common", "dim_company")} AS c USING (tenant_id)
+LEFT JOIN ${ref("dw_1_silver_xero", "bridge_company_date_fiscal_period")} AS fiscal_date
+  ON g.tenant_id = fiscal_date.tenant_id
+ AND g.transaction_date = fiscal_date.calendar_date
+LEFT JOIN ${ref("xero_gold_common", "dim_financial_period")} AS period
+  ON fiscal_date.tenant_id = period.tenant_id
+ AND fiscal_date.fiscal_configuration_state_key = period.fiscal_configuration_state_key
+ AND fiscal_date.financial_period_id = period.financial_period_id

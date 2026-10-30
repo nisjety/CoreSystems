@@ -5,6 +5,9 @@ mod profile;
 pub(crate) mod providers;
 mod shared;
 mod sync_jobs;
+mod algolia;
+#[cfg(test)]
+mod algolia_tests;
 
 use axum::{
     routing::{delete, get, post},
@@ -29,6 +32,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/model-subscriptions/openai-codex/connections/{connection_id}",
             delete(model_subscriptions::disconnect_openai_codex_subscription),
         )
+        .route("/api/v1/integrations/algolia/connections",get(algolia::connections))
+        .route("/api/v1/integrations/algolia/connect-session",post(algolia::connect).layer(axum::extract::DefaultBodyLimit::max(2048)))
+        .route("/api/v1/integrations/algolia/connect-sessions/{id}/status",get(algolia::status))
+        .route("/api/v1/integrations/algolia/connections/{id}/applications",get(algolia::applications))
+        .route("/api/v1/integrations/algolia/connections/{id}/indices",get(algolia::indices))
         // Providers
         .route(
             "/api/v1/integrations/providers",

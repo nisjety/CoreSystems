@@ -7,9 +7,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "pnpm --dir ../.. exec vitest run apps/verevon-web",
+    "test": "pnpm --dir ../.. exec vitest run apps/verevon-web --exclude 'apps/verevon-web/src/**/*.test.tsx' && pnpm --dir ../.. exec vitest run --config apps/verevon-web/vitest.config.mts",
     "remotion:studio": "remotion studio remotion/index.ts",
-    "remotion:render:cards": "node scripts/render-feature-films.mjs"
+    "remotion:render:cards": "node scripts/render-feature-films.mjs",
+    "remotion:render:product-moments": "node scripts/render-product-moments.mjs"
   },
   "dependencies": {
     "@remotion/player": "4.0.399",

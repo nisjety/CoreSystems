@@ -60,6 +60,7 @@ import { createResource } from '@/shared/lib/create-resource-compat'
 import { useI18n } from '@/shared/i18n'
 
 type StudioSection = 'canvas' | 'campaigns' | 'templates'
+type StudioMode = 'demo' | 'live'
 
 type DragState = {
   blockId: string
@@ -81,14 +82,14 @@ const addBlockOptions: Array<{
   { kind: 'social', label: 'Post', labelNo: 'Innlegg', icon: PenLine },
 ]
 
-export default function StudioPage(props: { section?: StudioSection }) {
+export default function StudioPage(props: { section?: StudioSection; mode?: StudioMode }) {
   const i18n = useI18n()
   const section = () => props.section ?? 'canvas'
 
   return (
     <Switch>
       <Match when={section() === 'canvas'}>
-        <StudioCanvasPage />
+        <StudioCanvasPage mode={props.mode ?? 'live'} />
       </Match>
       <Match when={section() === 'campaigns'}>
         <StudioLibraryPage
@@ -116,13 +117,14 @@ export default function StudioPage(props: { section?: StudioSection }) {
   )
 }
 
-function StudioCanvasPage() {
+function StudioCanvasPage(props: { mode: StudioMode }) {
   const i18n = useI18n()
+  const isDemo = untrack(() => props.mode) === 'demo'
   // Translation reads must live in a Solid tracking scope. These memos keep
   // the canvas labels in sync when the locale changes; imperative handlers
   // use the `read*` helpers below to intentionally take an untracked snapshot.
   const launchCanvasTitle = createMemo(() => i18n.tr('Lanseringslerret', 'Launch canvas'))
-  const localCanvasMessage = createMemo(() => i18n.tr('Lokalt lerret', 'Local canvas'))
+  const localCanvasMessage = createMemo(() => isDemo ? i18n.tr('Lokal Studio-demo · ingen konto eller API', 'Local Studio demo · no account or API') : i18n.tr('Lokalt lerret', 'Local canvas'))
   const ephemeralProjectMessage = createMemo(() => i18n.tr(
     'Midlertidig Studio-prosjekt — nullstilles hvis gatewayen starter på nytt',
     'Temporary Studio project — resets when the gateway restarts',
@@ -156,10 +158,14 @@ function StudioCanvasPage() {
   const [history, setHistory] = createSignal<StudioBlock[][]>([])
   const [future, setFuture] = createSignal<StudioBlock[][]>([])
   const [drag, setDrag] = createSignal<DragState | null>(null)
-  const [workspace] = createResource(loadStudioWorkspace)
+  const [workspace] = createResource(() => (
+    isDemo
+      ? Promise.resolve({ orgId: '', project: null, source: 'fallback' as const })
+      : loadStudioWorkspace()
+  ))
   const selectedBlock = createMemo(() => blocks().find((block) => block.id === selectedBlockId()))
   const canvasSummary = createMemo(() => `${blocks().length} blocks · ${persistenceMessage()}`)
-  const canPersist = createMemo(() => Boolean(orgId()) && !busyAction())
+  const canPersist = createMemo(() => !isDemo && Boolean(orgId()) && !busyAction())
   const selectedToolbarStyle = createMemo(() => {
     const block = selectedBlock()
     if (!block) return {}
@@ -249,6 +255,8 @@ function StudioCanvasPage() {
   }
 
   const persistCurrentProject = async (): Promise<StudioProject | null> => {
+    if (isDemo) return null
+
     const activeOrgId = orgId()
     if (!activeOrgId) {
       setPersistenceSource('fallback')
@@ -275,7 +283,7 @@ function StudioCanvasPage() {
   }
 
   const saveCurrentProject = async () => {
-    if (busyAction()) return
+    if (isDemo || busyAction()) return
 
     setBusyAction('save')
     setPersistenceMessage(orgId() ? readSavingProjectMessage() : readLocalCanvasMessage())
@@ -290,7 +298,7 @@ function StudioCanvasPage() {
   }
 
   const exportCurrentProject = async () => {
-    if (busyAction()) return
+    if (isDemo || busyAction()) return
 
     setBusyAction('export')
     setPersistenceMessage(orgId() ? readExportingDraftMessage() : readLocalCanvasMessage())
@@ -688,10 +696,12 @@ function StudioCanvasPage() {
                     <input type="number" min={MIN_BLOCK_HEIGHT} value={Math.round(block().height)} onInput={(event) => updateSelectedLayout('height', event.currentTarget.value)} />
                   </label>
                 </div>
+                <Show when={!isDemo}>
                 <div class="verevon-studio-inspector__links">
                   <a href="/social/calendar" link>{i18n.tr('Åpne kalender', 'Open calendar')}</a>
                   <a href="/knowledge" link>{i18n.tr('Legg ved ressurser', 'Attach assets')}</a>
                 </div>
+                </Show>
               </>
             )}
           </Show>

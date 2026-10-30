@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { routeFromPath } from '@/features/core/lib/shell-data'
+import { getNavbarLabels, routeFromPath } from '@/features/core/lib/shell-data'
 import {
   applyDemoModeNavGate,
   getSidebarSectionForPath,
+  isSidebarPathActive,
   sidebarSections,
   type SidebarPanelItem,
 } from '@/features/core/lib/sidebar-navigation'
@@ -53,6 +54,51 @@ describe('sidebar navigation wiring', () => {
     const ids = allItems().map((item) => item.id)
     expect(ids.length, `duplicate sidebar item id: ${ids.filter((id, i) => ids.indexOf(id) !== i).join(', ')}`)
       .toBe(new Set(ids).size)
+  })
+
+  it('resolves Pulse without falling back to Studio canvas', () => {
+    expect(routeFromPath('/studio/pulse')).toBe('/engagement/visibility')
+    expect(routeFromPath('/studio/pulse/')).toBe('/engagement/visibility')
+    expect(routeFromPath('/studio/canvas')).toBe('/studio/canvas')
+  })
+
+  it('makes Pulse the Marketing entry point and keeps it discoverable', () => {
+    const marketing = applyDemoModeNavGate(sidebarSections).find((section) => section.id === 'engagement')
+    expect(marketing?.href).toBe('/engagement')
+    expect(marketing?.panelGroups.flatMap((group) => group.items)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'engagement-visibility', label: 'Synlighet', href: '/engagement/visibility' }),
+    ]))
+    expect(getSidebarSectionForPath('/engagement/visibility', '/engagement/visibility').id).toBe('visibility')
+  })
+
+  it('uses the Visibility context for every new analysis page', () => {
+    for (const view of ['pages','groups','links','competitors']) {
+      const section=getSidebarSectionForPath(`/engagement/visibility/${view}`,routeFromPath(`/engagement/visibility/${view}`))
+      expect(section.id).toBe('visibility'); expect(section.parentSectionId).toBe('engagement')
+    }
+    expect(getSidebarSectionForPath('/engagement','/engagement').id).toBe('engagement')
+  })
+
+  it('names the real Marketing Pulse surface in localized navbar breadcrumbs', () => {
+    const route = routeFromPath('/studio/pulse')
+    expect(getNavbarLabels(route, 'no')).toEqual({ moduleLabel: 'Engasjement', tabLabel: 'Synlighet' })
+    expect(getNavbarLabels(route, 'en')).toEqual({ moduleLabel: 'Engagement', tabLabel: 'Visibility' })
+  })
+
+  it('opens the Anbud context under the Engagement rail without a Radar shortcut', () => {
+    const sections = applyDemoModeNavGate(sidebarSections)
+    const engagement = sections.find(section => section.id === 'engagement')!
+    const entries = engagement.panelGroups.flatMap(group => group.items)
+    expect(entries.some(item => item.href === '/anbud')).toBe(true)
+    expect(entries.some(item => item.href === '/anbud/radar')).toBe(false)
+    for (const path of ['/anbud', '/anbud/radar']) {
+      const context = getSidebarSectionForPath(path, routeFromPath(path), sections)
+      expect(context.id).toBe('anbud')
+      expect(context.parentSectionId).toBe('engagement')
+    }
+    expect(sections.filter(section => !section.parentSectionId).some(section => section.id === 'anbud')).toBe(false)
+    expect(isSidebarPathActive('/anbud/radar', '/anbud', [], true)).toBe(false)
+    expect(getNavbarLabels('/anbud', 'no')).toEqual({moduleLabel:'Engasjement',tabLabel:'Anbud'})
   })
 
   it('offers a way into the Space surface', () => {

@@ -1,0 +1,61 @@
+# Development-only first-party measurements; independent from the shared cache.
+services:
+  engagement-web-vitals-dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0@sha256:84b1009aee0b68327758bce8e99ed514f782d713353acc46caf5738feaa481d6
+    container_name: engagement-web-vitals-dragonfly
+    restart: unless-stopped
+    stop_grace_period: 30s
+    command:
+      - --flagfile=/run/secrets/web_vitals_dragonfly_config
+      - --cache_mode=false
+      - --maxmemory=256mb
+      - --proactor_threads=1
+      - --dir=/data
+      - --dbfilename=web-vitals
+      - --snapshot_cron=* * * * *
+      - --primary_port_http_enabled=false
+    ports:
+      - "127.0.0.1:6481:6379"
+    volumes:
+      - web-vitals-data:/data
+    secrets:
+      - web_vitals_dragonfly_config
+    networks:
+      - engagement-net
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop:
+      - ALL
+    # The vendor entrypoint owns the data directory, then drops to dfly.
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: "0.5"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - REDISCLI_AUTH="$$(sed -n 's/^--requirepass=//p' /run/secrets/web_vitals_dragonfly_config)" redis-cli ping | grep -qx PONG
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+
+volumes:
+  web-vitals-data:
+
+secrets:
+  web_vitals_dragonfly_config:
+    file: ${STUDIO_WEB_VITALS_DRAGONFLY_CONFIG_FILE:?set a protected Web Vitals Dragonfly config}

@@ -1,0 +1,27 @@
+# Keep the build context small — only ship what cargo actually reads.
+target
+**/target
+.git
+.gitignore
+**/*.md
+docs
+docker-compose*.yml
+Dockerfile
+.dockerignore
+.env
+.env.*
+tooling
+*.log
+*.profraw
+*.profdata
+.DS_Store
+
+# SPA build artifacts — the onboarding image builds these itself
+**/node_modules
+web/dist
+
+# BFF connection store (refresh tokens) — mounted/volumed at runtime, never built in
+data
+# Private raw runs, MCP receipts, coverage reports, and local source index.
+out
+.codegraph

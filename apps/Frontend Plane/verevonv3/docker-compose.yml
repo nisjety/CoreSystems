@@ -20,18 +20,17 @@ services:
     # `token="…"` regardless of whether the value is a literal or (as here) a
     # variable reference, so this name keeps that check meaningful instead of
     # training everyone to bypass it.
-    entrypoint: ["/bin/sh", "-ec"]
-    command:
-      - |
-        nats_auth="$${VEREVON_NATS_TOKEN:-}"
-        test -n "$$nats_auth" || { echo "VEREVON_NATS_TOKEN is required" >&2; exit 78; }
-        exec nats-server -js -m 8222 -sd /data --auth "$$nats_auth"
+    command: ["-c", "/etc/nats/shared.conf"]
     environment:
       VEREVON_NATS_TOKEN: ${VEREVON_NATS_TOKEN:?VEREVON_NATS_TOKEN is required}
+      NATS_STUDIO_LEAF_PASSWORD: ${NATS_STUDIO_LEAF_PASSWORD:?provide the protected Studio leaf credential}
+      NATS_CONTROL_LEAF_PASSWORD: ${NATS_CONTROL_LEAF_PASSWORD:?provide the protected Control leaf credential}
+      NATS_INGESTION_LEAF_PASSWORD: ${NATS_INGESTION_LEAF_PASSWORD:?provide the protected Ingestion leaf credential}
     networks:
       - inter-plane-bus
     volumes:
       - verevon-nats-data:/data
+      - ./nats.shared.conf:/etc/nats/shared.conf:ro
     deploy:
       resources:
         limits:
@@ -43,7 +42,7 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/healthz >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -96,6 +95,17 @@ services:
       BILLING_CORE_URL: ${BILLING_CORE_URL:-http://billing-core:3014}
       BILLING_CORE_SERVICE_TOKEN: ${GATEWAY_BILLING_CORE_SERVICE_TOKEN:?GATEWAY_BILLING_CORE_SERVICE_TOKEN must match Control Plane configuration}
       INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
+      # Server-only Marketing authority. Launcher reads protected Studio inputs;
+      # an empty binding disables the API, and only matching live membership is
+      # admitted while Marketing Core remains a single-organization service.
+      MARKETING_CORE_URL: ${MARKETING_CORE_URL:-http://visibility-core:3165}
+      # The anbud core (tender matching) is reached on inter-plane-bus. Its key comes from the runner, read from
+      # Studio's protected anbud_internal_api_key; without it the routes answer not_configured.
+      ANBUD_CORE_URL: ${ANBUD_CORE_URL:-http://anbud-core:3138}
+      ANBUD_API_KEY: ${ANBUD_API_KEY:-}
+      ANBUD_API_KEY_HEADER: ${ANBUD_API_KEY_HEADER:-X-Internal-API-Key}
+      MARKETING_CORE_SERVICE_KEY: ${MARKETING_CORE_SERVICE_KEY:-}
+      MARKETING_CORE_ORGANIZATION_ID: ${MARKETING_CORE_ORGANIZATION_ID:-}
       NOTIFICATION_CORE_URL: ${NOTIFICATION_CORE_URL:-http://notification-core:3140}
       NOTIFICATION_CORE_SERVICE_TOKEN: ${NOTIFICATION_GATEWAY_SERVICE_TOKEN:?NOTIFICATION_GATEWAY_SERVICE_TOKEN must match Application Plane notification-core configuration}
       CONVERSATION_CORE_SERVICE_TOKEN: ${CONVERSATION_GATEWAY_SERVICE_TOKEN:?CONVERSATION_GATEWAY_SERVICE_TOKEN must match Application Plane conversation-core configuration}
@@ -135,7 +145,7 @@ services:
       AUTOCOMPLETE_INTERNAL_TOKEN: ${AUTOCOMPLETE_INTERNAL_TOKEN:-}
       # Cross-plane GDPR erasure consumer. Points at control-shared-nats (Control
       # Plane), NOT this stack's own `nats` service: only control-shared-nats
-      # hosts the AQENCIA_CONTROLPLANE stream that org-core and user-core publish
+      # hosts the CONTROLPLANE stream that org-core and user-core publish
       # verevon.gdpr.erasure.requested into. Pointing this at verevon-nats would
       # connect, bind nothing, and retry forever — a consumer that looks healthy
       # and receives nothing. Both brokers sit on inter-plane-bus, so the name
@@ -187,6 +197,8 @@ services:
       context: .
       dockerfile: Dockerfile
       target: dev
+      additional_contexts:
+        quarry-sdk: ../../Ingestion Plane/Quarry-v2/sdks/typescript
       args: *build-metadata
       # The generated SDK is owned by Ingestion Plane and is outside this
       # frontend context.  Keep the app context small while making the local

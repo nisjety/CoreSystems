@@ -1,0 +1,36 @@
+# Traefik FILE-provider route for the onboarding app (tools.aquatiq.com).
+#
+# Deployed on the VPS to Traefik's file-provider dir:
+#   /opt/aquatiq/cloudflare-certs/xero-onboarding.yml   (providers.file.watch=true)
+#
+# WHY the file provider instead of docker labels: the host runs many short-lived
+# `docker run --rm` jobs (the xero sync one-shots, diagnostics). Traefik's docker
+# provider catches a create event for such a container, then fails to inspect it
+# once it's gone ("No such container ...") and DISCARDS the whole docker config
+# build — dropping this route and returning 502. The file provider is independent
+# of docker events: it resolves the compose container name over the `internal`
+# network at request time, so it survives both that failure mode AND container
+# recreates (new IP, same name). priority:1000 makes it win over any leftover
+# docker-label router for the same host.
+http:
+  routers:
+    xero-onboarding:
+      rule: "Host(`tools.aquatiq.com`)"
+      entryPoints:
+        - websecure
+      service: xero-onboarding
+      priority: 1000
+      tls: {}
+    xero-onboarding-http:
+      rule: "Host(`tools.aquatiq.com`)"
+      entryPoints:
+        - web
+      middlewares:
+        - redirect-to-https@file
+      service: xero-onboarding
+      priority: 1000
+  services:
+    xero-onboarding:
+      loadBalancer:
+        servers:
+          - url: "http://xero_service_v2-onboarding-1:8080"

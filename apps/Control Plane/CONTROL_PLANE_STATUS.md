@@ -2,6 +2,37 @@
 
 Last verified: 2026-07-16 (continuation of the 2026-07-10 production-readiness audit)
 
+## 2026-10-29 source continuation
+
+The approved namespace split is `controlplane` for infrastructure/domain events
+and `verevon` for product-facing names. Coordinated publisher, consumer, PubAck,
+provisioner and broker ACL source now uses the `CONTROLPLANE` shared stream.
+Existing brokers require the guarded namespace cutover described in
+[the migration runbook](docs/NATS_NAMESPACE_MIGRATION_PLAN.md); no existing
+stream or durable is reset by this source change.
+
+Session Core now forwards the verified active organization to User Core in its
+signed delegation. The gateway carries that organization into Session Core and
+uses its verified snapshot during normal bootstrap. The existing OAuth callback
+fix is preserved and handles Better Auth's resolved route parameter; email
+sign-in also reads the user from `newSession`. Local OAuth starts normalize
+loopback aliases before minting state cookies. The existing Session Core
+`users:read:self` scope was already correct and remains unchanged.
+
+Verification for this continuation: 61 targeted Auth Core tests and all 500
+gateway tests pass. Session Core's internal suite, User/Org/Billing NATS tests,
+the embedded-broker provisioner/migration tests, and focused scoped-broker
+contracts pass. Auth Core type checking and repository whitespace checks pass.
+The stale Social/Leads deployment fixtures now follow their actual Engagement
+Plane ownership. Application credential checks cover its current services;
+Engagement checks verify the Social/Leads broker alias, service credentials,
+publish namespaces and absence of shared/admin capabilities. The complete Audit
+Core suite (`go test -p 2 ./...`) and both services' configuration tests pass.
+
+These are source and isolated-test changes. Existing release-credential gates
+and a real Microsoft account/MFA acceptance check still apply; this update does
+not certify a live production rollout.
+
 ## Decision
 
 **The remaining secure-MVP engineering gates are implemented and pass source, static, embedded-broker, disposable-Postgres, and isolated-current-image checks; production release acceptance is still withheld pending an operator-owned integration credential rollout.** Org, Billing, Audit, Session, and User privileged paths use audience/scope-bound principals in current source. Better Auth's invitation-status gap has a durable, tombstone-aware repair ledger; historical owner repair is report-and-stop with an explicit reviewed mapping; membership invite/role/remove evidence is append-only and revision ordered; critical identity/organization/billing producers use durable outbox/PubAck paths; and runtime NATS principals cannot administer topology. The critical Session impersonation and User caller-asserted role/profile paths remain closed.
@@ -81,7 +112,7 @@ protocol in current source. Migration 016 snapshots every active User Core
 organization in the same transaction that creates the erasure operation and
 before Auth or local cleanup can run. Each organization receives one bounded,
 deterministic child ID. The parent cannot set `fanout_published_at` or
-`completed_at` until every child has a valid `AQENCIA_CONTROLPLANE` JetStream
+`completed_at` until every child has a valid `CONTROLPLANE` JetStream
 PubAck persisted; retry and terminal state remain per child. Audit and fanout
 terminal counts plus oldest lag are exposed in User health, and a verified-admin
 operator route requeues at most 100 selected terminal rows without deleting

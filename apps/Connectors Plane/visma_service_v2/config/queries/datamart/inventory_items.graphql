@@ -1,0 +1,60 @@
+query InventoryItems(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  inventoryItems(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    inventoryId
+    inventoryNumber
+    description
+    status
+    type
+    itemClassId
+    postingClassId
+    vatCodeId
+    priceClassId
+    lotSerialClassId
+    defaultPrice
+    recommendedPrice
+    pendingCost
+    pendingCostDate
+    currentCost
+    effectiveDate
+    lastCost
+    baseUnit
+    salesUnit
+    purchaseUnit
+    costPriceStatisticsLastCost
+    costPriceStatisticsAverageCost
+    costPriceStatisticsMinCost
+    costPriceStatisticsMaxCost
+    intrastatCn8
+    intrastatCountryOfOrigin
+    intrastatSupplementaryMeasureUnit
+    packagingBaseItemWeight
+    packagingWeightUom
+    packagingBaseItemVolume
+    packagingVolumeUom
+    stockItem
+    kitItem
+    defaultWarehouseId
+    defaultIssueFromId
+    defaultReceiptToId
+    note
+    lastModifiedDateTime
+    createdDateTime
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+  }
+}

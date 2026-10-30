@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -73,4 +74,17 @@ func TestUserClientGetProfileDecodesFlatLegacyShape(t *testing.T) {
 		Image:              "https://cdn.example.com/member.png",
 		OnboardingComplete: true,
 	}, profile)
+}
+
+func TestUserClientBindsActiveOrganizationToSignedDelegation(t *testing.T) {
+	client := NewUserClient("http://user-core:3012", "0123456789abcdef0123456789abcdef")
+	request, err := client.authedRequest(WithActiveOrganization(context.Background(), "org-selected"), http.MethodGet, "/api/v1/me/session-context", "user-1")
+	require.NoError(t, err)
+	require.Equal(t, "org-selected", request.Header.Get("X-Org-Id"))
+	fixed := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	signUserCoreDelegation(request, client.serviceToken, "user-1", fixed)
+	signed := request.Header.Get("X-Delegation-Signature")
+	request.Header.Set("X-Org-Id", "other-org")
+	signUserCoreDelegation(request, client.serviceToken, "user-1", fixed)
+	require.NotEqual(t, signed, request.Header.Get("X-Delegation-Signature"))
 }

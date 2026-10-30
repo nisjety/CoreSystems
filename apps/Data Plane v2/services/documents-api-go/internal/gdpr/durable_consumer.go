@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	controlSharedStream     = "AQENCIA_CONTROLPLANE"
+	controlSharedStream     = "CONTROLPLANE"
 	durableConsumerName     = "documents-api-gdpr-erasure-v1"
 	durableDeliverySubject  = "_VEREVON.CONTROL.SHARED.DELIVER.data.documents-api.gdpr-erasure"
 	erasureDLQSubject       = "verevon.gdpr.erasure.dlq.documents-api"

@@ -16,7 +16,7 @@
 		linear-gradient(180deg, #aaaca9 0%, #858984 45%, #5a5e5a 100%);
 	color: #f8f8f7;
 	container-type: size;
-	font-family: Protokoll, var(--font-geist-sans), Arial, sans-serif;
+	font-family: Geist, var(--font-geist-sans), Arial, sans-serif;
 	isolation: isolate;
 	max-height: 100svh;
 	max-width: 100vw;
@@ -239,7 +239,7 @@
 
 .topCaption,
 .bottomCaption {
-	font-family: var(--font-geist-sans), Arbeit, Arial, sans-serif;
+	font-family: var(--font-geist-sans), Manrope, Arial, sans-serif;
 	font-weight: 760;
 	left: 50%;
 	line-height: 0.95;
@@ -315,7 +315,8 @@
 
 .brandWord {
 	color: #171717;
-	font-family: Arbeit, var(--font-geist-sans), Arial, sans-serif;
+	font-family: var(--font-verevon);
+	font-synthesis: none;
 	font-size: 1.2rem;
 	font-weight: 900;
 	letter-spacing: 0;
@@ -419,7 +420,7 @@
 }
 
 .heroCopy h2 {
-	font-family: Arbeit, var(--font-geist-sans), Arial, sans-serif;
+	font-family: Manrope, var(--font-geist-sans), Arial, sans-serif;
 	font-size: clamp(1.08rem, 2.55cqw, 1.7rem);
 	font-weight: 860;
 	line-height: 0.98;
@@ -714,7 +715,7 @@
 
 .boardProfileText strong {
 	color: #171717;
-	font-family: Arbeit, var(--font-geist-sans), Arial, sans-serif;
+	font-family: Manrope, var(--font-geist-sans), Arial, sans-serif;
 	font-size: 0.52rem;
 	font-weight: 780;
 	line-height: 1.1;
@@ -870,7 +871,7 @@
 }
 
 .taskCard strong {
-	font-family: Arbeit, var(--font-geist-sans), Arial, sans-serif;
+	font-family: Manrope, var(--font-geist-sans), Arial, sans-serif;
 	font-size: 0.92rem;
 	font-weight: 400;
 	line-height: 1.02;
@@ -930,7 +931,7 @@
 }
 
 .finalCopy h2 {
-	font-family: Arbeit, var(--font-geist-sans), Arial, sans-serif;
+	font-family: Manrope, var(--font-geist-sans), Arial, sans-serif;
 	font-size: clamp(1.08rem, 2.25cqw, 1.52rem);
 	font-weight: 860;
 	line-height: 1.04;

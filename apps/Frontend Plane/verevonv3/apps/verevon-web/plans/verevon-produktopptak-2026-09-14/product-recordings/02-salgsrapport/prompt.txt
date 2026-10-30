@@ -1,0 +1,1 @@
+Lag en kort salgsrapport for uke 37 sammenlignet med uke 36, basert på vedlagt CSV og salgsnotat. Vis omsetning, bruttofortjeneste og vektet bruttomargin totalt og per produktgruppe. Finn de viktigste endringene, skill målte fakta fra mulige årsaker, og foreslå tre konkrete oppfølginger. Bruk norsk og vis beregningsgrunnlaget.

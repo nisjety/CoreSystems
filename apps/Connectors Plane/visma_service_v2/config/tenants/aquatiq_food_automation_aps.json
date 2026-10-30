@@ -1,0 +1,7 @@
+{
+  "tenant_id": "bed46bb6-21cc-11e9-b307-0aa512338dd6",
+  "tenant_name": "Aquatiq Food Automation ApS",
+  "datamart_company_id": "1868393",
+  "status": "active",
+  "notes": "Registered in v1 scripts/add_tenants.py; DataMart company discovered with `vsv2 dm-companies` on 2026-10-01."
+}

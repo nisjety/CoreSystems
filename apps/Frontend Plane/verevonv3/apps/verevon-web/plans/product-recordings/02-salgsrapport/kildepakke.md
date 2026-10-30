@@ -1,0 +1,24 @@
+# Fjordform — ukentlig salgsgrunnlag
+DEMOGRUNNLAG: Fiktive tall. Rapportdato: 14. september 2026.
+
+## S1 — Definisjoner for salg.csv
+- Uke 36: 31. august–6. september 2026.
+- Uke 37: 7.–13. september 2026.
+- Hver rad er en aggregert produktgruppe/kanal i én uke; ingen rader overlapper.
+- omsetning_nok: netto fakturert omsetning etter rabatter og returer, eksklusive merverdiavgift.
+- varekost_nok: direkte varekost for de fakturerte varene i samme rad.
+- antall: netto fakturerte enheter, oppgitt som bakgrunn.
+- Bruttofortjeneste = omsetning_nok minus varekost_nok.
+- Vektet bruttomargin = samlet bruttofortjeneste delt på samlet omsetning.
+- Relativ endring = (ny verdi minus gammel verdi) delt på gammel verdi.
+- Endring i margin vises i prosentpoeng. Bruttofortjeneste er ikke driftsresultat; lønn, frakt og markedsføringskostnader inngår ikke.
+- Ingen mål/budsjetter inngår. Ikke utled måloppnåelse.
+
+## S2 — Salgsnotat fra salgssjefen, 14. september
+To tilbud på skrivebord ble flyttet fra forventet signering i uke 37 til uke 38. Samlet tilbudsverdi var 48 000 kroner. Tilbud er ikke fakturert salg og skal ikke legges til CSV-tallene.
+En belysningskampanje gikk i nettbutikken gjennom uke 37. Vi har ikke attribusjonsdata som viser hvilken omsetning kampanjen forårsaket.
+Innkjøp varslet en prisjustering på én skrivebordsserie. Vi har ikke tall per serie i dette utdraget.
+Prioritet for neste uke: forstå endringene før vi endrer budsjett eller priser.
+
+## S3 — Rapportønske
+En kort oppsummering som ledelsen kan lese på to minutter, en sammenlignbar tabell og tre oppfølginger med foreslått rolle som eier. Ikke endre budsjetter eller priser.

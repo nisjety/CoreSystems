@@ -11,6 +11,7 @@ import {
   Fingerprint,
   Flame,
   Gauge,
+  Gavel,
   Home,
   Inbox,
   HatGlasses,
@@ -94,6 +95,9 @@ export type SidebarSection = {
   icon: SidebarIcon
   description: string
   pinnedBottom?: boolean
+  /** Context-only sidebar; its parent remains selected in the main rail. */
+  parentSectionId?: string
+  aliases?: string[]
   skipActiveMatch?: boolean
   panelTabs?: SidebarPanelTab[]
   panelGroups: SidebarPanelGroup[]
@@ -186,23 +190,42 @@ export const sidebarSections: SidebarSection[] = [
     ],
   },
   {
-    id: 'marketing',
-    label: 'Marketing',
-    href: '/studio/campaigns',
+    id: 'engagement',
+    label: 'Engasjement',
+    href: '/engagement',
     icon: Presentation,
-    description: 'Kampanjer, innholdspakker og publiseringsklare arbeidsflyter.',
+    description: 'Synlighet, søkeoptimalisering og anbudsoppfølging.',
     panelGroups: [
       {
-        id: 'marketing-core',
-        label: 'Marketing',
+        id: 'engagement-visibility',
+        label: 'Søk',
         defaultExpanded: true,
         items: [
-          { id: 'marketing-campaigns', label: 'Campaigns', href: '/studio/campaigns', icon: Presentation, description: 'Planlegg kampanjepakker og lanseringsløp.' },
-          { id: 'marketing-social-campaigns', label: 'Social campaigns', href: '/social/campaigns', icon: Megaphone, description: 'Samle og følge opp sosiale kampanjer.' },
-          { id: 'marketing-drafts', label: 'Drafts', href: '/social/drafts', icon: PenLine, description: 'Utkast, varianter og kanaltilpasning.' },
+          { id: 'engagement-visibility', label: 'Synlighet', href: '/engagement/visibility', icon: Gauge, description: 'Organisk og betalt søkesynlighet, SEO, SEM og markedsinnsikt.' },
+        ],
+      },
+      {
+        id: 'anbud-core',
+        label: 'Oppfølging',
+        items: [
+          { id: 'anbud-matches', label: 'Anbud', href: '/anbud', icon: Gavel, description: 'Anbud som passer selskapets profil, og hvorfor de passer.', exactPathMatch: true },
         ],
       },
     ],
+  },
+  {
+    id: 'visibility', label: 'Synlighet', href: '/engagement/visibility', parentSectionId: 'engagement', icon: Gauge,
+    description: 'Søkeanalyse og nettstedskvalitet.', panelGroups: [],
+  },
+  {
+    id: 'anbud',
+    label: 'Anbud',
+    href: '/anbud',
+    parentSectionId: 'engagement',
+    icon: Gavel,
+    description: 'Anbudsoppfølging med egne filtre, kundeprofil og arbeidsflyt.',
+    // The existing AnbudExpandedSidebarPanel owns its contextual navigation.
+    panelGroups: [],
   },
   {
     id: 'agents',
@@ -431,7 +454,7 @@ export function isSidebarPathActive(pathname: string, href: SidebarHref, aliases
     if (path.includes('?')) return normalizedPathname === path
     if (exactPathMatch && normalizedPathname.includes('?')) return false
     const pathnameWithoutSearch = normalizedPathname.split('?')[0]!
-    return pathnameWithoutSearch === path || pathnameWithoutSearch.startsWith(`${path}/`)
+    return pathnameWithoutSearch === path || (!exactPathMatch && pathnameWithoutSearch.startsWith(`${path}/`))
   })
 }
 
@@ -443,7 +466,7 @@ export function getSidebarSectionForPath(
   const normalizedPathname = normalizePath(pathname)
 
   return (
-    sections.find((section) => !section.skipActiveMatch && isSidebarPathActive(normalizedPathname, section.href)) ??
+    sections.filter((section) => !section.skipActiveMatch && isSidebarPathActive(normalizedPathname, section.href, section.aliases)).sort((a,b) => b.href.length - a.href.length)[0] ??
     sections.find((section) => section.href === fallbackRoute) ??
     sections[0]!
   )

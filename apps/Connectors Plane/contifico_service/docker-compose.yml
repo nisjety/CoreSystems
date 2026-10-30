@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  contifico-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aquatiq-contifico-service
+    restart: unless-stopped
+    ports:
+      - "5006:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./:/app
+      - ../../gcp-credentials.json:/app/gcp-credentials.json:ro
+    networks:
+      - aquatiq-backend
+    depends_on:
+      - postgres
+      - redis
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: aquatiq-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aquatiq
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: aquatiq_contifico
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - aquatiq-backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aquatiq"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: aquatiq-redis
+    restart: unless-stopped
+    command: redis-server --requirepass password
+    volumes:
+      - redis_data:/data
+    networks:
+      - aquatiq-backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  aquatiq-backend:
+    driver: bridge

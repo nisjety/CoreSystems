@@ -1,0 +1,181 @@
+VERDICT: sound after the corrections below. The design respects the five owner rules: no subscription rerank, contextual retrieval left on, org flag never written, no client-controlled ZDR flag, and the waiver is per connection. But two defects would fail on the live stack while passing tests (items 1 and 2), and item 3 is a security misclaim.
+
+Scope limit: the design JSON was cut off mid-task at Z-03. I reviewed Z-00 to Z-03 and the design text. Z-08, Z-15, Z-40, Z-41, Z-50 and Z-60 I could only check through references elsewhere. Anything below listed as a missing task may already be in Z-04 or later.
+
+I opened more than 25 sources and ran read-only probes against the live stack.
+
+CORRECTIONS
+
+1. BLOCKER: Auth Core cannot read org-core on the live stack, so org ZDR never reaches any signed token today. [FACT, verified live]
+   - `auth-core/src/auth/interactive-retention-policy.ts:94-99` calls org-core with no auth headers.
+   - org-core applies `router.Use(serviceAuthMiddleware(...))` to every route except `/health` (`org-core/internal/http/server.go:39`, `service_auth.go:545-576`).
+   - From inside the auth-service container, the same unauthenticated GET returns `401 {"error":"service authentication required"}`. The deployed dist file (`/app/dist/src/auth/interactive-retention-policy.js:27`) also sends no headers.
+   - `docker-compose.yml:531-532` gives principal `auth-core` only `org:projection:write:any` and `org:projection:delete:any`. It has no `org:read:any`, so adding headers alone still returns 403.
+   - The `catch` at `interactive-retention-policy.ts:167` returns `zdr:false` for every org, always. The design calls this a transient outage fail-open, but it is permanent.
+   - The resolver spec mocks `global.fetch` (`interactive-retention-policy.spec.ts:25-36`) and enforces no auth. Z-02 and Z-03 as written would pass their tests and still fail live.
+   - The BFF's `org_zdr_enabled` works today only because `proxy_json` carries verevon-gateway delegated credentials.
+   - Fix:
+     - Send `X-Service-Id` and `X-Service-Token` from Auth Core (`ORG_CORE_SERVICE_TOKEN` is already set in the container).
+     - Add a narrow scope such as `org:retention:read:any`, granted to `auth-core`.
+     - Map the new `retention-posture` route in `serviceScopesForRequest` (its default branch returns nil, which gives 403).
+     - Give the BFF its own scope for it.
+     - Add a Go test that reads the real compose credential block and the real scope function.
+     - Add a first free live probe: mint an interactive token for the ZDR test org and assert `zdr:true` before any model call.
+   - Without this, Z2 could not produce a `zdr_waived` run. This must be task zero.
+
+2. BLOCKER: Z-08 ("Quarry ORs the token claim in as a floor") would force ZDR on web search for every org. [FACT]
+   - The live registry gives model-gateway to quarry and execution-core to quarry `retentionByAudience: "zdr"`.
+   - Quarry reads the body flag only (`Quarry-v2/crates/quarry-edge/src/search_routes.rs:144,628`).
+   - Reading the claim for service tokens would disable paid providers and bypass the cache for all turns.
+   - Fix: apply the claim only for `principal_type=user`. For service principals, take the run's posture from the body flag. Test against the real registry rows.
+
+3. Wrong premise on connection ownership. [FACT]
+   - The design says integration-corev2 "already enforces owner and org via assertConnectionAccess". `personalProviderKeys` holds only microsoft and google (`providers/catalog.go:1863`).
+   - For `openai-codex-subscription`, the generic routes `GET /api/v1/connections`, `/:id` and `/:id/consents` (`server.go:318-437`) check org only, so any org member can read another member's connection.
+   - `scopedCodexSubscriptionConnection` skips the owner check for internal-key calls (`codex_subscription.go:455`).
+   - Fix:
+     - The ack and posture routes must be bearer-only, not `internalOrBearerAuth`.
+     - Enforce `principal.UserID == connection.UserID` with no internal bypass, plus a test that sends `X-Internal-API-Key`.
+     - Auth Core must compare the user itself.
+     - The ZDR capability fields must not be writable through generic upsert or patch.
+
+4. The waiver mints `zdr=false`, so any plane that is not waiver-aware silently treats the run as non-ZDR. [INFERENCE from the design plus code]
+   - Planes ignore unknown claims (no `deny_unknown_fields` in model-gateway, inference-core, session-core or execution-core).
+   - A rollback of the Model Plane while Auth Core stays up leaves an unbound `zdr=false` token for a ZDR org's content.
+   - Required:
+     - Ship enforcers first, then integration-corev2, then org-core, then Auth Core, then the BFF, then the SPA. Roll back in reverse order.
+     - Put a kill switch on the Auth Core decision route.
+     - Add a waiver version, with enforcers refusing unknown versions.
+   - Add a test that every plane able to call a model with a user token rejects a waiver for an unbound route.
+   - The BFF token set must be homogeneous. Execution-core and session-core compare `zdr` across delegated bearers and fail closed (`execution-core/src/auth.rs` ~420-515, `session-core/src/auth.rs:668`).
+   - Every mint site needs the decision header: `chat/shared.rs:150-338,1389` and `json_handlers.rs:444`.
+
+5. The live proof contradicts the org-switch gate. [FACT]
+   - Section 11 needs ZDR switched on for a test org while no provider is attested.
+   - Section 2.3 refuses to enable ZDR unless a ZDR model is advertised. These cannot both hold.
+   - Fix: an operator-only seed path, or ordering the proof before the gate lands.
+   - Also, the only holder of `org:settings:write:self` is verevon-gateway (compose line 532). So the gate belongs in the BFF, not "BFF and org-core". org-core cannot read the Model Plane catalogue without a Control-to-Model dependency.
+
+6. Principal registry has two writers. [FACT, verified live]
+   - `scripts/bootstrap_runtime_environment.sh:886,1056` writes a 14-principal registry without `verevon-gateway` or `model-gateway-mail-task-bridge`.
+   - `apps/Control Plane/scripts/run-control-plane.sh:245-354` assembles from the committed JSON, which has 17 principals (live also shows 17).
+   - A re-bootstrap silently removes the BFF's decision right. The design rates this "low"; it should be required.
+   - `verevon-gateway`'s credential env is `MAIL_TASK_GATEWAY_BRIDGE_SERVICE_API_KEY`. Use a separate principal for retention decisions.
+   - Add a test that both writers produce the same registry.
+
+7. The `effective_zdr` site count is wrong. [FACT]
+   - The design says "~20". There are 72 references in the four services: sse.rs 29, http_routes.rs 15, grpc.rs 8, finetune_routes.rs 5, inference-core 7, and others.
+   - The source-scan test needs a named inventory, not a number.
+
+8. The unknown-posture policy is inconsistent and the 24 h figure is unsourced.
+   - The BFF fails to TRUE (`zdr.rs`) while Auth Core would mint persistent with only an alarm. That recreates the mixed-posture defect.
+   - org-core emits an event only on false-to-true (`service_enhanced.go`). conversation-core's client comment says posture must be live-read with no cache, because no "off" event exists.
+   - Fix:
+     - Define one unknown-posture rule.
+     - Emit revision-stamped events in both directions.
+     - Persist last-known posture (controlplane-dragonfly exists) or refuse content-persisting audiences.
+
+9. Restricted-classification documents under a waived run. [FACT plus INFERENCE]
+   - Waived retrieval runs in `ZdrMode::Disabled`. `Reject` is the mode that filters restricted documents (`retrieval-engine pipeline/orchestrator.rs`, `cache/mod.rs:355`).
+   - Restricted documents would flow to the personal OpenAI account.
+   - The design needs an explicit rule and test. The default should be filtering, and the ack text must say retrieved org knowledge and tool results are sent to OpenAI (honest-limits L18).
+
+10. Data model.
+    - Use a side table, not columns on `integration_connections`. That table holds all connectors, and `UpsertConnection` read-modify-write (the poll path, `codex_subscription.go` ~122) could write back a stale digest.
+    - The ack ledger must not have an `ON DELETE CASCADE` foreign key (the `0004_platform_primitives.sql:4,24` pattern) if it is append-only for 365 days.
+    - Only integration-corev2 should compute the digest. Auth Core should compare it as an opaque string, which avoids Go and TypeScript canonical-JSON drift.
+
+11. Space ZDR "S" cannot be evaluated. The decision request has no space id, and honest-limits L14 says Space flags are not enforced in chat. State it is not applied in v1, or add the input.
+
+12. "Closes the 2026-10-02 finding by construction" is overclaimed.
+    - A waived Terra Do run still needs `AGENTIC_SUBSCRIPTION_ENABLED` on (it is off in the live stack, per memory notes), `plan_mode` read-only, and the gateway setting `req.zdr=false` (`execution-core/src/agent_route.rs:99-148`).
+
+13. Helper-call compatibility is proven only for non-ZDR runs.
+    - `subscription_scoped_request` is used at 4 sites (`sse.rs:7679,7743,7796,7883`) plus the summarizer at 5435. The inference-core backstop denies any other route.
+    - The existing test at `sse.rs:560-571` uses `zdr:true` with the Terra route, a state that `normalize.rs:297` and `codex_subscription.rs:624` refuse, so it is a permissive double.
+    - Add a route inventory test for every gateway to inference call on a waived turn.
+    - `session_core_rules_double.rs` copies session-core's rules (its own header says so), and it is untracked. Have it call the shared mp-contracts resolver instead of adding more copied rules.
+
+14. Trust edits tied to this item need explicit tasks. [FACT]
+    - `trust-claims.ts` marks `zdr-is-a-gate-not-a-guarantee` and `terra-route-disclosed` as `pending: c`.
+    - `mustSay` pins "ChatGPT-ruten støtter ikke ZDR, og en ZDR-forespørsel mot den avvises" and "sender forespørselen bare til en leverandør med registrert ZDR-godkjenning", which turn false for waived runs.
+    - `trust-claims-pending-reverification.md` lists 26 sentences. Rows 14, 23, 24 and 25 touch `dataClasses`, the privacy-tier tooltips, `answerProcessingNote` and VEREVON.md. It also says the prompt wording must be pinned in a test.
+    - The design's "depends on the trust-edits job" is not enough. The trust edits and this item must land together.
+
+15. Missing prompt copy. The owner wording says the user is told when it does support ZDR, but no `supported` text is drafted.
+
+FILE COLLISIONS (all uncommitted work from other sessions)
+- Control Plane:
+  - auth-core `convex-token.service.ts`, `plane-token.controller.ts` and their specs
+  - `plane-service-principals.json` (the rerank design will also add a Quarry grant here)
+  - `docker-compose.yml`, `run-control-plane.sh`
+  - `plane-service-principals-policy.contract.spec.ts` (untracked)
+- Model Plane:
+  - model-gateway `normalize.rs` (+434), `sse.rs` (+2136), `http_routes.rs`, `sse_events.rs`
+  - inference-core `fallback.rs`, `codex_subscription.rs`
+  - execution-core `grpc.rs`, `runtime_loop/*`
+  - session-core `auth.rs`, `grpc.rs`, `orchestration_*`
+  - `mp-contracts/lib.rs` plus untracked `agentic_subscription.rs`
+  - cost-core ledger and untracked migrations 0006/0007
+- Ingestion Plane: integration-corev2 `codex_subscription.go`, `server.go`, `auth/middleware.go`, `controlplane/clients.go`.
+- Frontend:
+  - gateway `integrations/model_subscriptions.rs`
+  - SPA `chat-retention.ts`, `chat-client.ts`, `chatgpt-subscription-client.ts`
+  - settings components
+  - the trust files
+- Cite function names or anchors rather than line numbers. session-core migration 0043 is free today, but claim it.
+
+MISSING TASKS (unless Z-04 or later covers them)
+- Auth Core to org-core credentials and scope (item 1).
+- Registry unification (item 6).
+- Quarry claim-reading limited to user tokens (item 2).
+- Deploy-order plan and kill switch (item 4).
+- The restricted-document rule (item 9).
+- The trust-claims and pin-test tasks (item 14).
+- A single unknown-posture policy (item 8).
+- Free live probes before any model call: ZDR test org token has `zdr:true`, a direct token mint carries no waiver, and the ack route rejects the internal-key path.
+- A Z-01 pre-check that no token source omits `zdr`. Auth Core always emits it (`convex-token.service.ts:543,642`); also check the session-terminal provider and dev and e2e tokens.
+
+OWNER DECISIONS ALREADY ANSWERED BY THE OWNER'S RULES
+- OD-Z4 (admin lock): answered as "we don't stop them", so no lock in v1. Counsel review of the processor-instruction risk remains separate. honest-limits.md line 45 and open item 5 still show it as owner-to-confirm, so those need updating.
+- Org-wide downgrade: never. Per-connection only. Already in the design.
+- GDPR_SUMMARY exception for user-owned connections: amend the document; no further question.
+- Own API keys are in the owner's intent. The design defers building them (Z-50), which is acceptable because no such connection exists.
+- Still open:
+  - the OD-Z2 derived-jobs skip for waived runs
+  - whether ZDR orgs' contextual retrieval and graph extraction are gated. This overlaps with item "a" in `trust-claims.ts` ("ZDR handling"), so ownership between the two designs needs a single ruling.
+  - metering of ZDR turns
+  - Temporary chat combined with a personal subscription. The design's default is refuse, which matches the existing `normalize.rs` behavior.
+
+CLAIMS VERIFIED
+- Live probes:
+  - 3 orgs, all pro, 0 with ZDR on.
+  - Every attestation variable empty or false; `INFERENCE_PROVIDER_ORDER` as stated.
+  - 0 ZDR log lines in model-gateway and inference-core.
+  - session-core: 1921 runs, 0 ZDR outbox rows, 3 child runs, `runs` has no `zdr` column, migrations at 42.
+  - 5 codex connections (2 active, 2 pending, 1 needs_refresh); consents table empty.
+  - Live registry and `retention_by_audience` as stated.
+  - `CONTEXTUAL_RETRIEVAL_ENABLED=true`; agent-memory uses azure/gpt-4o-mini.
+  - auth-service can reach `integration-api:3026` (health 200).
+  - Images were built 2026-10-01, after the cited source mtimes.
+- Source:
+  - `direct_infer` is called with empty provider hint and connection (`sse.rs:8104-8110`).
+  - `normalize.rs:297` checks `req.zdr` only.
+  - Serde defaults on `zdr` in model-gateway and inference-core, but required in session-core and retrieval.
+  - model-gateway does not compare `zdr` across bearers.
+  - Session-core forces an empty `parent_run_id` and a fresh thread for ZDR, and refuses ZDR writes.
+  - Execution-core refuses ZDR agent runs.
+  - org-core's plan-only gate and false-to-true outbox.
+  - TTLs (300 s planes, 900 s model-gateway).
+  - F8: the threads response has no retention field.
+  - The tooltip over-promise.
+  - Quarry reads the body flag only.
+  - The `learning_events` ZDR gate.
+  - honest-limits L8, L11 to L14, L17 to L19, L24.
+  - Matrix contract 4 (line 157).
+  - GDPR_SUMMARY `zdr_ephemeral`.
+- Not verified: the `http_routes.rs` unary path, the execution-core children code (`agent.rs:2581-2618`), and the Data Plane documents-api claim.
+
+NOTES
+- INCIDENT: I did not rotate or touch the leaked key; I was read-only and rotation is the owner's call.
+- My own env probe of auth-service printed a 40-character prefix of `PLANE_SERVICE_PRINCIPALS_JSON`, which exposed about 6 hex characters of one credential. Treat as negligible, but I am disclosing it.

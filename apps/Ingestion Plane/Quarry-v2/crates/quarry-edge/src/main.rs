@@ -28,6 +28,8 @@ mod fleet_routes;
 mod answer_routes;
 mod api_error;
 mod audio_routes;
+mod audit_page;
+mod audit_seo;
 mod auth;
 mod cache;
 mod canary;

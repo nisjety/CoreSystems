@@ -1,8 +1,12 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useRef, useState } from "react";
-import { motion, useInView } from "framer-motion";
+import { useEffect, useState } from "react";
+import { motion } from "framer-motion";
+import {
+	Minus,
+	Plus,
+} from "lucide-react";
 import { usePrefersReducedMotion } from "@/shared/hooks/usePrefersReducedMotion";
 
 type LayerId =
@@ -12,7 +16,9 @@ type LayerId =
 	| "infrastructure";
 
 type LayerDefinition = {
+	capabilities: readonly string[];
 	description: string;
+	story: string;
 	framerLayer: 1 | 2 | 3 | 4;
 	id: LayerId;
 	image: string;
@@ -21,78 +27,51 @@ type LayerDefinition = {
 	title: string;
 };
 
-// The visual here is literally four plates stacked in depth, but the copy used
-// to be four interchangeable feature blurbs that never referred to the stack
-// at all — you could shuffle them and nothing would read as wrong. Each layer
-// now names its own position and says what it rests on, so the words and the
-// picture describe the same object.
-//
-// orchestration/infrastructure use "-v2" mockups: the originals baked in real
-// third-party logos (OpenAI's mark, AWS's wordmark, a third vendor-style
-// icon) on tiles meant to be generic tool/integration slots. Those marks were
-// inpainted out and replaced with unbranded chip/cloud/hub icons in the same
-// isometric perspective — see IMAGE-DIRECTION.md §6.
+// Each illustration is a complete, deliberately composed surface rather than
+// a single thin plate. Selection gives the stack a clear focal point while
+// keeping the remaining layers visibly connected beneath it.
 const layers: LayerDefinition[] = [
 	{
 		id: "management",
 		title: "Kontroll",
 		position: "Øverste lag",
-		description:
-			"Ligger over alt det andre, fordi ingenting skal kunne skje under det uten at det er synlig her. Policy, godkjenning og revisjon.",
+		description: "Regler, tilgang og godkjenning rundt arbeidet.",
+		story: "Dere bestemmer hva AI kan se, foreslå og gjøre. Arbeid som faller utenfor rammene, eller krever en vurdering, går til riktig person. Alt kan følges og etterprøves.",
+		capabilities: ["Policy", "Tilgang", "Godkjenning", "Revisjon"],
 		framerLayer: 1,
-		image: "/verevon-layers/management-layer.png",
+		image: "/verevon-layers/kontroll-transparent.png",
 	},
 	{
 		id: "orchestration",
 		title: "Agentarbeid",
 		position: "Andre lag",
-		description:
-			"Her gjøres selve arbeidet. Agenter planlegger stegene og bruker modeller, MCP og godkjente verktøy — innenfor rammene laget over setter.",
+		description: "AI-arbeid innenfor rammene dere setter.",
+		story: "AI henter relevant kontekst, gjør forberedelser og utfører godkjente handlinger på tvers av systemene. Mennesker tar beslutningene der det trengs.",
+		capabilities: ["E-post", "Teams", "Telefon", "Mikrofon", "Nett"],
 		framerLayer: 2,
-		image: "/verevon-layers/orchestration-layer-v2.png",
+		image: "/verevon-layers/agentarbeid-transparent.png",
 	},
 	{
 		id: "business-context",
 		title: "Kunnskap",
 		position: "Tredje lag",
-		description:
-			"Laget agentene henter fra. Kilder, regler og tidligere arbeid er gjort søkbart, med kildespor som peker ned til laget under.",
+		description: "Virksomhetens kunnskap, samlet i kontekst.",
+		story: "Dokumenter, regler, tidligere beslutninger og arbeidsmåter knyttes til saken. Det gjør grunnlaget synlig for både mennesker og AI.",
+		capabilities: ["MCP", "Skills", "Instruksjoner", "Integrasjoner"],
 		framerLayer: 3,
-		image: "/verevon-layers/business-context-layer.png",
+		image: "/verevon-layers/kunnskap-transparent.png",
 	},
 	{
 		id: "infrastructure",
 		title: "Kilder",
 		position: "Nederste lag",
-		description:
-			"Grunnen resten hviler på. Dokumenter, nettsteder, norske datakilder og systemkoblinger — det arbeidet til slutt kan spores tilbake til.",
+		description: "Systemene og kildene dere allerede bruker.",
+		story: "Verevon kobler seg til avtalte systemer, dokumenter og datakilder. Fagsystemene blir stående, mens informasjonen blir tilgjengelig der arbeidet skjer.",
+		capabilities: ["Webhuset", "Telenor", "Bineric", "Interne kilder"],
 		framerLayer: 4,
-		image: "/verevon-layers/infrastructure-layer-v2.png",
+		image: "/verevon-layers/kilder-transparent.png",
 	},
 ];
-
-type StackFrame = {
-	glowOpacity: number;
-	scale: number;
-	shadowOpacity: number;
-	y: number;
-};
-
-/**
- * Physical z-order must stay constant.
- * This prevents lower visual layers from drawing above upper layers.
- *
- * Layer 1 = Management / Styringslag
- * Layer 2 = Orchestration / Orkestrering
- * Layer 3 = Business Context / Bedriftskontekst
- * Layer 4 = Infrastructure / Infrastruktur
- */
-const physicalLayerZIndex: Record<LayerId, number> = {
-	management: 40,
-	orchestration: 30,
-	"business-context": 20,
-	infrastructure: 10,
-};
 
 const layerGlows: Record<LayerId, string> = {
 	management:
@@ -105,135 +84,6 @@ const layerGlows: Record<LayerId, string> = {
 		"radial-gradient(circle at 50% 60%, rgba(57, 57, 57, 0.08), transparent 62%)",
 };
 
-/**
- * Visual layer order:
- *
- * Layer 1 = Management / Styringslag
- * Top operational surface with monitoring, evaluation and optimization.
- *
- * Layer 2 = Orchestration / Orkestrering
- * Agent routing and workflow coordination across channels and interfaces.
- *
- * Layer 3 = Business Context / Bedriftskontekst
- * Reusable instructions, knowledge, skills and process memory.
- *
- * Layer 4 = Infrastructure / Infrastruktur
- * Secure execution, models, connectors, approvals and audit trails.
- *
- * Important:
- * These layouts only control position, scale, glow and shadow.
- * The physical z-index stays fixed elsewhere so lower layers never render above upper layers.
- */
-const stackLayouts: Record<LayerId, Record<LayerId, StackFrame>> = {
-	management: {
-		management: {
-			y: -220,
-			scale: 1.06,
-			glowOpacity: 1,
-			shadowOpacity: 0.18,
-		},
-		orchestration: {
-			y: 68,
-			scale: 0.9,
-			glowOpacity: 0.2,
-			shadowOpacity: 0.08,
-		},
-		"business-context": {
-			y: 112,
-			scale: 0.865,
-			glowOpacity: 0.06,
-			shadowOpacity: 0.055,
-		},
-		infrastructure: {
-			y: 152,
-			scale: 0.845,
-			glowOpacity: 0.05,
-			shadowOpacity: 0.06,
-		},
-	},
-
-	orchestration: {
-		management: {
-			y: -300,
-			scale: 0.9,
-			glowOpacity: 0.22,
-			shadowOpacity: 0.095,
-		},
-		orchestration: {
-			y: 44,
-			scale: 1.06,
-			glowOpacity: 0.96,
-			shadowOpacity: 0.17,
-		},
-		"business-context": {
-			y: 330,
-			scale: 0.86,
-			glowOpacity: 0.06,
-			shadowOpacity: 0.06,
-		},
-		infrastructure: {
-			y: 378,
-			scale: 0.84,
-			glowOpacity: 0.045,
-			shadowOpacity: 0.055,
-		},
-	},
-
-	"business-context": {
-		management: {
-			y: -300,
-			scale: 0.9,
-			glowOpacity: 0.22,
-			shadowOpacity: 0.095,
-		},
-		orchestration: {
-			y: -250,
-			scale: 0.86,
-			glowOpacity: 0.045,
-			shadowOpacity: 0.055,
-		},
-		"business-context": {
-			y: 92,
-			scale: 1.06,
-			glowOpacity: 0.94,
-			shadowOpacity: 0.17,
-		},
-		infrastructure: {
-			y: 350,
-			scale: 0.86,
-			glowOpacity: 0.06,
-			shadowOpacity: 0.06,
-		},
-	},
-
-	infrastructure: {
-		management: {
-			y: -218,
-			scale: 0.92,
-			glowOpacity: 0.24,
-			shadowOpacity: 0.1,
-		},
-		orchestration: {
-			y: -168,
-			scale: 0.875,
-			glowOpacity: 0.045,
-			shadowOpacity: 0.055,
-		},
-		"business-context": {
-			y: -122,
-			scale: 0.855,
-			glowOpacity: 0.05,
-			shadowOpacity: 0.055,
-		},
-		infrastructure: {
-			y: 210,
-			scale: 1.08,
-			glowOpacity: 0.68,
-			shadowOpacity: 0.17,
-		},
-	},
-};
-
 const springTransition = {
 	type: "spring",
 	mass: 0.95,
@@ -241,45 +91,77 @@ const springTransition = {
 	damping: 21,
 } as const;
 
-const entryTransition = {
-	type: "spring",
-	mass: 1,
-	stiffness: 74,
-	damping: 18,
-} as const;
+type StackFrame = {
+	glowOpacity: number;
+	scale: number;
+	shadowOpacity: number;
+	y: number;
+};
 
-/**
- * Scales all vertical layer movement so the full section fits in one viewport.
- * The stackLayouts keep their design values, while this function compresses
- * the movement based on screen width.
- */
+const layerOrder: readonly LayerId[] = [
+	"management",
+	"orchestration",
+	"business-context",
+	"infrastructure",
+];
+
+const physicalLayerZIndex: Record<LayerId, number> = {
+	management: 40,
+	orchestration: 30,
+	"business-context": 20,
+	infrastructure: 10,
+};
+
+// This preserves the original vertical flow: Kontroll is clearly lifted above
+// the other three plates, while the stack remains visibly continuous below it.
+// Selecting a lower layer moves only the necessary plates, rather than turning
+// the whole visual into a single front-facing card.
+const stackLayouts: Record<LayerId, Record<LayerId, StackFrame>> = {
+	management: {
+		management: { y: -220, scale: 1.06, glowOpacity: 1, shadowOpacity: 0.18 },
+		orchestration: { y: 68, scale: 0.9, glowOpacity: 0.2, shadowOpacity: 0.08 },
+		"business-context": { y: 112, scale: 0.865, glowOpacity: 0.06, shadowOpacity: 0.055 },
+		infrastructure: { y: 152, scale: 0.845, glowOpacity: 0.05, shadowOpacity: 0.06 },
+	},
+	orchestration: {
+		management: { y: -300, scale: 0.9, glowOpacity: 0.22, shadowOpacity: 0.095 },
+		orchestration: { y: 44, scale: 1.06, glowOpacity: 0.96, shadowOpacity: 0.17 },
+		"business-context": { y: 330, scale: 0.86, glowOpacity: 0.06, shadowOpacity: 0.06 },
+		infrastructure: { y: 378, scale: 0.84, glowOpacity: 0.045, shadowOpacity: 0.055 },
+	},
+	"business-context": {
+		management: { y: -300, scale: 0.9, glowOpacity: 0.22, shadowOpacity: 0.095 },
+		orchestration: { y: -250, scale: 0.86, glowOpacity: 0.045, shadowOpacity: 0.055 },
+		"business-context": { y: 92, scale: 1.06, glowOpacity: 0.94, shadowOpacity: 0.17 },
+		infrastructure: { y: 350, scale: 0.86, glowOpacity: 0.06, shadowOpacity: 0.06 },
+	},
+	infrastructure: {
+		management: { y: -218, scale: 0.92, glowOpacity: 0.24, shadowOpacity: 0.1 },
+		orchestration: { y: -168, scale: 0.875, glowOpacity: 0.045, shadowOpacity: 0.055 },
+		"business-context": { y: -122, scale: 0.855, glowOpacity: 0.05, shadowOpacity: 0.055 },
+		infrastructure: { y: 210, scale: 1.08, glowOpacity: 0.68, shadowOpacity: 0.17 },
+	},
+};
+
+function getStackState(layerId: LayerId, activeLayerId: LayerId) {
+	const position = layerOrder.indexOf(layerId) - layerOrder.indexOf(activeLayerId);
+
+	if (position === 0) return "front";
+	return position > 0 ? `under-${position}` : `passed-${Math.abs(position)}`;
+}
+
 function useLayerOffsetScale() {
 	const [scale, setScale] = useState(0.74);
 
 	useEffect(() => {
 		const update = () => {
-			const width = window.innerWidth;
-
-			if (width < 640) {
-				setScale(0.5);
-				return;
-			}
-
-			if (width < 900) {
-				setScale(0.62);
-				return;
-			}
-
-			if (width < 1280) {
-				setScale(0.68);
-				return;
-			}
-
+			if (window.innerWidth < 640) return setScale(0.5);
+			if (window.innerWidth < 900) return setScale(0.62);
+			if (window.innerWidth < 1280) return setScale(0.68);
 			setScale(0.74);
 		};
 
 		update();
-
 		window.addEventListener("resize", update);
 		return () => window.removeEventListener("resize", update);
 	}, []);
@@ -291,185 +173,157 @@ function LayerCallout({
 	active,
 	layer,
 	onSelect,
+	prefersReducedMotion,
 }: {
 	active: boolean;
 	layer: LayerDefinition;
 	onSelect: (id: LayerId) => void;
+	prefersReducedMotion: boolean;
 }) {
+	const panelId = `platform-layer-panel-${layer.id}`;
+	const transition = prefersReducedMotion
+		? { duration: 0 }
+		: { duration: 0.36, ease: [0.22, 1, 0.36, 1] as const };
+
 	return (
-		<button
-			aria-pressed={active}
-			className="w-full cursor-pointer bg-transparent p-0 text-left outline-none focus:outline-none focus-visible:rounded-[10px] focus-visible:ring-2 focus-visible:ring-verevon-coral/30"
-			onClick={() => onSelect(layer.id)}
-			type="button"
+		<div
+			className="relative border-t border-verevon-j-text/15 last:border-b"
+			data-layer-disclosure="intric"
 		>
-			<motion.span
-				aria-hidden="true"
-				animate={{
-					opacity: active ? 1 : 0,
-					width: active ? 34 : 22,
-				}}
-				className="mb-4 block h-[3px] bg-verevon-coral"
-				initial={false}
-				transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-			/>
-
-			<motion.span
-				animate={{ opacity: active ? 0.72 : 0.32 }}
-				className="mb-2 block font-protokoll text-[10px] font-medium uppercase tracking-[0.2em] text-verevon-text-muted"
-				initial={false}
-				transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
+			<button
+				aria-controls={panelId}
+				aria-expanded={active}
+				className="group grid w-full cursor-pointer grid-cols-[20px_minmax(0,1fr)] items-start gap-x-5 bg-transparent py-[clamp(18px,1.8vw,24px)] text-left outline-none focus-visible:rounded-[2px] focus-visible:ring-2 focus-visible:ring-verevon-coral/40"
+				data-layer-row="intric"
+				onClick={() => onSelect(layer.id)}
+				type="button"
 			>
-				{layer.position}
-			</motion.span>
-
-			<motion.h3
-				animate={{ opacity: active ? 1 : 0.4 }}
-				className="font-arbeit text-[clamp(1.12rem,0.96vw,1.35rem)] font-light leading-[1.08] tracking-[-0.05em] text-verevon-j-text"
-				initial={false}
-				transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-			>
-				{layer.title}
-			</motion.h3>
-
-			<motion.p
-				animate={{ opacity: active ? 0.78 : 0.4 }}
-				className="mt-3 max-w-[310px] font-protokoll text-[clamp(0.9rem,0.78vw,1rem)] font-light leading-[1.42] tracking-[-0.02em] text-verevon-text-muted"
-				initial={false}
-				transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-			>
-				{layer.description}
-			</motion.p>
-		</button>
+				<span
+					aria-hidden="true"
+					className="mt-[2px] flex h-5 w-5 items-center justify-center text-verevon-j-text/75 transition-colors duration-200 group-hover:text-verevon-j-text"
+					data-layer-toggle
+				>
+					{active ? <Minus size={15} strokeWidth={1.35} /> : <Plus size={15} strokeWidth={1.35} />}
+				</span>
+				<span className="min-w-0">
+					<span className="mb-2.5 block font-geist text-[0.66rem] font-normal uppercase leading-none tracking-[0.065em] text-verevon-j-text/58" data-layer-position>
+						{layer.position}
+					</span>
+					<motion.span
+						animate={{ opacity: active ? 1 : 0.74 }}
+						className="block font-geist text-[clamp(0.94rem,1vw,1.04rem)] font-medium leading-[1.15] tracking-[-0.02em] text-verevon-j-text"
+						data-layer-title
+						initial={false}
+						transition={transition}
+					>
+						{layer.title}
+					</motion.span>
+				</span>
+			</button>
+			<div aria-hidden={!active} id={panelId}>
+				<motion.div
+					animate={{ height: active ? "auto" : 0, opacity: active ? 1 : 0 }}
+					className="overflow-hidden"
+					initial={false}
+					transition={transition}
+				>
+					<div className="pb-6 pl-10">
+						<p className="max-w-[440px] font-manrope text-[clamp(0.96rem,0.95vw,1.04rem)] font-light leading-[1.5] tracking-[-0.015em] text-verevon-j-text/75">
+							{layer.description}
+						</p>
+						<p className="max-w-[440px] pt-3 font-manrope text-[clamp(0.96rem,0.95vw,1.04rem)] font-light leading-[1.5] tracking-[-0.015em] text-verevon-j-text/75">
+							{layer.story}
+						</p>
+						<div className="flex flex-wrap gap-2 pt-5">
+							{layer.capabilities.map((capability) => (
+								<span className="border-t border-verevon-j-text/18 pt-2 font-geist text-[0.65rem] font-normal uppercase leading-none tracking-[0.065em] text-verevon-j-text/68" key={capability}>
+									{capability}
+								</span>
+							))}
+						</div>
+					</div>
+				</motion.div>
+			</div>
+		</div>
 	);
 }
 
 export function LayerSection() {
-	const sectionRef = useRef<HTMLElement | null>(null);
-	const sectionInView = useInView(sectionRef, {
-		amount: 0.34,
-		once: true,
-	});
-
 	const [activeLayerId, setActiveLayerId] = useState<LayerId>("management");
-	// Keep the server and the first client render identical. Framer Motion's
-	// useReducedMotion can resolve the browser preference during hydration,
-	// while the server has no media-query value, which changes the layer's
-	// opacity and transform before React attaches. The shared hook starts in a
-	// conservative reduced-motion state on both sides, then syncs after mount.
+	// The browser preference resolves after hydration. Initial state has no entry
+	// motion; transitions only happen after a visitor selects another layer.
 	const prefersReducedMotion = usePrefersReducedMotion();
 	const offsetScale = useLayerOffsetScale();
-
 	const activeLayout = stackLayouts[activeLayerId];
 
 	return (
 		<section
-			ref={sectionRef}
-			className="relative isolate overflow-hidden bg-background py-24 text-verevon-j-text lg:py-32"
+			className="verevon-platform-section relative isolate overflow-visible py-24 text-verevon-j-text lg:py-32"
 			id="plattform"
 		>
-			<div
-				aria-hidden="true"
-				className="absolute inset-0 bg-[radial-gradient(circle_at_50%_16%,rgba(23,23,23,0.04),transparent_34%),linear-gradient(90deg,rgba(23,23,23,0.022)_1px,transparent_1px),linear-gradient(180deg,rgba(23,23,23,0.02)_1px,transparent_1px)] bg-[length:100%_100%,108px_108px,108px_108px]"
-			/>
-
-			<div
-				aria-hidden="true"
-				className="absolute inset-0 bg-[radial-gradient(circle_at_50%_54%,rgba(255,255,255,0.94),rgba(248,248,247,0.54)_35%,transparent_72%)]"
-			/>
-
 			<div className="relative z-[1] mx-auto w-full px-[var(--verevon-edge)] max-[760px]:px-[var(--verevon-page-pad)]">
 				<header className="grid grid-cols-1 gap-x-8 gap-y-6 md:grid-cols-3">
-					<p className="pt-1 font-protokoll text-[12px] font-light leading-none text-verevon-text-muted">
-						04 / Plattform
-					</p>
-
-					<div className="md:col-span-2">
+					<div className="md:col-span-2 md:col-start-2">
 						<h2 className="verevon-home-heading text-verevon-j-text">
-							Fire lag. Ingen av dem skjuler de andre.
+							Alt i sammenheng. Kontroll hele veien.
 						</h2>
 
-						<p className="mt-4 max-w-[522px] font-protokoll text-[clamp(1rem,1vw,1.16rem)] font-light leading-[1.42] text-verevon-text-muted">
-							Kontroll øverst, kilder nederst, arbeidet i mellom. Velg et lag for å
-							se det løftet ut av stabelen — og hvordan et svar kan følges hele
-							veien ned til grunnlaget det kom fra.
+						<p className="mt-4 max-w-[522px] font-manrope text-[clamp(1rem,1.05vw,1.125rem)] font-light leading-[1.5] tracking-[-0.015em] text-verevon-text-muted">
+							Systemene deres blir der de er. Verevon samler informasjon, kunnskap,
+							AI-arbeid og kontroll i én felles arbeidsflate — fra første signal til
+							oppfølging. Velg et lag for å se hvordan.
 						</p>
 					</div>
 				</header>
 
 				<div className="mb-16 md:mb-24" />
 
-				<div
-					className="grid grid-cols-1 items-start gap-y-10 md:grid-cols-[5fr_2fr]"
-					style={{ columnGap: "30%" }}
-				>
+				<div className="grid grid-cols-1 items-start gap-y-10 md:grid-cols-[minmax(0,1.07fr)_minmax(320px,0.93fr)] md:gap-x-[clamp(42px,6vw,100px)]">
 					<div
-						className="relative w-full overflow-hidden border border-verevon-j-text/[0.08] bg-background p-[clamp(24px,3vw,52px)] shadow-[0_24px_90px_rgba(31,31,29,0.08)]"
+						className="verevon-platform-stage relative w-full overflow-visible p-[clamp(24px,3vw,52px)]"
+						data-platform-stage=""
 						style={{ aspectRatio: "3/4" }}
 					>
-						<div
-							aria-hidden="true"
-							className="absolute inset-0 bg-[radial-gradient(circle_at_50%_20%,rgba(255,255,255,0.92),rgba(248,248,247,0.62)_36%,transparent_74%),linear-gradient(90deg,rgba(23,23,23,0.026)_1px,transparent_1px),linear-gradient(180deg,rgba(23,23,23,0.022)_1px,transparent_1px)] bg-[length:100%_100%,92px_92px,92px_92px]"
-						/>
-
-						<div
-							aria-hidden="true"
-							className="absolute inset-x-[8%] top-[16%] h-[64%] rounded-full bg-[radial-gradient(circle_at_50%_50%,rgba(250,165,121,0.13),rgba(121,137,210,0.075)_38%,transparent_72%)] blur-[72px]"
-						/>
-
-						<span className="relative z-[2] block max-w-[280px] font-protokoll text-[10px] font-light uppercase leading-[1.4] tracking-[0.25em] text-verevon-text-muted/70">
+						<span className="relative z-[2] block max-w-[280px] font-geist text-[0.7rem] font-medium uppercase leading-[1.4] tracking-[0.08em] text-verevon-text-muted/70">
 							Kilder, kunnskap, agentarbeid, kontroll
 						</span>
 
 						<div className="absolute inset-x-[clamp(12px,3vw,44px)] bottom-[clamp(16px,3vw,48px)] top-[clamp(64px,8vw,112px)]">
 							{layers.map((layer) => {
-								const frame = activeLayout[layer.id];
 								const isActive = layer.id === activeLayerId;
-								const shouldPlayEntry =
-									layer.id === "management" &&
-									!sectionInView &&
-									!prefersReducedMotion;
+								const frame = activeLayout[layer.id];
 
 								return (
 									<motion.div
 										aria-hidden="true"
 										animate={{
-											opacity: shouldPlayEntry ? 0 : 1,
-											scale: shouldPlayEntry
-												? frame.scale * 0.72
-												: frame.scale,
-											y: shouldPlayEntry
-												? frame.y * offsetScale + 44
-												: frame.y * offsetScale,
+										opacity: 1,
+										scale: frame.scale,
+										y: frame.y * offsetScale,
 										}}
 										className="pointer-events-none absolute inset-0 flex items-center justify-center"
+										data-active={isActive}
 										data-framer-layer={layer.framerLayer}
+										data-layer-id={layer.id}
+									data-stack-offset={frame.y}
+									data-stack-state={getStackState(layer.id, activeLayerId)}
+										data-stack-visible="true"
 										initial={false}
 										key={layer.id}
 										style={{
-											filter: `drop-shadow(0 ${
-												isActive ? 28 : 15
-											}px ${isActive ? 42 : 22}px rgba(31, 31, 29, ${
-												frame.shadowOpacity
-											}))`,
-											zIndex: physicalLayerZIndex[
-												layer.id
-											],
+										filter: `drop-shadow(0 ${isActive ? 28 : 15}px ${
+											isActive ? 42 : 22
+										}px rgba(31, 31, 29, ${frame.shadowOpacity}))`,
+										zIndex: physicalLayerZIndex[layer.id],
 										}}
 										transition={
 											prefersReducedMotion
 												? { duration: 0 }
-												: layer.id === "management"
-													? entryTransition
-													: springTransition
+												: springTransition
 										}
 									>
 										<motion.div
-											animate={{
-												opacity: shouldPlayEntry
-													? 0
-													: frame.glowOpacity,
-											}}
+										animate={{ opacity: frame.glowOpacity }}
 											className="absolute inset-[12%_10%_8%]"
 											initial={false}
 											style={{
@@ -489,15 +343,12 @@ export function LayerSection() {
 											}
 										/>
 
-										<div className="relative aspect-[1832/939] w-[min(88vw,680px)] md:w-[min(50vw,680px)]">
+										<div className="relative aspect-[2752/1536] w-[min(88vw,680px)] md:w-[min(50vw,680px)]">
 											<Image
 												alt=""
 												className="select-none object-contain"
 												draggable={false}
 												fill
-												priority={
-													layer.id === "management"
-												}
 												sizes="(max-width: 720px) 88vw, (max-width: 1280px) 50vw, 680px"
 												src={layer.image}
 											/>
@@ -508,18 +359,22 @@ export function LayerSection() {
 						</div>
 					</div>
 
-					<div className="grid content-start gap-[clamp(30px,4vw,52px)] pt-1 sm:grid-cols-2 md:flex md:flex-col">
-						{layers.map((layer) => (
-							<LayerCallout
-								active={layer.id === activeLayerId}
-								key={layer.id}
-								layer={layer}
-								onSelect={setActiveLayerId}
-							/>
-						))}
+					<nav
+						aria-label="Velg lag i plattformen"
+						className="grid content-start pt-1"
+					>
+							{layers.map((layer) => (
+								<LayerCallout
+									active={layer.id === activeLayerId}
+									key={layer.id}
+									layer={layer}
+									onSelect={setActiveLayerId}
+									prefersReducedMotion={prefersReducedMotion}
+								/>
+							))}
+						</nav>
 					</div>
 				</div>
-			</div>
 		</section>
 	);
 }

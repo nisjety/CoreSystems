@@ -72,7 +72,7 @@ flowchart LR
   Frontend --> Billing["billing-core"]
   Frontend --> Session["session-core"]
   Auth --> NATSLocal["local NATS streams: auth.*, user.*, organization.*, session.*"]
-  Auth --> SharedBus["shared NATS: aqencia.controlplane.*, verevon.audit.v1.*"]
+  Auth --> SharedBus["shared NATS: controlplane.*, verevon.audit.v1.*"]
   NATSLocal --> User
   NATSLocal --> Org
   NATSLocal --> Billing
@@ -90,7 +90,7 @@ flowchart LR
 There are two event layers in active use:
 
 1. Local/compatibility subjects on the Control Plane NATS: `auth.>`, `user.>`, `organization.>`, `session.>`, `billing.>`, `usage.>`.
-2. Cross-plane subjects on the shared bus: `aqencia.controlplane.>`, `verevon.audit.v1.>`, `verevon.usage.v1.>`, `app.session.>`, `verevon.session.>`, and `verevon.agent.>`.
+2. Cross-plane subjects on the shared bus: `controlplane.>`, `verevon.audit.v1.>`, `verevon.usage.v1.>`, `app.session.>`, `verevon.session.>`, and `verevon.agent.>`.
 
 This dual namespace is deliberate during migration, but it means relationship mapping has to record both the local projection flow and the cross-plane notification flow.
 
@@ -108,7 +108,7 @@ Main includes:
 - `src/auth/nats-auth.controller.ts`: NATS request-reply for `session.validate`, `service.authenticate`, and `health.check`.
 - `src/grpc/auth-grpc.controller.ts`: gRPC `TokenValidationService.ValidateToken` and `AuthService` methods.
 - `src/internal/auth-event.publisher.ts`: publishes auth events to local streams, simplified target streams, shared cross-plane events, and audit events.
-- `src/nats/shared-nats.service.ts`: owns `AQENCIA_CONTROLPLANE` stream and publishes `aqencia.controlplane.*`.
+- `src/nats/shared-nats.service.ts`: owns `CONTROLPLANE` stream and publishes `controlplane.*`.
 - `src/auth/model-plane-token.controller.ts` and `src/auth/plane-token.controller.ts`: token issuance for model/data/ingestion/application-style audiences.
 - `src/auth/convex-auth.controller.ts`: Convex JWKS/token bridge.
 - `src/internal/internal-oauth.controller.ts` and `src/internal/internal-agent-signup.controller.ts`: internal endpoints guarded by shared internal API key.
@@ -124,7 +124,7 @@ Events:
 
 - Publishes compatibility events to `auth.*`.
 - Dual-publishes target simplified subjects such as `user.created`, `user.updated`, `session.created`, `organization.created`.
-- Publishes cross-plane subjects including `aqencia.controlplane.user.registered`, `aqencia.controlplane.user.signed_in`, `aqencia.controlplane.user.provider_linked`, `aqencia.controlplane.org.created`, `aqencia.controlplane.org.member_added`, and `aqencia.controlplane.org.member_removed`.
+- Publishes cross-plane subjects including `controlplane.user.registered`, `controlplane.user.signed_in`, `controlplane.user.provider_linked`, `controlplane.org.created`, `controlplane.org.member_added`, and `controlplane.org.member_removed`.
 - Publishes `verevon.audit.v1.control.*` only when an `org_id` is present; pre-onboarding users without org context are intentionally skipped for audit ingestion.
 
 Maturity notes:
@@ -297,8 +297,8 @@ HTTP surface:
 
 Event/model bridge:
 
-- Publishes session commands to `verevon.session.{sessionID}.command` for v2 and `aqencia.reasoning.session.{sessionID}.command` for v1.
-- Subscribes to agent events on `verevon.agent.run.{sessionID}.event` for v2 and `aqencia.reasoning.run.{sessionID}.event` for v1.
+- Publishes session commands to `verevon.session.{sessionID}.command` for v2 and `verevon.reasoning.session.{sessionID}.command` for v1.
+- Subscribes to agent events on `verevon.agent.run.{sessionID}.event` for v2 and `verevon.reasoning.run.{sessionID}.event` for v1.
 - Publishes session events and `app.session.entitlements_changed`.
 - Subscribes to user/org/billing change subjects for cache invalidation.
 
@@ -358,7 +358,7 @@ Mapped and active:
 
 - `auth-core` -> `user-core`: auth events and internal user-service integration.
 - `auth-core` -> `org-core`: organization events and organization event middleware.
-- `auth-core` -> cross-plane consumers: `aqencia.controlplane.*` and plane-token endpoints.
+- `auth-core` -> cross-plane consumers: `controlplane.*` and plane-token endpoints.
 - `auth-core` -> `audit-core`: `verevon.audit.v1.control.*` when org context exists.
 - `user-core` -> `auth-core`: `service.authenticate` NATS request-reply and Better Auth/OAuth client paths.
 - `user-core` -> `org-core`: default `ORG_SERVICE_URL` is `http://org-core:8080`; used for session context and membership enrichment paths.
@@ -450,4 +450,4 @@ Security checks that matter most for this plane:
 3. ~~Remove or relocate `.backup`, `.unused`~~ files — done on 2026-06-07 (see `apps/STALE_DOC_DELETION_REGISTER.md`); verified 2026-07-10 they are absent from the tree. The one remaining placeholder-only file, `auth-core/src/internal/contracts/user-service.contract.ts`, is still just `export const placeholder = true;` as of 2026-07-10 and still a candidate for removal/relocation.
 4. Update or remove `session-core/scripts/smoke_test_api.sh` todo-route checks.
 5. Add a per-org reverse index for Control Session cache invalidation if org-wide entitlement changes need sub-30-second correctness.
-6. Normalize the event namespace migration plan so consumers know when to prefer `auth.*`/`organization.*` versus `aqencia.controlplane.*` subjects.
+6. Normalize the event namespace migration plan so consumers know when to prefer `auth.*`/`organization.*` versus `controlplane.*` subjects.

@@ -71,6 +71,9 @@ func TestGoogleProviderClientRequestsAccountSelection(t *testing.T) {
 	if got := parsed.Query().Get("prompt"); got != "select_account consent" {
 		t.Fatalf("provider prompt = %q, want select_account consent", got)
 	}
+	if got := parsed.Query().Get("include_granted_scopes"); got != "true" {
+		t.Fatalf("incremental Google consent = %q, want true", got)
+	}
 }
 
 func TestNotionProviderClientUsesUserOwnedAuthorization(t *testing.T) {

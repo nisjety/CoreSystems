@@ -21,14 +21,7 @@ import {
   Zap,
   type LucideProps,
 } from '@/shared/icons'
-import {
-  createEffect,
-  createMemo,
-  createSignal,
-  For,
-  Show,
-  type Component,
-} from 'solid-js'
+import { createEffect, createMemo, createSignal, For, Show, type Component } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   createIngestionRun,

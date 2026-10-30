@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Navbar } from "@/components/core/navbar/Navbar";
 import { MenuModal } from "@/components/ui/MenuModal";
+import { HomepageIntro } from "./intro/HomepageIntro";
 
 type HomeClientShellProps = {
 	content: ReactNode;
@@ -29,17 +30,18 @@ export function HomeClientShell({
 	const [isMenuOpen, setIsMenuOpen] = useState(false);
 	const [isScrolled, setIsScrolled] = useState(false);
 	const [isHeroFogScrolled, setIsHeroFogScrolled] = useState(false);
+	const [introPhase, setIntroPhase] = useState<"checking" | "complete">("checking");
+	const isIntroActive = introPhase !== "complete";
 
 	useEffect(() => {
 		let frame: number | null = null;
 		lastFogScrollY.current = window.scrollY;
+		const motionPreference = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 		const updateScrollState = () => {
 			const nextScrollY = window.scrollY;
 			const delta = nextScrollY - lastFogScrollY.current;
-			const reduceMotion = window.matchMedia(
-				"(prefers-reduced-motion: reduce)",
-			).matches;
+			const reduceMotion = motionPreference.matches;
 			const fogTrigger = Math.max(224, window.innerHeight * 0.6);
 			let nextHeroFogScrolled = heroFogScrolledRef.current;
 
@@ -177,14 +179,18 @@ export function HomeClientShell({
 		let frame: number | null = null;
 
 		const updateTextFades = () => {
-			for (const element of fadeTargets) {
+			// Finish all geometry reads before touching styles.
+			const positions = fadeTargets.map((element) => {
 				const rect = element.getBoundingClientRect();
 				const maskY = -rect.top + 90;
-				const position = `0px ${maskY.toFixed(3)}px`;
-
+				return `0px ${maskY.toFixed(3)}px`;
+			});
+			fadeTargets.forEach((element, index) => {
+				const position = positions[index];
+				if (element.style.maskPosition === position) return;
 				element.style.setProperty("mask-position", position);
 				element.style.setProperty("-webkit-mask-position", position);
-			}
+			});
 
 			frame = null;
 		};
@@ -281,8 +287,13 @@ export function HomeClientShell({
 			className="verevon-home min-h-screen bg-background text-verevon-text [--verevon-content-max:1512px] [--verevon-edge:max(clamp(32px,7.7vw,100px),calc((100%-var(--verevon-content-max))/2))] [--verevon-page-pad:clamp(24px,4vw,48px)] [--verevon-section-gap:clamp(86px,8.9vw,330px)] [--verevon-section-vpad:clamp(96px,15vh,180px)]"
 			ref={homeRef}
 		>
-			<div aria-hidden={isMenuOpen || undefined} inert={isMenuOpen}>
+			<div
+				aria-hidden={isMenuOpen || isIntroActive || undefined}
+				data-home-content-shell=""
+				inert={isMenuOpen || isIntroActive}
+			>
 				<Navbar
+					isIntroActive={isIntroActive}
 					isMenuOpen={isMenuOpen}
 					isOnDark={false}
 					isScrolled={isScrolled}
@@ -311,6 +322,7 @@ export function HomeClientShell({
 			</div>
 
 			<MenuModal onClose={closeMenu} open={isMenuOpen} />
+			{isIntroActive ? <HomepageIntro onComplete={() => setIntroPhase("complete")} /> : null}
 		</div>
 	);
 }

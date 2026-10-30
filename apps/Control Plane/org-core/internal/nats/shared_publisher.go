@@ -13,16 +13,16 @@ import (
 )
 
 // SharedPublisher publishes cross-plane domain events to the shared
-// verevon-nats broker on the aqencia.controlplane.* subject namespace.
+// verevon-nats broker on the controlplane.* subject namespace.
 //
-// Subject convention: aqencia.controlplane.<entity>.<verb>
+// Subject convention: controlplane.<entity>.<verb>
 //
-//	aqencia.controlplane.org.created
-//	aqencia.controlplane.org.updated
-//	aqencia.controlplane.org.deleted
-//	aqencia.controlplane.org.member_added
-//	aqencia.controlplane.org.member_removed
-//	aqencia.controlplane.org.plan_changed
+//	controlplane.org.created
+//	controlplane.org.updated
+//	controlplane.org.deleted
+//	controlplane.org.member_added
+//	controlplane.org.member_removed
+//	controlplane.org.plan_changed
 type SharedPublisher struct {
 	conn       *nats.Conn
 	js         jetstream.JetStream
@@ -130,10 +130,10 @@ func (sp *SharedPublisher) Close() {
 
 // ─── Typed helpers ────────────────────────────────────────────────────────────
 
-// PublishOrgCreated publishes aqencia.controlplane.org.created.
+// PublishOrgCreated publishes controlplane.org.created.
 // All planes subscribe to this to provision org-level resources.
 func (sp *SharedPublisher) PublishOrgCreated(ctx context.Context, orgID, name, slug, plan string, metadata map[string]any) {
-	_ = sp.Publish(ctx, "aqencia.controlplane.org.created", map[string]any{
+	_ = sp.Publish(ctx, "controlplane.org.created", map[string]any{
 		"org_id":   orgID,
 		"org_name": name,
 		"slug":     slug,
@@ -142,26 +142,26 @@ func (sp *SharedPublisher) PublishOrgCreated(ctx context.Context, orgID, name, s
 	})
 }
 
-// PublishOrgUpdated publishes aqencia.controlplane.org.updated.
+// PublishOrgUpdated publishes controlplane.org.updated.
 func (sp *SharedPublisher) PublishOrgUpdated(ctx context.Context, orgID string, changes map[string]any) {
-	_ = sp.Publish(ctx, "aqencia.controlplane.org.updated", map[string]any{
+	_ = sp.Publish(ctx, "controlplane.org.updated", map[string]any{
 		"org_id":  orgID,
 		"changes": changes,
 	})
 }
 
-// PublishOrgDeleted publishes aqencia.controlplane.org.deleted.
+// PublishOrgDeleted publishes controlplane.org.deleted.
 func (sp *SharedPublisher) PublishOrgDeleted(ctx context.Context, orgID, name string) {
-	_ = sp.Publish(ctx, "aqencia.controlplane.org.deleted", map[string]any{
+	_ = sp.Publish(ctx, "controlplane.org.deleted", map[string]any{
 		"org_id":   orgID,
 		"org_name": name,
 	})
 }
 
-// PublishPlanChanged publishes aqencia.controlplane.org.plan_changed.
+// PublishPlanChanged publishes controlplane.org.plan_changed.
 // Reasoning Plane subscribes to this to adjust feature availability.
 func (sp *SharedPublisher) PublishPlanChanged(ctx context.Context, orgID, orgName, previousPlan, newPlan, changedBy, reason string, revision int64) error {
-	return sp.Publish(ctx, "aqencia.controlplane.org.plan_changed", map[string]any{
+	return sp.Publish(ctx, "controlplane.org.plan_changed", map[string]any{
 		"org_id":        orgID,
 		"org_name":      orgName,
 		"previous_plan": previousPlan,
@@ -181,7 +181,7 @@ func planChangeMessageID(orgID string, revision int64) string {
 // no actor identity, customer content, or retention payload: Conversation Core
 // needs only the organization identifier to remove personal draft recovery.
 func (sp *SharedPublisher) PublishInteractiveRetentionEnabled(ctx context.Context, orgID string, eventID int64) error {
-	return sp.Publish(ctx, "aqencia.controlplane.org.interactive_retention.enabled", map[string]any{
+	return sp.Publish(ctx, "controlplane.org.interactive_retention.enabled", map[string]any{
 		"org_id": orgID,
 		"zdr":    true,
 	}, jetstream.WithMsgID(interactiveRetentionMessageID(eventID)))
@@ -191,9 +191,9 @@ func interactiveRetentionMessageID(eventID int64) string {
 	return fmt.Sprintf("interactive-retention:%d", eventID)
 }
 
-// PublishMemberAdded publishes aqencia.controlplane.org.member_added.
+// PublishMemberAdded publishes controlplane.org.member_added.
 func (sp *SharedPublisher) PublishMemberAdded(ctx context.Context, orgID, orgName, userID, userEmail, role string) {
-	_ = sp.Publish(ctx, "aqencia.controlplane.org.member_added", map[string]any{
+	_ = sp.Publish(ctx, "controlplane.org.member_added", map[string]any{
 		"org_id":     orgID,
 		"org_name":   orgName,
 		"user_id":    userID,
@@ -202,9 +202,9 @@ func (sp *SharedPublisher) PublishMemberAdded(ctx context.Context, orgID, orgNam
 	})
 }
 
-// PublishMemberRemoved publishes aqencia.controlplane.org.member_removed.
+// PublishMemberRemoved publishes controlplane.org.member_removed.
 func (sp *SharedPublisher) PublishMemberRemoved(ctx context.Context, orgID, userID string) {
-	_ = sp.Publish(ctx, "aqencia.controlplane.org.member_removed", map[string]any{
+	_ = sp.Publish(ctx, "controlplane.org.member_removed", map[string]any{
 		"org_id":  orgID,
 		"user_id": userID,
 	})

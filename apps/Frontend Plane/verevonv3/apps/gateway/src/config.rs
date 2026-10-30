@@ -39,6 +39,16 @@ pub(crate) struct AppState {
     pub(crate) audit_core_service_token: String,
     pub(crate) insight_core_url: String,
     pub(crate) leads_core_url: String,
+    /// The anbud core (tender matching). Its key is the gateway's own credential for that core: the browser
+    /// never sees it, and an empty key answers the anbud routes with `not_configured`.
+    pub(crate) anbud_core_url: String,
+    pub(crate) anbud_api_key: String,
+    pub(crate) anbud_api_key_header: String,
+    pub(crate) marketing_core_url: String,
+    pub(crate) marketing_core_service_key: String,
+    /// Temporary single-org Marketing Core deployment binding, never a fallback
+    /// tenant. Sensitive routes compare it to live session membership.
+    pub(crate) marketing_core_organization_id: String,
     pub(crate) shipping_core_url: String,
     pub(crate) user_core_url: String,
     /// Application Plane's Convex deployment. Read from the environment once,
@@ -157,6 +167,16 @@ pub(crate) async fn build_state() -> Result<AppState> {
         // registry. Internal-key auth + x-org-id header, like the other cores.
         insight_core_url: env_url("INSIGHT_CORE_URL", "http://insight-core:3163"),
         leads_core_url: env_url("LEADS_CORE_URL", "http://leads-core:3164"),
+        anbud_core_url: env_url("ANBUD_CORE_URL", "http://anbud-core:3138"),
+        anbud_api_key: env::var("ANBUD_API_KEY").unwrap_or_default().trim().to_owned(),
+        anbud_api_key_header: env::var("ANBUD_API_KEY_HEADER")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "X-API-Key".to_owned()),
+        marketing_core_url: env_url("MARKETING_CORE_URL", "http://marketing-core:3165"),
+        marketing_core_service_key: env::var("MARKETING_CORE_SERVICE_KEY").unwrap_or_default().trim().to_owned(),
+        marketing_core_organization_id: env::var("MARKETING_CORE_ORGANIZATION_ID").unwrap_or_default().trim().to_owned(),
         // shipping-core (Ingestion Plane) — freight aggregator; on the
         // inter-plane bus, so the in-network name resolves from the gateway.
         shipping_core_url: env_url("SHIPPING_CORE_URL", "http://shipping-core:8080"),

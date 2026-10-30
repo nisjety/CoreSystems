@@ -1,0 +1,222 @@
+{
+  "schemaVersion": 2,
+  "preparedOn": "2026-09-14",
+  "locale": "nb-NO",
+  "demoCompany": "Fjordform (fiktiv demobedrift)",
+  "sectionTitle": "Fra kunnskap til handling.",
+  "tasks": [
+    {
+      "id": "01-kundesvar",
+      "label": "Kundesvar",
+      "title": "Fra henvendelse til svarutkast.",
+      "inputs": [
+        "01-kundesvar/kildepakke.md"
+      ],
+      "result": "Svarutkast og intern kildeoversikt",
+      "primary": true,
+      "prompt": "01-kundesvar/prompt.txt",
+      "direction": "01-kundesvar/REGI.md",
+      "status": "acceptance-pending",
+      "runVerified": false,
+      "media": {
+        "raw": null,
+        "video": null,
+        "poster": null,
+        "captions": null,
+        "rawCaptions": null
+      },
+      "plannedVideoFilename": "01-kundesvar.mp4",
+      "pasteBundle": "01-kundesvar/samtalestart.txt",
+      "historicalVerifiedRuns": [
+        {
+          "date": "2026-09-14",
+          "threadId": "01M2G70YVQVYHGHN6AER01VVRZ",
+          "method": "attachments",
+          "note": "Full prøvekjøring på ferdig bygg med ekte vedlegg fra inputs[]. Godkjent mot CONTROL-NOTES, inkludert REGI-oppfølgingen. Ingen opptak: verktøyet har ikke skjermopptak."
+        }
+      ],
+      "currentEvidence": {
+        "reviewedOn": "2026-09-30",
+        "consecutivePassesOnReleaseBuild": 5,
+        "record": "evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md",
+        "latestRehearsal": {
+          "result": "passed",
+          "kind": "editorial-rehearsal",
+          "build": "sha256:1ff7c6a268d606add3e7bd5883e929c36be300e9e930581e095803ecd4a4d09d",
+          "publicationApproved": false
+        }
+      },
+      "sourceHashes": {
+        "01-kundesvar/REGI.md": "9ebd1a09a317617b69a3c01bfeca99b539a167adf8615afd81d052f65a70dace",
+        "01-kundesvar/prompt.txt": "8a53ff07181a4d9eaa53598f47661fd476761a1f67956db02e7949244231aa41",
+        "01-kundesvar/kildepakke.md": "3643f7c8f41ea750e42482671601593e56313e8e6d9c48765751eeaea9059a0c"
+      }
+    },
+    {
+      "id": "02-salgsrapport",
+      "label": "Salgsanalyse",
+      "title": "Fra tall til prioriteringer.",
+      "inputs": [
+        "02-salgsrapport/kildepakke.md",
+        "02-salgsrapport/salg.csv"
+      ],
+      "result": "Ukesrapport med tall, hypoteser og oppfølginger",
+      "primary": false,
+      "prompt": "02-salgsrapport/prompt.txt",
+      "direction": "02-salgsrapport/REGI.md",
+      "status": "acceptance-pending",
+      "runVerified": false,
+      "media": {
+        "raw": null,
+        "video": null,
+        "poster": null,
+        "captions": null,
+        "rawCaptions": null
+      },
+      "plannedVideoFilename": "02-salgsrapport.mp4",
+      "pasteBundle": "02-salgsrapport/samtalestart.txt",
+      "historicalVerifiedRuns": [
+        {
+          "date": "2026-09-14",
+          "threadId": "01M2G75EFP4NZDS2S0J4P40FC3",
+          "method": "attachments",
+          "note": "Full prøvekjøring på ferdig bygg med ekte vedlegg fra inputs[]. Godkjent mot CONTROL-NOTES, inkludert REGI-oppfølgingen. Ingen opptak: verktøyet har ikke skjermopptak."
+        }
+      ],
+      "currentEvidence": {
+        "reviewedOn": "2026-09-30",
+        "consecutivePassesOnReleaseBuild": 5,
+        "record": "evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md",
+        "latestRehearsal": {
+          "result": "passed",
+          "kind": "editorial-rehearsal",
+          "build": "sha256:1ff7c6a268d606add3e7bd5883e929c36be300e9e930581e095803ecd4a4d09d",
+          "publicationApproved": false
+        }
+      },
+      "sourceHashes": {
+        "02-salgsrapport/prompt.txt": "0903ed3706ae28181971ea2f7df42a5c9434e6c6d307a0ba839cf7f0e63ebd3f",
+        "02-salgsrapport/salg.csv": "cf77ea3fa4322fcab03d81d81882fe62e49ea987271bd8b51b786a431298d2ba",
+        "02-salgsrapport/kildepakke.md": "473ca6de228f044c908c16118409053b615ff2da0e51bc84caea99cb984d1b90",
+        "02-salgsrapport/REGI.md": "fea45d2e820109c52d642cbad926d6163de6989b500bc82da155765acdd41bcc"
+      }
+    },
+    {
+      "id": "03-kampanje",
+      "label": "Kampanje",
+      "title": "Fra brief til innhold.",
+      "inputs": [
+        "03-kampanje/kildepakke.md"
+      ],
+      "result": "Tre LinkedIn-utkast og én e-post",
+      "primary": false,
+      "prompt": "03-kampanje/prompt.txt",
+      "direction": "03-kampanje/REGI.md",
+      "status": "acceptance-pending",
+      "runVerified": false,
+      "media": {
+        "raw": null,
+        "video": null,
+        "poster": null,
+        "captions": null,
+        "rawCaptions": null
+      },
+      "plannedVideoFilename": "03-kampanje.mp4",
+      "pasteBundle": "03-kampanje/samtalestart.txt",
+      "historicalVerifiedRuns": [
+        {
+          "date": "2026-09-14",
+          "threadId": "01M2G7BB4X7CK7PGSYVVE0DZNA",
+          "method": "attachments",
+          "note": "Full prøvekjøring på ferdig bygg med ekte vedlegg fra inputs[]. Godkjent mot CONTROL-NOTES, inkludert REGI-oppfølgingen. Ingen opptak: verktøyet har ikke skjermopptak."
+        }
+      ],
+      "currentEvidence": {
+        "reviewedOn": "2026-09-30",
+        "consecutivePassesOnReleaseBuild": 5,
+        "record": "evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md",
+        "latestRehearsal": {
+          "result": "passed",
+          "kind": "editorial-rehearsal",
+          "build": "sha256:1ff7c6a268d606add3e7bd5883e929c36be300e9e930581e095803ecd4a4d09d",
+          "publicationApproved": false
+        }
+      },
+      "sourceHashes": {
+        "03-kampanje/kildepakke.md": "f23a498e2e10fe34762d9e80dbe9a428008f8d3467eda8f446f34b614c2f09fa",
+        "03-kampanje/prompt.txt": "96ec79daa93467e268c1380303370dcc989cc5d4419113916bbcde3250e8b8d8",
+        "03-kampanje/REGI.md": "37c4e65262c747bad87560088cdc72b50492b540dc41ffd3e653ec097ecbd0b7"
+      }
+    },
+    {
+      "id": "04-prosjektplan",
+      "label": "Prosjektplan",
+      "title": "Fra møte til fremdrift.",
+      "inputs": [
+        "04-prosjektplan/kildepakke.md"
+      ],
+      "result": "Prosjektplan og risikooversikt",
+      "primary": false,
+      "prompt": "04-prosjektplan/prompt.txt",
+      "direction": "04-prosjektplan/REGI.md",
+      "status": "acceptance-pending",
+      "runVerified": false,
+      "media": {
+        "raw": null,
+        "video": null,
+        "poster": null,
+        "captions": null,
+        "rawCaptions": null
+      },
+      "plannedVideoFilename": "04-prosjektplan.mp4",
+      "pasteBundle": "04-prosjektplan/samtalestart.txt",
+      "historicalVerifiedRuns": [
+        {
+          "date": "2026-09-14",
+          "threadId": "01M2G7G9Q2AVB3JAW7RW5BV715",
+          "method": "attachments",
+          "note": "Full prøvekjøring på ferdig bygg med ekte vedlegg fra inputs[]. Godkjent mot CONTROL-NOTES, inkludert REGI-oppfølgingen. Ingen opptak: verktøyet har ikke skjermopptak."
+        }
+      ],
+      "currentEvidence": {
+        "reviewedOn": "2026-09-30",
+        "consecutivePassesOnReleaseBuild": 5,
+        "record": "evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md",
+        "latestRehearsal": {
+          "result": "passed",
+          "kind": "editorial-rehearsal",
+          "build": "sha256:1ff7c6a268d606add3e7bd5883e929c36be300e9e930581e095803ecd4a4d09d",
+          "publicationApproved": false
+        }
+      },
+      "sourceHashes": {
+        "04-prosjektplan/kildepakke.md": "4f03640ee7ad4810314d7d3161740716cc2deb52ff27f075cdde462fdc44694c",
+        "04-prosjektplan/prompt.txt": "75339e344e6599c63c51235d309ac1d55d23e988574a9c99a2b681e9bd31fcaf",
+        "04-prosjektplan/REGI.md": "364abed3cde2bd6de0c1bab37c8f7147a5fb21d72b91340fff0e274ccd0a5235"
+      }
+    }
+  ],
+  "recordingReadiness": {
+    "requiredConsecutivePasses": 5,
+    "reasons": [
+      "Final pass (2026-09-30, model-gateway image 1ff7c6a268d6; image IDs, switches and the failure analysis in the readiness record, sections Q16k and Q16L): all four scenarios reached five consecutive private rehearsal passes with the capture tool, no automatic retry and all attempts kept: 04 at attempt 5 (20/20), 03 at attempt 8 (19/20), 02 at attempt 5 (17/20 plus 4/4), 01 at attempt 5 (20/20). The fixtures match the hashes below.",
+      "Durability passed: the twenty qualifying threads of each journey reopened identically (20/20 evidence files, 21/21 checks before and after) in fresh browser contexts around a controlled restart of Model Plane Postgres, session-core, model-gateway and verevon-gateway-rs.",
+      "Recovery passed: product-recovery.spec.ts 9/9 on this build and the live Q08 reload-resume and mobile markdown checks 2/2 on the restarted system.",
+      "Performance passed against the owner targets (first turn p95 <= 120 s, follow-up p95 <= 70 s, no timeouts, >= 20 samples per journey turn): first-turn p95 43.0 to 105.7 s and follow-up p95 45.3 to 57.7 s across the four journeys, no timeout in 84 takes, 20 to 21 samples per turn. The previous blockers are gone: 03 follow-up p95 (74.7 s at the third freeze) is 57.7 s after section-only revision, and the two journey-04 timeouts of the previous series are gone after finer review batches and a 120 s source check. Single turns at 121.1 s (04 first), 106.5 s (04 follow-up) and 73.2 s (01 follow-up) are repair loops and are tolerated by the nearest-rank p95 at n=20.",
+      "Correctness remains partial: 4 of 80 final-pass attempts failed, all model behaviour and none a timeout (a revision whose recheck still found unsupported text after one repair in 03; in 02 a local check the repairs did not clear, a first create_artifact call with only an id, and a report written as chat text with no artifact), plus the content failures of the earlier series (04 plans without the required stand-in or buffer wording under author guidance v1). Source notes under posts now survive a section-only revision (14 of 14 documents with the layout that completed a revision: 4 in q16j and 10 in the final pass).",
+      "Experience remains partial: mobile/desktop, keyboard and reduced-motion checks pass on the four journeys (viewport spec 9/9, live Q08 mobile); caption tracks and the editorial/media review of the films are not done. Trust is evidenced by the memory and connected-account specs (3/3 on this build); the cross-tenant authority spec is not re-run on this build (its last recorded pass is 2026-07-16). It does not need owner-made passwords: its harness builds a disposable stack with random per-run credentials, but it builds about nine images, calls a macOS-only stat, and needs the owner's approval of a quiet run window (plan task J7). No public media pack is approved."
+    ],
+    "reviewedOn": "2026-09-30",
+    "evidence": "evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md",
+    "status": "blocked",
+    "gates": {
+      "trust": "partial",
+      "performance": "passed",
+      "repeatability": "passed",
+      "experience": "partial",
+      "recovery": "passed",
+      "durability": "passed",
+      "correctness": "partial"
+    }
+  }
+}

@@ -1,0 +1,64 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Current native Xero exchange-rate evidence by source entity. It records reported values and coverage only; it does not infer rate direction, a daily currency pair, or NOK conversion.",
+  assertions: {
+    nonNull: ["source_exchange_rate_observation_key", "tenant_id", "source_entity_type", "source_entity_id", "synced_at"],
+    uniqueKey: ["source_exchange_rate_observation_key"]
+  }
+}
+
+WITH observations AS (
+  SELECT tenant_id, 'customer_invoice' AS source_entity_type, invoice_id AS source_entity_id,
+         document_date AS source_document_date, currency_code, base_currency,
+         source_exchange_rate, source_amount_in_currency, CAST(NULL AS NUMERIC) AS source_bank_amount, synced_at
+  FROM ${ref("xero_gold_finance", "fact_customer_invoice")}
+  UNION ALL
+  SELECT tenant_id, 'supplier_invoice', invoice_id, document_date, currency_code, base_currency,
+         source_exchange_rate, source_amount_in_currency, CAST(NULL AS NUMERIC), synced_at
+  FROM ${ref("xero_gold_finance", "fact_supplier_invoice")}
+  UNION ALL
+  SELECT tenant_id, 'customer_credit_note', credit_note_id, document_date, currency_code, base_currency,
+         source_exchange_rate, source_amount_in_currency, CAST(NULL AS NUMERIC), synced_at
+  FROM ${ref("xero_gold_finance", "fact_customer_credit_note")}
+  UNION ALL
+  SELECT tenant_id, 'supplier_credit_note', credit_note_id, document_date, currency_code, base_currency,
+         source_exchange_rate, source_amount_in_currency, CAST(NULL AS NUMERIC), synced_at
+  FROM ${ref("xero_gold_finance", "fact_supplier_credit_note")}
+  UNION ALL
+  SELECT tenant_id, 'customer_payment', payment_id, payment_date, invoice_currency_code, base_currency,
+         source_exchange_rate, source_payment_amount, bank_amount, synced_at
+  FROM ${ref("xero_gold_finance", "fact_customer_payment")}
+  UNION ALL
+  SELECT tenant_id, 'supplier_payment', payment_id, payment_date, invoice_currency_code, base_currency,
+         source_exchange_rate, source_payment_amount, bank_amount, synced_at
+  FROM ${ref("xero_gold_finance", "fact_supplier_payment")}
+  UNION ALL
+  SELECT tenant_id, 'bank_transaction', bank_transaction_id, transaction_date, currency_code, CAST(NULL AS STRING),
+         source_exchange_rate, source_total_in_currency, CAST(NULL AS NUMERIC), synced_at
+  FROM ${ref("xero_gold_finance", "fact_bank_transaction")}
+)
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(tenant_id, '|', source_entity_type, '|', source_entity_id))
+    AS source_exchange_rate_observation_key,
+  FARM_FINGERPRINT(tenant_id) AS company_key,
+  IF(source_document_date IS NULL, NULL, FARM_FINGERPRINT(CAST(source_document_date AS STRING))) AS date_key,
+  tenant_id,
+  source_entity_type,
+  source_entity_id,
+  source_document_date,
+  currency_code,
+  base_currency,
+  source_exchange_rate,
+  source_exchange_rate IS NOT NULL AS is_source_rate_present,
+  currency_code IS NOT NULL AND base_currency IS NOT NULL AND currency_code != base_currency AS is_cross_currency,
+  FALSE AS is_rate_direction_known,
+  FALSE AS is_financial_measure_additive,
+  source_amount_in_currency,
+  source_bank_amount,
+  CAST(NULL AS NUMERIC) AS amount_nok,
+  FALSE AS is_nok_amount_available,
+  synced_at,
+  'xero' AS source_system
+FROM observations
