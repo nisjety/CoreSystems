@@ -1,0 +1,1 @@
+import{a as e}from"./http-C_MfZeN0.js";function t(){return e(`/api/v1/leads/lists`)}export{t as listLeadLists};

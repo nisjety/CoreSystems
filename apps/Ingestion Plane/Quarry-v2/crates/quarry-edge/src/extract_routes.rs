@@ -225,8 +225,10 @@ async fn extract_run(
 
     // Structured extraction needs Model Plane. Without it, fall back to
     // returning cleaned markdown (still useful), unless a schema was requested.
+    // QB-T17: the runner exists only when QUARRY_EDGE__AI_FORMATS is on and a model path exists.
+    let ai_formats_on = state.model_plane.ai_formats;
     let runner: Option<AiFormatRunner> = match state.model_plane_url.as_deref() {
-        Some(url) if !url.is_empty() => match ModelPlaneClient::new(url) {
+        Some(url) if !url.is_empty() && ai_formats_on => match ModelPlaneClient::new(url) {
             Ok(mut c) => {
                 if let Some(provider) = state.service_token_provider.clone() {
                     c = c.with_token_provider(provider);
@@ -246,8 +248,8 @@ async fn extract_run(
         return (
             StatusCode::NOT_IMPLEMENTED,
             Json(unsupported(
-                "structured extraction requires a Model Plane",
-                "set MODEL_PLANE_URL, or omit `schema` to receive markdown",
+                "structured extraction is not available on this edge",
+                "structured extraction needs QUARRY_EDGE__AI_FORMATS=1 and a granted Model Plane path (MODEL_PLANE_URL); omit `schema` to receive markdown",
             )),
         )
             .into_response();
@@ -656,6 +658,58 @@ mod tests {
     fn expand_empty_when_all_invalid() {
         let urls = vec!["nope".into(), "mailto:x@y.com".into()];
         assert!(expand_targets(&urls, 10).is_empty());
+    }
+
+    /// QB-T17: with `QUARRY_EDGE__AI_FORMATS` off, a `schema` request answers 501 before any page
+    /// is fetched, and makes no mint and no Model Plane call (the registry refuses that call).
+    #[tokio::test]
+    async fn structured_extraction_makes_no_model_plane_call_while_its_switch_is_off() {
+        use crate::test_support::{claims_for_org, test_state, StubDriver};
+        use axum::response::IntoResponse;
+        use quarry_runtime::service_tokens::{
+            AuthCoreServiceTokenProvider, SharedServiceTokenProvider,
+        };
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth_core = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "header.payload.signature",
+                "expiresInSeconds": 300
+            })))
+            .mount(&auth_core)
+            .await;
+        let model_plane = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&model_plane)
+            .await;
+        let provider: SharedServiceTokenProvider = Arc::new(
+            AuthCoreServiceTokenProvider::new(auth_core.uri(), "credential-long-enough").unwrap(),
+        );
+        let state = AppState {
+            model_plane_url: Some(model_plane.uri()),
+            service_token_provider: Some(provider),
+            ..test_state(StubDriver::ok())
+        };
+        let request: ExtractRequest = serde_json::from_value(serde_json::json!({
+            "urls": ["https://example.com/structured"],
+            "schema": { "type": "object" }
+        }))
+        .unwrap();
+
+        let response = extract(
+            State(state),
+            axum::Extension(claims_for_org("org_extract")),
+            axum::Json(request),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        assert!(auth_core.received_requests().await.unwrap().is_empty());
+        assert!(model_plane.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]

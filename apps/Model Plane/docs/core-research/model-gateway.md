@@ -272,6 +272,15 @@ joins both `default` and `inter-plane-bus` (aliases `model-gateway`,
 `model-gateway`. Azure OpenAI + OpenAI keys present (explains the active
 fine-tune poller); LangCache configured.
 
+**Runbook: Quarry cross-encoder scores (QB-T12).** `VEREVON_RELEVANCE_CROSS_ENCODER_SCORES`
+defaults to off. Turn it on only after `calibration/quarry-cross-encoder-v1.json` carries a fitted
+table from the QB-T14 judged run, with its `.sha256` pin updated to match. Boot is refused while the
+switch is on against the unfitted artefact, so a misconfigured switch stops the deploy rather than
+the gate. While it is off the gateway does not ask Quarry for cross-encoder scores. A Quarry build
+that reorders with the cross-encoder (QB-T09) then gives the gate no score, so web hits are judged on
+their words alone, and the RELEVANCE GATE header says the rerank applied without scores. The switch
+has no effect against a Quarry build that predates `score_kind`.
+
 ## Stubs / placeholders — judged [source-only]
 
 The 2026-06 dive over-stated stub status; the current tree is largely honest:

@@ -1,0 +1,131 @@
+/*
+ * The live demo's chat styles (stage 04). Every rule is scoped to
+ * html.verevon-demo-live, which installDemoLive sets and removes, so nothing
+ * here reaches the product outside the demo. global.css is never edited.
+ *
+ * The suggestion cards are the films' start-screen cards (scene.css), restated
+ * under this class: the films hide the whole shell under html.verevon-scene,
+ * and the demo keeps the real shell.
+ */
+
+html.verevon-demo-live .verevon-chat-empty__heading > p {
+  display: none;
+}
+
+html.verevon-demo-live .v-suggestions {
+  display: grid;
+  max-width: none;
+  gap: 0;
+  margin-top: 18px;
+}
+
+/* On the dashboard the card spans the whole overview grid, above the cards. */
+html.verevon-demo-live .v-suggestions.v-suggestions--home {
+  grid-column: 1 / -1;
+  margin: 0 0 16px;
+}
+
+html.verevon-demo-live .v-suggestions__label {
+  margin-bottom: 7px;
+  padding-left: 2px;
+  color: var(--verevon-e-subtle);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+html.verevon-demo-live .v-suggestions .verevon-chat-starter {
+  display: grid;
+  width: 100%;
+  min-height: 56px;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  border-radius: var(--chat-r-md, 12px);
+  background: var(--verevon-surface-soft);
+  padding: 13px 14px;
+  color: var(--verevon-e-muted);
+  font: inherit;
+  text-align: left;
+  box-shadow: none;
+  white-space: normal;
+  cursor: pointer;
+  transition: background-color 160ms ease, box-shadow 160ms ease;
+}
+
+html.verevon-demo-live .v-suggestions .verevon-chat-starter:hover {
+  background: #efeeec;
+  box-shadow: 0 1px 0 rgb(17 17 17 / 4%), 0 6px 18px -8px rgb(17 17 17 / 18%);
+  color: var(--verevon-j-text);
+}
+
+/* After the click the composer holds the question; the card stays as the record of where it came from. */
+html.verevon-demo-live .v-suggestions .verevon-chat-starter.is-chosen {
+  background: #efeeec;
+}
+
+html.verevon-demo-live .v-suggestion .verevon-chat-starter__icon {
+  align-self: start;
+  margin-top: 1px;
+}
+
+html.verevon-demo-live .v-suggestion__text {
+  color: var(--verevon-j-text);
+  font-size: 14px;
+  font-weight: 560;
+  line-height: 1.38;
+}
+
+html.verevon-demo-live .v-suggestion__meta {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+  color: var(--verevon-e-subtle);
+  font-size: 12px;
+}
+
+html.verevon-demo-live .v-suggestion__source {
+  color: var(--verevon-e-muted);
+  font-weight: 560;
+}
+
+html.verevon-demo-live .v-suggestion__chevron {
+  align-self: center;
+  color: var(--verevon-e-subtle);
+}
+
+/*
+ * A Do case is a plan-mode turn, and a finished one also derives the rung-only
+ * plan gate (a second, disabled «Godkjenn» with a justification box). The run's
+ * own approval card is the one gate the demo shows.
+ */
+html.verevon-demo-live .verevon-chat-plan,
+html.verevon-demo-live .verevon-chat-plan-granted {
+  display: none !important;
+}
+
+/*
+ * Phone width (PLAN_2026-10-11 "phone hazard"). Below 761px the product lays the Work canvas, and the run
+ * panel when it hosts Work, over the whole chat as a full sheet, and that sheet hides the approval gate. In
+ * the demo the same panel becomes a pane at the foot of the screen: the conversation and its gate stay above
+ * it, and the trigger in the header stays tappable, so a visitor still opens the canvas from the trigger.
+ * The rule is pure CSS and cannot loop. A Do turn's gate can still arrive below the pane, so after a send
+ * suggestions-live.ts moves the transcript to its end once (a timed, bounded scroll, never a DOM reaction).
+ * Wider screens keep the product's rail.
+ */
+@media (max-width: 760px) {
+  html.verevon-demo-live .verevon-chat-page--canvas .verevon-chat-workspace-canvas,
+  html.verevon-demo-live .verevon-chat-page--canvas .verevon-chat-run-panel {
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: auto;
+    height: 40vh;
+    height: 40dvh;
+    max-height: 340px;
+    border-top: 1px solid var(--verevon-border);
+    box-shadow: 0 -12px 32px rgb(17 17 17 / 6%);
+  }
+}

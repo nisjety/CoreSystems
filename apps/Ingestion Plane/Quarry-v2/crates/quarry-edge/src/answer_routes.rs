@@ -93,7 +93,7 @@ async fn answer_run(
                     error: "answer pipeline not configured".into(),
                     code: "UNSUPPORTED".into(),
                     hint: Some(
-                        "configure a SearchProvider AND a Model Plane URL to enable /v1/answer"
+                        "set QUARRY_EDGE__ANSWER_SYNTHESIS=1 (with a SearchProvider and a granted Model Plane path) to enable /v1/answer"
                             .into(),
                     ),
                 })
@@ -203,7 +203,7 @@ pub async fn answer_stream(
                     error: "answer pipeline not configured".into(),
                     code: "UNSUPPORTED".into(),
                     hint: Some(
-                        "configure a SearchProvider AND a Model Plane URL to enable /v1/answer"
+                        "set QUARRY_EDGE__ANSWER_SYNTHESIS=1 (with a SearchProvider and a granted Model Plane path) to enable /v1/answer"
                             .into(),
                     ),
                 })
@@ -368,6 +368,32 @@ fn _type_check_marker(_a: AnswerResult) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// QB-T17: with `QUARRY_EDGE__ANSWER_SYNTHESIS` off there is no pipeline, so `/v1/answer` answers
+    /// 501 and says which switch turns it on (the hint is what an operator reads at the 501).
+    #[tokio::test]
+    async fn answer_without_a_pipeline_names_the_switch() {
+        use crate::test_support::{claims_for_org, test_state, StubDriver};
+
+        let state = test_state(StubDriver::ok());
+        let request: AnswerHttpRequest =
+            serde_json::from_value(serde_json::json!({ "query": "rust async" })).unwrap();
+
+        let response = answer(
+            State(state),
+            Extension(claims_for_org("org_answer")),
+            Json(request),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("QUARRY_EDGE__ANSWER_SYNTHESIS"), "{body}");
+    }
 
     #[test]
     fn http_request_decodes_minimal_shape() {

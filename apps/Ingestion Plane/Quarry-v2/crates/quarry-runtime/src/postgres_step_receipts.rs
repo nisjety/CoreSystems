@@ -253,6 +253,27 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         rows.into_iter().map(Self::decode).collect()
     }
 
+    async fn last_step_for_org(&self, org_id: &str, run_id: &RunKind) -> QuarryResult<Option<u32>> {
+        if org_id.trim().is_empty() {
+            return Err(QuarryError::new(ErrorCode::Forbidden, "org_id is required"));
+        }
+        // An aggregate over the (org_id, run_id, step) index: no payload is read or decoded.
+        let row = sqlx::query(
+            "SELECT MAX(step) AS last_step FROM quarry_step_receipts
+             WHERE org_id = $1 AND run_id = $2",
+        )
+        .bind(org_id)
+        .bind(run_id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| db_err("last receipt step", error))?;
+        let last: Option<i32> = row
+            .try_get("last_step")
+            .map_err(|error| db_err("decode last receipt step", error))?;
+        // `step` is CHECKed non-negative.
+        Ok(last.map(|step| u32::try_from(step).unwrap_or(0)))
+    }
+
     async fn list_for_actor(
         &self,
         org_id: &str,
@@ -562,6 +583,49 @@ mod tests {
         );
     }
 
+    /// D2: a resume's first key reads the run's highest receipt step with an aggregate, so a
+    /// historical row whose payload no longer decodes cannot block it.
+    #[tokio::test]
+    async fn last_step_for_org_is_an_aggregate_bound_to_the_org() {
+        let Some(pool) = fresh_pool().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PostgresStepReceiptStore::new(pool.clone());
+        let run_id: RunKind = Id::new();
+        assert_eq!(
+            store.last_step_for_org("org_a", &run_id).await.unwrap(),
+            None
+        );
+        for step in [0, 4, 2] {
+            let receipt = ReceiptBuilder::start(run_id.to_string(), step)
+                .org_id("org_a")
+                .actor_id("user_a")
+                .complete(action(), None, 0.0);
+            store.append(receipt).await.unwrap();
+        }
+        sqlx::query(
+            "UPDATE quarry_step_receipts SET action = '\"not an action\"'::jsonb
+             WHERE run_id = $1 AND step = 2",
+        )
+        .bind(run_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            store.list_for_org("org_a", &run_id).await.is_err(),
+            "the listing decodes every payload"
+        );
+        assert_eq!(
+            store.last_step_for_org("org_a", &run_id).await.unwrap(),
+            Some(4)
+        );
+        assert_eq!(
+            store.last_step_for_org("org_b", &run_id).await.unwrap(),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn receipt_round_trip_keeps_the_agent_identity() {
         let Some(pool) = fresh_pool().await else {
@@ -668,6 +732,7 @@ mod tests {
             control_epoch: 7,
             budget: None,
             policy_mode: None,
+            next_step: 6,
         };
         store.save_run_checkpoint(checkpoint).await.unwrap();
 
@@ -677,6 +742,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(loaded.control_epoch, 7);
+        assert_eq!(
+            loaded.next_step, 6,
+            "the state JSON keeps the step key high-water mark"
+        );
         assert_eq!(loaded.control_mode, BrowserControlMode::HumanTakeover);
         assert!(store
             .load_run_checkpoint("org_b", &run_id)

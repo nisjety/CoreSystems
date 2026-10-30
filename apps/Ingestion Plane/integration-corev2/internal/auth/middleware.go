@@ -168,43 +168,7 @@ func InternalOrBearer(cfg Config) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		authHeader := strings.TrimSpace(c.Get("Authorization"))
 		if authHeader != "" {
-			if !strings.HasPrefix(authHeader, "Bearer ") {
-				return writeError(c, fiber.StatusUnauthorized, "unauthorized", "Authorization header must use Bearer scheme")
-			}
-			token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
-			if token == "" {
-				return writeError(c, fiber.StatusUnauthorized, "unauthorized", "Bearer token is empty")
-			}
-			if cfg.TokenVerifier == nil {
-				return writeError(c, fiber.StatusServiceUnavailable, "auth_core_unconfigured", "auth-core verifier is not configured")
-			}
-			principal, err := cfg.TokenVerifier.VerifyToken(c.UserContext(), token)
-			if err != nil {
-				var authErr Error
-				if errors.As(err, &authErr) {
-					return writeError(c, authErr.Status, authErr.Code, authErr.Message)
-				}
-				return writeError(c, fiber.StatusUnauthorized, "unauthorized", "Token verification failed")
-			}
-			if strings.TrimSpace(principal.UserID) == "" || strings.TrimSpace(principal.OrganizationID) == "" {
-				return writeError(c, fiber.StatusServiceUnavailable, "auth_core_incomplete_response", "auth-core response is missing required principal fields")
-			}
-			if strings.TrimSpace(principal.Role) == "" {
-				principal.Role = defaultRole
-			}
-			if strings.TrimSpace(principal.PrincipalType) == "" {
-				principal.PrincipalType = "user"
-			}
-			// A token that names an acting end user is a complete standalone
-			// bearer for that user's personal data, so it is honored exactly
-			// once (and refused outright if it carries no id to track).
-			if strings.TrimSpace(principal.DelegatedUserID) != "" &&
-				!delegatedTokenUse.consume(principal.TokenID, principal.TokenExpiresAt) {
-				return writeError(c, fiber.StatusUnauthorized, "token_replayed", "Delegated credential is single-use and was already used")
-			}
-			c.Locals(internalLocal, false)
-			c.Locals(principalLocal, principal)
-			return c.Next()
+			return authenticateBearer(c, cfg, authHeader)
 		}
 
 		provided := providedInternalKey(c, cfg)
@@ -221,6 +185,61 @@ func InternalOrBearer(cfg Config) fiber.Handler {
 		c.Locals(principalLocal, syntheticInternalPrincipal(c))
 		return c.Next()
 	}
+}
+
+// BearerOnly admits a request only with a verified bearer token. It never reads the internal API
+// key, so a caller that holds only that key cannot name the user a request acts for. Routes that
+// act on one user's own data are guarded with this rather than InternalOrBearer.
+func BearerOnly(cfg Config) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		authHeader := strings.TrimSpace(c.Get("Authorization"))
+		if authHeader == "" {
+			return writeError(c, fiber.StatusUnauthorized, "unauthorized", "Bearer token required")
+		}
+		return authenticateBearer(c, cfg, authHeader)
+	}
+}
+
+// authenticateBearer verifies the bearer token in authHeader. A verified token makes its own
+// principal the request's principal; every refusal is answered here and returned.
+func authenticateBearer(c *fiber.Ctx, cfg Config, authHeader string) error {
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return writeError(c, fiber.StatusUnauthorized, "unauthorized", "Authorization header must use Bearer scheme")
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+	if token == "" {
+		return writeError(c, fiber.StatusUnauthorized, "unauthorized", "Bearer token is empty")
+	}
+	if cfg.TokenVerifier == nil {
+		return writeError(c, fiber.StatusServiceUnavailable, "auth_core_unconfigured", "auth-core verifier is not configured")
+	}
+	principal, err := cfg.TokenVerifier.VerifyToken(c.UserContext(), token)
+	if err != nil {
+		var authErr Error
+		if errors.As(err, &authErr) {
+			return writeError(c, authErr.Status, authErr.Code, authErr.Message)
+		}
+		return writeError(c, fiber.StatusUnauthorized, "unauthorized", "Token verification failed")
+	}
+	if strings.TrimSpace(principal.UserID) == "" || strings.TrimSpace(principal.OrganizationID) == "" {
+		return writeError(c, fiber.StatusServiceUnavailable, "auth_core_incomplete_response", "auth-core response is missing required principal fields")
+	}
+	if strings.TrimSpace(principal.Role) == "" {
+		principal.Role = defaultRole
+	}
+	if strings.TrimSpace(principal.PrincipalType) == "" {
+		principal.PrincipalType = "user"
+	}
+	// A token that names an acting end user is a complete standalone
+	// bearer for that user's personal data, so it is honored exactly
+	// once (and refused outright if it carries no id to track).
+	if strings.TrimSpace(principal.DelegatedUserID) != "" &&
+		!delegatedTokenUse.consume(principal.TokenID, principal.TokenExpiresAt) {
+		return writeError(c, fiber.StatusUnauthorized, "token_replayed", "Delegated credential is single-use and was already used")
+	}
+	c.Locals(internalLocal, false)
+	c.Locals(principalLocal, principal)
+	return c.Next()
 }
 
 func RequirePlan(orgClient OrgPlanClient, minimumPlan string) fiber.Handler {

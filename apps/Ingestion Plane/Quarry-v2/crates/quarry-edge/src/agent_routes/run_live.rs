@@ -257,9 +257,11 @@ impl RunLive {
         }
     }
 
-    /// WS8.H: start the step keys at a resumed run's checkpoint step.
-    pub fn with_resume_step(mut self, step: u32) -> Self {
-        *self.steps_reserved.get_mut() = step;
+    /// WS8.H: start the step keys of a resumed run at the first key its earlier segments
+    /// did not use (`lifecycle::resume_next_step`, D2), not at its count of completed steps:
+    /// a failed step also used a key.
+    pub fn with_resume_step(mut self, next_step: u32) -> Self {
+        *self.steps_reserved.get_mut() = next_step;
         self
     }
 
@@ -267,6 +269,13 @@ impl RunLive {
     /// entry lock is held, after admission, so a refusal takes none.
     pub fn reserve_step(&self) -> u32 {
         self.steps_reserved.fetch_add(1, Ordering::AcqRel)
+    }
+
+    /// D2: the step key the run hands out next (one past the highest reserved). Every
+    /// checkpoint stores it, so a resume never hands a used key out again. Read while the
+    /// entry lock is held, which is also when keys are reserved.
+    pub fn next_step(&self) -> u32 {
+        self.steps_reserved.load(Ordering::Acquire)
     }
 
     /// Say what kind of run this is and how long its caller asked for.

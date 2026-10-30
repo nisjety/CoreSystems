@@ -213,6 +213,13 @@ pub(crate) async fn dream_once(
         let org_id = last.org_id.clone();
         let thread_id = last.thread_id.clone();
 
+        // A waiver can start after this batch was loaded. From then on the
+        // thread is out of background derivation, so its messages are left
+        // un-dreamt, and the pending query no longer selects them.
+        if thread_has_waived_run(pool, &thread_id).await? {
+            continue;
+        }
+
         if last.conversation_only {
             let mut tx = pool.begin().await?;
             for message in &group {
@@ -558,10 +565,10 @@ pub(crate) async fn sync_persisted_candidates_to_letta_for_grounding(
 /// question, and it runs once per ungrounded candidate.
 const GROUNDING_CANDIDATE_POOL: i64 = 20;
 
-struct GroundingPoolRow {
-    id: String,
-    key: String,
-    content: String,
+pub(crate) struct GroundingPoolRow {
+    pub(crate) id: String,
+    pub(crate) key: String,
+    pub(crate) content: String,
 }
 
 /// Existing same-scope memories to compare a new candidate against, in the
@@ -571,7 +578,12 @@ struct GroundingPoolRow {
 /// `(org_id, scope, owner, key)` for the rest -- just without requiring `key`
 /// to match. Filtered to `is_latest = true`: a row already superseded is not
 /// something grounding should compare against or supersede a second time.
-async fn grounding_candidate_pool(
+///
+/// A row whose source thread hosts a waived run is left out (decision D-B). Its
+/// current content came from that thread, and the classifier is a paid model the
+/// user did not accept for a waived run's content. A row names its writing thread
+/// in `source_links` (`thread:<id>`), the link the dreaming writes.
+pub(crate) async fn grounding_candidate_pool(
     pool: &PgPool,
     org_id: &str,
     owner: &str,
@@ -582,6 +594,11 @@ async fn grounding_candidate_pool(
             "SELECT id, key, content FROM agent_memory \
              WHERE org_id = $1 AND session_id = $2 AND scope = $3 \
                AND is_latest = true AND review_state = 'accepted' \
+               AND NOT EXISTS ( \
+                 SELECT 1 FROM runs wr \
+                 WHERE wr.retention_class = 'zdr_waived' \
+                   AND ('thread:' || wr.thread_id) = ANY(agent_memory.source_links) \
+               ) \
              ORDER BY updated_at DESC LIMIT $4",
         )
         .bind(org_id)
@@ -595,6 +612,11 @@ async fn grounding_candidate_pool(
             "SELECT id, key, content FROM agent_memory \
              WHERE org_id = $1 AND session_id IS NULL AND scope = $2 AND owner = $3 \
                AND is_latest = true AND review_state = 'accepted' \
+               AND NOT EXISTS ( \
+                 SELECT 1 FROM runs wr \
+                 WHERE wr.retention_class = 'zdr_waived' \
+                   AND ('thread:' || wr.thread_id) = ANY(agent_memory.source_links) \
+               ) \
              ORDER BY updated_at DESC LIMIT $4",
         )
         .bind(org_id)
@@ -1223,6 +1245,21 @@ pub(crate) async fn record_dream_run(
     Ok(())
 }
 
+/// Whether any run of `thread_id` was started under a waiver (Z-17). Messages
+/// carry no run id, so the background derivation is excluded per thread: the
+/// extractor and the grounding classifier are paid models, and the Letta mirror
+/// is an external processor, none of which the user accepted for a waived run
+/// (decision D-B). The thread stays readable and keeps its normal persistence.
+async fn thread_has_waived_run(pool: &PgPool, thread_id: &str) -> Result<bool, sqlx::Error> {
+    let (waived,): (bool,) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM runs WHERE thread_id = $1 AND retention_class = 'zdr_waived')",
+    )
+    .bind(thread_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(waived)
+}
+
 async fn load_pending_messages(
     pool: &PgPool,
     limit: i64,
@@ -1237,6 +1274,11 @@ async fn load_pending_messages(
              SELECT 1 FROM dream_runs d \
              WHERE d.thread_id = m.thread_id \
                AND d.metadata ->> 'message_id' = m.id \
+           ) \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM runs wr \
+             WHERE wr.thread_id = m.thread_id \
+               AND wr.retention_class = 'zdr_waived' \
            ) \
          ORDER BY m.created_at ASC, m.sequence ASC \
          LIMIT $1",

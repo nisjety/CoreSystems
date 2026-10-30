@@ -15,6 +15,8 @@ Name | Type
 `context` | string
 `facets` | [Array&lt;FacetCount&gt;](FacetCount.md)
 `policyDowngrades` | Array&lt;string&gt;
+`scoreKind` | string
+`rerank` | [RerankReport](RerankReport.md)
 
 ## Example
 
@@ -32,6 +34,8 @@ const example = {
   "context": null,
   "facets": null,
   "policyDowngrades": null,
+  "scoreKind": null,
+  "rerank": null,
 } satisfies SearchResponse
 
 console.log(example)

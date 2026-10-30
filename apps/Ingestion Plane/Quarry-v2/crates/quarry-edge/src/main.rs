@@ -56,6 +56,7 @@ mod batch_check;
 mod limits;
 mod map_routes;
 mod metrics;
+mod model_plane_gate;
 mod policy_baseline;
 mod profile_encryption;
 mod profile_guard;
@@ -411,6 +412,16 @@ async fn run() -> anyhow::Result<()> {
             "QUARRY_EDGE__QUARRY_SERVICE_API_KEY is required when Data or Model Plane is configured"
         );
     }
+
+    // QB-T17: the Model Plane features. Each is off unless its switch is on AND a model path exists.
+    // A switch that is on without one stays off, and boot logs an error that names it.
+    let model_plane_decision = model_plane_gate::decide(
+        &cfg,
+        cross_plane_tokens.is_some(),
+        &model_plane_gate::manifest_granted,
+    );
+    model_plane_gate::log_refusals(&model_plane_decision.refusals);
+    let mp = model_plane_decision.features;
 
     let redis = if let Some(url) = &cfg.redis_url {
         let client = redis::Client::open(url.as_str())?;
@@ -1298,7 +1309,7 @@ async fn run() -> anyhow::Result<()> {
     // dedupes hot keys for 60 minutes. Any failure or timeout in the LLM
     // call silently falls back to `QueryIntent::Default` — the search
     // path is never blocked by the Model Plane.
-    if cfg.llm_classify_intent {
+    if mp.intent_classifier {
         if let Some(mp_url) = cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()) {
             match build_model_client(mp_url) {
                 Ok(mp) => {
@@ -1336,7 +1347,7 @@ async fn run() -> anyhow::Result<()> {
     // queries. Same gating as the intent classifier: requires the flag AND a
     // Model Plane URL. The rewriter is degrade-safe (original query on any
     // failure), so this never blocks search.
-    if cfg.autoprompt {
+    if mp.autoprompt {
         if let Some(mp_url) = cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()) {
             match build_model_client(mp_url) {
                 Ok(mp) => {
@@ -1375,29 +1386,58 @@ async fn run() -> anyhow::Result<()> {
         None
     };
 
-    // Build the Data Plane vector index once (when DATA_PLANE_URL is set). It is
-    // shared by the hybrid search provider below AND retained in AppState for
-    // the find-similar route (`POST /v1/search/similar`), which queries it
-    // directly rather than going through the lexical/SERP chain.
-    let vector_index: Option<Arc<dyn quarry_runtime::vector_index::VectorIndex>> = cfg
+    // Build the Data Plane vector index once, behind its kill switch
+    // (QUARRY_EDGE__VECTOR_RETRIEVAL, off by default). It is shared by the hybrid
+    // search provider below AND retained in AppState for the find-similar route
+    // (`POST /v1/search/similar`), which queries it directly rather than going
+    // through the lexical/SERP chain. Without the switch, or without DATA_PLANE_URL,
+    // there is no vector leg: search is lexical-only and find-similar answers 501.
+    let vector_index: Option<Arc<dyn quarry_runtime::vector_index::VectorIndex>> = match cfg
         .data_plane_url
         .as_deref()
         .filter(|s| !s.is_empty())
-        .map(|dp_url| {
-            let mut vidx = quarry_runtime::DataPlaneVectorIndex::new(dp_url);
-            if let Some(provider) = cross_plane_tokens.clone() {
-                vidx = vidx.with_token_provider(provider);
-            } else if cfg.cross_plane_auth_dev_bypass {
-                if let Some(key) = cfg
-                    .data_plane_service_token
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                {
-                    vidx = vidx.with_api_key(key);
+    {
+        Some(dp_url) if cfg.vector_retrieval => {
+            let dev_key = cfg
+                .data_plane_service_token
+                .as_deref()
+                .filter(|s| !s.is_empty());
+            // A vector call needs a service identity. Without one the Data Plane
+            // would refuse every call, so the leg stays off and boot says why.
+            let identity = cross_plane_tokens.is_some()
+                || (cfg.cross_plane_auth_dev_bypass && dev_key.is_some());
+            if identity {
+                let mut vidx = quarry_runtime::DataPlaneVectorIndex::new(dp_url)?
+                    .with_sovereign_posture(cfg.zero_saas_search)
+                    .with_hourly_budget(cfg.vector_retrieval_per_org_hourly_budget);
+                if let Some(provider) = cross_plane_tokens.clone() {
+                    vidx = vidx.with_token_provider(provider);
+                } else if cfg.cross_plane_auth_dev_bypass {
+                    if let Some(key) = dev_key {
+                        vidx = vidx.with_api_key(key);
+                    }
                 }
+                tracing::info!(
+                    sovereign = cfg.zero_saas_search,
+                    per_org_hourly_budget = cfg.vector_retrieval_per_org_hourly_budget,
+                    "vector retrieval on: the Data Plane vector leg is wired"
+                );
+                Some(Arc::new(vidx) as Arc<dyn quarry_runtime::vector_index::VectorIndex>)
+            } else {
+                tracing::error!(
+                        "vector retrieval is on but no service identity is configured (cross-plane tokens or the dev bypass key); the vector leg stays off"
+                    );
+                None
             }
-            Arc::new(vidx) as Arc<dyn quarry_runtime::vector_index::VectorIndex>
-        });
+        }
+        Some(_) => {
+            tracing::info!(
+                    "vector retrieval off (QUARRY_EDGE__VECTOR_RETRIEVAL unset): search is lexical-only and find-similar answers 501"
+                );
+            None
+        }
+        None => None,
+    };
 
     // OSS-parity P0 1C: hybrid search (Path A). When the vector index is
     // configured, wrap the lexical/SERP router in a HybridSearchProvider that
@@ -1416,52 +1456,77 @@ async fn run() -> anyhow::Result<()> {
             (other, _) => other,
         };
 
-    // Exa-style semantic rerank — when enabled AND a Model Plane URL is set,
-    // wrap the search provider so the top-N merged results are reordered by
-    // query relevance with a short highlight attached per result. Degrade-safe
-    // inside the reranker (original order on any failure). Wrapping here means
-    // both /v1/search and the AnswerPipeline read reranked results, and the edge
-    // cache stores the reranked output (no repeat LLM cost on cache hits).
+    // Semantic rerank (Quarry option B). When on AND the Data Plane is configured with
+    // cross-plane tokens, its POST /v1/rerank orders the top-N merged results by a
+    // cross-encoder score. The wrapper sits here so both /v1/search and the AnswerPipeline
+    // read reranked results, and the edge cache stores the outcome. No Model Plane is
+    // involved. Degrade-safe: any failure keeps the original order.
+    if cfg.rerank_shadow && !cfg.semantic_rerank {
+        tracing::warn!(
+            "QUARRY_EDGE__RERANK_SHADOW has no effect while QUARRY_EDGE__SEMANTIC_RERANK is off"
+        );
+    }
     let search: Option<Arc<dyn quarry_runtime::serp::SearchProvider>> = match (
         search,
         cfg.semantic_rerank,
-        cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()),
     ) {
-        (Some(inner), true, Some(mp_url)) => match build_model_client(mp_url) {
-            Ok(mp) => {
-                let mut reranker = quarry_runtime::ModelPlaneSearchReranker::new(Arc::new(mp));
-                if let Some(m) = cfg
-                    .semantic_rerank_model
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                {
-                    reranker = reranker.with_model(m);
+        (Some(inner), true) => {
+            let dp_url = cfg.data_plane_url.as_deref().filter(|s| !s.is_empty());
+            match (dp_url, cross_plane_tokens.clone()) {
+                (Some(dp_url), Some(tokens)) => {
+                    match quarry_runtime::DataPlaneSearchReranker::new(dp_url, tokens) {
+                        Ok(reranker) => {
+                            let top_n = cfg
+                                .semantic_rerank_top_n
+                                .unwrap_or(quarry_runtime::rerank::DEFAULT_RERANK_TOP_N)
+                                .clamp(1, quarry_runtime::rerank::MAX_RERANK_DOCUMENTS);
+                            tracing::info!(
+                                top_n,
+                                deadline_ms = cfg.rerank_deadline().as_millis() as u64,
+                                shadow = cfg.rerank_shadow,
+                                sovereign = cfg.zero_saas_search,
+                                "semantic rerank: enabled (Data Plane /v1/rerank)"
+                            );
+                            Some(Arc::new(
+                                quarry_runtime::RerankingSearchProvider::new(
+                                    inner,
+                                    Arc::new(reranker),
+                                    top_n,
+                                )
+                                .with_deadline(cfg.rerank_deadline())
+                                .with_sovereign_posture(cfg.zero_saas_search)
+                                .with_shadow(cfg.rerank_shadow),
+                            )
+                                as Arc<dyn quarry_runtime::serp::SearchProvider>)
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "semantic rerank: the Data Plane client could not be built; rerank disabled"
+                            );
+                            Some(inner)
+                        }
+                    }
                 }
-                let top_n = cfg.semantic_rerank_top_n.unwrap_or(10);
-                tracing::info!(top_n, "semantic rerank: enabled");
-                Some(Arc::new(quarry_runtime::RerankingSearchProvider::new(
-                    inner,
-                    Arc::new(reranker),
-                    top_n,
-                ))
-                    as Arc<dyn quarry_runtime::serp::SearchProvider>)
+                _ => {
+                    tracing::error!(
+                            "semantic rerank is on but DATA_PLANE_URL or the cross-plane tokens are not set; rerank disabled"
+                        );
+                    Some(inner)
+                }
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "semantic rerank: MP client init failed; disabled");
-                Some(inner)
-            }
-        },
-        (other, _, _) => other,
+        }
+        (other, _) => other,
     };
 
     // Cycle 19 / cluster #18: AnswerPipeline (Tavily replacement).
-    // Requires BOTH a SearchProvider AND a Model Plane URL. When either
-    // is missing, /v1/answer returns 501 Unsupported with a hint.
+    // Requires QUARRY_EDGE__ANSWER_SYNTHESIS on (QB-T17), a SearchProvider and a model path.
+    // When any is missing, /v1/answer returns 501 Unsupported with a hint.
     let answer_pipeline: Option<Arc<quarry_runtime::answer::AnswerPipeline>> = match (
         &search,
         cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()),
     ) {
-        (Some(search_arc), Some(mp_url)) => {
+        (Some(search_arc), Some(mp_url)) if mp.answer_synthesis => {
             match build_model_client(mp_url) {
                 Ok(mp_client) => {
                     let mp_arc = Arc::new(mp_client);
@@ -1492,7 +1557,15 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         _ => {
-            tracing::info!("answer pipeline disabled (search or model_plane_url unset)");
+            if mp.answer_synthesis && search.is_none() {
+                tracing::error!(
+                    "QUARRY_EDGE__ANSWER_SYNTHESIS is on but no SearchProvider is configured: answer synthesis stays OFF"
+                );
+            } else {
+                tracing::info!(
+                    "answer pipeline off (QUARRY_EDGE__ANSWER_SYNTHESIS is not on, or no SearchProvider)"
+                );
+            }
             None
         }
     };
@@ -1647,8 +1720,10 @@ async fn run() -> anyhow::Result<()> {
     // as the other Model Plane consumers above. Absence of a Model Plane URL
     // simply leaves `title_source` at `html`/`host`.
     let page_title_enricher: Option<Arc<quarry_runtime::page_extract::PageTitleEnricher>> =
-        if !cfg.page_title_enrich.unwrap_or(true) {
-            tracing::info!("page-title enrichment disabled by QUARRY_EDGE__PAGE_TITLE_ENRICH=false");
+        if !mp.page_title {
+            tracing::info!(
+                "page-title enrichment off (QUARRY_EDGE__PAGE_TITLE_ENRICH is not on, or no model path)"
+            );
             None
         } else {
             match cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()) {
@@ -1742,6 +1817,7 @@ async fn run() -> anyhow::Result<()> {
         page_title_enricher,
         service_token_provider: cross_plane_tokens.clone(),
         answer_pipeline,
+        model_plane: mp,
         local_index,
         usage,
         limits: org_limits,

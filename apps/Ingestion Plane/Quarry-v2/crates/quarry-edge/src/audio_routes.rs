@@ -89,6 +89,17 @@ pub async fn audio(
     // Claims extension here ensures the route requires auth; the claim
     // itself isn't yet woven into the MP request body, but future
     // metering / billing hooks will use `claims.org_id`.
+    // QB-T17: off unless QUARRY_EDGE__MODEL_AUDIO is on and the model-audio grant exists.
+    if !state.model_plane.model_audio {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({
+                "error": "audio is not available on this edge",
+                "code": "UNSUPPORTED",
+                "hint": "audio needs QUARRY_EDGE__MODEL_AUDIO=1 and a granted Model Plane path (MODEL_PLANE_URL)",
+            })),
+        );
+    }
     let model_plane_url = match state.model_plane_url.as_deref() {
         Some(url) if !url.is_empty() => url,
         _ => {
@@ -291,6 +302,54 @@ mod tests {
         }
     }
 
+    /// QB-T17: with `QUARRY_EDGE__MODEL_AUDIO` off, `POST /v1/audio` answers 501 and makes no mint
+    /// and no Model Plane call: the registry refuses that call, so none is attempted.
+    #[tokio::test]
+    async fn audio_makes_no_model_plane_call_while_its_switch_is_off() {
+        use crate::test_support::{claims_for_org, test_state, StubDriver};
+        use quarry_runtime::service_tokens::{
+            AuthCoreServiceTokenProvider, SharedServiceTokenProvider,
+        };
+        use serde_json::json;
+        use std::sync::Arc;
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth_core = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "token": "header.payload.signature",
+                "expiresInSeconds": 300
+            })))
+            .mount(&auth_core)
+            .await;
+        let model_plane = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .mount(&model_plane)
+            .await;
+        let provider: SharedServiceTokenProvider = Arc::new(
+            AuthCoreServiceTokenProvider::new(auth_core.uri(), "credential-long-enough").unwrap(),
+        );
+        let state = AppState {
+            model_plane_url: Some(model_plane.uri()),
+            service_token_provider: Some(provider),
+            ..test_state(StubDriver::ok())
+        };
+        let request: AudioRequest = serde_json::from_value(json!({ "input": "hello" })).unwrap();
+
+        let (status, _) = audio(
+            State(state),
+            axum::Extension(claims_for_org("org_audio")),
+            Json(request),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert!(auth_core.received_requests().await.unwrap().is_empty());
+        assert!(model_plane.received_requests().await.unwrap().is_empty());
+    }
+
     /// The token request the handler makes is the `model-audio` row of the
     /// cross-plane manifest, as quarry-runtime's `token_request_contract` tests
     /// hold every other call path to its row. The handler, the real
@@ -328,6 +387,10 @@ mod tests {
         let state = AppState {
             model_plane_url: Some(model_plane.uri()),
             service_token_provider: Some(provider),
+            model_plane: crate::model_plane_gate::ModelPlaneFeatures {
+                model_audio: true,
+                ..Default::default()
+            },
             ..test_state(StubDriver::ok())
         };
         let request: AudioRequest = serde_json::from_value(json!({ "input": "hello" })).unwrap();

@@ -299,6 +299,7 @@ pub async fn attach_run(
     record_browser_timeline_event(
         &state,
         &entry,
+        &handle.live,
         BrowserTimelineEventKind::Attach {
             state: BrowserAttachState::Attached,
             attach_id: attach_id.clone(),
@@ -310,6 +311,7 @@ pub async fn attach_run(
     record_browser_timeline_event(
         &state,
         &entry,
+        &handle.live,
         BrowserTimelineEventKind::Tab {
             operation: BrowserTabOperation::Opened,
             tab_id: Some(tab_id.clone()),
@@ -419,6 +421,7 @@ async fn finish_attach(
     if let Err(error) = record_browser_timeline_event(
         state,
         entry,
+        &handle.live,
         BrowserTimelineEventKind::Attach {
             state: phase,
             attach_id: ended.attach_id.clone(),
@@ -534,6 +537,7 @@ pub async fn control_tab(
         record_browser_timeline_event(
             &state,
             &entry,
+            &handle.live,
             BrowserTimelineEventKind::TabControl {
                 tab_id: tab_id.clone(),
                 holder,
@@ -753,6 +757,7 @@ pub(super) async fn delegate_step(
         live.budget.charge();
         live.last_activity_ms = unix_ms_now();
     }
+    let egress_cursor = lane.ctx.last_egress_sequence;
     let step_result = runner.execute(&req, &pinned, &mut lane.ctx).await;
     let mut entry = handle.entry.lock().await;
     // D2-031: the attachment may have been released, revoked or ended (or the run closed)
@@ -787,8 +792,24 @@ pub(super) async fn delegate_step(
             // zdr-log-ok: a ZDR run has no delegate (attach is refused for it); the store error text is what an operator needs
             tracing::warn!(%error, "could not record the receipt of a delegate step whose attachment ended");
         }
+        // D2: the spent key is saved (skipped when the run itself closed).
+        checkpoint_failed_step(state, &entry, &handle.live).await;
         return Err(not_found());
     }
+    // The landed page is checked before the receipt and the checkpoint (T4b-1), against the
+    // attachment's hosts. An agent tab opened without a start URL is on `about:blank`.
+    let ran = step_result.as_ref().ok().map(|observation| observation.telemetry.clone());
+    let step_result = step_result.and_then(|observation| {
+        super::step::check_landed_page(
+            state,
+            &handle.live,
+            entry.zdr.is_active(),
+            &observation.url,
+            |url| domain_allowed(url, &attach.allowed_domains),
+            "browser action reached a domain outside the attachment's allowed domains",
+        )?;
+        Ok(observation)
+    });
     let observation = match step_result {
         Ok(observation) => {
             let cost_usd = receipt_cost_usd(&observation.telemetry, &receipt_action);
@@ -810,21 +831,22 @@ pub(super) async fn delegate_step(
             observation
         }
         Err(error) => {
+            let (failed_usd, failed_source) = failed_step_cost(ran.as_ref(), &receipt_action);
+            lane.ctx.last_egress_sequence = egress_cursor;
             let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
                 .org_id(receipt_org)
                 .actor_id(receipt_actor)
                 .initiator(StepInitiator::Agent, admitted.control_epoch)
                 .agent(admitted.agent.clone())
-                .failed_cost(estimated_action_cost_usd(&receipt_action))
-                .cost_source(CostSource::FlatTable)
+                .failed_cost(failed_usd)
+                .cost_source(failed_source)
                 .tab(Some(tab_id.clone()), Some(attach_id.clone()))
                 .typed_field(typed_kind)
                 .fail(receipt_action, &error);
-            state
-                .receipts
-                .append(receipt)
-                .await
-                .map_err(|error| driver_err(request_id, error))?;
+            let appended = state.receipts.append(receipt).await;
+            // D2: the spent key is saved whether or not its receipt was kept.
+            checkpoint_failed_step(state, &entry, &handle.live).await;
+            appended.map_err(|error| driver_err(request_id, error))?;
             return Err(driver_err(request_id, error));
         }
     };
@@ -834,21 +856,10 @@ pub(super) async fn delegate_step(
     if !entry.zdr.is_active() {
         state
             .receipts
-            .save_run_checkpoint(checkpoint_for_entry(&entry))
+            .save_run_checkpoint(checkpoint_for_entry(&entry, &handle.live))
             .await
             .map_err(|error| driver_err(request_id, error))?;
     }
-    if !domain_allowed(&observation.url, &attach.allowed_domains) {
-        return Err(driver_err(
-            request_id,
-            QuarryError::new(
-                ErrorCode::SecurityBlocked,
-                "browser action reached a domain outside the attachment's allowed domains",
-            ),
-        ));
-    }
-    crate::agent_policy_gate::gate_visit(state, &handle.live, entry.zdr.is_active(), &observation.url)
-        .map_err(|error| driver_err(request_id, error))?;
     Ok(Json(Envelope::ok(request_id.to_owned(), observation)))
 }
 
@@ -877,6 +888,7 @@ pub(super) async fn person_tab_gate(
         record_browser_timeline_event(
             state,
             entry,
+            &handle.live,
             BrowserTimelineEventKind::TabControl {
                 tab_id,
                 holder: BrowserTabHolder::Human,

@@ -174,6 +174,11 @@ func registerCodexSubscriptionRoutes(
 			if deleteErr != nil {
 				return deleteErr
 			}
+			// A removed subscription keeps no live acknowledgement; the revocation and its audit rows
+			// commit with the removal.
+			if _, err := store.RevokeAcknowledgementsOnRemoval(c.UserContext(), tx, connection.ID, time.Time{}); err != nil {
+				return err
+			}
 			return persist(store.AuditEvent{
 				ID:             auditMutationID(c.UserContext(), "codex-subscription-disconnected", connection.ID),
 				OrganizationID: connection.OrganizationID,
@@ -405,6 +410,9 @@ func markCodexSubscriptionLoginTerminal(c *fiber.Ctx, cfg ServerConfig, connecti
 	_ = withAuditTransaction(c.UserContext(), cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
 		updated, err := tx.MarkConnectionDeleted(c.UserContext(), connection.ID)
 		if err != nil {
+			return err
+		}
+		if _, err := store.RevokeAcknowledgementsOnRemoval(c.UserContext(), tx, connection.ID, time.Time{}); err != nil {
 			return err
 		}
 		return persist(store.AuditEvent{

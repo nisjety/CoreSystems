@@ -27,6 +27,11 @@ export class ApiError extends Error {
   readonly resumable: boolean
   /** The typed bot-wall reason (`blockReason`, or Quarry's `details.block_reason`), as sent. */
   readonly blockReason: string | null
+  /**
+   * The feature a zero-retention refusal names (`zdr_feature_not_supported`),
+   * by its key, when the body carries one. Null otherwise.
+   */
+  readonly feature: string | null
 
   constructor(message: string, status: number, code: string | null, hints: ApiErrorHints = {}) {
     super(message)
@@ -37,6 +42,7 @@ export class ApiError extends Error {
     this.retryAfterSeconds = hints.retryAfterSeconds ?? null
     this.resumable = hints.resumable === true
     this.blockReason = hints.blockReason ?? null
+    this.feature = hints.feature ?? null
   }
 }
 
@@ -46,6 +52,8 @@ export type ApiErrorHints = {
   retryAfterSeconds?: number | null
   resumable?: boolean
   blockReason?: string | null
+  /** The feature key a zero-retention refusal (`zdr_feature_not_supported`) names. */
+  feature?: string | null
 }
 
 /** A retry hint in whole seconds, or null when it is missing or not sane (1..3600). */
@@ -76,6 +84,8 @@ function applyDevAuth(headers: Headers): void {
  *    `{ error, code: "no_speech_detected" }`, keep their top-level code
  *  - Better Auth passthrough:   `{ code, message }` (auth routes are proxied
  *    verbatim by the gateway, so the SPA sees Better Auth's native shape)
+ * A zero-retention refusal also names its feature (`error.feature`, a key); it
+ * is returned only when present, so every other error keeps its exact shape.
  */
 export function extractError(
   body: unknown,
@@ -105,6 +115,7 @@ export function extractError(
           retryAfterSeconds: boundedSeconds(e.retryAfterSeconds) ?? boundedSeconds(details?.retry_after_seconds),
           resumable: e.resumable === true || details?.resumable === true,
           blockReason: typeof blockReason === 'string' ? blockReason : null,
+          feature: typeof e.feature === 'string' && e.feature.trim() ? e.feature : null,
         },
       }
     }

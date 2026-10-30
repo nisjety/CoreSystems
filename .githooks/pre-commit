@@ -53,6 +53,8 @@ LOCKFILE_EXCLUDES=(
   ':(exclude,glob)**/pnpm-lock.yaml'
   ':(exclude,glob)**/package-lock.json'
   ':(exclude,glob)**/yarn.lock'
+  # The generated interactive-demo bundle (stage 04) is scanned by scripts/build-product-demo.mjs instead.
+  ':(exclude,glob)**/verevon-web/public/product-demo/**'
 )
 
 # Nothing staged outside the lockfile excludes (a mode-only change, an empty

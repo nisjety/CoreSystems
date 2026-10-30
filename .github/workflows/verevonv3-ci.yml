@@ -281,3 +281,58 @@ jobs:
           --tag verevonv3-ci:${{ github.sha }}
           --load
           .
+
+  # Interactive demo (stage 04). The committed bundle must equal a fresh build, and the built demo
+  # must pass its privacy probe. Scripts and budgets: scripts/build-product-demo.mjs and
+  # scripts/probe-product-demo.mjs in the SPA package.
+  demo-product-build:
+    name: SPA — interactive demo bundle (manifest, rebuild, privacy probe)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 'apps/Frontend Plane/verevonv3'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: '11.3.0'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: 'apps/Frontend Plane/verevonv3/pnpm-lock.yaml'
+
+      # Same SDK step as the other SPA jobs: @quarry/client is a file: dependency.
+      - name: Generate and build the Quarry TypeScript SDK
+        working-directory: 'apps/Ingestion Plane/Quarry-v2/sdks'
+        run: |
+          ./generate.sh
+          cd typescript
+          pnpm install --ignore-scripts
+          pnpm run build
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Manifest is current with its sources (no build)
+        run: node scripts/build-product-demo.mjs --verify
+
+      - name: Rebuild the demo; the committed bundle must not change
+        run: |
+          node scripts/build-product-demo.mjs
+          changed=$(git status --porcelain --untracked-files=all -- apps/verevon-web/public/product-demo)
+          if [ -n "$changed" ]; then
+            echo "::error::The committed demo bundle differs from a fresh build. Rebuild from a clean tree with node scripts/build-product-demo.mjs and commit the result."
+            echo "$changed"
+            exit 1
+          fi
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Privacy and smoke probe of the demo
+        run: node scripts/probe-product-demo.mjs

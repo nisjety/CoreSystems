@@ -108,6 +108,11 @@ impl RunOwnershipResolver for SessionCoreRunOwnershipResolver {
             .await
             .map(|response| response.into_inner().authorized)
             .map_err(|error| {
+                // A typed refusal from Session Core (owner decision 17) is the answer and passes through,
+                // so the caller sees the reason rather than a retryable outage.
+                if mp_contracts::zdr_refusal::Refusal::from_status(&error).is_some() {
+                    return error;
+                }
                 warn!(code = ?error.code(), "Session Core run ownership lookup unavailable");
                 Status::unavailable("run ownership unavailable")
             })
@@ -221,6 +226,12 @@ impl ExecutionService {
         run_id: &str,
         session_bearer: &DelegatedSessionBearer,
     ) -> Result<(), Status> {
+        // Every user bearer of a run carries the caller's own retention posture
+        // (Z-18, matrix rule 1). Nothing else on this path judges the session
+        // bearer, so it is judged here, before the run's authority is used.
+        self.auth
+            .bind_session_bearer(session_bearer, caller)
+            .await?;
         authorize_durable_run_owner(
             &self.state,
             self.ownership.as_ref(),
@@ -646,16 +657,20 @@ async fn create_durable_approval(
         })
 }
 
+/// Refuses a durable execution path (a tool, an agent run, a run control) for a
+/// caller whose token says ZDR, or whose request does. `feature` is the catalogue
+/// key of what is refused, so the status names it.
 #[allow(clippy::result_large_err)]
 fn enforce_persistence_free_execution(
     caller: &AuthenticatedUser,
     request_zdr: bool,
-    operation: &'static str,
+    feature: &'static str,
 ) -> Result<(), Status> {
     if caller.zdr || request_zdr {
-        return Err(Status::failed_precondition(format!(
-            "ZDR {operation} is disabled until its lifecycle is persistence-free"
-        )));
+        return Err(
+            mp_contracts::zdr_refusal::Refusal::feature_not_supported(feature)
+                .grpc_status(tonic::Code::FailedPrecondition),
+        );
     }
     Ok(())
 }
@@ -731,7 +746,8 @@ fn validate_direct_permission_mode(permission_mode: &str) -> Result<(), Status> 
 /// `subscription_connection_id` of every run that predates the fields) passes
 /// untouched. One that names the ChatGPT subscription route passes only when
 /// `crate::agent_route::validate_run_route` says so (kill switch on, canonical
-/// provider, a connection, a concrete model, read-only, not ZDR).
+/// provider, a connection, a concrete model, read-only, and a retention the
+/// caller's claims allow: a waiver for this connection, or an ordinary turn).
 ///
 /// The refusals are `PermissionDenied` or `InvalidArgument`, which model-gateway
 /// terminalizes as a confirmed dispatch rejection: nothing ran, so the prepared
@@ -745,8 +761,9 @@ fn validate_direct_permission_mode(permission_mode: &str) -> Result<(), Status> 
 fn enforce_agent_route(
     req: &pb::RunAgentRequest,
     switches: mp_contracts::agentic_subscription::Switches,
+    caller: &AuthenticatedUser,
 ) -> Result<(), Status> {
-    crate::agent_route::validate_run_route(req, switches).inspect_err(|status| {
+    crate::agent_route::validate_run_route(req, switches, caller).inspect_err(|status| {
         warn!(
             run_id = %req.run_id,
             code = ?status.code(),
@@ -814,9 +831,10 @@ fn authorize_scheduled_step_service(
         ));
     }
     if caller.zdr {
-        return Err(Status::failed_precondition(
-            "scheduled-step execution requires persistent service retention",
-        ));
+        return Err(
+            mp_contracts::zdr_refusal::Refusal::feature_not_supported("scheduled_step")
+                .grpc_status(tonic::Code::FailedPrecondition),
+        );
     }
     Ok(())
 }
@@ -878,7 +896,7 @@ impl ExecutionCore for ExecutionService {
             .await?;
         reject_direct_owner_action(&req.tool_name)?;
         validate_direct_permission_mode(&req.permission_mode)?;
-        enforce_persistence_free_execution(&caller, req.zdr, "tool execution")?;
+        enforce_persistence_free_execution(&caller, req.zdr, "tool_execution")?;
         // Resolve the opaque JSON grant id with BrowserBroker only after the
         // signed caller and durable run owner are authorized. The resulting
         // immutable policy is passed to the runtime; raw tool JSON cannot
@@ -940,6 +958,10 @@ impl ExecutionCore for ExecutionService {
             Some(&browser_sink),
             Some(&self.state),
             req.zdr,
+            // The caller's own waiver (Z-18): a waived caller's retrieval is
+            // filtered, whichever step it runs. A step names no model route, so
+            // nothing else is judged here.
+            caller.zdr_waiver.is_some(),
             req.min_privacy_tier,
             Some(data_plane_bearer.as_str()),
             Some(session_bearer.as_str()),
@@ -1074,7 +1096,7 @@ impl ExecutionCore for ExecutionService {
         // A resumed retained run can emit session events and perform external
         // browser actions. Do not rely on Model Gateway alone: Execution Core
         // is the authoritative execution-dispatch boundary.
-        enforce_persistence_free_execution(&caller, false, "run control")?;
+        enforce_persistence_free_execution(&caller, false, "run_control")?;
         let req = request.into_inner();
         caller.authorize(&req.org_id, None)?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
@@ -1137,7 +1159,7 @@ impl ExecutionCore for ExecutionService {
     ) -> Result<Response<pb::CancelRunResponse>, Status> {
         let session_bearer = delegated_session_bearer(&request)?;
         let caller = self.auth.authenticate(&request).await?;
-        enforce_persistence_free_execution(&caller, false, "run control")?;
+        enforce_persistence_free_execution(&caller, false, "run_control")?;
         let req = request.into_inner();
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
@@ -1177,7 +1199,7 @@ impl ExecutionCore for ExecutionService {
     ) -> Result<Response<pb::PauseRunResponse>, Status> {
         let session_bearer = delegated_session_bearer(&request)?;
         let caller = self.auth.authenticate(&request).await?;
-        enforce_persistence_free_execution(&caller, false, "run control")?;
+        enforce_persistence_free_execution(&caller, false, "run_control")?;
         let req = request.into_inner();
         caller.authorize(&req.org_id, None)?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
@@ -1234,12 +1256,16 @@ impl ExecutionCore for ExecutionService {
         caller.authorize(&req.org_id, Some(&req.user_id))?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
-        enforce_persistence_free_execution(&caller, req.zdr, "agent run")?;
+        enforce_persistence_free_execution(&caller, req.zdr, "agent_run")?;
         // The inference route the request names (`provider_hint` and
         // `subscription_connection_id`) is judged here, at the boundary and
         // before any of the run's work: a route this process may not honour is
         // refused, never replaced by the default one.
-        enforce_agent_route(&req, mp_contracts::agentic_subscription::Switches::from_env())?;
+        enforce_agent_route(
+            &req,
+            mp_contracts::agentic_subscription::Switches::from_env(),
+            &caller,
+        )?;
         info!(
             run_id = %req.run_id,
             thread_id = %req.thread_id,
@@ -1250,6 +1276,7 @@ impl ExecutionCore for ExecutionService {
             &self.state,
             self.session_channel.clone(),
             self.inference_channel(),
+            &caller,
             req,
             Some(data_plane_bearer.as_str().to_owned()),
             Some(session_bearer.as_str().to_owned()),
@@ -1793,7 +1820,7 @@ mod auth_tests {
     #[test]
     fn signed_zdr_blocks_execution_dispatch_and_durable_run_control() {
         let caller = AuthenticatedUser::for_test_with_zdr("org-owner", "user-owner", true);
-        for operation in ["tool execution", "run control"] {
+        for operation in ["tool_execution", "run_control"] {
             let error = enforce_persistence_free_execution(&caller, false, operation)
                 .expect_err("signed ZDR must dominate a caller-controlled request flag");
             assert_eq!(error.code(), tonic::Code::FailedPrecondition);
@@ -1888,11 +1915,17 @@ mod auth_tests {
             allow_effects: false,
         };
 
+    /// The verified caller of a run that is not ZDR and holds no waiver.
+    fn route_caller() -> AuthenticatedUser {
+        AuthenticatedUser::for_test("org-1", "user-1")
+    }
+
     #[test]
     fn a_subscription_run_is_refused_when_the_switch_is_off() {
         let error = enforce_agent_route(
             &subscription_run(),
             mp_contracts::agentic_subscription::Switches::OFF,
+            &route_caller(),
         )
         .expect_err("a disabled route must not start");
         assert_eq!(error.code(), tonic::Code::PermissionDenied);
@@ -1904,23 +1937,43 @@ mod auth_tests {
             error.message()
         );
         // The only difference from a run that is accepted is the switch.
-        enforce_agent_route(&subscription_run(), ROUTE_ON).expect("switch on admits the run");
+        enforce_agent_route(&subscription_run(), ROUTE_ON, &route_caller())
+            .expect("switch on admits the run");
     }
 
     #[test]
     fn a_subscription_run_is_refused_with_zdr_or_a_pseudo_model() {
         let mut zdr = subscription_run();
         zdr.zdr = true;
-        let error = enforce_agent_route(&zdr, ROUTE_ON).expect_err("the seat has no ZDR commitment");
+        let error = enforce_agent_route(&zdr, ROUTE_ON, &route_caller())
+            .expect_err("the seat has no ZDR commitment");
         assert_eq!(error.code(), tonic::Code::PermissionDenied);
 
         for pseudo in ["verevon-balance", "verevon-auto", "Verevon-Genius", ""] {
             let mut request = subscription_run();
             request.model = pseudo.to_owned();
-            let error =
-                enforce_agent_route(&request, ROUTE_ON).expect_err("a pseudo model names no model");
+            let error = enforce_agent_route(&request, ROUTE_ON, &route_caller())
+                .expect_err("a pseudo model names no model");
             assert_eq!(error.code(), tonic::Code::InvalidArgument, "{pseudo:?}");
         }
+    }
+
+    /// The gateway boundary admits a waived run on its own connection only (Z-18):
+    /// the same request, with the caller's waiver for another connection, is refused.
+    #[test]
+    fn a_waived_subscription_run_is_admitted_only_on_its_own_connection() {
+        let waived = AuthenticatedUser::for_test_with_waiver("org-1", "user-1", "conn_1", "ack-1");
+        enforce_agent_route(&subscription_run(), ROUTE_ON, &waived)
+            .expect("the waiver binds this connection");
+
+        let other = AuthenticatedUser::for_test_with_waiver("org-1", "user-1", "conn_2", "ack-1");
+        let error = enforce_agent_route(&subscription_run(), ROUTE_ON, &other)
+            .expect_err("a waiver for another connection is refused");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            mp_contracts::zdr_refusal::Refusal::from_status(&error).map(|refusal| refusal.code()),
+            Some(mp_contracts::zdr_refusal::code::WAIVER_ROUTE_MISMATCH)
+        );
     }
 
     #[test]
@@ -1940,7 +1993,7 @@ mod auth_tests {
             ("alias provider", alias, ROUTE_ON),
             ("not read-only", acting, ROUTE_ON),
         ] {
-            let error = enforce_agent_route(&request, switches).expect_err(label);
+            let error = enforce_agent_route(&request, switches, &route_caller()).expect_err(label);
             assert!(
                 matches!(
                     error.code(),
@@ -1962,7 +2015,8 @@ mod auth_tests {
             ..Default::default()
         };
         for switches in [mp_contracts::agentic_subscription::Switches::OFF, ROUTE_ON] {
-            enforce_agent_route(&plain, switches).expect("a route-less run is unchanged");
+            enforce_agent_route(&plain, switches, &route_caller())
+                .expect("a route-less run is unchanged");
         }
     }
 

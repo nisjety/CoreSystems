@@ -10,14 +10,16 @@ type SharePointDocument = {
   metadata?: Record<string, unknown>
 }
 
-export type AquatiqUpdate = { id: string; title: string; url: string; site: string; updatedAt?: string }
-export type AquatiqUpdates = { pages: AquatiqUpdate[]; hasMore: boolean }
+export type WorkspacePage = { id: string; title: string; url: string; site: string; updatedAt?: string }
+export type WorkspacePages = { pages: WorkspacePage[]; hasMore: boolean }
 
 function sharePointUrl(value: unknown): URL | null {
   if (typeof value !== 'string') return null
   try {
     const url = new URL(value)
-    return url.protocol === 'https:' && url.hostname.endsWith('.sharepoint.com') && !url.username && !url.password ? url : null
+    // The interactive demo build serves reserved .example hosts, so it never carries a real tenant name.
+    const allowedHost = url.hostname.endsWith('.sharepoint.com') || (import.meta.env.VITE_DEMO === '1' && url.hostname.endsWith('.example'))
+    return url.protocol === 'https:' && allowedHost && !url.username && !url.password ? url : null
   } catch { return null }
 }
 
@@ -25,7 +27,7 @@ function sharePointUrl(value: unknown): URL | null {
  * source registration, sync, or browser persistence. The connector does not
  * currently preserve news promotion metadata: do not claim these are a
  * complete feed of published news. Known home/draft pages are excluded. */
-export async function loadAquatiqUpdates(orgId: string, signal?: AbortSignal): Promise<AquatiqUpdates> {
+export async function loadWorkspacePages(orgId: string, signal?: AbortSignal): Promise<WorkspacePages> {
   const payload = await requestJson<{ documents: SharePointDocument[] | null; total?: number }>(
     '/api/v1/knowledge/documents?type=sharepoint_page&limit=100&offset=0',
     { headers: { 'X-Org-Id': orgId }, signal },
@@ -33,7 +35,7 @@ export async function loadAquatiqUpdates(orgId: string, signal?: AbortSignal): P
   // documents-api's Go nil slice serializes as null when the count is zero.
   if (payload.documents === null && payload.total === 0) return { pages: [], hasMore: false }
   if (!Array.isArray(payload.documents)) throw new Error('SharePoint pages response is unavailable')
-  const pages = payload.documents.flatMap((document): AquatiqUpdate[] => {
+  const pages = payload.documents.flatMap((document): WorkspacePage[] => {
     const metadata = document.metadata ?? {}
     const url = sharePointUrl(metadata.web_url)
     if (document.source !== 'sharepoint' || document.type !== 'sharepoint_page' || !url

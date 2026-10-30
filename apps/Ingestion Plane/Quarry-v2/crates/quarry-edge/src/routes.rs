@@ -2193,6 +2193,7 @@ mod tests {
             page_title_enricher: None,
             service_token_provider: None,
             answer_pipeline: None,
+            model_plane: Default::default(),
             local_index: None,
             usage: Arc::new(NoopUsageMeter),
             limits: Arc::new(crate::limits::StaticFloor),

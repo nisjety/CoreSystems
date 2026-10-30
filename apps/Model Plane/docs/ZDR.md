@@ -414,13 +414,75 @@ comes first.
 | `zdr_no_attested_provider`, `zdr_gate_unavailable` | gateway, enabling org ZDR | Built |
 | `retention_posture_unavailable` | Auth Core mint, posture unresolvable (503) | Built |
 | `zdr_feature_not_supported`, `zdr_durable_mutation_forbidden`, `zdr_draft_persistence_forbidden`, `zdr_ai_proposal_forbidden`, `zdr_recurrence_forbidden` | model-gateway, gateway, conversation-core | Built |
-| `zdr_connection_not_acknowledged`, `zdr_connection_not_supported`, `zdr_explicit_request_not_supported_by_connection`, `zdr_decision_unavailable` | decision and turn start | Designed, not built |
+| `zdr_connection_not_supported` | decision and turn start | Built (Z-00) on the HTTP stream, unary and `/v1/ai/chat` paths; not yet on gRPC |
+| `zdr_connection_not_acknowledged`, `zdr_explicit_request_not_supported_by_connection`, `zdr_decision_unavailable` | decision and turn start | Designed, not built |
 | `zdr_waiver_route_mismatch`, `zdr_posture_mismatch` | the planes that receive tokens | Designed, not built |
 
 This document and the others that name these codes are checked by
 `docs/compliance/evidence/tools/check-doc-codes.mjs` (registry `doc-codes.json` in the
 same folder): a code presented as built must be in its source file, and a document that
 names a designed code must say "not built".
+
+### 5.10 Reduced answers: the retrieval notice (Z-41b)
+
+A ZDR or waived turn that asks for organisation knowledge is answered from text search only when the Data
+Plane has no ZDR-approved route to embed the query. No embedding route is attested while Z-40 is not done, so
+that is the case the code is built for; the live state was not checked for this section. The Data Plane says so
+with the notice `zdr_dense_unavailable`. A ZDR turn is told it under that code. A waived turn runs
+persistent for its connection, so it is told only that its answer was reduced, under the generic code
+`retrieval_reduced`, and never the zero-retention wording. model-gateway passes the notice on in three places:
+
+- the `retrieval_notice` SSE event, `{code, wording_key, request_id}`. It is a control event, sent whatever
+  features the client opted into, and before the answer. On a durable turn it is buffered like every other
+  frame, so a resumed stream replays it. A ZDR answer has no stream buffer by design, so it cannot be resumed,
+  and its notice reaches only the live connection;
+- `notice` on the answer of `POST /v1/retrieval`, present only when the answer was reduced;
+- `retrieval_notice` in the knowledge-search tool result that the model reads.
+
+The notice carries only the code and the key the client's wording is filed under, never the Data Plane's
+English sentence. The wording belongs to the client (task Z-20). A persistent turn never carries the notice,
+whatever mode its body asks for. Where the Data Plane refuses a restrictive retrieval instead of answering it
+(`failed_precondition` with the reason `zdr_dense_unavailable`, the form its streaming retrieval uses), the turn
+gets the typed `zdr_unavailable` refusal, not an empty answer.
+
+Not covered yet: the source-verification retrieval that runs after a durable answer, whose verdict does not
+carry the notice, and a refused knowledge search inside the tool loop, which reaches the model as a tool error.
+The gateway's unary Data Plane call never receives that refusal today, so the typed path is proven by a Data
+Plane double only. With hybrid search switched off on the Data Plane, the same refusal reaches the gateway as an
+internal error, so the answer goes on ungrounded with no notice. The typed refusal has to come from the Data Plane
+(task Z-41); this section does not change it. The live proof needs an attested ZDR route, so it waits for Z-40 and Z-60.
+
+### 5.11 Durable mutations and the retention receipt (Z-15b)
+
+Owner decision 17 (2026-10-13) splits the durable mutations by what they do.
+
+1. **Deletes, archives and presentation controls are the owner's housekeeping under every posture.** A
+   zero-retention user can delete or archive a thread, set its pin and persona controls, delete a memory of their
+   own, and remove an MCP server they own. Each keeps its org and owner checks. A presentation request that carries a title or a preview is
+   refused as a durable mutation under ZDR, because a ZDR credential never persists conversation text.
+2. **Starting or advancing stored work, and continuing a stored run, is allowed only when the caller's posture
+   equals the receipt of the object it changes.** The receipt is the run's retention receipt (Z-17). A plan or a
+   todo takes the receipt of its run, and a plan with no run is persistent. An approval takes its run's receipt.
+   A ZDR credential is always refused with `zdr_durable_mutation_forbidden`, because a ZDR run keeps no plan, todo
+   or approval to advance. A waiver is valid only for the run started under the same waiver (same connection and
+   acknowledgement). Any other difference is `zdr_posture_mismatch`. Every refusal comes before any state change.
+3. **Service workloads are not held to a user's posture.** They act for the run's owner under their own scope, and
+   their system writes (the terminal outcome of a ZDR run among them) keep working.
+
+Where it is enforced. Session Core: `retention_receipt::require_stored_posture`, `run_owner_matches` (behind
+`ResolveRunOwner`), `stored_plan_retention`, `stored_todo_retention` and `stored_approval_retention`, called from
+`TransitionPlan`, `TransitionTodo` and `DecideApproval`. Model Gateway: `zdr_posture::continuation_gate` on approve,
+reject, todo update, approval decision, resume, cancel and plan approval. A typed refusal from Session Core passes
+through the run-owner gate unchanged.
+
+Left as they were. Create memory, create document, queue input, feedback, the MCP register, share, OAuth and connect
+routes, and the task and cron proxies are not continuations. They keep the blanket refusal of ZDR and waived
+credentials. A waiver is minted only behind Auth Core's kill switch, which is off by default.
+
+Open. Threads carry no receipt: Z-17 stamps runs. A waived turn that appends to an existing thread (`AppendMessage`)
+is therefore not checked against that thread's posture. Closing this needs a thread receipt (a migration and a stamp
+at thread creation). Until then the owner's continuation rule covers plans, todos, approvals and runs, not threads.
+A ZDR credential is refused on thread appends by Session Core's ordinary write rule, which is untyped.
 
 ---
 

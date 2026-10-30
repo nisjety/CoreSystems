@@ -1,0 +1,15 @@
+{
+  "filters": {
+    "sources": [
+      "quarry"
+    ]
+  },
+  "mode_mix": {
+    "rerank": false
+  },
+  "org_id": "org-golden",
+  "query": "how often is the conveyor belt cleaned",
+  "sovereign_required": false,
+  "top_n": 10,
+  "zdr_mode": "disabled"
+}

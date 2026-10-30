@@ -97,8 +97,13 @@ redis.call('EXPIRE', KEYS[1], ttl)
 return allowed
 "#;
 
+/// The bucket namespace in Dragonfly: `{key_prefix}{org}`. The engine-wide limiter and the
+/// rerank-class limiter use different prefixes, so one never drains the other.
+const DEFAULT_KEY_PREFIX: &str = "dpv2:ratelimit:";
+
 struct LimiterInner {
     redis_url: String,
+    key_prefix: String,
     rps: f64,
     burst: f64,
     ttl_seconds: i64,
@@ -127,6 +132,24 @@ impl PerOrgLimiter {
         Self::with_config(rps, burst, redis_url)
     }
 
+    /// The rerank-class limiter for `POST /v1/rerank` (QB-T05a): its own bucket namespace,
+    /// `DPV2_WEB_RERANK_RATE_LIMIT_PER_ORG_RPS` (default 5) and `..._BURST` (default 10).
+    /// The same token bucket and fail-open convention as [`PerOrgLimiter::from_env`].
+    pub fn rerank_from_env() -> Self {
+        let rps = std::env::var("DPV2_WEB_RERANK_RATE_LIMIT_PER_ORG_RPS")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(5.0_f64);
+        let burst = std::env::var("DPV2_WEB_RERANK_RATE_LIMIT_PER_ORG_BURST")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(10.0_f64);
+        let redis_url = std::env::var("DRAGONFLY_URL")
+            .or_else(|_| std::env::var("CACHE_URL"))
+            .unwrap_or_else(|_| "redis://localhost:6379".to_string());
+        Self::with_prefix("dpv2:webrerank:ratelimit:", rps, burst, redis_url)
+    }
+
     /// Separated from `from_env` so the clamping/TTL math is unit-testable
     /// as a pure function of its arguments. `std::env::var` is process-global
     /// — the previous test suite drove this through `from_env` with
@@ -135,6 +158,10 @@ impl PerOrgLimiter {
     /// flaky, occasionally-nonsensical TTL. No test touches this directly;
     /// they all call `with_config`.
     fn with_config(rps: f64, burst: f64, redis_url: String) -> Self {
+        Self::with_prefix(DEFAULT_KEY_PREFIX, rps, burst, redis_url)
+    }
+
+    fn with_prefix(key_prefix: &str, rps: f64, burst: f64, redis_url: String) -> Self {
         // A zero/negative misconfiguration must not make every request wait
         // forever for a refill that never accumulates meaningfully.
         let rps = rps.max(0.001_f64);
@@ -149,6 +176,7 @@ impl PerOrgLimiter {
         Self {
             inner: Arc::new(LimiterInner {
                 redis_url,
+                key_prefix: key_prefix.to_owned(),
                 rps,
                 burst,
                 ttl_seconds,
@@ -178,7 +206,7 @@ impl PerOrgLimiter {
     /// 8-minute request stall in production, not graceful degradation.
     const BACKEND_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
-    async fn check(&self, key: &str) -> bool {
+    pub(crate) async fn check(&self, key: &str) -> bool {
         match tokio::time::timeout(Self::BACKEND_TIMEOUT, self.check_inner(key)).await {
             Ok(allowed) => allowed,
             Err(_) => {
@@ -202,7 +230,7 @@ impl PerOrgLimiter {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        let redis_key = format!("dpv2:ratelimit:{key}");
+        let redis_key = format!("{}{key}", self.inner.key_prefix);
         let result: Result<i64, redis::RedisError> = self
             .inner
             .script

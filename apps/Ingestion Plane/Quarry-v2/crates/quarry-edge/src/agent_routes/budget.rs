@@ -113,6 +113,23 @@ pub(super) fn receipt_cost_source(telemetry: &BrowserTelemetry) -> CostSource {
     }
 }
 
+/// The cost of a failed step and its source. `ran` is the telemetry of a browser action
+/// that ran and whose landed page the edge then refused (T4b-1): it is charged as a
+/// completed action is, since the action did run. An action that failed is charged the
+/// flat table (WS6.B).
+pub(super) fn failed_step_cost(
+    ran: Option<&BrowserTelemetry>,
+    action: &AgentAction,
+) -> (f64, CostSource) {
+    match ran {
+        Some(telemetry) => (
+            receipt_cost_usd(telemetry, action),
+            receipt_cost_source(telemetry),
+        ),
+        None => (estimated_action_cost_usd(action), CostSource::FlatTable),
+    }
+}
+
 pub(super) fn cost_source_label(source: CostSource) -> &'static str {
     match source {
         CostSource::FlatTable => "flat_table",
@@ -125,7 +142,11 @@ pub(super) fn cost_source_label(source: CostSource) -> &'static str {
 /// `agent.budget_exhausted` event, and a checkpoint that stores the latch so a
 /// resume restores it. Nothing is written for a ZDR run (the event goes through
 /// `emit_for_zdr`). Errors are logged, never returned: the caller returns the 402.
-pub(super) async fn announce_budget_refusal(state: &AppState, entry: &mut RunEntry) {
+pub(super) async fn announce_budget_refusal(
+    state: &AppState,
+    entry: &mut RunEntry,
+    live: &RunLive,
+) {
     let zdr = entry.zdr;
     let run_id = entry.run_id.clone();
     let Some(payload) = entry
@@ -148,7 +169,7 @@ pub(super) async fn announce_budget_refusal(state: &AppState, entry: &mut RunEnt
     if !zdr.is_active() {
         if let Err(error) = state
             .receipts
-            .save_run_checkpoint(checkpoint_for_entry(entry))
+            .save_run_checkpoint(checkpoint_for_entry(entry, live))
             .await
         {
             tracing::warn!(

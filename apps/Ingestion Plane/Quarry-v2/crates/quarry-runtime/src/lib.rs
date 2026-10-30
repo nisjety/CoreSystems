@@ -44,6 +44,7 @@ pub mod crawl_filter;
 pub mod crawl_frontier;
 pub mod crawl_ranker;
 pub mod crawl_signals;
+pub mod data_plane_http;
 pub mod deep_research;
 pub mod fallback_driver;
 pub mod fetch;
@@ -176,7 +177,10 @@ pub use postgres_step_receipts::PostgresStepReceiptStore;
 pub use publisher::EventPublisher;
 pub use quarry_tls::TlsProfile;
 pub use request_queue::{InMemoryRequestQueue, Priority, QueueStats, QueuedRequest, RequestQueue};
-pub use rerank::{ModelPlaneSearchReranker, RerankingSearchProvider, SearchReranker};
+pub use rerank::{
+    DataPlaneSearchReranker, RerankContext, RerankEpoch, RerankOutcome, RerankReport, RerankStatus,
+    RerankingSearchProvider, SearchReranker,
+};
 pub use retry::{backoff_delay, classify, execute_with_retry, wait, IdempotencyKey, RetryClass};
 pub use robots_cache::{origin_key, RobotsCache, RobotsFetch, RobotsFetcher, RobotsState};
 pub use robots_gate::{

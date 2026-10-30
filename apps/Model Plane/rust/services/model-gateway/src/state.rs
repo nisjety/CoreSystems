@@ -723,11 +723,15 @@ impl AppState {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(30),
         );
+        // The boot-time check for VEREVON_RELEVANCE_CROSS_ENCODER_SCORES runs with or without a Quarry URL:
+        // an unreadable switch, or one that is on against an unfitted calibration, stops the boot rather
+        // than being ignored in a deployment that has no Quarry.
         let quarry_client = if quarry_base_url.trim().is_empty() {
             crate::quarry::Client::new(crate::quarry::Config::default())
         } else {
             crate::quarry::Client::from_env(&quarry_base_url, quarry_timeout)?
-        };
+        }
+        .with_cross_encoder_scores_from_env()?;
         if quarry_client.available() {
             tracing::info!("quarry edge client configured");
         } else {

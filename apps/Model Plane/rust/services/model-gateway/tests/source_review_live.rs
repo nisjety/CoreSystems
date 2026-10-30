@@ -240,7 +240,12 @@ async fn labeled_live_review() -> anyhow::Result<()> {
         )?;
         // Selection only: Inference Core verifies this Auth Core token and
         // authorizes the org itself. Decoding does not grant any authority.
-        anyhow::ensure!(claims["zdr"].as_bool() != Some(true), "subscription is unavailable under the account policy");
+        // Auth Core stamps zdr on every token. A token without a boolean claim
+        // is a broken mint, not a persistent one, so it is refused here.
+        let zdr = claims["zdr"]
+            .as_bool()
+            .ok_or_else(|| anyhow::anyhow!("Auth Core token has no boolean zdr claim"))?;
+        anyhow::ensure!(!zdr, "subscription is unavailable under the account policy");
         let org_id = claims["org_id"].as_str().ok_or_else(|| anyhow::anyhow!("active org missing"))?;
         let connections = http.get("http://localhost:5173/api/v1/integrations/connections")
             .header("Cookie", &cookies).header("x-verevon-org-id", org_id).send().await?;
@@ -264,7 +269,7 @@ async fn labeled_live_review() -> anyhow::Result<()> {
                 .into(),
             request_id: format!("source-eval-{}-{id}", chrono::Utc::now().timestamp_millis()),
             model: eval_model.clone(),
-            zdr: claims["zdr"].as_bool().unwrap_or(false),
+            zdr,
             ..Default::default()
         };
         let authorization: tonic::metadata::MetadataValue<_> = format!("Bearer {token}")

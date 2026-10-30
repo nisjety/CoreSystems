@@ -1,0 +1,25 @@
+{
+  "profile": "web-v1",
+  "reason": "timeout",
+  "request_id": "rr-golden-slow",
+  "results": [
+    {
+      "id": "doc-0",
+      "index": 0,
+      "scored": false
+    },
+    {
+      "id": "doc-1",
+      "index": 1,
+      "scored": false
+    },
+    {
+      "id": "doc-2",
+      "index": 2,
+      "scored": false
+    }
+  ],
+  "status": "degraded",
+  "truncated_ids": [],
+  "zdr_actions_applied": []
+}

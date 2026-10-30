@@ -20,6 +20,8 @@ Name | Type
 `format` | string
 `highlight` | boolean
 `facets` | boolean
+`zdr` | boolean
+`scoreKinds` | Array&lt;string&gt;
 
 ## Example
 
@@ -42,6 +44,8 @@ const example = {
   "format": null,
   "highlight": null,
   "facets": null,
+  "zdr": null,
+  "scoreKinds": null,
 } satisfies SearchRequest
 
 console.log(example)

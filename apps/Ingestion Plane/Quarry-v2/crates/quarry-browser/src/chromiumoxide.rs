@@ -29,7 +29,7 @@ use ::chromiumoxide::cdp::browser_protocol::input::{
 use ::chromiumoxide::cdp::browser_protocol::log::EventEntryAdded;
 use ::chromiumoxide::cdp::browser_protocol::page::{GetLayoutMetricsParams, Viewport as CdpViewport};
 use ::chromiumoxide::cdp::browser_protocol::network::{
-    ErrorReason, EventRequestWillBeSent, EventResponseReceived,
+    ErrorReason, EventRequestWillBeSent, EventResponseReceived, ResourceType,
 };
 use ::chromiumoxide::cdp::browser_protocol::target::TargetId;
 use ::chromiumoxide::cdp::browser_protocol::target::{
@@ -38,7 +38,7 @@ use ::chromiumoxide::cdp::browser_protocol::target::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -49,7 +49,7 @@ use ::chromiumoxide::cdp::browser_protocol::page::{
     EventLifecycleEvent, EventScreencastFrame, FrameId, GetFrameTreeParams,
     HandleJavaScriptDialogParams, PrintToPdfParams, ScreencastFrameAckParams,
     SetWebLifecycleStateParams, SetWebLifecycleStateState, StartScreencastFormat,
-    StartScreencastParams, StopScreencastParams,
+    StartScreencastParams, StopLoadingParams, StopScreencastParams,
 };
 use ::chromiumoxide::cdp::js_protocol::runtime::{
     CallArgument, CallFunctionOnParams, EventConsoleApiCalled, ReleaseObjectParams,
@@ -76,7 +76,10 @@ use crate::capture_plan;
 use crate::stitch;
 use crate::screenshot_mask;
 use crate::actions::ScrollTarget;
-use crate::deadlines::{best_effort, deadline, read_with_retry, timeout_error, with_deadline, Op};
+use crate::deadlines::{
+    best_effort, deadline, library_timeout, read_with_retry, timeout_error, with_deadline,
+    with_limit, Op,
+};
 use crate::navigation::{guard_navigation_target, guard_page_request_target};
 use crate::profile_capture;
 use crate::profile_restore::{self, ProfileEmulation, ProfileLoadError, RestorePolicy, RestoreReport};
@@ -339,6 +342,14 @@ pub struct ChromiumoxideDriver {
     /// A teardown in progress, per session: an `acquire` of the same key
     /// waits for it, so a teardown never frees the next session's state.
     teardowns: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// SC4 T3: tabs whose last `goto` timed out, was dropped or was refused (D3) (see
+    /// `drain_abandoned_navigation`); the tab's next `goto` drains it. Closing the tab,
+    /// releasing the session or losing the browser forgets the entry.
+    /// Innermost lock: a `std` mutex, never held across an `.await`.
+    abandoned_navigations: Arc<std::sync::Mutex<HashSet<TargetId>>>,
+    /// SC4 D3: the navigations a `goto` is waiting on, which the tab's Fetch guard ends
+    /// at once when it refuses their document request (see `NavigationWatches`).
+    navigation_watches: Arc<NavigationWatches>,
     /// Test hooks: stalls and a stale content read.
     #[cfg(test)]
     hooks: Arc<TestHooks>,
@@ -411,6 +422,8 @@ impl ChromiumoxideDriver {
             shut_down: Arc::new(AtomicBool::new(false)),
             owner: true,
             teardowns: Arc::new(Mutex::new(HashMap::new())),
+            abandoned_navigations: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            navigation_watches: Arc::new(NavigationWatches::default()),
             #[cfg(test)]
             hooks: Arc::new(TestHooks::default()),
             frame_epochs: Arc::new(AtomicU64::new(0)),
@@ -518,6 +531,8 @@ impl ChromiumoxideDriver {
             shut_down: self.shut_down.clone(),
             owner: false,
             teardowns: self.teardowns.clone(),
+            abandoned_navigations: self.abandoned_navigations.clone(),
+            navigation_watches: self.navigation_watches.clone(),
             #[cfg(test)]
             hooks: self.hooks.clone(),
             frame_epochs: self.frame_epochs.clone(),
@@ -801,7 +816,9 @@ impl ChromiumoxideDriver {
             "browser process lost"
         );
         for key in &lost {
-            self.pages.lock().await.remove(key);
+            if let Some(session_pages) = self.pages.lock().await.remove(key) {
+                self.forget_abandoned_navigations(session_pages.tabs.iter().map(|tab| &tab.page));
+            }
             self.dialog_pages.lock().await.remove(key);
             self.live_frames.lock().await.remove(key);
         }
@@ -885,9 +902,11 @@ impl ChromiumoxideDriver {
             .with_details(json!({ "error": e.to_string() }))
         })?;
         let mut builder = BrowserConfig::builder()
-            // Above the largest deadline in the table, so a typed Timeout from
-            // `with_deadline` always beats the library's untyped one; this only
-            // bounds the calls that are not wrapped (event collectors, guards).
+            // The handler's eviction of pending commands; it bounds only what is not
+            // wrapped (event collectors, guards). It does NOT bound a command: every
+            // `CommandFuture` and every navigation keeps chromiumoxide's own fixed
+            // 30 s timer whatever this says. `deadlines` keeps one CDP call below
+            // that timer and types the library timeout when it still fires.
             .request_timeout(Duration::from_secs(40))
             .launch_timeout(Duration::from_secs(20))
             .user_data_dir(&launch_dirs.user_data)
@@ -1083,6 +1102,7 @@ impl ChromiumoxideDriver {
             }
         }
         if let Some(session_pages) = removed {
+            self.forget_abandoned_navigations(session_pages.tabs.iter().map(|tab| &tab.page));
             for tab in session_pages.tabs {
                 if let Err(err) = best_effort(Op::PageClose, tab.page.close()).await {
                     tracing::debug!(
@@ -1133,7 +1153,8 @@ impl ChromiumoxideDriver {
         session.lease.session_affinity_key.clone()
     }
 
-    /// Browser navigation is permitted only after both halves of Quarry's
+    /// Browser navigation (and opening any page, SC4 D1's placeholder tab too)
+    /// is permitted only after both halves of Quarry's
     /// egress boundary are present: the DNS-pinning transport provider and a
     /// session-scoped host policy. Keeping this invariant in the driver
     /// prevents a new caller from accidentally treating CDP's URL guard as a
@@ -1270,6 +1291,7 @@ impl ChromiumoxideDriver {
         &self,
         session: &BrowserSession,
         url: Option<&str>,
+        first_navigation: FirstNavigation,
         activate: bool,
         egress_policy: Option<BrowserEgressPolicy>,
     ) -> QuarryResult<(String, Page)> {
@@ -1280,6 +1302,13 @@ impl ChromiumoxideDriver {
         // contexts); other sessions attach in parallel.
         let attach_lock = self.attach_lock(&session_key).await;
         let _attaching = attach_lock.lock().await;
+        // A placeholder is wanted only while the session has no page: one that got a
+        // tab while this call waited for the attach uses that tab.
+        if first_navigation == FirstNavigation::Placeholder {
+            if let Some(found) = self.active_tab_page(session).await {
+                return Ok(found);
+            }
+        }
 
         // The page counts against the slot from here; the guard gives it back,
         // and closes whatever this call created, on every early return, on a
@@ -1368,56 +1397,17 @@ impl ChromiumoxideDriver {
                 None => (true, None),
             }
         };
-        let snapshot = if first_tab {
-            match self.load_snapshot(&session.lease).await {
-                Ok(snapshot) => snapshot,
-                Err(failure) => {
-                    tracing::warn!(
-                        event = "profile_load_failed",
-                        reason = failure.class(),
-                        "browser profile could not be loaded"
-                    );
-                    match failure {
-                        // The profile exists but cannot be read now: refuse the attach (503)
-                        // instead of starting fresh, which the release would then save over it.
-                        ProfileLoadError::KeyUnavailable(error) => {
-                            return Err(error.with_details(
-                                json!({ "reason": "profile_key_unavailable" }),
-                            ));
-                        }
-                        // Unreadable: start fresh, and do not overwrite it at release.
-                        ProfileLoadError::Corrupt(_) => {
-                            let mut pages = self.pages.lock().await;
-                            pages.entry(session_key.clone()).or_default().lease_restore_failed =
-                                true;
-                            None
-                        }
-                        // Crypto-shredded: gone for good, the same as no profile.
-                        ProfileLoadError::KeyDestroyed => None,
-                    }
-                }
-            }
+        // SC4 D1: a placeholder tab (an observation of a session with no page) leaves the
+        // restore to the session's first `goto`, which knows where the run is going.
+        let restores_profile = first_tab && first_navigation != FirstNavigation::Placeholder;
+        let snapshot = if restores_profile {
+            self.load_first_tab_snapshot(session, &session_key).await?
         } else {
             None
         };
-        // WS17.C1: a profile-enabled session under capture v2 keeps an origin journal and
-        // installs the pagehide flush on its tabs. Everything else records nothing.
-        let profile_journal = if session.lease.persist_profile
-            && self.profiles.is_some()
-            && capture_v2_enabled()
-        {
-            let mut pages = self.pages.lock().await;
-            let session_pages = pages.entry(session_key.clone()).or_default();
-            if let Ok(mut journal) = session_pages.journal.lock() {
-                journal.enable();
-            }
-            if snapshot.as_ref().is_some_and(SessionSnapshot::has_state) {
-                session_pages.profile_loaded_nonempty = true;
-            }
-            Some(session_pages.journal.clone())
-        } else {
-            None
-        };
+        let profile_journal = self
+            .enable_profile_journal(session, &session_key, snapshot.as_ref())
+            .await;
         let new_page_params = CreateTargetParamsBuilder::default()
             .url("about:blank")
             .browser_context_id(context_id.clone())
@@ -1502,6 +1492,7 @@ impl ChromiumoxideDriver {
             self.egress_sequence.clone(),
             self.egress_policies.clone(),
             self.tab_egress_policies.clone(),
+            self.navigation_watches.clone(),
         )
         .await?;
         if let Some(journal) = profile_journal.as_ref() {
@@ -1516,83 +1507,42 @@ impl ChromiumoxideDriver {
         }
         // WS17.C2: restore the saved profile BEFORE the first navigation: the first request
         // already carries the restored cookies, so nothing reloads. Once per context.
-        let mut restore_failed = false;
-        if let Some(snapshot) = snapshot.as_ref() {
-            let policy = RestorePolicy::from_env();
-            let restored = {
-                let browser_guard = self.browser.read().await;
-                match browser_guard.as_ref() {
-                    Some(browser) => {
-                        with_deadline(Op::TabAttach, async {
-                            Ok(profile_restore::restore_into_context(
-                                browser,
-                                &context_id,
-                                &page,
-                                snapshot,
-                                initial_url,
-                                chrono::Utc::now(),
-                                &policy,
-                            )
-                            .await)
-                        })
-                        .await
-                    }
-                    None => Err(browser_missing()),
-                }
-            };
-            let report = match restored {
-                Ok((report, _emulation)) => report,
-                Err(error) => {
-                    tracing::warn!(
-                        event = "profile_restore_failed",
-                        error_class = error.code.wire_name(),
-                        "browser profile restore did not finish"
-                    );
-                    RestoreReport {
-                        cookies_total: u32::try_from(snapshot.cookies.len()).unwrap_or(u32::MAX),
-                        failed: true,
-                        ..RestoreReport::default()
-                    }
-                }
-            };
-            restore_failed = report.failed;
-            tracing::info!(
-                event = "profile_restored",
-                cookies_total = report.cookies_total,
-                cookies_applied = report.cookies_applied,
-                skipped_expired = report.skipped_expired,
-                skipped_session_stale = report.skipped_session_stale,
-                cookies_rejected = report.cookies_rejected,
-                origins_seeded = report.origins_seeded,
-                idb_databases = report.idb_databases,
-                ua_changed = report.ua_changed,
-                failed = report.failed,
-                "browser profile restored"
-            );
-            // The origins the profile holds stay in the next capture unless a live tab
-            // replaces them: a run that never visits an origin must not lose its storage.
-            if let Some(journal) = profile_journal.as_ref() {
-                if let Ok(mut journal) = journal.lock() {
-                    journal.carry(snapshot.effective_origins(initial_url));
-                }
-            }
-            self.session_telemetry
-                .lock()
+        let restore_failed = match snapshot.as_ref() {
+            Some(snapshot) => {
+                self.restore_snapshot_into(
+                    &session_key,
+                    &context_id,
+                    &page,
+                    snapshot,
+                    initial_url,
+                    profile_journal.as_ref(),
+                )
                 .await
-                .entry(session_key.clone())
-                .or_default()
-                .profile_restore = Some(report.summary());
-        }
-        if initial_url != "about:blank" {
-            with_deadline(Op::Navigate, async {
-                page.goto(initial_url).await.map_err(|e| {
-                    QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide goto failed")
-                        .with_details(json!({ "error": e.to_string(), "url": initial_url }))
-                })
-            })
+            }
+            None => false,
+        };
+        // Where the tab is when it is committed. A caller-driven first navigation runs
+        // after the commit, so the tab is there for it to keep on a TIMEOUT.
+        let committed_url = match first_navigation {
+            FirstNavigation::InAttach => initial_url,
+            FirstNavigation::ByCaller | FirstNavigation::Placeholder => "about:blank",
+        };
+        if committed_url != "about:blank" {
+            // No recovery here: a tab whose first navigation fails is closed by the
+            // attach guard, abandoned navigation and all. A refused one fails at once
+            // (SC4 D3), not at the navigate deadline.
+            goto_watched(
+                &self.navigation_watches,
+                &page,
+                committed_url,
+                deadline(Op::Navigate),
+            )
             .await?;
         }
-        install_popup_bridge(&page).await?;
+        // The bridge is per document: the caller's navigation installs it on its own.
+        if committed_url == initial_url {
+            install_popup_bridge(&page).await?;
+        }
 
         let mut pages = self.pages.lock().await;
         // Released, reaped or lost while attaching: the guard closes the page.
@@ -1603,7 +1553,10 @@ impl ChromiumoxideDriver {
         if let Some(context_id) = attach.context.take() {
             session_pages.browser_context_id = Some(context_id);
             session_pages.download_dir = attach.download_dir.take();
-            // The context's first tab is committed: the profile is restored, once.
+        }
+        // The context's first tab is committed: the profile is restored, once. A
+        // placeholder that made the context leaves it to the session's first `goto`.
+        if restores_profile {
             session_pages.profile_restored = true;
             session_pages.profile_emulation = profile_emulation.filter(|e| !e.is_empty());
             session_pages.lease_restore_failed |= restore_failed;
@@ -1613,7 +1566,7 @@ impl ChromiumoxideDriver {
             page: page.clone(),
             admission,
             title_hint: None,
-            url_hint: Some(initial_url.to_owned()),
+            url_hint: Some(committed_url.to_owned()),
         });
         // A background open keeps the active tab. A session with none yet
         // activates the new tab, so it always has a tab to act on.
@@ -1661,6 +1614,17 @@ impl ChromiumoxideDriver {
             Some(reason) => session_lost_error(reason),
             None => not_open_error(),
         })
+    }
+
+    /// Drop the SC4 T3 marks of tabs that are going away: no `goto` reads them again.
+    fn forget_abandoned_navigations<'p>(&self, pages: impl IntoIterator<Item = &'p Page>) {
+        let mut abandoned = self
+            .abandoned_navigations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for page in pages {
+            abandoned.remove(page.target_id());
+        }
     }
 
     async fn update_tab_metadata(&self, session_key: &str, tab_id: &str, page: &Page) {
@@ -1803,6 +1767,202 @@ impl ChromiumoxideDriver {
             .map_err(ProfileLoadError::classify)
     }
 
+    /// The profile the context's first tab restores (WS17.C2). A key that cannot be
+    /// reached refuses the call (503) instead of starting fresh, which the release would
+    /// then save over the profile; an unreadable profile starts fresh and is not saved
+    /// over; a crypto-shredded one is the same as none.
+    async fn load_first_tab_snapshot(
+        &self,
+        session: &BrowserSession,
+        session_key: &str,
+    ) -> QuarryResult<Option<SessionSnapshot>> {
+        match self.load_snapshot(&session.lease).await {
+            Ok(snapshot) => Ok(snapshot),
+            Err(failure) => {
+                tracing::warn!(
+                    event = "profile_load_failed",
+                    reason = failure.class(),
+                    "browser profile could not be loaded"
+                );
+                match failure {
+                    ProfileLoadError::KeyUnavailable(error) => {
+                        Err(error.with_details(json!({ "reason": "profile_key_unavailable" })))
+                    }
+                    ProfileLoadError::Corrupt(_) => {
+                        let mut pages = self.pages.lock().await;
+                        pages
+                            .entry(session_key.to_owned())
+                            .or_default()
+                            .lease_restore_failed = true;
+                        Ok(None)
+                    }
+                    ProfileLoadError::KeyDestroyed => Ok(None),
+                }
+            }
+        }
+    }
+
+    /// WS17.C1: a profile-enabled session under capture v2 keeps an origin journal and
+    /// installs the pagehide flush on its tabs. Everything else records nothing.
+    async fn enable_profile_journal(
+        &self,
+        session: &BrowserSession,
+        session_key: &str,
+        snapshot: Option<&SessionSnapshot>,
+    ) -> Option<Arc<std::sync::Mutex<OriginJournal>>> {
+        if !(session.lease.persist_profile && self.profiles.is_some() && capture_v2_enabled()) {
+            return None;
+        }
+        let mut pages = self.pages.lock().await;
+        let session_pages = pages.entry(session_key.to_owned()).or_default();
+        if let Ok(mut journal) = session_pages.journal.lock() {
+            journal.enable();
+        }
+        if snapshot.is_some_and(SessionSnapshot::has_state) {
+            session_pages.profile_loaded_nonempty = true;
+        }
+        Some(session_pages.journal.clone())
+    }
+
+    /// WS17.C2: restore `snapshot` into the context, planned for `initial_url`, before the
+    /// tab's first navigation. Returns whether the restore failed (the release then does
+    /// not save over the stored profile).
+    async fn restore_snapshot_into(
+        &self,
+        session_key: &str,
+        context_id: &BrowserContextId,
+        page: &Page,
+        snapshot: &SessionSnapshot,
+        initial_url: &str,
+        profile_journal: Option<&Arc<std::sync::Mutex<OriginJournal>>>,
+    ) -> bool {
+        let policy = RestorePolicy::from_env();
+        let restored = {
+            let browser_guard = self.browser.read().await;
+            match browser_guard.as_ref() {
+                Some(browser) => {
+                    with_deadline(Op::TabAttach, async {
+                        Ok(profile_restore::restore_into_context(
+                            browser,
+                            context_id,
+                            page,
+                            snapshot,
+                            initial_url,
+                            chrono::Utc::now(),
+                            &policy,
+                        )
+                        .await)
+                    })
+                    .await
+                }
+                None => Err(browser_missing()),
+            }
+        };
+        let report = match restored {
+            Ok((report, _emulation)) => report,
+            Err(error) => {
+                tracing::warn!(
+                    event = "profile_restore_failed",
+                    error_class = error.code.wire_name(),
+                    "browser profile restore did not finish"
+                );
+                RestoreReport {
+                    cookies_total: u32::try_from(snapshot.cookies.len()).unwrap_or(u32::MAX),
+                    failed: true,
+                    ..RestoreReport::default()
+                }
+            }
+        };
+        tracing::info!(
+            event = "profile_restored",
+            cookies_total = report.cookies_total,
+            cookies_applied = report.cookies_applied,
+            skipped_expired = report.skipped_expired,
+            skipped_session_stale = report.skipped_session_stale,
+            cookies_rejected = report.cookies_rejected,
+            origins_seeded = report.origins_seeded,
+            idb_databases = report.idb_databases,
+            ua_changed = report.ua_changed,
+            failed = report.failed,
+            "browser profile restored"
+        );
+        // The origins the profile holds stay in the next capture unless a live tab
+        // replaces them: a run that never visits an origin must not lose its storage.
+        if let Some(journal) = profile_journal {
+            if let Ok(mut journal) = journal.lock() {
+                journal.carry(snapshot.effective_origins(initial_url));
+            }
+        }
+        self.session_telemetry
+            .lock()
+            .await
+            .entry(session_key.to_owned())
+            .or_default()
+            .profile_restore = Some(report.summary());
+        report.failed
+    }
+
+    /// SC4 D1: the session's page is a placeholder (`FirstNavigation::Placeholder`, an
+    /// observation of a session with no page), so its context has not restored the
+    /// profile. The session's first `goto` restores it now, into that tab and planned for
+    /// the `goto`'s target, as a first `goto` that opens its own tab does: profile load,
+    /// locale and timezone, cookies and web storage, then the navigation.
+    async fn restore_profile_before_first_goto(
+        &self,
+        session: &BrowserSession,
+        session_key: &str,
+        page: &Page,
+        url: &str,
+    ) -> QuarryResult<()> {
+        let pending = |pages: &HashMap<String, SessionPages>| {
+            pages
+                .get(session_key)
+                .filter(|session_pages| !session_pages.profile_restored)
+                .and_then(|session_pages| session_pages.browser_context_id.clone())
+        };
+        if pending(&*self.pages.lock().await).is_none() {
+            return Ok(());
+        }
+        let attach_lock = self.attach_lock(session_key).await;
+        let _attaching = attach_lock.lock().await;
+        let Some(context_id) = pending(&*self.pages.lock().await) else {
+            return Ok(());
+        };
+        let snapshot = self.load_first_tab_snapshot(session, session_key).await?;
+        let profile_journal = self
+            .enable_profile_journal(session, session_key, snapshot.as_ref())
+            .await;
+        let profile_emulation = snapshot.as_ref().map(ProfileEmulation::from_snapshot);
+        if let Some(emulation) = profile_emulation.as_ref().filter(|e| !e.is_empty()) {
+            let _ = best_effort(Op::TabAttach, async {
+                profile_restore::apply_profile_emulation(page, emulation).await;
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .await;
+        }
+        let restore_failed = match snapshot.as_ref() {
+            Some(snapshot) => {
+                self.restore_snapshot_into(
+                    session_key,
+                    &context_id,
+                    page,
+                    snapshot,
+                    url,
+                    profile_journal.as_ref(),
+                )
+                .await
+            }
+            None => false,
+        };
+        let mut pages = self.pages.lock().await;
+        if let Some(session_pages) = pages.get_mut(session_key) {
+            session_pages.profile_restored = true;
+            session_pages.profile_emulation = profile_emulation.filter(|e| !e.is_empty());
+            session_pages.lease_restore_failed |= restore_failed;
+        }
+        Ok(())
+    }
+
     async fn persist_current_page(&self, session: &BrowserSession) -> QuarryResult<()> {
         if !session.lease.persist_profile {
             return Ok(());
@@ -1810,6 +1970,23 @@ impl ChromiumoxideDriver {
         let Some(store) = self.profiles.as_ref() else {
             return Ok(());
         };
+        // SC4 D1: a session whose context never restored the profile (it only observed a
+        // placeholder tab) does not save its empty jar over the stored profile.
+        let never_restored = {
+            let pages = self.pages.lock().await;
+            pages
+                .get(&Self::session_key(session))
+                .is_some_and(|session_pages| {
+                    session_pages.browser_context_id.is_some() && !session_pages.profile_restored
+                })
+        };
+        if never_restored {
+            tracing::info!(
+                event = "profile_save_skipped_not_restored",
+                "browser profile not saved: this session never restored it"
+            );
+            return Ok(());
+        }
         // WS17.C2: a profile that could not be read or restored is not overwritten by what
         // this session happened to hold.
         let restore_failed = {
@@ -1825,7 +2002,13 @@ impl ChromiumoxideDriver {
             );
             return Ok(());
         }
-        if capture_v2_enabled() {
+        #[allow(unused_mut)]
+        let mut capture_v2 = capture_v2_enabled();
+        #[cfg(test)]
+        {
+            capture_v2 |= self.hooks.release_capture_v2.load(Ordering::SeqCst);
+        }
+        if capture_v2 {
             return self.persist_profile_v2(session, store).await;
         }
         let Some((_tab_id, page)) = self.active_tab_page(session).await else {
@@ -1969,6 +2152,7 @@ impl ChromiumoxideDriver {
 /// listener covers redirects and requests initiated by the page itself (such
 /// as fetch/XHR, iframes, images, and stylesheet resources) before Chromium
 /// is permitted to open the connection.
+#[allow(clippy::too_many_arguments)] // one call site; the arguments are the driver's shared egress state
 async fn install_network_guard(
     page: &Page,
     session_key: String,
@@ -1977,6 +2161,7 @@ async fn install_network_guard(
     sequence: Arc<Mutex<HashMap<String, u64>>>,
     policies: Arc<Mutex<HashMap<String, BrowserEgressPolicy>>>,
     tab_policies: Arc<Mutex<HashMap<(String, String), BrowserEgressPolicy>>>,
+    navigation_watches: Arc<NavigationWatches>,
 ) -> QuarryResult<()> {
     let mut events = page
         .event_listener::<EventRequestPaused>()
@@ -2014,6 +2199,10 @@ async fn install_network_guard(
             let request_id = event.request_id.clone();
             let request_url = event.request.url.clone();
             let method = event.request.method.clone();
+            // A page target's main frame has the target's id. Its document requests are
+            // its navigations (a frame's are the frame's, which never end a `goto`).
+            let main_frame_document = event.resource_type == ResourceType::Document
+                && event.frame_id.inner() == guarded_page.target_id().inner();
             // The meet of the session's policy and the tab's own one (WS8.E, D2-013):
             // a tab can narrow what the session allows, never widen it, and a session
             // with no policy is deny-all. A page can start emitting Fetch events as
@@ -2031,7 +2220,7 @@ async fn install_network_guard(
             let (decision, policy, command_result) = if !policy_allows_url {
                 (
                     BrowserEgressDecision::Block,
-                    "domain_grant_blocked".to_owned(),
+                    NAVIGATION_REFUSED_BY_GRANT,
                     best_effort(
                         Op::GuardResolve,
                         guarded_page.execute(FailRequestParams::new(request_id, ErrorReason::Aborted)),
@@ -2040,10 +2229,10 @@ async fn install_network_guard(
                     .map(|_| ()),
                 )
             } else {
-                match guard_page_request_target(&request_url).await {
+                match navigation_watches.guard_request_target(&request_url).await {
                     Ok(()) => (
                         BrowserEgressDecision::Allow,
-                        "url_dns_public".to_owned(),
+                        "url_dns_public",
                         best_effort(
                             Op::GuardResolve,
                             guarded_page.execute(ContinueRequestParams::new(request_id)),
@@ -2058,7 +2247,7 @@ async fn install_network_guard(
                         );
                         (
                             BrowserEgressDecision::Block,
-                            "url_or_dns_blocked".to_owned(),
+                            NAVIGATION_REFUSED_BY_GUARD,
                             best_effort(
                                 Op::GuardResolve,
                                 guarded_page
@@ -2070,6 +2259,7 @@ async fn install_network_guard(
                     }
                 }
             };
+            let refusal = (decision == BrowserEgressDecision::Block).then_some(policy);
             push_egress_receipt(
                 &receipts,
                 &sequence,
@@ -2080,11 +2270,19 @@ async fn install_network_guard(
                     method,
                     url: redact_egress_url(&request_url),
                     decision,
-                    policy,
+                    policy: policy.to_owned(),
                     timestamp_ms: now_ms(),
                 },
             )
             .await;
+            // SC4 D3: after the receipt, so a `goto` the refusal ends finds it recorded.
+            if main_frame_document {
+                navigation_watches.document_request(
+                    guarded_page.target_id(),
+                    &PausedDocument::of(&event),
+                    refusal,
+                );
+            }
             if let Err(error) = command_result {
                 tracing::warn!(error_class = crate::deadlines::cdp_class(&error), "chromiumoxide request guard resolution failed");
             }
@@ -2292,6 +2490,398 @@ fn chromium_launch_dirs_in(root: &Path) -> std::io::Result<ChromiumLaunchDirs> {
         user_data,
         crash_dumps,
     })
+}
+
+/// Who navigates a new tab to the URL `open_tab_page` is given. Either way the URL plans
+/// the profile restore of the context's first tab and enters the origin journal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FirstNavigation {
+    /// The attach, before the tab is committed: a tab whose navigation fails is closed
+    /// and the caller gets no tab (`open_tab`, which answers with the tab it made).
+    InAttach,
+    /// The caller, once the tab is committed on `about:blank`: a navigation that times
+    /// out leaves the tab as any later one does, readable and drained at the next `goto`
+    /// (SC4 T4b, a run's first step).
+    ByCaller,
+    /// Nobody (SC4 D1, `ensure_page`): the session had no page and is observed, so it
+    /// gets a tab on `about:blank` that goes nowhere. There is no URL to plan the
+    /// profile restore for, so a context's first tab leaves it to the session's first
+    /// `goto` (`restore_profile_before_first_goto`); a session that has a page by the
+    /// time the attach lock is held keeps it, and no tab is opened.
+    Placeholder,
+}
+
+/// The tab's Fetch guard refused a request the run's egress policy does not allow (its
+/// receipt policy, and the `details.reason` of a `goto` it ends).
+const NAVIGATION_REFUSED_BY_GRANT: &str = "domain_grant_blocked";
+/// The tab's Fetch guard refused a request its URL and DNS check blocks (a private or
+/// unresolvable address, a blocked scheme).
+const NAVIGATION_REFUSED_BY_GUARD: &str = "url_or_dns_blocked";
+
+/// SC4 D3: the navigation each tab's `goto` is waiting on, so the tab's Fetch guard can
+/// end it the moment it refuses the navigation's document request.
+///
+/// The guard refuses a request with `Fetch.failRequest(Aborted)`. For a main-frame
+/// document that commits nothing and raises no error, so chromiumoxide's navigation
+/// never ends, and a `goto` to a refused host (or redirected to one) waited out its
+/// whole navigate deadline (25 s live) and answered a 504 `TIMEOUT` with effect
+/// `unknown` for what is a policy refusal. The block showed only in the next
+/// observation's egress receipts.
+///
+/// A navigation is the first main-frame document request for the `goto`'s own URL
+/// (fragment aside, or its `https` upgrade) the guard sees once the `goto` starts, plus
+/// every redirect hop of it (a request whose `redirectedRequestId`, or whose network id,
+/// is already in the chain). A document request outside that chain (the old page
+/// navigating itself elsewhere in the meantime, a frame) and any subresource never end a
+/// `goto`. A `goto` whose own request goes unrecognised only loses the early end: it
+/// runs to its navigate deadline as before.
+#[derive(Default)]
+struct NavigationWatches {
+    /// Innermost lock: a `std` mutex, never held across an `.await`.
+    by_tab: std::sync::Mutex<HashMap<TargetId, NavigationWatch>>,
+    sequence: AtomicU64,
+    /// Test only: the guard takes a `*.fixture.test` host (which resolves to nothing) as
+    /// public, so the egress policy is what decides it in a live test.
+    #[cfg(test)]
+    fixture_hosts_resolve: AtomicBool,
+}
+
+struct NavigationWatch {
+    id: u64,
+    /// Where the `goto` goes, without its fragment (a Fetch request URL has none);
+    /// `None` for a URL that does not parse, whose first document request is taken.
+    target: Option<url::Url>,
+    /// The Fetch request ids of the navigation's document request and its redirect hops.
+    requests: HashSet<String>,
+    /// Their network ids (one id across a redirect chain).
+    networks: HashSet<String>,
+    /// Taken by the first refusal.
+    refused: Option<tokio::sync::oneshot::Sender<&'static str>>,
+}
+
+impl NavigationWatch {
+    /// Whether a document request for `raw` is the `goto`'s own first one: its URL, or
+    /// the `https` form of an `http` one (Chromium tries that first).
+    fn starts_with(&self, raw: &str) -> bool {
+        let Some(target) = self.target.as_ref() else {
+            return true;
+        };
+        let Ok(mut requested) = url::Url::parse(raw) else {
+            return false;
+        };
+        requested.set_fragment(None);
+        if requested == *target {
+            return true;
+        }
+        let mut upgraded = target.clone();
+        target.scheme() == "http" && upgraded.set_scheme("https").is_ok() && requested == upgraded
+    }
+}
+
+/// The parts of a paused main-frame document request a [`NavigationWatch`] reads.
+struct PausedDocument<'a> {
+    /// Its Fetch request id.
+    request: &'a str,
+    url: &'a str,
+    network: Option<&'a str>,
+    /// The Fetch request id of the hop that redirected to it.
+    redirected_from: Option<&'a str>,
+}
+
+impl<'a> PausedDocument<'a> {
+    fn of(event: &'a EventRequestPaused) -> Self {
+        Self {
+            request: event.request_id.inner(),
+            url: &event.request.url,
+            network: event.network_id.as_ref().map(|id| id.inner().as_str()),
+            redirected_from: event
+                .redirected_request_id
+                .as_ref()
+                .map(|id| id.inner().as_str()),
+        }
+    }
+}
+
+impl NavigationWatches {
+    /// Watch the navigation of `tab` to `url`, until the returned guard drops.
+    fn watch(self: &Arc<Self>, tab: TargetId, url: &str) -> WatchedNavigation {
+        let (refused, receiver) = tokio::sync::oneshot::channel();
+        let id = self.sequence.fetch_add(1, Ordering::Relaxed);
+        let target = url::Url::parse(url).ok().map(|mut target| {
+            target.set_fragment(None);
+            target
+        });
+        self.by_tab
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                tab.clone(),
+                NavigationWatch {
+                    id,
+                    target,
+                    requests: HashSet::new(),
+                    networks: HashSet::new(),
+                    refused: Some(refused),
+                },
+            );
+        WatchedNavigation {
+            watches: self.clone(),
+            tab,
+            id,
+            refused: receiver,
+        }
+    }
+
+    /// The guard decided a main-frame document request of `tab` (`event`'s Fetch
+    /// request id, URL, network id and `redirectedRequestId`): `refusal` is the policy
+    /// that refused it, if one did.
+    fn document_request(
+        &self,
+        tab: &TargetId,
+        event: &PausedDocument<'_>,
+        refusal: Option<&'static str>,
+    ) {
+        let mut by_tab = self
+            .by_tab
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(watch) = by_tab.get_mut(tab) else {
+            return;
+        };
+        let network = event.network;
+        // A hop is in the chain by its `redirectedRequestId` or, failing that, its
+        // network id (one across a redirect chain); the chain starts with the `goto`'s
+        // own URL, never with whatever main-frame request comes first.
+        let ours = event
+            .redirected_from
+            .is_some_and(|previous| watch.requests.contains(previous))
+            || network.is_some_and(|network| watch.networks.contains(network))
+            || (watch.requests.is_empty() && watch.starts_with(event.url));
+        if !ours {
+            return;
+        }
+        watch.requests.insert(event.request.to_owned());
+        if let Some(network) = network {
+            watch.networks.insert(network.to_owned());
+        }
+        if let Some(policy) = refusal {
+            if let Some(refused) = watch.refused.take() {
+                let _ = refused.send(policy);
+            }
+        }
+    }
+
+    /// The guard's URL and DNS check of a request the policy allows.
+    async fn guard_request_target(&self, raw: &str) -> QuarryResult<()> {
+        #[cfg(test)]
+        {
+            let fixture = url::Url::parse(raw)
+                .ok()
+                .and_then(|url| url.host_str().map(|host| host.ends_with(".fixture.test")))
+                .unwrap_or(false);
+            if fixture && self.fixture_hosts_resolve.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+        }
+        guard_page_request_target(raw).await
+    }
+}
+
+/// A watched navigation; dropping it stops the watch.
+struct WatchedNavigation {
+    watches: Arc<NavigationWatches>,
+    tab: TargetId,
+    id: u64,
+    refused: tokio::sync::oneshot::Receiver<&'static str>,
+}
+
+impl Drop for WatchedNavigation {
+    fn drop(&mut self) {
+        let mut by_tab = self
+            .watches
+            .by_tab
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if by_tab
+            .get(&self.tab)
+            .is_some_and(|watch| watch.id == self.id)
+        {
+            by_tab.remove(&self.tab);
+        }
+    }
+}
+
+/// The typed refusal of a navigation the tab's Fetch guard refused. No URL or host: the
+/// reason is the guard's receipt policy, and the message is the edge's own for the same
+/// refusal (the gateway keys its `browser_navigation_outside_scope` on it).
+fn navigation_refused(policy: &'static str) -> QuarryError {
+    let message = if policy == NAVIGATION_REFUSED_BY_GRANT {
+        "browser navigation is outside the run's allowed domains"
+    } else {
+        "browser navigation target is blocked by security policy"
+    };
+    QuarryError::new(ErrorCode::SecurityBlocked, message)
+        .with_details(json!({ "reason": policy, "op": "navigate" }))
+}
+
+/// [`goto_within`], ended at once with a typed `SECURITY_BLOCKED` when the tab's Fetch
+/// guard refuses the navigation's document request or a redirect hop of it (SC4 D3).
+/// The refused navigation is then still the library's current one, as a timed-out one
+/// is: the caller treats it the same way.
+async fn goto_watched(
+    watches: &Arc<NavigationWatches>,
+    page: &Page,
+    url: &str,
+    limit: Duration,
+) -> QuarryResult<()> {
+    let mut watched = watches.watch(page.target_id().clone(), url);
+    tokio::select! {
+        biased;
+        Ok(policy) = &mut watched.refused => Err(navigation_refused(policy)),
+        navigated = goto_within(page, url, limit) => match navigated {
+            // A refusal that came with the failure is its cause.
+            Err(error) => match watched.refused.try_recv() {
+                Ok(policy) => Err(navigation_refused(policy)),
+                Err(_) => Err(error),
+            },
+            Ok(()) => Ok(()),
+        },
+    }
+}
+
+/// `page.goto(url)` within `limit` (the `Op::Navigate` entry in production). A
+/// failure carries the library's text and never the URL: an error body must not
+/// carry a page address for a ZDR caller.
+async fn goto_within(page: &Page, url: &str, limit: Duration) -> QuarryResult<()> {
+    with_limit(Op::Navigate, limit, async {
+        page.goto(url).await.map(|_| ()).map_err(|e| {
+            QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide goto failed")
+                .with_details(json!({ "error": e.to_string() }))
+        })
+    })
+    .await
+}
+
+/// Stop the load a timed-out navigation left running, within `limit`. Returns whether
+/// it stopped.
+///
+/// Dropping the timed-out `goto` does not stop anything: Chromium keeps loading, and
+/// until it stops the page answers no read (content and the accessibility tree hang).
+/// Stopping leaves the page as the navigation got it: the old document if the new one
+/// never arrived, the new one if only a subresource or its load event hung. Either way
+/// it stays readable, and the caller is told to look before acting.
+async fn stop_abandoned_navigation(page: &Page, limit: Duration) -> bool {
+    let outcome = with_limit(Op::NavigateRecovery, limit, async {
+        page.execute(StopLoadingParams::default())
+            .await
+            .map(|_| ())
+            .map_err(navigation_recovery_failed)
+    })
+    .await;
+    navigation_recovery_logged(outcome)
+}
+
+/// Clear the navigation chromiumoxide still holds for a tab whose `goto` timed out or
+/// was dropped, within `limit`. Returns whether it is clear.
+///
+/// The library keeps a navigation as the frame's current one until the frame reports a
+/// `load` lifecycle event for a new document, queuing every later `Page.navigate` behind
+/// it until its own 30 s timer. A stopped load never sends that event (and
+/// chromiumoxide 0.9.1 ignores `Page.frameStoppedLoading`), so a stopped navigation
+/// holds the queue whether or not its document arrived. Committing a fresh
+/// `about:blank` from the page itself (a `Page.navigate` would queue behind the stuck
+/// one) sends it; navigating to `about:blank` once more returns only when the queue has
+/// drained. That replaces the page, so it runs just before the tab's next `goto`, which
+/// leaves the page anyway.
+///
+/// The second navigation is queued only once the first blank page is there: the
+/// library takes a navigation's starting document from the frame as it is when the
+/// navigation is queued, so one queued earlier counts the blank page's commit as its
+/// own, returns before its own commit, and the `goto` after it returns on that one in
+/// turn, with its page not there yet.
+async fn drain_abandoned_navigation(page: &Page, limit: Duration) -> bool {
+    let outcome = with_limit(Op::NavigateRecovery, limit, async {
+        // A `goto` dropped mid-navigation never stopped its load, and a loading page
+        // answers no evaluate. After a TIMEOUT the load is stopped already: a no-op.
+        page.execute(StopLoadingParams::default())
+            .await
+            .map_err(navigation_recovery_failed)?;
+        page.evaluate("window.__quarryDraining = true; location.replace('about:blank')")
+            .await
+            .map_err(navigation_recovery_failed)?;
+        // A fresh window does not carry the mark. An evaluate that lands while the
+        // documents change fails; it is simply asked again.
+        loop {
+            let marked = page
+                .evaluate("window.__quarryDraining === true")
+                .await
+                .ok()
+                .and_then(|marked| marked.into_value::<bool>().ok());
+            if marked == Some(false) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        page.goto("about:blank")
+            .await
+            .map_err(navigation_recovery_failed)?;
+        Ok(())
+    })
+    .await;
+    navigation_recovery_logged(outcome)
+}
+
+/// Marks a tab's navigation abandoned when the `goto` driving it is dropped (a client
+/// gone, an outer deadline) before it ends: the navigation then holds the library's
+/// queue as a timed-out one does, and the tab's next `goto` drains it the same way.
+/// The load is not stopped (that needs an `.await`); a read waits for it as before.
+struct MarkAbandonedOnDrop<'a> {
+    abandoned: &'a std::sync::Mutex<HashSet<TargetId>>,
+    target: Option<TargetId>,
+}
+
+impl<'a> MarkAbandonedOnDrop<'a> {
+    fn new(abandoned: &'a std::sync::Mutex<HashSet<TargetId>>, page: &Page) -> Self {
+        Self {
+            abandoned,
+            target: Some(page.target_id().clone()),
+        }
+    }
+
+    /// The navigation ended, either way: the caller handles the outcome.
+    fn disarm(mut self) {
+        self.target = None;
+    }
+}
+
+impl Drop for MarkAbandonedOnDrop<'_> {
+    fn drop(&mut self) {
+        if let Some(target) = self.target.take() {
+            self.abandoned
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(target);
+        }
+    }
+}
+
+fn navigation_recovery_failed(error: CdpError) -> QuarryError {
+    QuarryError::new(ErrorCode::DriverFailed, "navigation recovery failed")
+        .with_details(json!({ "error": error.to_string() }))
+}
+
+/// A recovery's outcome is only logged: it never replaces the error the caller sees.
+fn navigation_recovery_logged(outcome: QuarryResult<()>) -> bool {
+    match outcome {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                error_class = crate::deadlines::cdp_class(&error.message),
+                "chromiumoxide navigation recovery failed; the tab may stay busy until the library's timer"
+            );
+            false
+        }
+    }
 }
 
 async fn install_popup_bridge(page: &Page) -> QuarryResult<()> {
@@ -3797,34 +4387,131 @@ impl BrowserDriver for ChromiumoxideDriver {
         Ok(())
     }
 
+    /// SC4 D1: a session with no page yet (a run that never navigated, one resumed
+    /// from a checkpoint with no URL) gets a placeholder tab on `about:blank`, so it
+    /// can be observed. It is navigated nowhere; the session's first `goto` uses it.
+    async fn ensure_page(&self, session: &BrowserSession) -> QuarryResult<()> {
+        let owner = self.admission(session);
+        self.refuse_lost(session)?;
+        if self.active_tab_page(session).await.is_some() {
+            return Ok(());
+        }
+        if let Some(pin) = session.tab_pin() {
+            return Err(pinned_tab_closed_error(pin));
+        }
+        // Every path that opens a page requires the pinned proxy and an installed egress
+        // policy, also this one whose page loads nothing (see `require_configured_egress`).
+        self.require_configured_egress(session).await?;
+        let (tab_id, page) = self
+            .open_tab_page(session, None, FirstNavigation::Placeholder, true, None)
+            .await?;
+        self.update_tab_metadata(&Self::session_key(session), &tab_id, &page)
+            .await;
+        self.invalidate_live_frame_cache(session, owner).await;
+        Ok(())
+    }
+
     async fn goto(&self, session: &BrowserSession, url: &str) -> QuarryResult<()> {
         let owner = self.admission(session);
         self.refuse_lost(session)?;
         guard_navigation_target(url).await?;
         self.require_configured_egress(session).await?;
         let (tab_id, page, created) = match self.active_tab_page(session).await {
-            Some((tab_id, page)) => (tab_id, page, false),
+            Some((tab_id, page)) => {
+                // SC4 D1: a placeholder tab (the session was observed before it had a
+                // page) restores the profile here, as the tab below would at its open.
+                self.restore_profile_before_first_goto(
+                    session,
+                    &Self::session_key(session),
+                    &page,
+                    url,
+                )
+                .await?;
+                (tab_id, page, false)
+            }
             None => {
                 if let Some(pin) = session.tab_pin() {
                     return Err(pinned_tab_closed_error(pin));
                 }
-                let (tab_id, page) = self.open_tab_page(session, Some(url), true, None).await?;
+                // SC4 T4b: the tab is committed before its first navigation, which then
+                // takes the path below like any other, TIMEOUT recovery included.
+                // Inside the attach a timed-out navigation closed the tab, and the
+                // run's next step found no page at all.
+                let (tab_id, page) = self
+                    .open_tab_page(session, Some(url), FirstNavigation::ByCaller, true, None)
+                    .await?;
                 (tab_id, page, true)
             }
         };
 
-        if !created {
-            with_deadline(Op::Navigate, async {
-                page.goto(url).await.map_err(|e| {
-                    QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide goto failed")
-                        .with_details(json!({ "error": e.to_string(), "url": url }))
-                })
-            })
-            .await?;
+        let session_key = Self::session_key(session);
+        // SC4 T3: a navigation that timed out on this tab earlier is still the
+        // library's current one; clear it first or this one queues behind it.
+        let abandoned = self
+            .abandoned_navigations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(page.target_id());
+        if abandoned {
+            drain_abandoned_navigation(&page, deadline(Op::NavigateRecovery)).await;
+        }
+        #[allow(unused_mut)]
+        let (mut target, mut limit) = (url, deadline(Op::Navigate));
+        #[cfg(test)]
+        let detour = self
+            .hooks
+            .goto_detour
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        #[cfg(test)]
+        {
+            if let Some((detour_url, bound)) = detour.as_ref() {
+                (target, limit) = (detour_url.as_str(), *bound);
+                // The fixture host does not resolve, which the tab's Fetch guard refuses.
+                if !self.hooks.goto_detour_keeps_guard.load(Ordering::SeqCst) {
+                    with_deadline(Op::TabAttach, async {
+                        page.execute(
+                            ::chromiumoxide::cdp::browser_protocol::fetch::DisableParams::default(),
+                        )
+                        .await
+                        .map_err(|e| QuarryError::new(ErrorCode::Internal, e.to_string()))
+                    })
+                    .await?;
+                }
+            }
+        }
+        // A tab opened for `about:blank` is there already.
+        if !(created && target == "about:blank") {
+            let dropped = MarkAbandonedOnDrop::new(&self.abandoned_navigations, &page);
+            let navigated = goto_watched(&self.navigation_watches, &page, target, limit).await;
+            dropped.disarm();
+            if let Err(error) = navigated {
+                // SC4 T3: the abandoned navigation still loads (no read answers until
+                // it stops) and still holds the library's queue. Stop it before the
+                // TIMEOUT goes out, so the page can be looked at, and leave the queue
+                // to the tab's next `goto`. A navigation the Fetch guard refused (SC4
+                // D3, the only `SECURITY_BLOCKED` here) loads nothing more, but holds
+                // the queue the same way.
+                let abandoned =
+                    matches!(error.code, ErrorCode::Timeout | ErrorCode::SecurityBlocked);
+                if abandoned {
+                    self.abandoned_navigations
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(page.target_id().clone());
+                }
+                if abandoned
+                    && stop_abandoned_navigation(&page, deadline(Op::NavigateRecovery)).await
+                {
+                    self.update_tab_metadata(&session_key, &tab_id, &page).await;
+                    self.invalidate_live_frame_cache(session, owner).await;
+                }
+                return Err(error);
+            }
             install_popup_bridge(&page).await?;
         }
 
-        let session_key = Self::session_key(session);
         self.update_tab_metadata(&session_key, &tab_id, &page).await;
         #[cfg(test)]
         {
@@ -4477,9 +5164,11 @@ impl BrowserDriver for ChromiumoxideDriver {
             ..PrintToPdfParams::default()
         };
         let bytes = with_deadline(Op::Pdf, async {
-            page.pdf(params).await.map_err(|_| {
-                QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide pdf failed")
-                    .with_details(json!({ "reason": "driver_error" }))
+            page.pdf(params).await.map_err(|e| match e {
+                // Still the typed TIMEOUT when the library's 30 s timer fires first.
+                CdpError::Timeout => library_timeout(),
+                _ => QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide pdf failed")
+                    .with_details(json!({ "reason": "driver_error" })),
             })
         })
         .await?;
@@ -4571,6 +5260,7 @@ impl BrowserDriver for ChromiumoxideDriver {
             .open_tab_page(
                 session,
                 options.url.as_deref(),
+                FirstNavigation::InAttach,
                 options.activate,
                 options.egress_policy,
             )
@@ -4692,6 +5382,7 @@ impl BrowserDriver for ChromiumoxideDriver {
             }
         }
         self.book().page_closed(&session_key, removed.admission);
+        self.forget_abandoned_navigations([&removed.page]);
 
         if let Err(err) = best_effort(Op::PageClose, removed.page.close()).await {
             tracing::debug!(
@@ -5380,6 +6071,15 @@ struct TestHooks {
     goto_hold: AtomicBool,
     goto_reached: tokio::sync::Notify,
     goto_resume: tokio::sync::Notify,
+    /// `goto` navigates here within this bound instead (a tab it opens too), past the
+    /// URL guard and the tab's Fetch guard: a live test reaches a fixture host the
+    /// guards refuse without waiting out the shipped navigate deadline.
+    goto_detour: std::sync::Mutex<Option<(String, Duration)>>,
+    /// The detour leaves the tab's Fetch guard on, which then refuses the fixture host.
+    goto_detour_keeps_guard: AtomicBool,
+    /// The release's profile save takes the capture v2 path without the process-wide
+    /// environment switch (which every test in the binary would see).
+    release_capture_v2: AtomicBool,
     /// The same for `close_tab`, between taking the tab out of the session's
     /// pages and giving its page back to the slot book.
     close_tab_hold: AtomicBool,
@@ -6673,8 +7373,52 @@ mod tests {
             .await
             .expect_err("a released session navigates nowhere");
         assert_eq!(loss_reason(&error), "session_not_open", "{error:?}");
+        // SC4 D1: nor does a released session get a placeholder tab to observe.
+        let error = driver
+            .ensure_page(&session)
+            .await
+            .expect_err("a released session is given no page");
+        assert_eq!(loss_reason(&error), "session_not_open", "{error:?}");
         assert_eq!(driver.book().slot(SLOT).unwrap().pages, 0);
         assert_eq!(driver.launch_count(), 0);
+    }
+
+    /// SC4 D1 review: the placeholder tab `ensure_page` opens is a page like any other, so
+    /// it needs both halves of the egress boundary (the pinned proxy and the session's
+    /// installed policy), as `goto` and `open_tab` do; a refusal opens no tab and launches
+    /// no browser. On the D1 code it opened the tab without either.
+    #[tokio::test]
+    async fn a_placeholder_tab_needs_the_pinned_proxy_and_an_egress_policy() {
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(Arc::new(StubEgressProvider))
+            .with_pool_config(quiet_pool());
+        driver.book().admit(
+            "placeholder-egress",
+            Duration::from_secs(30),
+            Instant::now(),
+        );
+        let session = bare_session("placeholder-egress");
+        let error = driver
+            .ensure_page(&session)
+            .await
+            .expect_err("no installed egress policy");
+        assert_eq!(error.code, ErrorCode::SecurityBlocked, "{error:?}");
+        assert_eq!(driver.book().slot(SLOT).unwrap().pages, 0);
+        assert_eq!(driver.launch_count(), 0);
+
+        let unpinned = ChromiumoxideDriver::new().with_pool_config(quiet_pool());
+        unpinned.book().admit(
+            "placeholder-egress",
+            Duration::from_secs(30),
+            Instant::now(),
+        );
+        let error = unpinned
+            .ensure_page(&session)
+            .await
+            .expect_err("no pinned egress proxy");
+        assert_eq!(error.code, ErrorCode::Unsupported, "{error:?}");
+        assert_eq!(unpinned.book().slot(SLOT).unwrap().pages, 0);
+        assert_eq!(unpinned.launch_count(), 0);
     }
 
     /// An egress authority whose endpoint fails for the probe's key only, so
@@ -7613,6 +8357,1207 @@ mod tests {
         driver.release(session).await.expect("release");
     }
 
+    /// A loopback server that accepts every connection and never answers: a navigation
+    /// to it stays pending, like the stack's `slow.crawl.test`. Abort the handle to stop.
+    async fn silent_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("http://{}/slow.html", listener.local_addr().expect("addr"));
+        let handle = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        (url, handle)
+    }
+
+    /// A loopback server that answers every request with one small page.
+    async fn page_server(marker: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("http://{}/page.html", listener.local_addr().expect("addr"));
+        let handle = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut request = [0u8; 4096];
+                    let _ = socket.read(&mut request).await;
+                    let body = format!("<html><head><title>{marker}</title></head><body><p>{marker}</p></body></html>");
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (url, handle)
+    }
+
+    /// A plain page on the driver's own browser (the production launch config). The
+    /// driver's session tabs cannot be used here: their navigation guard and network
+    /// guard refuse loopback, and a loopback server is what makes a navigation hang.
+    async fn raw_page(driver: &ChromiumoxideDriver) -> Page {
+        driver.ensure_browser().await.expect("browser");
+        let guard = driver.browser.read().await;
+        guard
+            .as_ref()
+            .expect("launched")
+            .new_page("about:blank")
+            .await
+            .expect("page")
+    }
+
+    /// SC4 T1 and T3 against a real Chromium. A navigation that hangs ends in the typed
+    /// navigate TIMEOUT at its own deadline (no URL in it); once it is stopped the tab
+    /// answers reads at once and still holds its page, and once it is drained the next
+    /// navigation goes straight through. Before the fix the reads hung until their own
+    /// deadlines and the next navigation queued behind the abandoned one for the
+    /// library's 30 s. Both a tab with a document and a fresh `about:blank` tab.
+    #[tokio::test]
+    async fn a_hung_navigation_times_out_typed_and_the_tab_is_usable_at_once() {
+        if !live_enabled() {
+            return;
+        }
+        let (silent, silent_task) = silent_server().await;
+        let (answering, answering_task) = page_server("sc4-next-page").await;
+        let driver = ChromiumoxideDriver::new();
+        for has_document in [true, false] {
+            let page = raw_page(&driver).await;
+            if has_document {
+                goto_within(&page, &answering, Duration::from_secs(10))
+                    .await
+                    .expect("first page");
+            }
+            let limit = Duration::from_millis(1500);
+            let started = Instant::now();
+            let error = goto_within(&page, &silent, limit).await.unwrap_err();
+            let waited = started.elapsed();
+            assert_eq!(error.code, ErrorCode::Timeout, "{error:?}");
+            assert!(!error.retryable);
+            let details = error.details.clone().expect("details");
+            assert_eq!(details["op"], "navigate");
+            assert_eq!(details["deadline_ms"], 1500);
+            assert_eq!(details["effect"], "unknown");
+            assert!(!format!("{error:?}").contains("127.0.0.1"), "{error:?}");
+            assert!(waited < limit + Duration::from_secs(1), "{waited:?}");
+
+            let started = Instant::now();
+            assert!(
+                stop_abandoned_navigation(&page, Duration::from_secs(3)).await,
+                "stop (has_document={has_document})"
+            );
+            eprintln!(
+                "stop took {:?} (has_document={has_document})",
+                started.elapsed()
+            );
+
+            // The next step: an accessibility read, the page as it was, and a navigation
+            // after the drain, each well inside a short bound.
+            let started = Instant::now();
+            with_limit(Op::AxSnapshot, Duration::from_secs(2), async {
+                page.execute(AccessibilityEnableParams::default())
+                    .await
+                    .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, e.to_string()))?;
+                page.execute(GetFullAxTreeParams::builder().depth(8).build())
+                    .await
+                    .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, e.to_string()))
+            })
+            .await
+            .expect("the accessibility tree answers after the stop");
+            let kept = read_with_retry(Op::Content, || async {
+                page.content()
+                    .await
+                    .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, e.to_string()))
+            })
+            .await
+            .expect("content after the stop");
+            assert_eq!(kept.contains("sc4-next-page"), has_document, "{kept}");
+            assert!(
+                drain_abandoned_navigation(&page, Duration::from_secs(3)).await,
+                "drain (has_document={has_document})"
+            );
+            goto_within(&page, &answering, Duration::from_secs(5))
+                .await
+                .expect("the next navigation is not queued behind the abandoned one");
+            let html = with_limit(Op::Content, Duration::from_secs(2), async {
+                page.content()
+                    .await
+                    .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, e.to_string()))
+            })
+            .await
+            .expect("content");
+            assert!(html.contains("sc4-next-page"));
+            let next_step = started.elapsed();
+            eprintln!("next step took {next_step:?} (has_document={has_document})");
+            // About 0.1 s alone, up to 3 s under the full live suite; the failure is the
+            // library's queue, about 28 s here.
+            assert!(next_step < Duration::from_secs(8), "{next_step:?}");
+            let _ = best_effort(Op::PageClose, page.close()).await;
+        }
+        driver.shutdown().await;
+        silent_task.abort();
+        answering_task.abort();
+    }
+
+    /// The pinned proxy of a session in the test below. Chromium hands a proxy the
+    /// whole URL, so no host name is resolved and any path can be served:
+    /// `/slow.html` and `/held.png` are accepted and never answered; `/loaded.html` is
+    /// a page whose document arrives but whose image never does (so its load never
+    /// ends); `/redirect-out.html` is a 302 to `sc4-out.fixture.test`, and
+    /// `/image-out.html` a page (`sc4-image-out`) with an image from that host; any
+    /// other path is a small page carrying `sc4-next-page`. A `CONNECT` (an
+    /// HTTPS upgrade attempt) is refused, so Chromium stays on plain HTTP.
+    async fn fixture_proxy() -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        // No trailing slash: Chromium refuses `http://host:port/` as a proxy server.
+        let endpoint = format!("http://{}", listener.local_addr().expect("addr"));
+        let handle = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match socket.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => head.extend_from_slice(&chunk[..read]),
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&head).into_owned();
+                    let mut request_line = head.split_whitespace();
+                    let method = request_line.next().unwrap_or_default().to_owned();
+                    let target = request_line.next().unwrap_or_default().to_owned();
+                    if method == "CONNECT" {
+                        let _ = socket
+                            .write_all(b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                            .await;
+                        return;
+                    }
+                    if target.ends_with("/slow.html") || target.ends_with("/held.png") {
+                        // Held open and never answered, like `slow.crawl.test`.
+                        return std::future::pending::<()>().await;
+                    }
+                    if target.ends_with("/redirect-out.html") {
+                        let _ = socket
+                            .write_all(b"HTTP/1.1 302 Found\r\nlocation: http://sc4-out.fixture.test/next.html\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                            .await;
+                        return;
+                    }
+                    let (marker, image) = if target.ends_with("/loaded.html") {
+                        ("sc4-loaded", "<img src=\"/held.png\">")
+                    } else if target.ends_with("/image-out.html") {
+                        (
+                            "sc4-image-out",
+                            "<img src=\"http://sc4-out.fixture.test/pixel.png\">",
+                        )
+                    } else {
+                        ("sc4-next-page", "")
+                    };
+                    let body = format!(
+                        "<html><head><title>{marker}</title></head><body><p>{marker}</p>{image}</body></html>"
+                    );
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (endpoint, handle)
+    }
+
+    /// A pinned-proxy provider whose every session uses the given endpoint.
+    struct FixtureProxyProvider(String);
+
+    #[async_trait::async_trait]
+    impl BrowserEgressProxyProvider for FixtureProxyProvider {
+        async fn endpoint_for_session(
+            &self,
+            _session_key: &str,
+        ) -> QuarryResult<PinnedEgressProxyEndpoint> {
+            PinnedEgressProxyEndpoint::parse(self.0.clone())
+        }
+
+        async fn receipts_after(
+            &self,
+            _session_key: &str,
+            _after_sequence: u64,
+            _limit: usize,
+        ) -> QuarryResult<Vec<BrowserEgressReceipt>> {
+            Ok(Vec::new())
+        }
+
+        async fn configure_policy(
+            &self,
+            _session_key: &str,
+            _policy: BrowserEgressPolicy,
+        ) -> QuarryResult<()> {
+            Ok(())
+        }
+
+        async fn release_session(&self, _session_key: &str) {}
+    }
+
+    async fn page_html(driver: &ChromiumoxideDriver, session: &BrowserSession) -> String {
+        let bytes = driver.content(session).await.expect("content");
+        String::from_utf8(bytes.to_vec()).expect("utf-8")
+    }
+
+    /// SC4 T3 through the driver's own `goto` on a session tab, the live path: the
+    /// timeout, the stop, the tab bookkeeping and the drain in the next `goto`. The
+    /// session's pinned proxy is `fixture_proxy`, its Fetch guard is turned off (it
+    /// refuses a host name that does not resolve), and `goto_detour` takes the
+    /// navigation past the URL guard to the fixture host under a short bound. Two hangs,
+    /// each a typed TIMEOUT after which the page can be read at once:
+    /// - the document never arrives: the tab keeps the page it had;
+    /// - the document arrived and an image never does: the tab keeps that page.
+    ///
+    /// Then the next navigation goes straight through, in both cases.
+    #[tokio::test]
+    async fn a_session_goto_that_hangs_times_out_typed_and_the_next_step_answers() {
+        if !live_enabled() {
+            return;
+        }
+        let (endpoint, proxy_task) = fixture_proxy().await;
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(Arc::new(FixtureProxyProvider(endpoint)))
+            .with_pool_config(quiet_pool());
+        let session = live_session_sized(&driver, "sc4-goto", None, "sc4-before").await;
+        driver
+            .current_page(&session)
+            .await
+            .expect("current page")
+            .execute(::chromiumoxide::cdp::browser_protocol::fetch::DisableParams::default())
+            .await
+            .expect("guard off");
+        let detour = |path: &str, bound: Duration| {
+            *driver.hooks.goto_detour.lock().unwrap() =
+                Some((format!("http://sc4.fixture.test{path}"), bound));
+        };
+
+        for (hang, kept) in [("/slow.html", "sc4-before"), ("/loaded.html", "sc4-loaded")] {
+            let limit = Duration::from_millis(1500);
+            detour(hang, limit);
+            let started = Instant::now();
+            let error = driver.goto(&session, "about:blank").await.unwrap_err();
+            let waited = started.elapsed();
+            assert_eq!(error.code, ErrorCode::Timeout, "{hang}: {error:?}");
+            let details = error.details.clone().expect("details");
+            assert_eq!(details["op"], "navigate", "{hang}");
+            assert_eq!(details["deadline_ms"], 1500, "{hang}");
+            assert_eq!(details["effect"], "unknown", "{hang}");
+            assert!(!format!("{error:?}").contains("fixture"), "{error:?}");
+            assert!(
+                waited < limit + Duration::from_secs(4),
+                "{hang}: {waited:?}"
+            );
+            eprintln!("timeout and recovery took {waited:?} for {hang}");
+
+            let started = Instant::now();
+            let html = page_html(&driver, &session).await;
+            assert!(html.contains(kept), "{hang}: the tab keeps {kept}: {html}");
+            detour("/next.html", Duration::from_secs(5));
+            driver
+                .goto(&session, "about:blank")
+                .await
+                .expect("the next navigation is not queued behind the abandoned one");
+            assert!(
+                page_html(&driver, &session).await.contains("sc4-next-page"),
+                "{hang}"
+            );
+            let next_step = started.elapsed();
+            eprintln!("next step took {next_step:?} after {hang}");
+            // As in the test above: about 0.1 s alone, against about 28 s of queue.
+            assert!(next_step < Duration::from_secs(8), "{hang}: {next_step:?}");
+        }
+        *driver.hooks.goto_detour.lock().unwrap() = None;
+        driver.release(session).await.expect("release");
+        driver.shutdown().await;
+        proxy_task.abort();
+    }
+
+    /// SC4 T4b: the same two hangs as a run's first step, on a session with no tab yet.
+    /// The `goto` opens the tab and its navigation ends in the typed TIMEOUT; the tab
+    /// stays, so the next step reads it at once (`about:blank` when the document never
+    /// arrived, the held page when only its image hangs) and the next navigation goes
+    /// straight through. Before the fix the attach closed the tab with its timed-out
+    /// navigation, and every read after it answered `no_current_page`.
+    ///
+    /// On the old code this test fails earlier, at the first `unwrap_err`: `goto_detour`
+    /// then covered only a tab that existed, so the first `goto` stayed on `about:blank`
+    /// and succeeded. The zero-tab symptom was shown by applying the detour inside the
+    /// old attach, by hand; the live T4b re-run is the proof on the real path. The
+    /// detour turns the tab's Fetch guard off; the test below keeps it on.
+    #[tokio::test]
+    async fn a_first_step_goto_that_hangs_keeps_its_tab_and_the_next_step_answers() {
+        if !live_enabled() {
+            return;
+        }
+        let (endpoint, proxy_task) = fixture_proxy().await;
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(Arc::new(FixtureProxyProvider(endpoint)))
+            .with_pool_config(quiet_pool());
+        let detour = |path: &str, bound: Duration| {
+            *driver.hooks.goto_detour.lock().unwrap() =
+                Some((format!("http://sc4.fixture.test{path}"), bound));
+        };
+        // A warm browser: the step below still attaches, but only a context and a tab.
+        let warm = live_session_sized(&driver, "sc4-first-warm", None, "warm").await;
+        driver.release(warm).await.expect("release");
+
+        for (hang, kept) in [("/slow.html", None), ("/loaded.html", Some("sc4-loaded"))] {
+            let key = format!("sc4-first{}", hang.replace(['/', '.'], "-"));
+            let session = driver
+                .acquire(&make_lease_with_key(&key))
+                .await
+                .expect("acquire");
+            driver
+                .configure_egress_policy(&session, BrowserEgressPolicy::deny_all())
+                .await
+                .expect("install deny-all egress policy");
+            assert!(driver.list_tabs(&session).await.expect("tabs").is_empty());
+
+            let limit = Duration::from_millis(1500);
+            detour(hang, limit);
+            let started = Instant::now();
+            let error = driver.goto(&session, "about:blank").await.unwrap_err();
+            let waited = started.elapsed();
+            assert_eq!(error.code, ErrorCode::Timeout, "{hang}: {error:?}");
+            let details = error.details.clone().expect("details");
+            assert_eq!(details["op"], "navigate", "{hang}");
+            assert_eq!(details["deadline_ms"], 1500, "{hang}");
+            assert_eq!(details["effect"], "unknown", "{hang}");
+            assert!(!format!("{error:?}").contains("fixture"), "{error:?}");
+            eprintln!("first-step attach, timeout and recovery took {waited:?} for {hang}");
+            // The attach is in the step too: up to about 11 s (a cold browser) under the
+            // full live suite, against the shipped 25 s deadline and the 30 s queue.
+            assert!(
+                waited < limit + Duration::from_secs(12),
+                "{hang}: {waited:?}"
+            );
+
+            let started = Instant::now();
+            let tabs = driver.list_tabs(&session).await.expect("tabs");
+            assert_eq!(tabs.len(), 1, "{hang}: the tab stays: {tabs:?}");
+            assert!(tabs[0].active, "{hang}: {tabs:?}");
+            driver
+                .native_page_projection(&session)
+                .await
+                .expect("the accessibility tree answers after the timeout");
+            let html = page_html(&driver, &session).await;
+            match kept {
+                Some(marker) => {
+                    assert!(
+                        html.contains(marker),
+                        "{hang}: the tab keeps {marker}: {html}"
+                    );
+                    assert_eq!(tabs[0].title.as_deref(), Some(marker), "{hang}");
+                }
+                None => assert!(!html.contains("sc4-"), "{hang}: still blank: {html}"),
+            }
+            let read = started.elapsed();
+            eprintln!("first-step reads took {read:?} after {hang}");
+            detour("/next.html", Duration::from_secs(5));
+            driver
+                .goto(&session, "about:blank")
+                .await
+                .expect("the next navigation is not queued behind the abandoned one");
+            assert!(
+                page_html(&driver, &session).await.contains("sc4-next-page"),
+                "{hang}"
+            );
+            let next_step = started.elapsed();
+            eprintln!("first-step next step took {next_step:?} after {hang}");
+            // As in the test above: about 0.1 s alone, against about 28 s of queue.
+            assert!(read < Duration::from_secs(5), "{hang}: {read:?}");
+            assert!(next_step < Duration::from_secs(8), "{hang}: {next_step:?}");
+            *driver.hooks.goto_detour.lock().unwrap() = None;
+            driver.release(session).await.expect("release");
+        }
+        driver.shutdown().await;
+        proxy_task.abort();
+    }
+
+    /// SC4 D1: a session with no tab yet (a run that never navigated, one resumed from a
+    /// checkpoint with no URL) is observed on a placeholder tab: `ensure_page` opens one
+    /// on `about:blank`, active and readable, that goes nowhere; a second call keeps it;
+    /// the session's first `goto` navigates that same tab (no second tab). A plain page
+    /// read still answers `no_current_page` before it: only observing steps ask for a page.
+    /// On the old code the trait's no-op `ensure_page` left the session with no tab, and
+    /// the run's observation failed `no_current_page` (502) in the live RS leg.
+    #[tokio::test]
+    async fn an_observed_session_with_no_page_gets_a_blank_tab_its_first_goto_uses() {
+        if !live_enabled() {
+            return;
+        }
+        let (endpoint, proxy_task) = fixture_proxy().await;
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(Arc::new(FixtureProxyProvider(endpoint)))
+            .with_pool_config(quiet_pool());
+        let session = driver
+            .acquire(&make_lease_with_key("sc4-d1-placeholder"))
+            .await
+            .expect("acquire");
+        driver
+            .configure_egress_policy(&session, BrowserEgressPolicy::deny_all())
+            .await
+            .expect("install deny-all egress policy");
+        assert!(driver.list_tabs(&session).await.expect("tabs").is_empty());
+        let error = driver.content(&session).await.expect_err("no page yet");
+        assert_eq!(loss_reason(&error), "no_current_page", "{error:?}");
+
+        driver
+            .ensure_page(&session)
+            .await
+            .expect("a placeholder tab");
+        let tabs = driver.list_tabs(&session).await.expect("tabs");
+        assert_eq!(tabs.len(), 1, "{tabs:?}");
+        assert!(tabs[0].active, "{tabs:?}");
+        assert_eq!(tabs[0].url.as_deref(), Some("about:blank"), "{tabs:?}");
+        let placeholder = tabs[0].tab_id.clone();
+        driver
+            .native_page_projection(&session)
+            .await
+            .expect("the accessibility tree of the blank tab answers");
+        let href = driver
+            .evaluate(&session, "window.location.href")
+            .await
+            .expect("page state");
+        assert_eq!(href, json!("about:blank"));
+        assert!(!page_html(&driver, &session).await.contains("sc4-"));
+
+        driver
+            .ensure_page(&session)
+            .await
+            .expect("a page already there");
+        let tabs = driver.list_tabs(&session).await.expect("tabs");
+        assert_eq!(tabs.len(), 1, "a second call opens nothing: {tabs:?}");
+
+        *driver.hooks.goto_detour.lock().unwrap() = Some((
+            "http://sc4.fixture.test/next.html".to_owned(),
+            Duration::from_secs(5),
+        ));
+        driver
+            .goto(&session, "about:blank")
+            .await
+            .expect("the first navigation goes through on the placeholder");
+        assert!(page_html(&driver, &session).await.contains("sc4-next-page"));
+        let tabs = driver.list_tabs(&session).await.expect("tabs");
+        assert_eq!(tabs.len(), 1, "the goto used the placeholder: {tabs:?}");
+        assert_eq!(tabs[0].tab_id, placeholder, "{tabs:?}");
+        *driver.hooks.goto_detour.lock().unwrap() = None;
+        driver.release(session).await.expect("release");
+        driver.shutdown().await;
+        proxy_task.abort();
+    }
+
+    /// A profile store over an in-memory one that counts its loads and saves.
+    struct CountingProfileStore {
+        inner: crate::session::InMemoryProfileStore,
+        loads: AtomicUsize,
+        saves: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ProfileStore for CountingProfileStore {
+        async fn save(
+            &self,
+            org_id: &str,
+            profile_id: &quarry_core::ids::kinds::ProfileKind,
+            snapshot: &SessionSnapshot,
+            meta: &crate::session::SaveMeta,
+        ) -> QuarryResult<crate::session::SaveOutcome> {
+            self.saves.fetch_add(1, Ordering::SeqCst);
+            self.inner.save(org_id, profile_id, snapshot, meta).await
+        }
+        async fn load(
+            &self,
+            org_id: &str,
+            profile_id: &quarry_core::ids::kinds::ProfileKind,
+        ) -> QuarryResult<Option<SessionSnapshot>> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            self.inner.load(org_id, profile_id).await
+        }
+        async fn delete(
+            &self,
+            org_id: &str,
+            profile_id: &quarry_core::ids::kinds::ProfileKind,
+        ) -> QuarryResult<()> {
+            self.inner.delete(org_id, profile_id).await
+        }
+        async fn list(&self, org_id: &str) -> QuarryResult<Vec<crate::session::ProfileSummary>> {
+            self.inner.list(org_id).await
+        }
+        async fn save_metadata(
+            &self,
+            org_id: &str,
+            profile_id: &quarry_core::ids::kinds::ProfileKind,
+            metadata: &crate::session::ProfileMetadata,
+        ) -> QuarryResult<()> {
+            self.inner.save_metadata(org_id, profile_id, metadata).await
+        }
+        async fn load_metadata(
+            &self,
+            org_id: &str,
+            profile_id: &quarry_core::ids::kinds::ProfileKind,
+        ) -> QuarryResult<Option<crate::session::ProfileMetadata>> {
+            self.inner.load_metadata(org_id, profile_id).await
+        }
+    }
+
+    /// SC4 D1 and WS17.C2: a placeholder tab has no URL to plan the profile restore for,
+    /// so it neither loads nor restores the profile; the session's first `goto` does, into
+    /// that tab and before its navigation, as a first `goto` that opens its own tab does,
+    /// and only once. A session that only observed never restored the profile and does not
+    /// save its jar over it at release (without that rule a capture v2 release stored the
+    /// placeholder context's empty jar over it). Needs no network.
+    #[tokio::test]
+    async fn a_placeholder_tab_leaves_the_profile_to_the_first_goto() {
+        if !live_enabled() {
+            return;
+        }
+        let store = Arc::new(CountingProfileStore {
+            inner: crate::session::InMemoryProfileStore::new(),
+            loads: AtomicUsize::new(0),
+            saves: AtomicUsize::new(0),
+        });
+        let mut lease = make_lease_with_key("sc4-d1-profile-observe");
+        lease.persist_profile = true;
+        let stored = SessionSnapshot {
+            cookies: vec![Cookie {
+                name: "sc4_d1".into(),
+                value: "kept".into(),
+                domain: "example.com".into(),
+                path: "/".into(),
+                expires: Some(chrono::Utc::now() + chrono::Duration::days(3)),
+                ..Default::default()
+            }],
+            captured_at: Some(chrono::Utc::now()),
+            ..Default::default()
+        };
+        store
+            .inner
+            .save(
+                &lease.org_id,
+                &lease.profile_id,
+                &stored,
+                &crate::session::SaveMeta::now(None),
+            )
+            .await
+            .expect("seed the profile");
+        let driver = live_driver()
+            .with_pool_config(quiet_pool())
+            .with_profile_store(store.clone());
+        // Capture v2 saves whatever the context holds (v1 cannot capture a blank tab).
+        driver
+            .hooks
+            .release_capture_v2
+            .store(true, Ordering::SeqCst);
+
+        // A session that only observes: no load, no restore, no save.
+        let session = driver.acquire(&lease).await.expect("acquire");
+        driver
+            .configure_egress_policy(&session, BrowserEgressPolicy::deny_all())
+            .await
+            .expect("policy");
+        driver
+            .ensure_page(&session)
+            .await
+            .expect("a placeholder tab");
+        assert_eq!(
+            store.loads.load(Ordering::SeqCst),
+            0,
+            "the placeholder loads nothing"
+        );
+        let telemetry = driver.telemetry(&session).await.expect("telemetry");
+        assert!(telemetry.profile_restore.is_none(), "{telemetry:?}");
+        driver.release(session).await.expect("release");
+        assert_eq!(
+            store.saves.load(Ordering::SeqCst),
+            0,
+            "a session that never restored the profile does not save over it"
+        );
+        let kept = store
+            .inner
+            .load(&lease.org_id, &lease.profile_id)
+            .await
+            .expect("load")
+            .expect("still stored");
+        assert_eq!(kept.cookies.len(), 1, "{kept:?}");
+
+        // A session that observes, then navigates: the goto loads and restores it, once.
+        let session = driver.acquire(&lease).await.expect("acquire");
+        driver
+            .configure_egress_policy(&session, BrowserEgressPolicy::deny_all())
+            .await
+            .expect("policy");
+        driver
+            .ensure_page(&session)
+            .await
+            .expect("a placeholder tab");
+        driver
+            .goto(&session, "about:blank")
+            .await
+            .expect("the first goto");
+        assert_eq!(
+            store.loads.load(Ordering::SeqCst),
+            1,
+            "the first goto loads it"
+        );
+        let restore = driver
+            .telemetry(&session)
+            .await
+            .expect("telemetry")
+            .profile_restore
+            .expect("the first goto restored the profile");
+        assert_eq!(restore.cookies_total, 1, "{restore:?}");
+        driver
+            .goto(&session, "about:blank")
+            .await
+            .expect("a later goto");
+        assert_eq!(
+            store.loads.load(Ordering::SeqCst),
+            1,
+            "restored once per context"
+        );
+        let tabs = driver.list_tabs(&session).await.expect("tabs");
+        assert_eq!(tabs.len(), 1, "{tabs:?}");
+        driver.release(session).await.expect("release");
+        driver.shutdown().await;
+    }
+
+    /// SC4 D1: a profile whose key cannot be reached does not fail the observation (the
+    /// placeholder loads nothing); the first `goto` loads it and is refused (503), as the
+    /// first `goto` that opens its own tab is, and nothing is saved over the profile.
+    #[tokio::test]
+    async fn an_unreadable_profile_refuses_the_first_goto_after_a_placeholder() {
+        if !live_enabled() {
+            return;
+        }
+        let store = Arc::new(FailingLoadStore::new(QuarryError::new(
+            ErrorCode::RuntimeNotReady,
+            "profile key unavailable",
+        )));
+        let driver = live_driver()
+            .with_pool_config(quiet_pool())
+            .with_profile_store(store.clone());
+        let mut lease = make_lease_with_key("sc4-d1-profile-key");
+        lease.persist_profile = true;
+        let session = driver.acquire(&lease).await.expect("acquire");
+        driver
+            .configure_egress_policy(&session, BrowserEgressPolicy::deny_all())
+            .await
+            .expect("policy");
+        driver
+            .ensure_page(&session)
+            .await
+            .expect("the observation is not refused");
+        let error = driver
+            .goto(&session, "about:blank")
+            .await
+            .expect_err("the first goto must not start fresh over an unreadable profile");
+        assert_eq!(error.code, ErrorCode::RuntimeNotReady, "{error:?}");
+        assert_eq!(
+            error
+                .details
+                .as_ref()
+                .map(|details| details["reason"].clone()),
+            Some(json!("profile_key_unavailable")),
+            "{error:?}"
+        );
+        let _ = driver.release(session).await;
+        assert_eq!(store.saves.load(Ordering::SeqCst), 0);
+        driver.shutdown().await;
+    }
+
+    fn abandoned_count(driver: &ChromiumoxideDriver) -> usize {
+        driver.abandoned_navigations.lock().unwrap().len()
+    }
+
+    /// SC4 D3: the typed refusal a `goto` the tab's Fetch guard refused ends with, well
+    /// before its navigate bound; it names neither the URL nor the host.
+    fn assert_refused_at_once(case: &str, error: &QuarryError, waited: Duration, bound: Duration) {
+        assert_eq!(error.code, ErrorCode::SecurityBlocked, "{case}: {error:?}");
+        assert_eq!(
+            error.message, "browser navigation is outside the run's allowed domains",
+            "{case}"
+        );
+        let details = error.details.clone().expect("details");
+        assert_eq!(details["reason"], "domain_grant_blocked", "{case}");
+        assert_eq!(details["op"], "navigate", "{case}");
+        assert!(!error.retryable, "{case}");
+        let rendered = format!("{error:?}");
+        assert!(
+            !rendered.contains("fixture") && !rendered.contains("http"),
+            "{case}: {rendered}"
+        );
+        eprintln!("{case}: refused in {waited:?}");
+        // About 0.1 s alone; the old code waited out the whole bound and answered TIMEOUT.
+        assert!(waited < bound / 3, "{case}: {waited:?}");
+    }
+
+    fn paused<'a>(
+        request: &'a str,
+        url: &'a str,
+        network: Option<&'a str>,
+        redirected_from: Option<&'a str>,
+    ) -> PausedDocument<'a> {
+        PausedDocument {
+            request,
+            url,
+            network,
+            redirected_from,
+        }
+    }
+
+    /// SC4 D3 review: while a `goto` waits for its document request, a main-frame
+    /// document the old page starts for another URL is not taken as the `goto`'s own,
+    /// refused or allowed: refused, it used to end the `goto` with a false
+    /// `SECURITY_BLOCKED`; allowed, it took the chain's first place, so the `goto`'s own
+    /// refusal later was missed and it waited out its deadline.
+    #[test]
+    fn a_navigation_watch_starts_with_its_own_url_only() {
+        let watches = Arc::new(NavigationWatches::default());
+        let tab = TargetId::new("tab");
+
+        let mut watched = watches.watch(tab.clone(), "http://allowed.test/page#top");
+        watches.document_request(
+            &tab,
+            &paused("stray", "http://refused.test/", Some("n-stray"), None),
+            Some(NAVIGATION_REFUSED_BY_GRANT),
+        );
+        assert!(
+            watched.refused.try_recv().is_err(),
+            "the old page's refused navigation is not the goto's"
+        );
+        // The goto's own request (Chromium tries the https form first), then allowed.
+        watches.document_request(
+            &tab,
+            &paused("own", "https://allowed.test/page", Some("n-own"), None),
+            None,
+        );
+        assert!(watched.refused.try_recv().is_err());
+        drop(watched);
+
+        let mut watched = watches.watch(tab.clone(), "http://refused.test/next");
+        watches.document_request(
+            &tab,
+            &paused("stray", "http://elsewhere.test/", Some("n-stray"), None),
+            None,
+        );
+        watches.document_request(
+            &tab,
+            &paused("own", "http://refused.test/next", Some("n-own"), None),
+            Some(NAVIGATION_REFUSED_BY_GRANT),
+        );
+        assert_eq!(
+            watched.refused.try_recv().ok(),
+            Some(NAVIGATION_REFUSED_BY_GRANT),
+            "an allowed stray navigation does not hide the goto's own refusal"
+        );
+    }
+
+    /// SC4 D3 review: a redirect hop is in the chain by its `redirectedRequestId` or, when
+    /// Chromium leaves that out, by the chain's network id; a later document request with
+    /// neither is not.
+    #[test]
+    fn a_navigation_watch_follows_redirect_hops_by_request_or_network_id() {
+        let watches = Arc::new(NavigationWatches::default());
+        let tab = TargetId::new("tab");
+
+        let mut watched = watches.watch(tab.clone(), "http://allowed.test/redirect");
+        watches.document_request(
+            &tab,
+            &paused("r1", "http://allowed.test/redirect", Some("n1"), None),
+            None,
+        );
+        watches.document_request(
+            &tab,
+            &paused("other", "http://refused.test/", Some("n2"), None),
+            Some(NAVIGATION_REFUSED_BY_GRANT),
+        );
+        assert!(watched.refused.try_recv().is_err(), "not a hop of the goto");
+        // A hop without `redirectedRequestId`, on the chain's network id.
+        watches.document_request(
+            &tab,
+            &paused("r2", "http://refused.test/", Some("n1"), None),
+            Some(NAVIGATION_REFUSED_BY_GRANT),
+        );
+        assert_eq!(
+            watched.refused.try_recv().ok(),
+            Some(NAVIGATION_REFUSED_BY_GRANT)
+        );
+        drop(watched);
+
+        let mut watched = watches.watch(tab.clone(), "http://allowed.test/redirect");
+        watches.document_request(
+            &tab,
+            &paused("r1", "http://allowed.test/redirect", None, None),
+            None,
+        );
+        watches.document_request(
+            &tab,
+            &paused("r2", "http://refused.test/", None, Some("r1")),
+            Some(NAVIGATION_REFUSED_BY_GUARD),
+        );
+        assert_eq!(
+            watched.refused.try_recv().ok(),
+            Some(NAVIGATION_REFUSED_BY_GUARD)
+        );
+        drop(watched);
+        assert!(
+            watches.by_tab.lock().unwrap().is_empty(),
+            "a dropped watch is gone"
+        );
+    }
+
+    /// Whether the tab's Fetch guard recorded a `domain_grant_blocked` receipt for a
+    /// request to `host` on `tab_id` after `after` (a subresource's can land just after
+    /// the load). The host keeps Chromium's own background requests, which the guard
+    /// refuses too, from passing for the one a check is about.
+    async fn grant_block_recorded(
+        driver: &ChromiumoxideDriver,
+        session: &BrowserSession,
+        tab_id: &str,
+        host: &str,
+        after: u64,
+    ) -> bool {
+        for _ in 0..40 {
+            let receipts = driver
+                .egress_receipts(session, after, 512)
+                .await
+                .expect("receipts");
+            if receipts.iter().any(|receipt| {
+                receipt.tab_id.as_deref() == Some(tab_id)
+                    && receipt.decision == BrowserEgressDecision::Block
+                    && receipt.policy == "domain_grant_blocked"
+                    && url::Url::parse(&receipt.url).is_ok_and(|url| url.host_str() == Some(host))
+            }) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    async fn last_receipt_sequence(driver: &ChromiumoxideDriver, session: &BrowserSession) -> u64 {
+        driver
+            .egress_receipts(session, 0, 4096)
+            .await
+            .expect("receipts")
+            .iter()
+            .map(|receipt| receipt.sequence)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// SC4 T4b review and D3: a run's first `goto` with the tab's Fetch guard left on.
+    /// Under a deny-all egress policy the guard refuses the navigation itself; then,
+    /// with `sc4.fixture.test` allowed, a redirect from it to `sc4-out.fixture.test`.
+    /// Each is a typed `SECURITY_BLOCKED` at once (before D3 it waited out the navigate
+    /// bound and answered TIMEOUT), with its refusal receipt; the tab stays, on
+    /// `about:blank`, and answers the next read where the attach used to close it, and
+    /// the next navigation goes straight through.
+    #[tokio::test]
+    async fn a_first_step_goto_the_network_guard_refuses_keeps_its_tab() {
+        if !live_enabled() {
+            return;
+        }
+        let (endpoint, proxy_task) = fixture_proxy().await;
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(Arc::new(FixtureProxyProvider(endpoint)))
+            .with_pool_config(quiet_pool());
+        // A warm browser: the step below still attaches, but only a context and a tab.
+        let warm = live_session_sized(&driver, "sc4-first-guarded-warm", None, "warm").await;
+        driver.release(warm).await.expect("release");
+        driver
+            .navigation_watches
+            .fixture_hosts_resolve
+            .store(true, Ordering::SeqCst);
+        let session = driver
+            .acquire(&make_lease_with_key("sc4-first-guarded"))
+            .await
+            .expect("acquire");
+        driver
+            .configure_egress_policy(&session, BrowserEgressPolicy::deny_all())
+            .await
+            .expect("install deny-all egress policy");
+        driver
+            .hooks
+            .goto_detour_keeps_guard
+            .store(true, Ordering::SeqCst);
+        let bound = Duration::from_secs(10);
+        let detour = |path: &str| {
+            *driver.hooks.goto_detour.lock().unwrap() =
+                Some((format!("http://sc4.fixture.test{path}"), bound));
+        };
+
+        // The attach is in this step too (a context and a tab).
+        detour("/next.html");
+        let started = Instant::now();
+        let outcome = driver.goto(&session, "about:blank").await;
+        let waited = started.elapsed();
+        eprintln!("guarded first step: {outcome:?}");
+        let error = outcome.expect_err("the guard refuses the fixture host");
+        assert_refused_at_once("first step, deny-all", &error, waited, bound);
+        assert_eq!(
+            abandoned_count(&driver),
+            1,
+            "the refused navigation is marked"
+        );
+
+        let tabs = driver.list_tabs(&session).await.expect("tabs");
+        assert_eq!(tabs.len(), 1, "the tab stays: {tabs:?}");
+        assert!(tabs[0].active, "{tabs:?}");
+        let tab_id = tabs[0].tab_id.clone();
+        let html = page_html(&driver, &session).await;
+        assert!(
+            !html.contains("sc4-"),
+            "the refused page never arrived: {html}"
+        );
+        assert!(
+            grant_block_recorded(&driver, &session, &tab_id, "sc4.fixture.test", 0).await,
+            "the refusal is a receipt"
+        );
+
+        driver
+            .configure_egress_policy(
+                &session,
+                BrowserEgressPolicy::from_allowed_domains(&["sc4.fixture.test".to_owned()]),
+            )
+            .await
+            .expect("allow the fixture host");
+        let after = last_receipt_sequence(&driver, &session).await;
+        detour("/redirect-out.html");
+        let started = Instant::now();
+        let error = driver.goto(&session, "about:blank").await.unwrap_err();
+        assert_refused_at_once("first step, redirect", &error, started.elapsed(), bound);
+        assert!(
+            grant_block_recorded(&driver, &session, &tab_id, "sc4-out.fixture.test", after).await,
+            "the refused hop is a receipt"
+        );
+        assert!(!page_html(&driver, &session).await.contains("sc4-"));
+
+        detour("/next.html");
+        let started = Instant::now();
+        driver
+            .goto(&session, "about:blank")
+            .await
+            .expect("the next navigation is not queued behind the refused one");
+        assert!(page_html(&driver, &session).await.contains("sc4-next-page"));
+        let next_step = started.elapsed();
+        eprintln!("next step took {next_step:?} after a refused first step");
+        assert!(next_step < Duration::from_secs(8), "{next_step:?}");
+        assert_eq!(abandoned_count(&driver), 0, "the drain takes the mark");
+
+        *driver.hooks.goto_detour.lock().unwrap() = None;
+        driver
+            .hooks
+            .goto_detour_keeps_guard
+            .store(false, Ordering::SeqCst);
+        driver.release(session).await.expect("release");
+        assert_eq!(abandoned_count(&driver), 0, "the release forgets the tab");
+        driver.shutdown().await;
+        proxy_task.abort();
+    }
+
+    /// SC4 D3 on a tab that has a page (a later step), with the tab's Fetch guard on and
+    /// only `sc4.fixture.test` allowed. A navigation redirected to `sc4-out.fixture.test`
+    /// and one straight to it are each a typed `SECURITY_BLOCKED` at once, with their
+    /// refusal receipts; the tab keeps the page it had, answers reads, and the next
+    /// navigation goes straight through. A page whose only refused request is an image
+    /// still loads: a subresource never ends a `goto`. Before D3 the two refusals waited
+    /// out the navigate bound and answered TIMEOUT.
+    #[tokio::test]
+    async fn a_goto_the_network_guard_refuses_is_a_typed_refusal_at_once() {
+        if !live_enabled() {
+            return;
+        }
+        let (endpoint, proxy_task) = fixture_proxy().await;
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(Arc::new(FixtureProxyProvider(endpoint)))
+            .with_pool_config(quiet_pool());
+        driver
+            .navigation_watches
+            .fixture_hosts_resolve
+            .store(true, Ordering::SeqCst);
+        let session = live_session_sized(&driver, "sc4-refused", None, "sc4-before").await;
+        driver
+            .configure_egress_policy(
+                &session,
+                BrowserEgressPolicy::from_allowed_domains(&["sc4.fixture.test".to_owned()]),
+            )
+            .await
+            .expect("allow the fixture host");
+        driver
+            .hooks
+            .goto_detour_keeps_guard
+            .store(true, Ordering::SeqCst);
+        let tab_id = driver.list_tabs(&session).await.expect("tabs")[0]
+            .tab_id
+            .clone();
+        let bound = Duration::from_secs(10);
+        let detour = |url: &str| {
+            *driver.hooks.goto_detour.lock().unwrap() = Some((url.to_owned(), bound));
+        };
+
+        let mut kept = "sc4-before";
+        for (case, url) in [
+            ("redirect", "http://sc4.fixture.test/redirect-out.html"),
+            ("direct", "http://sc4-out.fixture.test/next.html"),
+        ] {
+            let after = last_receipt_sequence(&driver, &session).await;
+            detour(url);
+            let started = Instant::now();
+            let error = driver.goto(&session, "about:blank").await.unwrap_err();
+            assert_refused_at_once(case, &error, started.elapsed(), bound);
+            assert!(
+                grant_block_recorded(&driver, &session, &tab_id, "sc4-out.fixture.test", after)
+                    .await,
+                "{case}: the refusal is a receipt"
+            );
+            assert_eq!(abandoned_count(&driver), 1, "{case}: marked");
+            let html = page_html(&driver, &session).await;
+            assert!(html.contains(kept), "{case}: the tab keeps {kept}: {html}");
+            driver
+                .native_page_projection(&session)
+                .await
+                .expect("the accessibility tree answers after the refusal");
+
+            detour("http://sc4.fixture.test/next.html");
+            let started = Instant::now();
+            driver
+                .goto(&session, "about:blank")
+                .await
+                .expect("the next navigation is not queued behind the refused one");
+            assert!(page_html(&driver, &session).await.contains("sc4-next-page"));
+            let next_step = started.elapsed();
+            eprintln!("{case}: next step took {next_step:?}");
+            assert!(next_step < Duration::from_secs(8), "{case}: {next_step:?}");
+            assert_eq!(abandoned_count(&driver), 0, "{case}: drained");
+            kept = "sc4-next-page";
+        }
+
+        let after = last_receipt_sequence(&driver, &session).await;
+        detour("http://sc4.fixture.test/image-out.html");
+        driver
+            .goto(&session, "about:blank")
+            .await
+            .expect("a refused image does not fail the navigation");
+        assert!(page_html(&driver, &session).await.contains("sc4-image-out"));
+        assert!(
+            grant_block_recorded(&driver, &session, &tab_id, "sc4-out.fixture.test", after).await,
+            "the refused image is a receipt"
+        );
+        assert_eq!(abandoned_count(&driver), 0);
+
+        *driver.hooks.goto_detour.lock().unwrap() = None;
+        driver
+            .hooks
+            .goto_detour_keeps_guard
+            .store(false, Ordering::SeqCst);
+        driver.release(session).await.expect("release");
+        driver.shutdown().await;
+        proxy_task.abort();
+    }
+
+    /// SC4 T4b review: a `goto` dropped mid-navigation (an outer deadline here) marks
+    /// its tab, so the next `goto` stops and drains the navigation instead of queueing
+    /// behind it for the library's 30 s; a release forgets the mark.
+    #[tokio::test]
+    async fn a_goto_dropped_mid_navigation_is_drained_by_the_next_one() {
+        if !live_enabled() {
+            return;
+        }
+        let (endpoint, proxy_task) = fixture_proxy().await;
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(Arc::new(FixtureProxyProvider(endpoint)))
+            .with_pool_config(quiet_pool());
+        let session = live_session_sized(&driver, "sc4-dropped", None, "sc4-before").await;
+        let detour = |path: &str| {
+            *driver.hooks.goto_detour.lock().unwrap() = Some((
+                format!("http://sc4.fixture.test{path}"),
+                Duration::from_secs(5),
+            ));
+        };
+
+        detour("/slow.html");
+        let dropped =
+            tokio::time::timeout(Duration::from_secs(1), driver.goto(&session, "about:blank"))
+                .await;
+        assert!(
+            dropped.is_err(),
+            "the outer deadline drops the goto: {dropped:?}"
+        );
+        assert_eq!(
+            abandoned_count(&driver),
+            1,
+            "the dropped navigation is marked"
+        );
+
+        detour("/next.html");
+        let started = Instant::now();
+        driver
+            .goto(&session, "about:blank")
+            .await
+            .expect("the next navigation is not queued behind the dropped one");
+        let next_step = started.elapsed();
+        eprintln!("next step took {next_step:?} after a dropped goto");
+        assert!(
+            page_html(&driver, &session).await.contains("sc4-next-page"),
+            "the next page arrived"
+        );
+        assert_eq!(abandoned_count(&driver), 0, "the drain takes the mark");
+        // As in the tests above: well under the library's 30 s queue.
+        assert!(next_step < Duration::from_secs(8), "{next_step:?}");
+
+        detour("/slow.html");
+        let _ = tokio::time::timeout(Duration::from_secs(1), driver.goto(&session, "about:blank"))
+            .await;
+        assert_eq!(abandoned_count(&driver), 1);
+        *driver.hooks.goto_detour.lock().unwrap() = None;
+        driver.release(session).await.expect("release");
+        assert_eq!(abandoned_count(&driver), 0, "the release forgets the tab");
+        driver.shutdown().await;
+        proxy_task.abort();
+    }
+
+    /// SC4 T1 at a deadline above the library's own 30 s timer (a scale above 1): the
+    /// library's "Request timed out." comes first and is still the typed TIMEOUT, with
+    /// the bound that expired. Slow (30 s), so run by name.
+    #[tokio::test]
+    #[ignore = "SC4 live lane, slow (30 s): needs Chromium (CHROMIUMOXIDE_TEST=1)"]
+    async fn the_library_timer_is_the_typed_navigate_timeout_too() {
+        if !live_enabled() {
+            return;
+        }
+        let (silent, silent_task) = silent_server().await;
+        let driver = ChromiumoxideDriver::new();
+        let page = raw_page(&driver).await;
+        let started = Instant::now();
+        let error = goto_within(&page, &silent, Duration::from_secs(45))
+            .await
+            .unwrap_err();
+        let waited = started.elapsed();
+        assert!(waited < Duration::from_secs(35), "{waited:?}");
+        assert_eq!(error.code, ErrorCode::Timeout, "{error:?}");
+        let details = error.details.expect("details");
+        assert_eq!(details["op"], "navigate");
+        assert_eq!(details["deadline_ms"], 30_000);
+        assert_eq!(details["effect"], "unknown");
+        assert!(!details.to_string().contains("127.0.0.1"));
+        let _ = best_effort(Op::PageClose, page.close()).await;
+        driver.shutdown().await;
+        silent_task.abort();
+    }
+
     /// The end-to-end loopback-egress proof lives in
     /// `quarry-runtime/tests/browser_egress_boundary.rs`, not here.
     ///
@@ -8166,8 +10111,9 @@ mod bounded_calls_and_launch_dirs {
     /// The wrappers of `deadlines.rs`, and the one direct use of the table
     /// (`tokio::time::timeout(deadline(Op::X), call)`). A call is bounded when it sits
     /// inside the argument list of one of these.
-    const BOUNDS: [&str; 5] = [
+    const BOUNDS: [&str; 6] = [
         "with_deadline(",
+        "with_limit(",
         "read_with_retry(",
         "best_effort(",
         "bounded_hint(",

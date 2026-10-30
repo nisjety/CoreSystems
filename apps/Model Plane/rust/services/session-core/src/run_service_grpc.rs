@@ -907,18 +907,17 @@ impl RunService for RunServiceImpl {
             if !caller.is_service() {
                 caller.authorize_user(&req.user_id)?;
             }
-            let (authorized,): (bool,) = sqlx::query_as(
-                "SELECT EXISTS(SELECT 1 FROM runs WHERE id = $1 AND org_id = $2 AND user_id = $3)",
+            // Owner decision 17: the owner's run answers `authorized` only when the caller's posture is
+            // the run's receipt. A posture mismatch is a typed refusal, not a `false`, so the caller
+            // reports why. A run that is not the caller's answers `false` without the receipt being read.
+            let authorized = crate::retention_receipt::run_owner_matches(
+                &self.pool,
+                &caller,
+                &req.run_id,
+                &req.org_id,
+                &req.user_id,
             )
-            .bind(&req.run_id)
-            .bind(&req.org_id)
-            .bind(&req.user_id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|error| {
-                tracing::error!(%error, "durable run ownership lookup failed");
-                Status::unavailable("run ownership unavailable")
-            })?;
+            .await?;
             Ok(Response::new(pb::ResolveRunOwnerResponse { authorized }))
         }
         .await;

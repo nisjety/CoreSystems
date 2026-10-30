@@ -198,9 +198,27 @@ pub(super) fn receipt_plan(
     }
 }
 
+/// The URL of a tab that has no page yet: a run's first tab is committed on it before its
+/// first navigation (SC4 T4b), and stays on it when that navigation never commits.
+pub(super) const BLANK_TAB_URL: &str = "about:blank";
+
+/// Whether `url` is a tab with no page yet (T4b-1). Exactly `about:blank`: it loads
+/// nothing, so a step that lands on it reached no host. It is an observation only, never a
+/// navigation target: the edge's `RunNavPolicy::allows` still refuses it as one (the
+/// browser's `guard_navigation_target` admits it, as it loads nothing). `about:srcdoc` (a frame's inline document, never a tab's URL) and every other
+/// `about:` URL are not this case.
+pub(super) fn is_blank_tab(url: &str) -> bool {
+    url == BLANK_TAB_URL
+}
+
 /// The URL a checkpoint keeps. An open-web run keeps only scheme, host and path (a
-/// query can carry a session token); an allow-list run keeps its URL as it was.
+/// query can carry a session token); an allow-list run keeps its URL as it was. A tab with
+/// no page yet keeps `""`, as a run that never navigated does: there is nothing to recover
+/// on a resume, and `about:blank` is never a recovery navigation (T4b-1).
 pub(super) fn checkpoint_url(run: &RunNavPolicy, current_url: &str) -> String {
+    if is_blank_tab(current_url) {
+        return String::new();
+    }
     match run {
         RunNavPolicy::OpenWeb { .. } => navigate_without_query(current_url),
         RunNavPolicy::Allowlist => current_url.to_owned(),
@@ -380,6 +398,30 @@ mod tests {
             checkpoint_url(&RunNavPolicy::Allowlist, "https://example.com/a?q=1"),
             "https://example.com/a?q=1"
         );
+    }
+
+    #[test]
+    fn a_blank_tab_is_checkpointed_as_no_page_and_only_the_exact_url_counts() {
+        let open = RunNavPolicy::OpenWeb { denied: Vec::new() };
+        assert_eq!(checkpoint_url(&RunNavPolicy::Allowlist, "about:blank"), "");
+        assert_eq!(checkpoint_url(&open, "about:blank"), "");
+        assert!(is_blank_tab("about:blank"));
+        for url in [
+            "about:srcdoc",
+            "about:blank#x",
+            "about:blank?x=1",
+            "ABOUT:BLANK",
+            "about:config",
+            "data:text/html,x",
+            "javascript:void(0)",
+            "",
+        ] {
+            assert!(!is_blank_tab(url), "{url} is not a tab with no page yet");
+        }
+        // It never becomes a navigation target: the run's host rule still refuses it.
+        let domains = vec!["example.test".to_owned()];
+        assert!(!RunNavPolicy::Allowlist.allows("about:blank", &domains));
+        assert!(!open.allows("about:blank", &domains));
     }
 
     #[test]

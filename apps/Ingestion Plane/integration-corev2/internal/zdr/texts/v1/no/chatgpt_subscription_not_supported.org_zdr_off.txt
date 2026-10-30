@@ -1,0 +1,7 @@
+title: Dette abonnementet gir ikke ZDR
+continue: Forstått
+cancel: Forstått
+
+Organisasjonen din bruker ikke ZDR nå, så ingenting endres. Samtaler du kjører med ChatGPT-abonnementet ditt, sendes til OpenAI under din egen konto og dine egne vilkår, og OpenAI kan beholde dem.
+
+Slår organisasjonen på ZDR senere, spør vi deg før du kan bruke abonnementet.

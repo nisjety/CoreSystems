@@ -175,12 +175,15 @@ impl InferenceService {
 /// Refuse a modality with no independently attested zero-retention deployment
 /// whenever zero retention applies: through the caller token's own claim, or
 /// through `request_zdr`, the request's own flag. Contracts that carry no such
-/// flag pass `false`; the token claim still applies to them.
+/// flag pass `false`; the token claim still applies to them. A modality is never
+/// the route a connection-bound waiver names, so the posture check (Z-16) runs
+/// first: a waived or mixed-posture caller is refused before any ZDR gate.
 fn reject_unattested_zdr_modality(
     principal: &AuthenticatedPrincipal,
     request_zdr: bool,
     operation: &'static str,
 ) -> Result<(), Status> {
+    principal.enforce_non_chat_zdr_posture(request_zdr)?;
     if principal.effective_zdr(request_zdr) {
         return Err(zdr_unavailable_status(format!(
             "ZDR {operation} is unavailable because no provider deployment is independently attested"
@@ -335,6 +338,9 @@ impl InferenceCore for InferenceService {
     ) -> Result<Response<pb::CreateEmbeddingResponse>, Status> {
         let principal = self.authorize(&request).await?;
         let req = request.into_inner();
+        // An embedding is not the chat route a waiver names: the posture check (Z-16)
+        // refuses a waived caller here, before any provider is named.
+        principal.enforce_non_chat_zdr_posture(req.zdr)?;
         // Capture identifiers before they move into the internal request so a
         // failure is never silent (Phase 3 B-spike: the embedding error path had
         // no server-side log, so a provider-hint mismatch surfaced only as an
@@ -1056,13 +1062,18 @@ fn infer_response_to_wire(
 /// Convert the public contract to the provider contract. Tenant, user, and
 /// issuer-enforced ZDR posture come only from the verified principal.
 ///
+/// The route the request names is checked against that posture first (Z-16): a
+/// connection-bound waiver reaches its own provider and connection and nothing
+/// else, so a request that names any other route never reaches a provider.
+///
 /// # Errors
 /// Returns `invalid_argument` when the caller names a privacy tier this build
-/// cannot interpret.
+/// cannot interpret, and the posture refusal when the route is not allowed.
 fn to_internal_request(
     req: &pb::InferRequest,
     principal: &AuthenticatedPrincipal,
 ) -> Result<provider::InferRequest, Status> {
+    principal.enforce_zdr_route(&req.provider_hint, &req.subscription_connection_id, req.zdr)?;
     let messages = req
         .messages
         .iter()
@@ -2189,3 +2200,119 @@ mod tests {
 /// build a whole service stay out of this one.
 #[cfg(test)]
 mod real_rules_tests;
+
+/// The inference boundary under a connection-bound zero-retention waiver (Z-16): the
+/// route the waiver binds is the only route it reaches, and a waiver never covers a
+/// non-chat call or a persistent token of a ZDR org. A file of its own, like
+/// `real_rules_tests`.
+#[cfg(test)]
+mod zdr_waiver_route_tests;
+
+/// The zero-data-retention refusals of the modality surface are typed through the
+/// catalogue: every handler that refuses a modality under ZDR does it through
+/// `reject_unattested_zdr_modality`, every operation it names comes back as the
+/// frozen `zdr_unavailable` kind, and that kind is the catalogue's code.
+#[cfg(test)]
+mod zdr_refusal_catalogue {
+    use super::*;
+    use mp_contracts::zdr_refusal::{code, Refusal};
+
+    /// The gRPC handlers that refuse a modality under ZDR, by function name. Each
+    /// must call `reject_unattested_zdr_modality` in its body.
+    const REFUSING_HANDLERS: [&str; 14] = [
+        "synthesize_speech_as",
+        "transcribe_speech_as",
+        "translate_text",
+        "batch_translate_text",
+        "detect_text_language",
+        "generate_image",
+        "analyze_image",
+        "extract_image_text",
+        "analyze_document",
+        "analyze_language",
+        "create_realtime_session",
+        "create_video_generation_job",
+        "get_video_generation_job",
+        "stream_video_generation_content",
+    ];
+
+    /// The operations those handlers name. A client sees each in the message.
+    const OPERATIONS: [&str; 13] = [
+        "speech synthesis",
+        "speech transcription",
+        "translation",
+        "language detection",
+        "image generation",
+        "image analysis",
+        "image text extraction",
+        "document analysis",
+        "language analysis",
+        "realtime session",
+        "video generation",
+        "video status",
+        "video content",
+    ];
+
+    /// This file's code, without its test module.
+    fn production_source() -> &'static str {
+        include_str!("grpc.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the file starts with code")
+    }
+
+    #[test]
+    fn every_refusing_handler_refuses_through_the_one_helper() {
+        let source = production_source();
+        for handler in REFUSING_HANDLERS {
+            let start = source
+                .find(&format!("fn {handler}("))
+                .unwrap_or_else(|| panic!("{handler} is declared in grpc.rs"));
+            let window = &source[start..(start + 1500).min(source.len())];
+            assert!(
+                window.contains("reject_unattested_zdr_modality("),
+                "{handler} refuses a modality under ZDR without reject_unattested_zdr_modality"
+            );
+        }
+    }
+
+    #[test]
+    fn every_refused_modality_is_the_catalogue_refusal_with_its_operation_named() {
+        for operation in OPERATIONS {
+            let principal = AuthenticatedPrincipal::for_test("org-zdr", Some("user-zdr"), true);
+            let status =
+                reject_unattested_zdr_modality(&principal, false, operation).expect_err(operation);
+            assert_eq!(
+                status.code(),
+                tonic::Code::FailedPrecondition,
+                "{operation}"
+            );
+            assert_eq!(
+                Refusal::from_status(&status),
+                Some(Refusal::UNAVAILABLE),
+                "{operation}"
+            );
+            assert!(
+                status.message().contains(operation),
+                "{operation}: {}",
+                status.message()
+            );
+        }
+    }
+
+    #[test]
+    fn the_frozen_kind_is_the_catalogue_code() {
+        assert_eq!(PROVIDER_ERROR_ZDR_UNAVAILABLE, code::UNAVAILABLE);
+    }
+
+    #[test]
+    fn an_unrestricted_caller_is_not_refused_on_any_modality() {
+        let principal = AuthenticatedPrincipal::for_test("org-a", Some("user-a"), false);
+        for operation in OPERATIONS {
+            assert!(
+                reject_unattested_zdr_modality(&principal, false, operation).is_ok(),
+                "{operation}"
+            );
+        }
+    }
+}

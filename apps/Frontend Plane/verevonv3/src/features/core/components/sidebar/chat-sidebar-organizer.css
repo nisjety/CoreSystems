@@ -21,6 +21,11 @@
 .chat-organizer__search > button { display: grid; place-items: center; flex-shrink: 0; width: 28px; min-height: 32px; border: 0; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; }
 .chat-organizer > .core-chat-sidebar__new { flex-shrink: 0; height: 42px; gap: 10px; margin: 0 0 12px; background: transparent; color: inherit; font-size: 13px; font-weight: 500; }
 .chat-organizer > .core-chat-sidebar__new:hover { background: var(--verevon-surface-soft); }
+.chat-work-links { display: grid; flex-shrink: 0; gap: 1px; margin: -6px 0 13px; padding: 0 2px 11px; border-bottom: 1px solid var(--verevon-border); }
+.chat-work-links a { display: flex; min-height: 35px; align-items: center; gap: 10px; padding: 0 10px; border-radius: 8px; color: var(--verevon-text); font-size: 13px; text-decoration: none; }
+.chat-work-links a:hover, .chat-work-links a[aria-current='page'] { background: var(--verevon-surface-soft); }
+.chat-work-links a:focus-visible { outline: 2px solid var(--verevon-accent-ink); outline-offset: 2px; }
+.chat-work-links svg { flex-shrink: 0; color: var(--verevon-text-muted); }
 .chat-organizer__list { padding: 2px; }
 .chat-organizer__group { position: relative; flex-shrink: 0; margin-bottom: 12px; }
 .chat-organizer__draggable { min-width: 0; }

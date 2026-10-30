@@ -1331,6 +1331,11 @@ pub struct RunProvenanceRow {
     pub agent_id: String,
     pub status: String,
     pub created_at: DateTime<Utc>,
+    /// The run's retention receipt, as stamped when it started (Z-17). The bundle
+    /// cites it; it is not the organisation's live posture.
+    pub retention_class: String,
+    pub waiver_ack_id: Option<String>,
+    pub waiver_connection_id: Option<String>,
 }
 
 /// One approval's continuation evidence, flattened across the receipt and its
@@ -1371,7 +1376,8 @@ pub async fn get_run_provenance_for_org(
         bail!("org_id is required");
     }
     let row = sqlx::query_as::<_, RunProvenanceRow>(
-        "SELECT goal, agent_id, status, created_at \
+        "SELECT goal, agent_id, status, created_at, retention_class, \
+                waiver_ack_id, waiver_connection_id \
          FROM runs WHERE id = $1 AND org_id = $2",
     )
     .bind(run_id)
