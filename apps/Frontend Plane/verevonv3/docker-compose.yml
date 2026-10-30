@@ -237,13 +237,13 @@ services:
       context: .
       dockerfile: Dockerfile
       target: dev
-      additional_contexts:
-        quarry-sdk: ../../Ingestion Plane/Quarry-v2/sdks/typescript
       args: *build-metadata
       # The generated SDK is owned by Ingestion Plane and is outside this
       # frontend context.  Keep the app context small while making the local
-      # file: dependency available to the image build.
+      # file: dependency available to the image build. The Dockerfile reads
+      # it under both names.
       additional_contexts:
+        quarry-sdk: "../../Ingestion Plane/Quarry-v2/sdks/typescript"
         quarry-client: "../../Ingestion Plane/Quarry-v2/sdks/typescript"
     restart: unless-stopped
     init: true
