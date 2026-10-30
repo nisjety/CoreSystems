@@ -2976,3 +2976,75 @@ export const Hash = (props: LucideProps) => <Icon {...props} name="hash" iconNod
   y2: '21',
   key: 'weycgp'
 }]]} />
+
+// Lucide v1.31.0 icon path data (ISC).
+export const Gavel = (props: LucideProps) => <Icon {...props} name="gavel" iconNode={[
+  ["path", { d: "m14 13-8.381 8.38a1 1 0 0 1-3.001-3l8.384-8.381", key: "pgg06f" }],
+  ["path", { d: "m16 16 6-6", key: "vzrcl6" }],
+  ["path", { d: "m21.5 10.5-8-8", key: "a17d9x" }],
+  ["path", { d: "m8 8 6-6", key: "18bi4p" }],
+  ["path", { d: "m8.5 7.5 8 8", key: "1oyaui" }]
+]} />
+
+// Lucide v1.31.0 icon path data (ISC).
+export const Columns3 = (props: LucideProps) => <Icon {...props} name="columns-3" iconNode={[
+  ["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2", key: "afitv7" }],
+  ["path", { d: "M9 3v18", key: "fh3hqa" }],
+  ["path", { d: "M15 3v18", key: "14nvp0" }]
+]} />
+
+// Lucide v1.31.0 icon path data (ISC).
+export const ChevronsUpDown = (props: LucideProps) => <Icon {...props} name="chevrons-up-down" iconNode={[
+  ["path", { d: "m7 15 5 5 5-5", key: "1hf1tw" }],
+  ["path", { d: "m7 9 5-5 5 5", key: "sgt6xg" }]
+]} />
+
+// Lucide v1.31.0 icon path data (ISC).
+export const FilePenLine = (props: LucideProps) => <Icon {...props} name="file-pen-line" iconNode={[
+  [
+    "path",
+    {
+      d: "M14.364 13.634a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506l4.013-4.009a1 1 0 0 0-3.004-3.004z",
+      key: "ukzhwg"
+    }
+  ],
+  ["path", { d: "M14.487 7.858A1 1 0 0 1 14 7V2", key: "1klhew" }],
+  [
+    "path",
+    {
+      d: "M20 19.645V20a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l2.516 2.516",
+      key: "rxaxab"
+    }
+  ],
+  ["path", { d: "M8 18h1", key: "13wk12" }]
+]} />
+
+// Lucide v1.31.0 icon path data (ISC).
+export const Cookie = (props: LucideProps) => <Icon {...props} name="cookie" iconNode={[
+  ["path", { d: "M12 2a10 10 0 1 0 10 10 4 4 0 0 1-5-5 4 4 0 0 1-5-5", key: "laymnq" }],
+  ["path", { d: "M8.5 8.5v.01", key: "ue8clq" }],
+  ["path", { d: "M16 15.5v.01", key: "14dtrp" }],
+  ["path", { d: "M12 12v.01", key: "u5ubse" }],
+  ["path", { d: "M11 17v.01", key: "1hyl5a" }],
+  ["path", { d: "M7 14v.01", key: "uct60s" }]
+]} />
+
+// Lucide v1.31.0 icon path data (ISC).
+export const Files = (props: LucideProps) => <Icon {...props} name="files" iconNode={[
+  ["path", { d: "M15 2h-4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8", key: "14sh0y" }],
+  [
+    "path",
+    {
+      d: "M16.706 2.706A2.4 2.4 0 0 0 15 2v5a1 1 0 0 0 1 1h5a2.4 2.4 0 0 0-.706-1.706z",
+      key: "1970lx"
+    }
+  ],
+  ["path", { d: "M5 7a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h8a2 2 0 0 0 1.732-1", key: "l4dndm" }]
+]} />
+
+// Lucide v1.31.0 icon path data (ISC).
+export const ListFilter = (props: LucideProps) => <Icon {...props} name="list-filter" iconNode={[
+  ["path", { d: "M2 5h20", key: "1fs1ex" }],
+  ["path", { d: "M6 12h12", key: "8npq4p" }],
+  ["path", { d: "M9 19h6", key: "456am0" }]
+]} />

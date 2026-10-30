@@ -3,6 +3,7 @@
 import * as React from "react";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
+import { ArrowButton } from "@/components/ui/ArrowButton";
 import { Section } from "./section";
 import { SensesGuidelines } from "./SensesGuidelines";
 import { SensesMotion } from "../senses/SensesMotion";
@@ -22,30 +23,30 @@ type SenseChapter = {
 };
 
 // Each chapter pairs an outcome with a complete, illustrated workflow.
-const chapters: SenseChapter[] = [
+export const chapters: SenseChapter[] = [
 	{
 		kind: "delegate",
 		id: "search",
-		subtitle: "Delegering",
-		titleLines: ["La Verevon", "gjøre jobben."],
-		text: "Rapporter, kundeoppfølging og oppgaver som gjentar seg. La Verevon gjøre jobben i systemene dere bruker, med dere som dirigenter. Dere setter målet og beholder kontrollen — med opptil 99 % mindre manuelt arbeid på utvalgte oppgaver.",
-		highlight: "med dere som dirigenter",
+		subtitle: "Fremdrift",
+		titleLines: ["La arbeidet", "gå videre."],
+		text: "Når noe krever oppfølging, samler Verevon relevant informasjon og foreslår veien videre. Arbeid som følger reglene deres kan gå videre. Når det trengs en vurdering, går saken til riktig person.",
+		highlight: "går saken til riktig person",
 	},
 	{
 		kind: "learn",
 		id: "trace",
-		subtitle: "Læring",
-		titleLines: ["Dere er", "ekspertene."],
-		text: "Beskriv eller vis hvordan dere vil ha jobben gjort. Verevon lærer av bedriftens kunnskap, arbeidsmåter og tilbakemeldingene dere gir, så dere slipper å starte fra begynnelsen hver gang. Dere setter standarden. Verevon hjelper dere å få mer gjort.",
-		highlight: "Verevon lærer",
+		subtitle: "Felles grunnlag",
+		titleLines: ["Kunnskapen", "blir felles."],
+		text: "Verevon knytter dokumenter, tidligere vurderinger og måten dere arbeider på til nye saker. Hver sak starter med konteksten virksomheten allerede har, uten at dere må forklare alt på nytt.",
+		highlight: "konteksten virksomheten allerede har",
 	},
 	{
 		kind: "oversee",
 		id: "operate",
-		subtitle: "Oversikt",
-		titleLines: ["Se arbeidet.", "Styr retningen."],
-		text: "Følg de digitale medarbeiderne i en visuell arbeidsflate. Se hva som er gjort, hva som skjer nå og hva som trenger deres vurdering. Gi tilbakemeldinger og godkjenn neste steg sammen med teamet.",
-		highlight: "godkjenn neste steg",
+		subtitle: "Kontroll",
+		titleLines: ["Behold oversikten.", "Grip inn ved behov."],
+		text: "Følg hva AI bruker som grunnlag, hva som skjer videre og hvem som har ansvar. Når noe avviker eller krever en beslutning, får riktig person saken med kildene og alternativene som trengs.",
+		highlight: "riktig person",
 	},
 ];
 
@@ -134,11 +135,11 @@ export function SensesSection() {
 	}, []);
 
 	return (
-		<Section containerClassName="p-0" id="kunnskap" title="Løs oppgavene som driver bedriften fremover." titleClassName="sr-only" variant="full-bleed-tight">
+		<Section containerClassName="p-0" id="kunnskap" title="Når helheten er synlig, kan arbeidet gå videre." titleClassName="sr-only" variant="full-bleed-tight">
 			<div className={styles.section} ref={containerRef}>
 				<header className={styles.header}>
-					<h2 className="verevon-home-heading max-w-[26ch] text-verevon-j-text text-balance"><span className="block">Løs oppgavene som driver</span>{" "}<span className="block">bedriften fremover.</span></h2>
-					<p className={styles.intro}>Få mer gjort med teamet dere allerede har. La Verevon håndtere tidkrevende oppgaver, slik at dere kan bruke tiden på kundene, fagkunnskapen og bedriftens neste steg. Dere trenger ikke kunne AI for å komme i gang.</p>
+					<h2 className="verevon-home-heading max-w-[26ch] text-verevon-j-text text-balance"><span className="block">Når helheten er synlig.</span>{" "}<span className="block">Kan arbeidet gå videre.</span></h2>
+					<p className={styles.intro}>Verevon gir virksomheten et felles grunnlag for å forstå, vurdere og følge opp arbeidet. AI bidrar innenfor rammene dere bestemmer.</p>
 				</header>
 				<ol className={styles.chapters}>
 					{chapters.map((chapter, index) => (
@@ -148,7 +149,7 @@ export function SensesSection() {
 									<p className={styles.eyebrow}>Kapittel 0{index + 1} / {chapter.subtitle}</p>
 									<h3 className={`verevon-home-heading ${styles.title}`}>{chapter.titleLines.map((part, lineIndex) => <React.Fragment key={part}>{lineIndex > 0 ? " " : null}<span>{part}</span></React.Fragment>)}</h3>
 									<p className={styles.body}>{renderHighlightText(chapter.text, chapter.highlight)}</p>
-									{index === 0 ? <a className={`verevon-inline-link ${styles.link}`} href="/produkt/arbeidsflyten">Se hvordan Verevon gjør jobben <span aria-hidden="true">⟶</span></a> : null}
+									{index === 0 ? <ArrowButton className={styles.link} href="/produkt/arbeidsflyten">Se arbeidsflaten i bruk</ArrowButton> : null}
 								</div>
 							</div>
 							<div className={styles.media}>
@@ -158,7 +159,7 @@ export function SensesSection() {
 						</li>
 					))}
 				</ol>
-				<div className={styles.closing}><p>Mer kapasitet. Flere muligheter.</p></div>
+				<div className={styles.closing}><p>Felles grunnlag. Styrt arbeid.</p></div>
 			</div>
 		</Section>
 	);

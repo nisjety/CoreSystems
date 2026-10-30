@@ -1,0 +1,27 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  name: "dim_fixed_asset",
+  disabled: dataform.projectConfig.vars.enable_xero_extended !== "true",
+  description: "Current fixed assets from the Xero Assets API, preferring detail responses.",
+  tags: ["silver", "xero", "dimension"]
+}
+
+WITH source AS (
+  SELECT tenant_id, record_id, payload_json, synced_at
+  FROM ${ref("dw_1_silver_xero", "current_extended_records")}
+  WHERE endpoint = 'assets_assets'
+)
+SELECT
+  tenant_id,
+  record_id AS asset_id,
+  JSON_VALUE(payload_json, '$.assetName') AS asset_name,
+  JSON_VALUE(payload_json, '$.assetNumber') AS asset_number,
+  JSON_VALUE(payload_json, '$.assetTypeId') AS asset_type_id,
+  JSON_VALUE(payload_json, '$.assetStatus') AS asset_status,
+  SAFE_CAST(SUBSTR(JSON_VALUE(payload_json, '$.purchaseDate'), 1, 10) AS DATE) AS purchase_date,
+  SAFE_CAST(JSON_VALUE(payload_json, '$.purchasePrice') AS NUMERIC) AS purchase_price,
+  SAFE_CAST(JSON_VALUE(payload_json, '$.accountingBookValue') AS NUMERIC) AS accounting_book_value,
+  payload_json,
+  synced_at
+FROM source

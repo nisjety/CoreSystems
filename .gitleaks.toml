@@ -103,4 +103,12 @@ regexes = [
   '''^v2\.Y29udHJvbC13aXJlLXZlY3Rvci1rZXk\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$''',
   # The exact replacement-token constant of org-core's service_auth_test.go.
   '''^replace-with-generated-secret-at-least-32-bytes$''',
+  # Identifiers from the Coresystem-verevon merge (added 2026-10-30), each checked against the exact string gitleaks
+  # extracted: the Visma journal-transaction API name in vsv2-mcp's api_reference.json, the ledger=BUDGET query value in
+  # vsv2-orchestrator's executor and validation tests, anbud-core's role test database name, and a minified expression in
+  # the verevon-web product-demo bundle.
+  '''^journaltx_v1$''',
+  '''^ledger=BUDGET$''',
+  '''^anbud_test_[a-z0-9]{8}$''',
+  '''^t=r\.latencyMs$''',
 ]

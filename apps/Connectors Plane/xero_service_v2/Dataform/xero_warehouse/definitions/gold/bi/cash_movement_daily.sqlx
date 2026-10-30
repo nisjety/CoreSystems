@@ -1,0 +1,41 @@
+config {
+  type: "table",
+  schema: "xero_datamart",
+  description: "Daily external cash movement from authorised Xero bank transactions. It excludes transfers and keeps each native currency separate; it is not a bank balance or cash-position snapshot.",
+  assertions: {
+    nonNull: ["cash_movement_daily_key", "tenant_id", "movement_date", "currency_code"],
+    uniqueKey: ["cash_movement_daily_key"]
+  }
+}
+
+WITH cash_transactions AS (
+  SELECT *
+  FROM ${ref("xero_gold_finance", "fact_bank_transaction")}
+  WHERE external_cash_flow_in_currency IS NOT NULL
+)
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(
+    tenant_id, '|', CAST(transaction_date AS STRING), '|',
+    COALESCE(bank_account_id, ''), '|', currency_code
+  )) AS cash_movement_daily_key,
+  company_key,
+  date_key,
+  IF(bank_account_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(tenant_id, '|', bank_account_id))) AS bank_account_key,
+  tenant_id,
+  transaction_date AS movement_date,
+  bank_account_id,
+  bank_account_code,
+  bank_account_name,
+  currency_code,
+  COUNT(*) AS source_transaction_count,
+  COUNTIF(transaction_type = 'SPEND') AS spend_transaction_count,
+  COUNTIF(transaction_type = 'RECEIVE') AS receive_transaction_count,
+  SUM(CASE WHEN transaction_type = 'SPEND' THEN -external_cash_flow_in_currency ELSE 0 END) AS external_spend_in_currency,
+  SUM(CASE WHEN transaction_type = 'RECEIVE' THEN external_cash_flow_in_currency ELSE 0 END) AS external_receive_in_currency,
+  SUM(external_cash_flow_in_currency) AS net_external_cash_flow_in_currency,
+  CAST(NULL AS NUMERIC) AS amount_nok,
+  FALSE AS is_nok_amount_available,
+  'xero' AS source_system
+FROM cash_transactions
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10

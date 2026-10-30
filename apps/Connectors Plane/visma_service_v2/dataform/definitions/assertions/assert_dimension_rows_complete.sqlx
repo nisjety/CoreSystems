@@ -1,0 +1,192 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_dimension_rows_complete",
+  description: "Every silver dimension that mirrors a Visma master list must hold every master row that bronze holds. Returns one row per dimension and tenant where the number of distinct staging keys in the bronze table differs from the rows of the silver dimension. dim_department is compared on the rows that came from visma_departments (the synthetic Uspesifisert sentinels have no sync time). dim_location has its own assertion, assert_location_rows_complete.",
+  tags: ["assertion", "silver", "dimension"]
+}
+
+WITH bronze AS (
+  SELECT 'dim_account' AS model, tenantId AS tenant_id, COUNT(DISTINCT accountCD) AS bronze_rows
+  FROM ${ref("visma_bronze", "visma_accounts")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT 'dim_branch', tenantId, COUNT(DISTINCT number)
+  FROM ${ref("visma_bronze", "visma_branches")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT 'dim_company', tenantId, COUNT(DISTINCT number)
+  FROM ${ref("visma_bronze", "visma_branches")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT 'dim_cash_account', tenantId, COUNT(DISTINCT number)
+  FROM ${ref("visma_bronze", "visma_cash_accounts")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT 'dim_currency', tenantId, COUNT(DISTINCT id)
+  FROM ${ref("visma_bronze", "visma_currencies")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT 'dim_currency_rate', tenantId, COUNT(DISTINCT id)
+  FROM ${ref("visma_bronze", "visma_currency_rates")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT 'dim_customer', tenantId, COUNT(DISTINCT number)
+  FROM ${ref("visma_bronze", "visma_customers")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT 'dim_department', tenantId, COUNT(DISTINCT departmentId)
+  FROM ${ref("visma_bronze", "visma_departments")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT 'dim_employee', tenantId, COUNT(DISTINCT employeeId)
+  FROM ${ref("visma_bronze", "visma_employees")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT 'dim_financial_period', tenantId, COUNT(DISTINCT FORMAT('%t|%t', year, period))
+  FROM ${ref("visma_bronze", "visma_financial_periods")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT 'dim_fixed_asset', tenantId, COUNT(DISTINCT assetID)
+  FROM ${ref("visma_bronze", "visma_fixed_assets")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT 'dim_inventory_item', tenantId, COUNT(DISTINCT inventoryNumber)
+  FROM ${ref("visma_bronze", "visma_inventory_items")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT 'dim_ledger', tenantId, COUNT(DISTINCT number)
+  FROM ${ref("visma_bronze", "visma_ledgers")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT 'dim_project', tenantId, COUNT(DISTINCT projectID)
+  FROM ${ref("visma_bronze", "visma_projects")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT 'dim_sales_person', tenantId, COUNT(DISTINCT salespersonID)
+  FROM ${ref("visma_bronze", "visma_sales_persons")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT 'dim_subaccount', tenantId, COUNT(DISTINCT subaccountId)
+  FROM ${ref("visma_bronze", "visma_subaccounts")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT 'dim_supplier', tenantId, COUNT(DISTINCT number)
+  FROM ${ref("visma_bronze", "visma_suppliers")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT 'dim_warehouse', tenantId, COUNT(DISTINCT warehouseID)
+  FROM ${ref("visma_bronze", "visma_warehouses")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+  UNION ALL
+  SELECT 'dim_warehouse_location', tenantId, COUNT(DISTINCT FORMAT('%t|%t', warehouseID, JSON_VALUE(loc, '$.locationId')))
+  FROM ${ref("visma_bronze", "visma_warehouses")},
+       UNNEST(JSON_QUERY_ARRAY(locations)) AS loc
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+),
+
+silver AS (
+  SELECT 'dim_account' AS model, tenant_id, COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "dim_account")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'dim_branch', tenant_id, COUNT(*)
+  FROM ${ref("visma_silver", "dim_branch")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'dim_company', tenant_id, COUNT(*)
+  FROM ${ref("visma_silver", "dim_company")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'dim_cash_account', tenant_id, COUNT(*)
+  FROM ${ref("visma_silver", "dim_cash_account")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'dim_currency', tenant_id, COUNT(*)
+  FROM ${ref("visma_silver", "dim_currency")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'dim_currency_rate', tenant_id, COUNT(*)
+  FROM ${ref("visma_silver", "dim_currency_rate")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'dim_customer', tenant_id, COUNT(*)
+  FROM ${ref("visma_silver", "dim_customer")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'dim_department', tenant_id, COUNTIF(synced_at IS NOT NULL)
+  FROM ${ref("visma_silver", "dim_department")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'dim_employee', tenant_id, COUNT(*)
+  FROM ${ref("visma_silver", "dim_employee")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'dim_financial_period', tenant_id, COUNT(*)
+  FROM ${ref("visma_silver", "dim_financial_period")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'dim_fixed_asset', tenant_id, COUNT(*)
+  FROM ${ref("visma_silver", "dim_fixed_asset")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'dim_inventory_item', tenant_id, COUNT(*)
+  FROM ${ref("visma_silver", "dim_inventory_item")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'dim_ledger', tenant_id, COUNT(*)
+  FROM ${ref("visma_silver", "dim_ledger")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'dim_project', tenant_id, COUNT(*)
+  FROM ${ref("visma_silver", "dim_project")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'dim_sales_person', tenant_id, COUNT(*)
+  FROM ${ref("visma_silver", "dim_sales_person")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'dim_subaccount', tenant_id, COUNT(*)
+  FROM ${ref("visma_silver", "dim_subaccount")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'dim_supplier', tenant_id, COUNT(*)
+  FROM ${ref("visma_silver", "dim_supplier")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'dim_warehouse', tenant_id, COUNT(*)
+  FROM ${ref("visma_silver", "dim_warehouse")}
+  GROUP BY tenant_id
+  UNION ALL
+  SELECT 'dim_warehouse_location', tenant_id, COUNT(*)
+  FROM ${ref("visma_silver", "dim_warehouse_location")}
+  GROUP BY tenant_id
+)
+
+SELECT
+  COALESCE(bronze.model, silver.model) AS model,
+  COALESCE(bronze.tenant_id, silver.tenant_id) AS tenant_id,
+  COALESCE(bronze_rows, 0) AS bronze_rows,
+  COALESCE(silver_rows, 0) AS silver_rows
+FROM bronze
+FULL OUTER JOIN silver ON bronze.model = silver.model AND bronze.tenant_id = silver.tenant_id
+WHERE COALESCE(bronze_rows, 0) != COALESCE(silver_rows, 0)

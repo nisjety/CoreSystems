@@ -1,0 +1,377 @@
+{
+  "description": "Differences from v1 that docs/dataform_validation.md explains, in its sections 'Where v2 differs from v1, and why v2 is right' and 'Left as it was'. parity_gate.py matches each finding of the four comparison tools against these entries; a finding no entry covers fails the gate. Fields: id; check (a tool name or '*'); table (a name, a glob, or 'dataset.name' to pin the dataset of a table that exists in silver and gold); metric (a glob over row_count, column_fill:<col>, sum:<col>, bronze_field:<col>); reason; evidence (doc heading anchor). Optional: diff_pct_range [low, high] on the signed change from v1 (null = open end); abs_diff_range [low, high] on v2 minus v1 in absolute units. Keep entries as narrow as the tool allows. Each entry states the evidence of the run that produced it: a per-tenant count, a key-class decomposition (settled rows that differ, rows changed after the cutoff, rows on one side only), or a value-pattern count. Entries accept a size the tool does not check only where the reason says so: the historical-tenant entries and the v1-duplicate entry are direction-only, and the bronze NULL-fill entries are bounded by the share measured in the run. Nothing is added for a difference that the doc does not name.",
+  "entries": [
+    {
+      "id": "historical-supplier-invoices-rows",
+      "check": "compare_with_v1",
+      "table": "fact_supplier_invoice",
+      "metric": "row_count",
+      "diff_pct_range": [
+        0,
+        null
+      ],
+      "reason": "Four historical tenants (Hygiene Systems, Food Factory, Sense, Consult): v1 stopped syncing them in 2025 and v2 holds their history. Per tenant, inside the like-for-like cutoff: historical 10,651 in v2 against 1,372 in v1; active tenants 19,699 against 19,496 (+1.0 %). compare_with_v1 counts whole tables and cannot split by tenant, so this accepts any v2 surplus on the table.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "historical-supplier-invoice-lines-rows",
+      "check": "compare_with_v1",
+      "table": "fact_supplier_invoice_line",
+      "metric": "row_count",
+      "diff_pct_range": [
+        0,
+        null
+      ],
+      "reason": "Four historical tenants: v2 holds their supplier-invoice lines and v1 holds 6,579 of them against 60,142 in v2. Active tenants: 52,369 in v2 against 53,548 in v1 (-2.2 %), which this entry does not check; the sum finding on this table is not explained. The table has no date, so no cutoff applies. compare_with_v1 cannot split by tenant, so any v2 surplus is accepted.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "historical-supplier-payments-rows",
+      "check": "compare_with_v1",
+      "table": "fact_supplier_payment",
+      "metric": "row_count",
+      "diff_pct_range": [
+        0,
+        null
+      ],
+      "reason": "Four historical tenants: v1 stopped syncing them in 2025 and v2 holds their payments. Per tenant, inside the like-for-like cutoff: historical 7,011 in v2 against 829 in v1; active tenants 16,832 against 16,818 (+0.1 %). compare_with_v1 cannot split by tenant, so any v2 surplus on this table is accepted.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "historical-gl-balances-rows",
+      "check": "compare_with_v1",
+      "table": "fact_general_ledger_balance",
+      "metric": "row_count",
+      "diff_pct_range": [
+        0,
+        null
+      ],
+      "reason": "Four historical tenants: v2 holds their GL balances and v1 stopped syncing them. Per tenant, inside the like-for-like cutoff: historical 316,032 in v2 against 283,291 in v1; active tenants 133,610 against 131,654 (+1.5 %). compare_with_v1 cannot split by tenant, so any v2 surplus on this table is accepted.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "historical-bronze-supplier-invoices-rows",
+      "check": "compare_with_v1",
+      "table": "visma_bronze.visma_supplier_invoices",
+      "metric": "row_count",
+      "diff_pct_range": [
+        0,
+        null
+      ],
+      "reason": "Bronze twin of fact_supplier_invoice, on distinct keys: the four historical tenants hold 10,651 keys in v2 against 1,372 in v1 (inside the cutoff); active tenants 19,702 against 19,496 (+1.1 %). compare_with_v1 cannot split by tenant, so any v2 surplus is accepted.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "historical-bronze-supplier-payments-rows",
+      "check": "compare_with_v1",
+      "table": "visma_bronze.visma_supplier_payments",
+      "metric": "row_count",
+      "diff_pct_range": [
+        0,
+        null
+      ],
+      "reason": "Bronze twin of fact_supplier_payment, on distinct keys: the four historical tenants hold 7,048 keys in v2 against 829 in v1 (inside the cutoff); active tenants 16,903 against 16,818 (+0.5 %). compare_with_v1 cannot split by tenant, so any v2 surplus is accepted.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "historical-bronze-gl-balances-rows",
+      "check": "compare_with_v1",
+      "table": "visma_bronze.visma_general_ledger_balances_v2",
+      "metric": "row_count",
+      "diff_pct_range": [
+        0,
+        null
+      ],
+      "reason": "Bronze twin of fact_general_ledger_balance, on distinct keys: the four historical tenants hold 316,032 keys in v2 against 283,291 in v1 (inside the cutoff); active tenants 133,610 against 131,654 (+1.5 %). compare_with_v1 cannot split by tenant, so any v2 surplus is accepted.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "historical-customers-bronze-rows",
+      "check": "compare_with_v1",
+      "table": "visma_bronze.visma_customers",
+      "metric": "row_count",
+      "diff_pct_range": [
+        0,
+        null
+      ],
+      "reason": "Four historical tenants: v2 holds 19,979 of their customers and v1 18,843 distinct (v1 holds 527,604 raw rows for them, duplicates). Active tenants: 7,308 against 7,036 (+3.9 %), inside the 5 % row tolerance. v1's lastModifiedDateTime is empty on every row, so no cutoff applies and all rows are compared. compare_with_v1 cannot split by tenant, so any v2 surplus is accepted.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "historical-customers-silver-rows",
+      "check": "compare_with_v1",
+      "table": "visma_silver.dim_customer",
+      "metric": "row_count",
+      "diff_pct_range": [
+        0,
+        null
+      ],
+      "reason": "The customers of visma_customers in silver: historical tenants 19,979 in v2 against 18,843 in v1; active tenants 7,308 against 7,036 (+3.9 %). v1's date is empty on every row, so all rows are compared. compare_with_v1 cannot split by tenant, so any v2 surplus is accepted.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "historical-customers-gold-rows",
+      "check": "compare_with_v1",
+      "table": "visma_gold_finance.dim_customer",
+      "metric": "row_count",
+      "diff_pct_range": [
+        0,
+        null
+      ],
+      "reason": "The customers of visma_customers in gold finance: historical tenants 19,980 in v2 against 18,922 in v1; active tenants 7,318 against 7,073 (+3.5 %). The date is empty on v1, so all rows are compared. compare_with_v1 cannot split by tenant, so any v2 surplus is accepted.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "historical-customers-bridge-rows",
+      "check": "compare_with_v1",
+      "table": "visma_silver_common.bridge_customer_to_combined",
+      "metric": "row_count",
+      "diff_pct_range": [
+        0,
+        null
+      ],
+      "reason": "The customers of visma_customers in the combined-customer bridge: historical tenants 19,980 in v2 against 18,922 in v1; active tenants 7,318 against 7,073 (+3.5 %). compare_with_v1 cannot split by tenant, so any v2 surplus is accepted.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "historical-price-class-bridge-rows",
+      "check": "compare_with_v1",
+      "table": "visma_silver_common.bridge_customer_price_class",
+      "metric": "row_count",
+      "diff_pct_range": [
+        0,
+        null
+      ],
+      "reason": "Customer price-class bridge: 98 rows of the four historical tenants exist in v2 and none in v1; active tenants 1,677 against 1,649 (+1.7 %). compare_with_v1 cannot split by tenant, so any v2 surplus is accepted.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "historical-procurement-backlog-rows",
+      "check": "compare_with_v1",
+      "table": "visma_silver_common.source_gap_procurement_line_backlog",
+      "metric": "row_count",
+      "diff_pct_range": [
+        0,
+        null
+      ],
+      "reason": "Procurement line backlog: the doc says it is larger in v2 and leaves it unmatched. In this run the four historical tenants hold 573 rows in v2 against 108 in v1 (+465), and active tenants 1,343 against 1,355 (-0.9 %), so the historical tenants explain the difference. compare_with_v1 cannot split by tenant, so any v2 surplus is accepted.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "historical-project-pnl-rows",
+      "check": "compare_with_v1",
+      "table": "visma_datamart.BI_ProjectPortfolioPnL",
+      "metric": "row_count",
+      "diff_pct_range": [
+        0,
+        null
+      ],
+      "reason": "Project P&L rows: the four historical tenants hold 1,141 rows in v2 against 968 in v1 (+173), and active tenants 1,042 against 1,067 (-2.3 %). The open project-transactions item in the doc concerns sums and is not this entry. compare_with_v1 cannot split by tenant, so any v2 surplus is accepted.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "v1-duplicate-gap-report-supplier-invoice-line-rows",
+      "check": "compare_with_v1",
+      "table": "source_gap_supplier_invoice_line",
+      "metric": "row_count",
+      "diff_pct_range": [
+        null,
+        0
+      ],
+      "reason": "Gap report built on raw bronze rows, which hold v1's duplicates: active supplier invoices have 31,929 raw rows in v1 for 19,981 keys (1.6 x), and the report is 1.6 x larger in v1 for active tenants (37,828 against 23,401 in v2). Only the direction is checked (v2 fewer), not the size.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "gap-report-qa-gl-project-gap-ap-rows",
+      "check": "compare_with_v1",
+      "table": "qa_gl_project_gap_ap",
+      "metric": "row_count",
+      "diff_pct_range": [
+        null,
+        0
+      ],
+      "reason": "Quality report built on raw bronze rows, which hold v1's duplicates: historical tenants 95,046 in v1 against 43,790 in v2, while active tenants are within 1.2 % (115,009 against 113,698). Only the direction is checked (v2 fewer), not the size.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "gl-balance-period-debit-credit",
+      "check": "compare_values",
+      "table": "fact_general_ledger_balance",
+      "metric": "sum:ptd_*",
+      "diff_pct_range": [
+        40,
+        240
+      ],
+      "reason": "General ledger balances: v1 has period debit 0 for many accounts that have postings, so period debit and credit sum to 1.4 to 3.4 times v1 in v2. In this run ptd_debit is 106 % and ptd_credit 107 % higher in v2, and the settled rows that are in both sides carry the difference. The range is the doc's ratio, and it also covers the currency columns. compare_values sums whole tables and cannot split by account.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "open-balance-customer-invoice",
+      "check": "compare_values",
+      "table": "fact_customer_invoice",
+      "metric": "sum:balance*",
+      "diff_pct_range": [
+        null,
+        0
+      ],
+      "reason": "Open balances: v1 is stale because paying an invoice does not change its lastModifiedDateTime, so v1 shows as open what Visma and v2 show as paid. In this run the invoices in both sides and unchanged in v1 are 8.08 M lower in v2, which is the direction the doc gives. Only the direction is checked. balance_in_currency, the same balance in invoice currency, is included.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "open-balance-purchase-order",
+      "check": "compare_values",
+      "table": "fact_purchase_order",
+      "metric": "sum:open_balance",
+      "diff_pct_range": [
+        null,
+        0
+      ],
+      "reason": "Open balances: the doc names open_balance on purchase orders as stale in v1. Checked against Visma for orders 001658, 001771, 001813, 001702 and 001674: 0 in Visma and v2, open in v1. Only the direction is checked. open_quantity has the same total in this run (4,751,213.79 in v2 and 6,799,887.19 in v1), but the doc does not name it, so this entry does not cover open_quantity.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "bi-finance-table-amount-nok",
+      "check": "compare_values",
+      "table": "BI_FinanceTable",
+      "metric": "sum:amount_nok",
+      "diff_pct_range": [
+        -100.5,
+        -99.5
+      ],
+      "reason": "The sum of BI_FinanceTable.amount_nok is about 0 (-1,535) in v2 and 15.0 M in v1. A ledger nets to zero, so v1 is the one that is off. The range is a change of -100 %. amount_local_currency is not named by the doc and stays unmatched.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "currency-rows-empty-tenant",
+      "check": "compare_with_v1",
+      "table": "visma_silver.dim_currency",
+      "metric": "row_count",
+      "abs_diff_range": [
+        -11,
+        -11
+      ],
+      "reason": "Currency rows with an empty tenant id: the doc says v1 has 11 currency rows with an empty tenant id and v2 none. In this run v1 holds those 11 rows (the bronze visma_currencies keys with no tenant), and dim_currency has 122 rows here and 133 in v1, so v2 minus v1 is exactly -11. The entry checks that difference, not which rows.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "bronze-account-tax-category",
+      "check": "compare_bronze_rows",
+      "table": "visma_accounts",
+      "metric": "bronze_field:taxCategory",
+      "diff_pct_range": [
+        -22.2,
+        0
+      ],
+      "reason": "Bronze, record by record: the doc names account taxCategory as NULL in v1 and filled in v2. In this run 78.8 % of the 4,079 matched records are equal, and the 866 differing records are all NULL in v1 and set in v2 (none has both set and different). The bound is this run's 21.2 % plus a margin, so a larger mismatch fails the gate. The gate cannot test the NULL pattern itself.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "bronze-contact-phone-numbers",
+      "check": "compare_bronze_rows",
+      "table": "visma_contacts",
+      "metric": "bronze_field:phone[123]",
+      "diff_pct_range": [
+        -21.0,
+        0
+      ],
+      "reason": "Bronze, record by record: the doc names the contact phone numbers as NULL in v1 and filled in v2. phone1 to phone3 are those fields. In this run phone1 differs on 20.1 % of 11,943 matched records (2,389 NULL in v1 and set in v2, 6 both set and different), phone2 on 12.2 % and phone3 on 1.9 %, and the bound is the largest of these plus a margin. The gate cannot test the NULL pattern itself.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "bronze-supplier-corporate-id",
+      "check": "compare_bronze_rows",
+      "table": "visma_suppliers",
+      "metric": "bronze_field:corporateId",
+      "diff_pct_range": [
+        -67.0,
+        0
+      ],
+      "reason": "Bronze, record by record: the doc names supplier corporateId as NULL in v1 and filled in v2. In this run 66.0 % of the 2,071 matched records differ, all 1,367 differing records are NULL in v1 and set in v2 (none both set and different), and the bound is that share plus a margin. The gate cannot test the NULL pattern itself.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "bronze-shipment-freight",
+      "check": "compare_bronze_rows",
+      "table": "visma_shipments",
+      "metric": "bronze_field:freightCur*",
+      "diff_pct_range": [
+        -100,
+        0
+      ],
+      "reason": "Bronze, record by record: the doc names shipment freight as NULL in v1 and filled in v2. The freight fields are freightCurAmt and freightCurCost. In this run 21,617 of 21,698 matched records differ on each, all NULL in v1 and set in v2 (none both set and different); the bound is the full range, so the gate checks the field exists and accepts any mismatch in it.",
+      "evidence": "docs/dataform_validation.md#where-v2-differs-from-v1-and-why-v2-is-right"
+    },
+    {
+      "id": "bronze-sales-orders-v3-lines-null",
+      "check": "compare_bronze_rows",
+      "table": "visma_sales_orders_v3",
+      "metric": "bronze_field:lines",
+      "diff_pct_range": [
+        -100,
+        0
+      ],
+      "reason": "Left as it was: the lines of visma_sales_orders_v3 are the retired API's line list and silver takes orderLines first. In this run 21,668 of 21,703 matched records have lines NULL in v2 and set in v1, and the other 35 are NULL on both sides. The gate cannot test the NULL pattern itself, so this entry accepts any mismatch in the field.",
+      "evidence": "docs/dataform_validation.md#left-as-it-was"
+    },
+    {
+      "id": "bronze-sales-orders-v3-shipments-null",
+      "check": "compare_bronze_rows",
+      "table": "visma_sales_orders_v3",
+      "metric": "bronze_field:shipments",
+      "diff_pct_range": [
+        -100,
+        0
+      ],
+      "reason": "Left as it was: the shipments of visma_sales_orders_v3 are the retired API's list. In this run all 21,703 matched records have shipments NULL in v2 and set in v1. The gate cannot test the NULL pattern itself, so this entry accepts any mismatch in the field.",
+      "evidence": "docs/dataform_validation.md#left-as-it-was"
+    },
+    {
+      "id": "timing-sales-order-excise-duty-total",
+      "check": "compare_values",
+      "table": "fact_sales_order",
+      "metric": "sum:order_excise_duty_total",
+      "diff_pct_range": [
+        2.5,
+        3.2
+      ],
+      "reason": "Timing (class iii): rows last modified in v1 after the cutoff are counted in v2 in their older state, so they fall on the v2 side only. In this run the timing component is 101,200 and the residual 99,533 (the rest is 1,667 from rows only in v1). The range is this run's +2.87 % with 0.3 points either side, so it passes only while the timing component stays this size.",
+      "evidence": "docs/dataform_validation.md#left-as-it-was"
+    },
+    {
+      "id": "timing-sales-order-excise-duty-total-base",
+      "check": "compare_values",
+      "table": "fact_sales_order",
+      "metric": "sum:order_excise_duty_total_base",
+      "diff_pct_range": [
+        2.5,
+        3.2
+      ],
+      "reason": "Timing (class iii): the same rows as the excise duty total, in base currency. In this run the timing component is 101,689 and the residual 100,022. The range is this run's +2.89 % with 0.3 points either side.",
+      "evidence": "docs/dataform_validation.md#left-as-it-was"
+    },
+    {
+      "id": "timing-supplier-invoice-cash-discount",
+      "check": "compare_values",
+      "table": "fact_supplier_invoice",
+      "metric": "sum:cash_discount",
+      "diff_pct_range": [
+        3.3,
+        3.9
+      ],
+      "reason": "Timing (class iii): rows last modified in v1 after the cutoff are counted in v2 in their older state. In this run the residual of 58,505 is exactly the timing component (no settled row differs and no key is on one side only). The range is this run's +3.63 % with 0.3 points either side.",
+      "evidence": "docs/dataform_validation.md#left-as-it-was"
+    },
+    {
+      "id": "timing-supplier-invoice-cash-discount-currency",
+      "check": "compare_values",
+      "table": "fact_supplier_invoice",
+      "metric": "sum:cash_discount_in_currency",
+      "diff_pct_range": [
+        3.5,
+        4.2
+      ],
+      "reason": "Timing (class iii): rows last modified in v1 after the cutoff are counted in v2 in their older state. In this run the residual of 5,407 is exactly the timing component. The range is this run's +3.88 % with 0.3 points either side.",
+      "evidence": "docs/dataform_validation.md#left-as-it-was"
+    }
+  ]
+}

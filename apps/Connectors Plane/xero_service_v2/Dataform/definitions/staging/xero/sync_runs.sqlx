@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "dw_staging_xero",
+  name: "sync_runs",
+  description: "One durable Xero run manifest per run_id. Populated by the GCS manifest loader."
+}

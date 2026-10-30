@@ -41,6 +41,88 @@ func TestOverviewIncludesAllVerevonSurfaces(t *testing.T) {
 	}
 }
 
+func TestRecordMarketingMetricRequiresTraceableDurableEvidence(t *testing.T) {
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	service := NewService(NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{})), WithNow(func() time.Time { return now }))
+
+	_, err := service.RecordMetricEvent(context.Background(), IngestMetricEventInput{
+		OrgID:         "org-1",
+		Surface:       SurfaceExternalAnalytics,
+		Metric:        "ads_impressions",
+		Value:         42,
+		ConnectorType: "meta",
+	})
+	if err == nil {
+		t.Fatal("RecordMetricEvent error = nil, want missing marketing evidence rejection")
+	}
+
+	windowStart := now.Add(-24 * time.Hour)
+	windowEnd := now.Add(-time.Nanosecond)
+	event, err := service.RecordMetricEvent(context.Background(), IngestMetricEventInput{
+		OrgID:          "org-1",
+		Surface:        SurfaceExternalAnalytics,
+		Metric:         "ads_impressions",
+		Value:          42,
+		ConnectorType:  "meta",
+		TimeWindow:     &TimeWindow{From: &windowStart, To: &windowEnd},
+		ObservedAt:     now,
+		SourceTraceRef: "social-core:metrics:account-1:campaign-1:2026-10-18",
+		RetentionClass: "durable",
+	})
+	if err != nil {
+		t.Fatalf("RecordMetricEvent error: %v", err)
+	}
+	if event.TimeWindow == nil || event.TimeWindow.From == nil || !event.TimeWindow.From.Equal(windowStart) {
+		t.Fatalf("time_window = %#v, want preserved window", event.TimeWindow)
+	}
+	if event.ObservedAt != now || event.SourceTraceRef == "" || event.RetentionClass != "durable" {
+		t.Errorf("grounding fields = %#v, want observed_at, source_trace_ref, and durable retention", event)
+	}
+}
+
+func TestListGroundableMarketingEvidenceExcludesLegacyUnverifiedRows(t *testing.T) {
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	repository := NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{}))
+	service := NewService(repository, WithNow(func() time.Time { return now }))
+	_, err := repository.RecordMetricEvent(context.Background(), MetricEvent{
+		ID:             "legacy-meta-row",
+		OrgID:          "org-1",
+		Surface:        SurfaceExternalAnalytics,
+		Metric:         "ads_impressions",
+		ConnectorType:  "meta",
+		OccurredAt:     now,
+		ObservedAt:     now,
+		RetentionClass: "legacy_unverified",
+	})
+	if err != nil {
+		t.Fatalf("Record legacy event error: %v", err)
+	}
+
+	windowStart := now.Add(-24 * time.Hour)
+	windowEnd := now.Add(-time.Nanosecond)
+	if _, err := service.RecordMetricEvent(context.Background(), IngestMetricEventInput{
+		OrgID:          "org-1",
+		Surface:        SurfaceExternalAnalytics,
+		Metric:         "ads_impressions",
+		Value:          42,
+		ConnectorType:  "meta",
+		TimeWindow:     &TimeWindow{From: &windowStart, To: &windowEnd},
+		ObservedAt:     now,
+		SourceTraceRef: "social-core:provider-metric:valid-row",
+		RetentionClass: "durable",
+	}); err != nil {
+		t.Fatalf("Record verified event error: %v", err)
+	}
+
+	evidence, err := service.ListGroundableMarketingEvidence(context.Background(), OverviewQuery{OrgID: "org-1"})
+	if err != nil {
+		t.Fatalf("ListGroundableMarketingEvidence error: %v", err)
+	}
+	if len(evidence) != 1 || evidence[0].ID == "legacy-meta-row" {
+		t.Fatalf("groundable evidence = %#v, want only verified marketing evidence", evidence)
+	}
+}
+
 func TestOverviewCitesRealEventSourcesNeverFabricates(t *testing.T) {
 	service := NewService(NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{})))
 
@@ -319,8 +401,8 @@ func TestDefaultConnectorsIncludeGoogleContractsWithoutSecrets(t *testing.T) {
 	if ga4 == nil || searchConsole == nil {
 		t.Fatalf("missing google connector slots: ga4=%v searchConsole=%v", ga4 != nil, searchConsole != nil)
 	}
-	if ga4.Status != ConnectorStatusRequiresTokenLease || searchConsole.Status != ConnectorStatusRequiresTokenLease {
-		t.Fatalf("google connector status must require token lease")
+	if ga4.Status != ConnectorStatusRequiresGovernedAction || searchConsole.Status != ConnectorStatusRequiresGovernedAction {
+		t.Fatalf("google connector status must require governed actions")
 	}
 	for _, connector := range []ConnectorSlot{*ga4, *searchConsole} {
 		for _, env := range connector.RequiredEnv {
@@ -328,5 +410,65 @@ func TestDefaultConnectorsIncludeGoogleContractsWithoutSecrets(t *testing.T) {
 				t.Fatalf("connector %s declares secret env %s", connector.Type, env)
 			}
 		}
+	}
+}
+
+func TestOverviewReportsHonestMarketingConnectorGaps(t *testing.T) {
+	service := NewService(NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{})))
+	overview, err := service.Overview(context.Background(), OverviewQuery{OrgID: "org-1"})
+	if err != nil {
+		t.Fatalf("Overview error: %v", err)
+	}
+	gaps := map[string]ConnectorGap{}
+	for _, gap := range overview.ConnectorLag {
+		gaps[gap.Type] = gap
+	}
+	wantOwners := map[string]string{
+		"google_search_console": "integration-corev2 provider action adapter",
+		"google_analytics_4":    "integration-corev2 provider action adapter",
+		"google_ads":            "integration-corev2 provider action adapter",
+		"semrush":               "integration-corev2 credential broker",
+		"first_party_seo":       "Quarry-v2 and Data Plane v2 evidence contract",
+	}
+	for connectorType, owner := range wantOwners {
+		gap, found := gaps[connectorType]
+		if !found {
+			t.Errorf("missing honest connector gap for %s", connectorType)
+			continue
+		}
+		if gap.NextOwner != owner || gap.Reason == "" {
+			t.Errorf("gap[%s] = %#v, want non-empty reason and next owner %q", connectorType, gap, owner)
+		}
+	}
+	if _, found := gaps["meta_ads"]; found {
+		t.Error("native Meta Ads metrics must not be reported as a connector gap")
+	}
+}
+
+func TestOverviewPreservesMarketingSourceAttribution(t *testing.T) {
+	service := NewService(NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{})))
+	windowStart := time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)
+	windowEnd := time.Date(2026, 10, 18, 23, 59, 59, 0, time.UTC)
+	_, err := service.RecordMetricEvent(context.Background(), IngestMetricEventInput{
+		OrgID:          "org-1",
+		Surface:        SurfaceExternalAnalytics,
+		Metric:         "organic_clicks",
+		Value:          12,
+		Source:         "integration-corev2",
+		ConnectorType:  "google_search_console",
+		TimeWindow:     &TimeWindow{From: &windowStart, To: &windowEnd},
+		ObservedAt:     windowEnd,
+		SourceTraceRef: "integration-corev2:gsc:query:1",
+		RetentionClass: "durable",
+	})
+	if err != nil {
+		t.Fatalf("RecordMetricEvent error: %v", err)
+	}
+	overview, err := service.Overview(context.Background(), OverviewQuery{OrgID: "org-1", Surfaces: []string{SurfaceExternalAnalytics}})
+	if err != nil {
+		t.Fatalf("Overview error: %v", err)
+	}
+	if got := overview.Surfaces[0].Metrics[0].Source; got != "integration-corev2" {
+		t.Errorf("marketing source = %q, want integration-corev2", got)
 	}
 }

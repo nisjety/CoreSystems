@@ -1,0 +1,2 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+dm_journal_transactions,,1,0,succeeded,573369,573369,573369,1147,0,369,,10315,2026-09-29 13:47:46.045+00

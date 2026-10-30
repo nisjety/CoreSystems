@@ -1,0 +1,18 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "One Xero organization per tenant; tenant is the company, not a Visma business unit.",
+  assertions: { nonNull: ["tenant_id"], uniqueKey: ["tenant_id"] }
+}
+
+WITH latest AS (
+  SELECT * FROM ${ref("dw_bronze_xero", "xero_organisations")}
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY tenant_id ORDER BY synced_at DESC, version_id DESC) = 1
+)
+SELECT b.tenant_id, b.organisation_id, b.organisation_name, b.legal_name, b.country_code,
+       b.base_currency, b.financial_year_end_day, b.financial_year_end_month,
+       b.status, b.is_demo_company, b.registration_number, b.tax_number,
+       b.synced_at, b.version_id, s.record_id IS NULL AS is_missing_from_staging
+FROM latest AS b
+LEFT JOIN ${ref("dw_staging_xero", "organisations")} AS s
+  ON b.tenant_id = s.tenant_id AND b.record_id = s.record_id

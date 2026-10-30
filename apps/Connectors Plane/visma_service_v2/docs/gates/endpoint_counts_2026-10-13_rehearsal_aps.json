@@ -1,0 +1,1647 @@
+{
+ "day": "2026-10-13",
+ "write_source": "the heartbeat table where a row exists, else the last staging write",
+ "heartbeat_table": true,
+ "calls": {
+  "token": 2,
+  "GET": 88
+ },
+ "subset": true,
+ "tenants": [
+  "Aquatiq Aps"
+ ],
+ "endpoints": [
+  {
+   "endpoint": "accounts",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "accounts",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 225,
+     "staging_total": 225,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:26:54+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "attributes",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "attributes",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 41,
+     "staging_total": 41,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:15:48+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "branches",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the one-row answer has a row but no totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "budgets",
+   "method": "-",
+   "cells": [],
+   "not_countable": "needs branch, ledger and financialYear (a partitioned fan-out): HTTP 400 without them. A count is one request per combination, not one total.",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "carriers",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "carriers",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:14:53+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "cash_accounts",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the endpoint ignores pageSize and answers its whole list (8 rows for a one-row request) without a totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "cash_sales",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "cash_sales",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:29:55+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "cash_transactions",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the one-row answer has a row but no totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "contacts",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "contacts",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 9,
+     "staging_total": 9,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:20:55+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "countries",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "countries",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 260,
+     "staging_total": 260,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:38:34+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "credit_terms",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "credit_terms",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 11,
+     "staging_total": 11,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:24:06+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "currencies",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the endpoint ignores pageSize and answers its whole list (9 rows for a one-row request) without a totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "currency_rate_types",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the one-row answer has a row but no totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "currency_rates",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the endpoint ignores pageSize and answers its whole list (80 rows for a one-row request) without a totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "customer_balances",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the one-row answer has a row but no totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "customer_balances_v2",
+   "method": "finance list, one row (fromFinPeriod=200001, toFinPeriod=203012)",
+   "cells": [],
+   "not_countable": "no total: the one-row answer has a row but no totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "customer_classes",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the endpoint ignores pageSize and answers its whole list (3 rows for a one-row request) without a totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "customer_contracts",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "customer_contracts",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:31:31+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "customer_credit_notes",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "customer_credit_notes",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 1,
+     "staging_total": 1,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:22:49+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "customer_credit_write_offs",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "customer_credit_write_offs",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 1,
+     "staging_total": 1,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:39:13+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "customer_debit_notes",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "customer_debit_notes",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:22:14+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "customer_documents",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "customer_documents",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 55,
+     "staging_total": 55,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:19:09+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "customer_invoices",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "customer_invoices",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 53,
+     "staging_total": 53,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:19:25+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "customer_locations",
+   "method": "-",
+   "cells": [],
+   "not_countable": "child of the Sales Order API (/Customers/{customerId}/locations): an unpaged list per customer with no total, and it needs the parent key.",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "customer_overdue_charges",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "customer_overdue_charges",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:19:45+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "customer_payment_methods",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "customer_payment_methods",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:40:04+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "customer_payments",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "customer_payments",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 44,
+     "staging_total": 44,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:20:13+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "customer_sales_prices",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "customer_sales_prices",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 17,
+     "staging_total": 17,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:21:13+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "customers",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "customers",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 8,
+     "staging_total": 8,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:37:40+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "deferral_codes",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "deferral_codes",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 1,
+     "staging_total": 1,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:37:31+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "departments",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the one-row answer has a row but no totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "dimensions",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the endpoint ignores pageSize and answers its whole list (23 rows for a one-row request) without a totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "discount_codes",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "discount_codes",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:39:37+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "discounts",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "discounts",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:24:41+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "earning_types",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the endpoint ignores pageSize and answers its whole list (4 rows for a one-row request) without a totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "employees",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "employees",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 3,
+     "staging_total": 3,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:30:52+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "expense_claims",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "expense_claims",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:30:47+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "expense_receipts",
+   "method": "-",
+   "cells": [],
+   "not_countable": "no total: the answer is the whole unpaged list, no totalCount, about 100 s (pilot: 14,548 rows, HTTP 200).",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "financial_periods",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the endpoint ignores pageSize and answers its whole list (48 rows for a one-row request) without a totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "fixed_asset_classes",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "fixed_asset_classes",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 6,
+     "staging_total": 6,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:31:28+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "fixed_asset_property_tax_groups",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "fixed_asset_property_tax_groups",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:36:04+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "fixed_asset_transactions",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "fixed_asset_transactions",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:31:42+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "fixed_assets",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "fixed_assets",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:31:48+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "general_ledger_balances_v2",
+   "method": "-",
+   "cells": [],
+   "not_countable": "period-scanned: periodId is required (HTTP 400 without it) and the total is per period, so a count is one request per period, not one total.",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "general_ledger_transactions",
+   "method": "finance list, one row (ledger=1, fromPeriod=202001, toPeriod=203012)",
+   "cells": [
+    {
+     "endpoint": "general_ledger_transactions",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 2707,
+     "staging_total": 2707,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:34:00+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "inventory_adjustments",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "inventory_adjustments",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:34:08+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "inventory_issues",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "inventory_issues",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 6,
+     "staging_total": 6,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:35:29+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "inventory_item_classes",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "inventory_item_classes",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 5,
+     "staging_total": 5,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:41:01+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "inventory_item_post_classes",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "inventory_item_post_classes",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 7,
+     "staging_total": 7,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:35:46+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "inventory_items",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "inventory_items",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 144,
+     "staging_total": 144,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:40:49+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "inventory_receipt_transfers",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "inventory_receipt_transfers",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:36:02+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "inventory_receipts",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "inventory_receipts",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:36:07+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "inventory_transfers",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "inventory_transfers",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:36:16+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "journal_transactions",
+   "method": "-",
+   "cells": [],
+   "not_countable": "period-scanned and line-counted: periodId is required (HTTP 400 without it) and the total counts journal lines, while staging holds one row per batch.",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "kit_assemblies",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "kit_assemblies",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:37:16+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "kit_specifications",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "kit_specifications",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:37:26+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "landed_cost_codes",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "landed_cost_codes",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:37:34+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "languages",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the endpoint ignores pageSize and answers its whole list (6 rows for a one-row request) without a totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "ledgers",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the endpoint ignores pageSize and answers its whole list (4 rows for a one-row request) without a totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "locations",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "locations",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 13,
+     "staging_total": 13,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:38:13+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "lot_serial_classes",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "lot_serial_classes",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 1,
+     "staging_total": 1,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:38:25+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "number_sequences",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the endpoint ignores pageSize and answers its whole list (75 rows for a one-row request) without a totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "organizations",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the one-row answer has a row but no totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "packaging_types",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "packaging_types",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:38:57+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "payment_methods",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the endpoint ignores pageSize and answers its whole list (8 rows for a one-row request) without a totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "project_account_groups",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the endpoint ignores pageSize and answers its whole list (9 rows for a one-row request) without a totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "project_budgets",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "project_budgets",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:39:30+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "project_tasks",
+   "method": "-",
+   "cells": [],
+   "not_countable": "needs projectId (one request per project): HTTP 400 without it, so no single total.",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "project_transactions",
+   "method": "-",
+   "cells": [],
+   "not_countable": "period-scanned: fromPeriod and toPeriod are required (HTTP 400 without them) and the fetch walks one month at a time (staging keeps a row per document and _scan_period), so a count is one request per month, not one total.",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "projects",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "projects",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:39:52+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "purchase_orders",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "purchase_orders",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 7,
+     "staging_total": 7,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:40:01+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "purchase_receipt_transfers",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "purchase_receipt_transfers",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:40:07+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "purchase_receipts",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "purchase_receipts",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 6,
+     "staging_total": 6,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:40:17+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "sales_categories",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "sales_categories",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:40:24+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "sales_order_customers",
+   "method": "Sales Order API, one row",
+   "cells": [
+    {
+     "endpoint": "sales_order_customers",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 7,
+     "staging_total": 7,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:40:44+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "sales_order_inventory",
+   "method": "Sales Order API, one row",
+   "cells": [
+    {
+     "endpoint": "sales_order_inventory",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 138,
+     "staging_total": 138,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:40:54+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "sales_order_types",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "sales_order_types",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 14,
+     "staging_total": 14,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:41:06+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "sales_orders_v3",
+   "method": "Sales Order API, one row",
+   "cells": [
+    {
+     "endpoint": "sales_orders_v3",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 13,
+     "staging_total": 13,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:41:18+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "sales_persons",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "sales_persons",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 3,
+     "staging_total": 3,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:41:23+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "shipments",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "shipments",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 5,
+     "staging_total": 5,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:41:29+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "stocktakes_v2",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "stocktakes_v2",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 0,
+     "staging_total": 0,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:41:31+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "subaccounts",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "subaccounts",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 4,
+     "staging_total": 4,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:41:37+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "supplier_balances_v2",
+   "method": "finance list, one row (fromFinPeriod=200001, toFinPeriod=203012)",
+   "cells": [],
+   "not_countable": "no total: the one-row answer has a row but no totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "supplier_classes",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the endpoint ignores pageSize and answers its whole list (7 rows for a one-row request) without a totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "supplier_documents",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "supplier_documents",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 147,
+     "staging_total": 147,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:41:53+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "supplier_inbox_rules",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "supplier_inbox_rules",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 1,
+     "staging_total": 1,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:41:58+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "supplier_invoices",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "supplier_invoices",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 147,
+     "staging_total": 147,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:42:04+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "supplier_locations",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "supplier_locations",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 25,
+     "staging_total": 25,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:42:09+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "supplier_payments",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "supplier_payments",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 144,
+     "staging_total": 144,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:42:17+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "suppliers",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "suppliers",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 25,
+     "staging_total": 25,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:42:25+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "time_cards",
+   "method": "-",
+   "cells": [],
+   "not_countable": "needs employeeCd (one request per employee): HTTP 400 without it, so no single total.",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "unit_of_measures",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the endpoint ignores pageSize and answers its whole list (24 rows for a one-row request) without a totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "vat_categories",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the endpoint ignores pageSize and answers its whole list (19 rows for a one-row request) without a totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "vat_zones",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "vat_zones",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 13,
+     "staging_total": 13,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:42:43+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  },
+  {
+   "endpoint": "vats",
+   "method": "finance list, one row",
+   "cells": [],
+   "not_countable": "no total: the endpoint ignores pageSize and answers its whole list (25 rows for a one-row request) without a totalCount",
+   "modified_filter": "-"
+  },
+  {
+   "endpoint": "warehouses",
+   "method": "finance list, one row",
+   "cells": [
+    {
+     "endpoint": "warehouses",
+     "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+     "name": "Aquatiq Aps",
+     "visma_total": 1,
+     "staging_total": 1,
+     "missing": 0,
+     "changed": null,
+     "basis": "not needed",
+     "last_write": "2026-10-12T23:42:54+00:00",
+     "last_write_source": "heartbeat",
+     "verdict": "PASS",
+     "reason": "none missing"
+    }
+   ],
+   "not_countable": null,
+   "modified_filter": "not needed"
+  }
+ ]
+}

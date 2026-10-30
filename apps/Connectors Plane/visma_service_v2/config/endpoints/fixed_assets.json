@@ -1,0 +1,37 @@
+{
+  "endpoint_name": "fixed_assets",
+  "bigquery_table": "visma_fixed_assets",
+  "primary_key": "assetID",
+  "source": "erp_rest",
+  "api_method": "get_fixed_assets",
+  "api_endpoint": "/v1/fixedAsset",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "assetID",
+    "description",
+    "classID",
+    "depreciable",
+    "quantity",
+    "bookBalance",
+    "lastModifiedDateTime"
+  ],
+  "datamart": {
+    "ready": false,
+    "type_name": "FixedAsset",
+    "query_file": "config/queries/fixed_asset.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_fixed_asset",
+    "fallback_source": "erp_rest",
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    }
+  },
+  "default_query": {
+    "expandAccounts": "true"
+  }
+}

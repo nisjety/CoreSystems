@@ -1,0 +1,100 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_fiscal_period_safety",
+  description: "Xero-derived fiscal periods must be tenant-scoped, contiguous, and backed by valid organisation fiscal year-end configuration."
+}
+
+WITH companies AS (
+  SELECT tenant_id, financial_year_end_day, financial_year_end_month
+  FROM ${ref("dw_1_silver_xero", "dim_company")}
+), periods AS (
+  SELECT * FROM ${ref("dw_1_silver_xero", "dim_financial_period")}
+), configuration_history AS (
+  SELECT * FROM ${ref("dw_1_silver_xero", "dim_company_fiscal_configuration_history")}
+), invalid_companies AS (
+  SELECT
+    'invalid_financial_year_end_configuration' AS issue,
+    tenant_id,
+    CAST(NULL AS STRING) AS financial_period_id
+  FROM companies
+  WHERE financial_year_end_day NOT BETWEEN 1 AND 31
+     OR financial_year_end_month NOT BETWEEN 1 AND 12
+     OR financial_year_end_day IS NULL
+     OR financial_year_end_month IS NULL
+), unsupported_non_month_end_companies AS (
+  SELECT
+    'unsupported_non_month_end_fiscal_configuration' AS issue,
+    tenant_id,
+    CAST(NULL AS STRING) AS financial_period_id
+  FROM companies
+  WHERE financial_year_end_day BETWEEN 1 AND 31
+    AND financial_year_end_month BETWEEN 1 AND 12
+    AND financial_year_end_day != EXTRACT(DAY FROM LAST_DAY(
+      DATE(2001, financial_year_end_month, 1)
+    ))
+), configuration_changes AS (
+  SELECT
+    'fiscal_configuration_changed_requires_policy' AS issue,
+    tenant_id,
+    CAST(NULL AS STRING) AS financial_period_id
+  FROM configuration_history
+  GROUP BY tenant_id
+  HAVING COUNT(DISTINCT CONCAT(
+    CAST(financial_year_end_day AS STRING), '|', CAST(financial_year_end_month AS STRING)
+  )) > 1
+), missing_periods AS (
+  SELECT
+    'missing_derived_periods' AS issue,
+    company.tenant_id,
+    CAST(NULL AS STRING) AS financial_period_id
+  FROM companies AS company
+  LEFT JOIN periods AS period USING (tenant_id)
+  WHERE company.financial_year_end_day BETWEEN 1 AND 31
+    AND company.financial_year_end_month BETWEEN 1 AND 12
+    AND company.financial_year_end_day = EXTRACT(DAY FROM LAST_DAY(
+      DATE(2001, company.financial_year_end_month, 1)
+    ))
+    AND period.tenant_id IS NULL
+), invalid_periods AS (
+  SELECT
+    'invalid_derived_period' AS issue,
+    tenant_id,
+    financial_period_id
+  FROM periods
+  WHERE is_derived IS NOT TRUE
+     OR period_start > period_end
+     OR fiscal_month NOT BETWEEN 1 AND 12
+     OR fiscal_quarter NOT BETWEEN 1 AND 4
+), discontinuities AS (
+  SELECT
+    'non_contiguous_periods' AS issue,
+    tenant_id,
+    financial_period_id
+  FROM periods
+  QUALIFY DATE_SUB(period_start, INTERVAL 1 DAY) != LAG(period_end) OVER (
+    PARTITION BY tenant_id
+    ORDER BY period_start
+  )
+), unresolved_ledger_periods AS (
+  SELECT
+    'unresolved_general_ledger_period' AS issue,
+    ledger.tenant_id,
+    CAST(ledger.journal_line_id AS STRING) AS financial_period_id
+  FROM ${ref("xero_gold_finance", "fact_general_ledger")} AS ledger
+  LEFT JOIN ${ref("xero_gold_common", "dim_financial_period")} AS period
+    ON ledger.financial_period_key = period.financial_period_key
+  WHERE ledger.transaction_date IS NOT NULL
+    AND (
+      period.financial_period_key IS NULL
+      OR ledger.is_financial_period_derived IS NOT TRUE
+      OR ledger.financial_period_basis IS NULL
+    )
+)
+SELECT * FROM invalid_companies
+UNION ALL SELECT * FROM unsupported_non_month_end_companies
+UNION ALL SELECT * FROM configuration_changes
+UNION ALL SELECT * FROM missing_periods
+UNION ALL SELECT * FROM invalid_periods
+UNION ALL SELECT * FROM discontinuities
+UNION ALL SELECT * FROM unresolved_ledger_periods

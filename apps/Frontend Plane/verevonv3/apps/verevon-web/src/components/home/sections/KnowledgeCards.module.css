@@ -17,6 +17,19 @@
 	background: #f5f4f2;
 }
 
+/* The entire card is a destination without nesting links: the transparent
+ * link sits above the visual and copy, while the department nodes can remain
+ * individually reachable links above it. */
+.cardLink {
+	position: absolute;
+	inset: 0;
+	z-index: 15;
+	cursor: pointer;
+	outline-offset: -5px;
+}
+.card:has(.cardLink) .content { pointer-events: none; }
+.cardLink:focus-visible { outline: 2px solid var(--verevon-coral-deep, #9f4e38); }
+
 /* A travelling light on the edge, with no colour wash over the content. */
 .card::after {
 	content: "";
@@ -55,7 +68,7 @@
 	z-index: 10;
 	font-family: var(--font-geist), sans-serif;
 	font-size: 11px;
-	letter-spacing: 0.12em;
+	letter-spacing: 0.08em;
 	color: var(--verevon-text-muted);
 }
 
@@ -91,10 +104,11 @@
 
 .content p {
 	margin-top: 12px;
-	font-family: var(--font-geist), sans-serif;
-	font-size: 13px;
+	font-family: var(--font-manrope), sans-serif;
+	font-size: 16px;
 	font-weight: 300;
 	line-height: 1.5;
+	letter-spacing: -0.015em;
 	color: var(--verevon-text-muted);
 	text-wrap: pretty;
 }
@@ -166,6 +180,7 @@
 .tile:nth-child(even) { transform: translateY(6px); }
 .tile:empty { background: rgb(225 223 219 / 22%); border-color: rgb(225 223 219 / 15%); box-shadow: none; }
 .tile img { width: 24px; height: 24px; object-fit: contain; opacity: 0.87; }
+.tileMark { max-width: 38px; overflow: hidden; color: #61616a; font: 600 7px/1 var(--font-geist), sans-serif; letter-spacing: -0.015em; text-align: center; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
 
 @media (prefers-reduced-motion: reduce) {
 	:global(html:not([data-motion="full"])) .card::after { animation: none; transition: none; }
@@ -187,41 +202,57 @@
 .cards[data-active="02"] { grid-template-columns: 0.75fr 1.5fr 0.75fr; }
 .cards[data-active="03"] { grid-template-columns: 0.75fr 0.75fr 1.5fr; }
 
-.sectionNavigation { margin-top: 24px; }
+.sectionNavigation { margin-top: 28px; }
 .sectionNavigation ul {
-	display: flex;
-	flex-wrap: wrap;
-	align-items: flex-end;
-	justify-content: center;
-	gap: 8px 32px;
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 0 clamp(20px, 3vw, 52px);
 	margin: 0;
 	padding: 0;
+	border-top: 1px solid rgb(23 23 23 / 14%);
 	list-style: none;
 }
 .sectionNavigation a {
 	position: relative;
 	display: flex;
 	align-items: center;
-	min-height: 48px;
-	padding-block: 12px;
-	border-bottom: 2px solid transparent;
-	font: 500 0.92rem/1.5 var(--font-geist), sans-serif;
+	min-height: 50px;
+	padding: 13px 0 9px;
+	font: 400 clamp(0.68rem, 0.72vw, 0.76rem)/1.25 var(--font-geist), sans-serif;
+	letter-spacing: 0.035em;
+	text-transform: uppercase;
 	color: var(--verevon-text-muted);
 	text-decoration: none;
 	text-wrap: pretty;
-	transition: color 300ms ease;
+	transition: color 180ms ease;
 }
 .sectionNavigation a:hover,
 .sectionNavigation a[data-highlighted="true"] { color: var(--verevon-j-text); }
 .sectionNavigation a:focus-visible { color: var(--verevon-j-text); outline: 2px solid var(--verevon-coral, #c36b4c); outline-offset: 4px; border-radius: 2px; }
-.navigationLine { position: absolute; bottom: -2px; height: 2px; background: var(--verevon-j-text); pointer-events: none; }
+.sectionNavigation a::after {
+	position: absolute;
+	bottom: 0;
+	left: 0;
+	width: 24px;
+	height: 1px;
+	background: currentColor;
+	content: "";
+	transform: scaleX(0);
+	transform-origin: left;
+	transition: transform 180ms ease;
+}
+.sectionNavigation a:hover::after,
+.sectionNavigation a[data-highlighted="true"]::after { transform: scaleX(1); }
 
 @media (max-width: 760px) {
 	.sectionNavigation { margin-top: 20px; }
-	.sectionNavigation ul { flex-direction: column; align-items: flex-start; }
+	.sectionNavigation ul { grid-template-columns: 1fr; gap: 0; }
+	.sectionNavigation li + li { border-top: 1px solid rgb(23 23 23 / 10%); }
+	.sectionNavigation a { min-height: 48px; }
 }
 @media (prefers-reduced-motion: reduce) {
-	:global(html:not([data-motion="full"])) .sectionNavigation a { transition: none; }
+	:global(html:not([data-motion="full"])) .sectionNavigation a,
+	:global(html:not([data-motion="full"])) .sectionNavigation a::after { transition: none; }
 }
 
 .expand {
@@ -254,42 +285,106 @@
 
 .connectionScene { position: relative; width: 100%; height: 100%; }
 .connectors { transition: opacity 260ms ease, transform 600ms cubic-bezier(0.22, 1, 0.36, 1); }
-.connectionScene[data-expanded="true"] .connectors { opacity: 0.13; transform: scale(1.2); }
+.connectionScene[data-expanded="true"] .connectors { opacity: 0.08; transform: scale(1.16); }
 .systems {
 	position: absolute;
-	inset: 18px 12px 6px;
+	inset: 10px 0 0;
 	display: flex;
 	flex-direction: column;
-	justify-content: center;
-	gap: 12px;
+	gap: 6px;
 	opacity: 0;
 	visibility: hidden;
+	pointer-events: none;
 	transition: opacity 200ms ease, visibility 200ms ease;
 }
-.connectionScene[data-expanded="true"] .systems { opacity: 1; visibility: visible; transition-delay: 100ms; }
-.systemsCaption { text-align: center; font-family: var(--font-geist), sans-serif; font-size: 10px; letter-spacing: 0.04em; color: #77706a; }
-.systemGrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
+.connectionScene[data-expanded="true"] .systems { opacity: 1; visibility: visible; pointer-events: auto; transition-delay: 100ms; }
+.systemsCaption {
+	position: relative;
+	z-index: 2;
+	min-height: 16px;
+	margin: 0;
+	text-align: center;
+	font-family: var(--font-geist), sans-serif;
+	font-size: 10px;
+	letter-spacing: 0.025em;
+	color: #77706a;
+}
+.systemField {
+	position: relative;
+	flex: 1;
+	min-height: 0;
+	overflow: hidden;
+	margin: 0 -10px -8px;
+	/* Let the tiles sit on the card's own surface so this interaction does not
+	 * introduce a visible horizontal panel edge behind the system field. */
+	background: transparent;
+}
+.systemGrid {
+	position: absolute;
+	top: 0;
+	left: 5%;
+	display: grid;
+	width: 90%;
+	grid-template-columns: repeat(6, minmax(0, 1fr));
+	gap: clamp(5px, 0.72vw, 9px);
+	padding: 8px clamp(8px, 1.3vw, 16px) 26px;
+	transform: perspective(700px) rotateX(32deg) rotateZ(-3deg);
+	transform-origin: 50% 0;
+}
 .system {
 	display: flex;
-	flex-direction: column;
 	align-items: center;
 	justify-content: center;
-	gap: 12px;
-	min-height: 73px;
-	padding: 12px 8px 8px;
-	border: 1px solid rgb(255 255 255 / 90%);
-	border-radius: 5px;
-	background: rgb(255 255 255 / 94%);
-	box-shadow: 0 4px 16px rgb(66 53 40 / 5%);
+	min-width: 0;
+	aspect-ratio: 1.38;
+	padding: 6px;
+	border: 1px solid rgb(255 255 255 / 70%);
+	border-radius: clamp(8px, 1.2vw, 14px);
+	background: rgb(255 255 255 / 76%);
+	box-shadow: 0 10px 17px rgb(53 70 91 / 12%), inset 0 1px rgb(255 255 255 / 70%);
+	backdrop-filter: blur(8px);
 	opacity: 0;
-	transform: translateY(18px) scale(0.92);
-	transition: opacity 220ms ease, transform 440ms cubic-bezier(0.22, 1, 0.36, 1);
+	transform: translateY(14px) scale(0.9);
+	cursor: pointer;
+	transition: opacity 220ms ease, transform 440ms cubic-bezier(0.22, 1, 0.36, 1), border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
 }
-.connectionScene[data-expanded="true"] .system { opacity: 1; transform: none; transition-delay: calc(90ms + var(--tile-order) * 30ms); }
-.system img { width: 100%; max-width: 85px; height: 25px; object-fit: contain; }
-.system span { color: #827b73; font: 9px var(--font-geist), sans-serif; }
+.connectionScene[data-expanded="true"] .system { opacity: 1; transform: none; transition-delay: calc(90ms + var(--tile-order) * 28ms); }
+.connectionScene[data-expanded="true"] .system:hover,
+.connectionScene[data-expanded="true"] .system:focus-visible,
+.connectionScene[data-expanded="true"] .system[data-selected="true"] {
+	border-color: rgb(195 107 76 / 46%);
+	background: rgb(255 255 255 / 96%);
+	box-shadow: 0 15px 25px rgb(113 69 49 / 18%), inset 0 1px white;
+	transform: translateY(-4px) scale(1.045);
+}
+.system:focus-visible { outline: 2px solid #c36b4c; outline-offset: 2px; }
+.system img { width: min(80%, 52px); height: min(62%, 36px); object-fit: contain; }
+.systemMark {
+	max-width: 100%;
+	overflow: hidden;
+	color: #565d65;
+	font: 600 clamp(7px, 0.58vw, 9px)/1 var(--font-geist), sans-serif;
+	letter-spacing: 0.015em;
+	text-align: center;
+	text-overflow: ellipsis;
+	text-transform: uppercase;
+	white-space: nowrap;
+}
+.system[data-context="lookup"] .systemMark { color: #826e60; }
+.system[data-system="Tripletex"] .systemMark { font-size: 7px; letter-spacing: 0; }
+.systemName {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0, 0, 0, 0);
+	white-space: nowrap;
+	border: 0;
+}
 
-.departmentNodes { position: absolute; inset: 0; z-index: 2; opacity: 0; visibility: hidden; transition: opacity 300ms ease, visibility 300ms ease; }
+.departmentNodes { position: absolute; inset: 0; z-index: 18; opacity: 0; visibility: hidden; transition: opacity 300ms ease, visibility 300ms ease; }
 .graph[data-expanded="true"] .departmentNodes { opacity: 1; visibility: visible; transition-delay: 180ms; }
 .departmentNode { position: absolute; display: grid; place-items: center; width: 30px; height: 30px; transform: translate(-50%, -50%); border-radius: 50%; cursor: pointer; }
 .departmentDot { width: 4px; height: 4px; border-radius: 50%; background: rgb(91 86 73 / 65%); transition: background 180ms ease, box-shadow 180ms ease; }
@@ -357,16 +452,18 @@
 	.card[data-muted="true"] .content h3 { font-size: 24px; }
 	.card[data-muted="true"] .cta { font-size: inherit; }
 	.card[data-expanded="true"] .content { padding-inline: 24px; }
-	.systemGrid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+	.systemGrid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 }
 @media (max-width: 480px) {
 	.connect[data-expanded="true"] { height: 540px; }
 	.connectionScene[data-expanded="true"] .systems { transition-delay: 240ms; }
 	.connectionScene[data-expanded="true"] .system { transition-delay: calc(240ms + var(--tile-order) * 30ms); }
-	.systems { inset: 18px 6px 6px; gap: 8px; }
-	.systemGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
-	.system { min-height: 48px; padding: 7px 8px; gap: 5px; }
-	.system img { height: 19px; }
+	.systems { inset: 10px 0 0; gap: 5px; }
+	.systemField { margin-inline: -7px; }
+	.systemGrid { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; padding-inline: 5px; }
+	.system { padding: 6px; border-radius: 9px; }
+	.system img { width: min(76%, 38px); height: min(58%, 27px); }
+	.systemMark { font-size: 8px; }
 	.systemsCaption { font-size: 8px; }
 	.departmentPreview { width: 152px; padding: 9px; }
 	.departmentItem { font-size: 8px; gap: 4px; }

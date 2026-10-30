@@ -6,7 +6,7 @@ use axum::{
 use crate::{
     config::AppState,
     onboarding::{
-        crawl_preview::crawl_preview,
+        crawl_preview::{crawl_preview, audit_preview},
         lookup::{brreg_search, graph_preview, recommend_plan, translate_recommendation},
     },
 };
@@ -16,6 +16,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/v1/onboarding/brreg/search", get(brreg_search))
         .route("/api/v1/onboarding/graph-preview", get(graph_preview))
         .route("/api/v1/onboarding/crawl-preview", post(crawl_preview))
+        .route("/api/v1/onboarding/audit-preview", post(audit_preview))
         .route("/api/v1/onboarding/recommend-plan", post(recommend_plan))
         .route(
             "/api/v1/onboarding/translate-recommendation",

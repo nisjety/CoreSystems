@@ -1,0 +1,15 @@
+.git/
+.github/
+.gitignore
+.env
+.env.*
+!.env.example
+bin/
+dist/
+coverage/
+tmp/
+*.log
+**/*_test.go
+testdata/
+docs/
+README.md

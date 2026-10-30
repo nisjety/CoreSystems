@@ -1,0 +1,51 @@
+query Accounts(
+  $lastId: String,
+  $publicCode1: String,
+  $publicCode2: String,
+  $externalCode1: String,
+  $externalCode2: String,
+  $active: Boolean,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  accounts(
+    lastId: $lastId,
+    publicCode1: $publicCode1,
+    publicCode2: $publicCode2,
+    externalCode1: $externalCode1,
+    externalCode2: $externalCode2,
+    active: $active,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    accountId
+    accountCd
+    type
+    accountClassId
+    active
+    description
+    curyId
+    taxCategoryId
+    useDefaultSubaccount
+    deletedDatabaseRecord
+    isCashAccount
+    controlAccountModule
+    publicCode1
+    publicCode2
+    externalCode1
+    externalCode2
+    analysisCode
+    externalCode1Description
+    externalCode2Description
+    analysisCodeDescription
+    groupCd
+    createdInDataMartDateTime
+  }
+}

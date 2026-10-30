@@ -774,6 +774,26 @@ func (s *Service) UpdateBrregVerification(ctx context.Context, id, orgNumber str
 	return nil
 }
 
+// SetWebsite records the organisation's own website. The address is checked here before the write, and the
+// column checks it again, so the record never holds a value that is not a web address.
+func (s *Service) SetWebsite(ctx context.Context, orgID, rawURL, changedBy string) (*Organization, error) {
+	if strings.TrimSpace(orgID) == "" {
+		return nil, fmt.Errorf("organization id is required")
+	}
+	website, err := NormalizeWebsite(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.repo.SetWebsite(ctx, orgID, website); err != nil {
+		return nil, err
+	}
+	if s.cache != nil {
+		_ = s.cache.Del(ctx, "org:id:"+orgID)
+	}
+	s.publishOrganizationUpdated(ctx, orgID, map[string]interface{}{"website_url": website})
+	return s.repo.GetOrganization(ctx, orgID)
+}
+
 // HardDelete atomically commits the irreversible organization erasure and its
 // durable audit intent. Publication is asynchronous and retried from the local
 // outbox, so a broker outage cannot create an unaudited successful erasure.

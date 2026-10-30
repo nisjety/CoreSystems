@@ -26,7 +26,7 @@
 //	NATS_URL=nats://control-shared-nats:4222 \
 //	NATS_USER=control-shared-provisioner \
 //	NATS_PASSWORD=... \
-//	nats-consumer-migrate --stream=AQENCIA_CONTROLPLANE --durable=retrieval-engine-gdpr-erasure-v1
+//	nats-consumer-migrate --stream=CONTROLPLANE --durable=retrieval-engine-gdpr-erasure-v1
 package main
 
 import (

@@ -69,6 +69,8 @@ const capture = productCaptureSettings(process.env.PRODUCT_RECORDING_MODE || (pr
   JSON.parse(readFileSync(new URL('./apps/verevon-web/plans/product-recordings/manifest.json', import.meta.url), 'utf8')),
   process.env.PRODUCT_RECORDING_OUTPUT, resolve(fileURLToPath(new URL('.', import.meta.url)), '../../..'))
 const RECORD_PRODUCT_MEDIA = Boolean(capture)
+const STUDIO_DEMO_BASE_URL = process.env.STUDIO_DEMO_BASE_URL || 'http://127.0.0.1:5174'
+const STUDIO_DEMO_SPECS = /studio-demo\.spec\.ts/
 
 export default defineConfig({
   testDir: 'tests/e2e',
@@ -95,7 +97,7 @@ export default defineConfig({
     {
       name: 'e2e',
       testMatch: /.*\.spec\.ts/,
-      testIgnore: [BROWSER_WORKSPACE_SPECS, BROWSER_GRANT_PROD_SPEC, CHAT_WORKSPACE_SPECS, PRODUCT_READINESS_SPECS, PRODUCT_RECORDING_SPEC],
+      testIgnore: [BROWSER_WORKSPACE_SPECS, BROWSER_GRANT_PROD_SPEC, CHAT_WORKSPACE_SPECS, PRODUCT_READINESS_SPECS, PRODUCT_RECORDING_SPEC, STUDIO_DEMO_SPECS],
       dependencies: ['setup'],
       use: { ...devices['Desktop Chrome'], storageState: STORAGE_STATE },
     },
@@ -133,6 +135,11 @@ export default defineConfig({
       timeout: capture ? 300_000 : 240_000,
       use: { ...devices['Desktop Chrome'], baseURL: LOCAL_BASE_URL, storageState: LOCAL_STORAGE_STATE, viewport: { width: 1440, height: RECORD_PRODUCT_MEDIA ? 900 : 1000 }, actionTimeout: 15_000,
         video: RECORD_PRODUCT_MEDIA ? { mode: 'on', size: { width: 1440, height: 900 } } : 'off' },
+    },
+    {
+      name: 'studio-demo',
+      testMatch: STUDIO_DEMO_SPECS,
+      use: { ...devices['Desktop Chrome'], baseURL: STUDIO_DEMO_BASE_URL },
     },
   ],
 })

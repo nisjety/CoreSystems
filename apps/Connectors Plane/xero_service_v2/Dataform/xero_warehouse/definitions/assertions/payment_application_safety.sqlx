@@ -1,0 +1,10 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_invoice_payment_application_grain"
+}
+
+SELECT tenant_id, payment_id
+FROM ${ref("dw_1_silver_xero", "bridge_invoice_payment_application")}
+GROUP BY tenant_id, payment_id
+HAVING COUNT(*) != 1

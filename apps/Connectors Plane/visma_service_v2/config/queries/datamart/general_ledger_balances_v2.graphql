@@ -1,0 +1,42 @@
+query GeneralLedgerBalancesV2(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $toggleBalanceSign: Boolean! = false,
+  $includeDeleted: Boolean! = true
+) {
+  generalLedgerBalancesV2(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    toggleBalanceSign: $toggleBalanceSign,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    deletedDatabaseRecord
+    branchId
+    ledgerId
+    accountId
+    subaccountId
+    finPeriodId
+    accountType
+    baseCuryId
+    curyId
+    balanceType
+    periodToDateDebit
+    periodToDateCredit
+    periodToDateDebitInCurrency
+    periodToDateCreditInCurrency
+    yearClosed
+    lastModifiedDateTime
+    beginningBalance
+    beginningBalanceInCurrency
+    yearToDateBalance
+    yearToDateBalanceInCurrency
+    createdInDataMartDateTime
+  }
+}

@@ -1,0 +1,80 @@
+config {
+  type: "table",
+  schema: "visma_datamart",
+  name: "BI_ProjectBudgetRecon",
+  description: "Project P&L reconciliation at tenant + project grain: Visma projectBudget actuals (native rollup, fact_project_budget) vs the GL-transaction model (BI_ProjectPortfolioPnL). income/expense_delta surfaces amounts the project module attributes to a project but that have no project-tagged GL transaction line — e.g. GL booked without the project dimension (establishment-revenue acct 3047, varekost acct 4410). recon_status: reconciled | amount_divergent | budget_only | model_only. Self-monitoring surface for new untagged-GL postings.",
+  tags: ["gold", "bi", "project", "finance", "recon"]
+}
+
+WITH budget AS (
+  SELECT
+    tenant_id,
+    project_id,
+    ANY_VALUE(organization_name)        AS organization_name,
+    SUM(actual_income_amount)           AS budget_income,
+    SUM(actual_expense_amount)          AS budget_expense,
+    SUM(actual_liability_amount)        AS budget_liability,
+    COUNT(*)                            AS budget_line_count
+  FROM ${ref("visma_silver", "fact_project_budget")}
+  GROUP BY tenant_id, project_id
+),
+
+model AS (
+  SELECT
+    tenant_id,
+    project_id,
+    entity_name,
+    project_name,
+    income_amount                       AS model_income,
+    expense_amount                      AS model_expense,
+    result_amount                       AS model_result
+  FROM ${ref("visma_datamart", "BI_ProjectPortfolioPnL")}
+),
+
+joined AS (
+  SELECT
+    COALESCE(b.tenant_id, m.tenant_id)              AS tenant_id,
+    COALESCE(b.project_id, m.project_id)            AS project_id,
+    m.entity_name,
+    m.project_name,
+    COALESCE(b.organization_name, m.entity_name)    AS organization_name,
+    COALESCE(b.budget_income, 0)                    AS budget_income,
+    COALESCE(m.model_income, 0)                     AS model_income,
+    ROUND(COALESCE(b.budget_income, 0) - COALESCE(m.model_income, 0), 2)   AS income_delta,
+    COALESCE(b.budget_expense, 0)                   AS budget_expense,
+    COALESCE(m.model_expense, 0)                    AS model_expense,
+    ROUND(COALESCE(b.budget_expense, 0) - COALESCE(m.model_expense, 0), 2) AS expense_delta,
+    COALESCE(b.budget_liability, 0)                 AS budget_liability,
+    (b.project_id IS NOT NULL)                      AS in_budget,
+    (m.project_id IS NOT NULL)                      AS in_model
+  FROM budget AS b
+  FULL OUTER JOIN model AS m
+    ON b.tenant_id = m.tenant_id
+   AND b.project_id = m.project_id
+)
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(CAST(tenant_id AS STRING), '|', CAST(project_id AS STRING))) AS project_budget_recon_key,
+  tenant_id,
+  project_id,
+  entity_name,
+  project_name,
+  organization_name,
+  budget_income,
+  model_income,
+  income_delta,
+  budget_expense,
+  model_expense,
+  expense_delta,
+  budget_liability,
+  in_budget,
+  in_model,
+  ROUND(ABS(income_delta) + ABS(expense_delta), 2)    AS abs_total_delta,
+  CASE
+    WHEN NOT in_model  THEN 'budget_only'
+    WHEN NOT in_budget THEN 'model_only'
+    WHEN ABS(income_delta) > 1 OR ABS(expense_delta) > 1 THEN 'amount_divergent'
+    ELSE 'reconciled'
+  END                                                 AS recon_status,
+  'projectBudget_vs_BI_ProjectPortfolioPnL'           AS recon_basis
+FROM joined

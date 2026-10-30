@@ -1,0 +1,11 @@
+<!doctype html><html><head><meta charset="utf-8"><title>kern check</title><style>
+@font-face{font-family:"VSL";font-weight:300;src:url("out/VerevonSansLab-Light.ttf")}
+@font-face{font-family:"VSL";font-weight:700;src:url("out/VerevonSansLab-Bold.ttf")}
+body{margin:10px 24px;font-family:VSL;font-weight:300;font-size:64px;line-height:1.2}
+.n{font-kerning:none} .b{font-weight:700} small{font:12px monospace;color:#888;display:block}
+</style></head><body>
+<small>no kerning</small><div class="n">AVATAR Tomorrow Type LT Yo.</div>
+<small>kerning</small><div>AVATAR Tomorrow Type LT Yo.</div>
+<small>bold, kerning off / on</small><div class="b n">AVATAR Type Wa, 2357</div><div class="b">AVATAR Type Wa, 2357</div>
+<small>bold glyphs</small><div class="b">SZfrtJG skty 2357 Ææ</div>
+</body></html>

@@ -63,9 +63,7 @@ env_files+=(
   "$root/convex-core/.env"
   "$root/conversation-core/.env"
   "$root/notification-core/.env"
-  "$root/social-core/.env"
   "$root/insight-core/.env"
-  "$root/leads-core/.env"
   "$root/information-core/.env"
 )
 # convex services also keep a local overlay if present.

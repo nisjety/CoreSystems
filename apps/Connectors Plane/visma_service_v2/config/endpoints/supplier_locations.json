@@ -1,0 +1,27 @@
+{
+  "endpoint_name": "supplier_locations",
+  "bigquery_table": "visma_supplier_locations",
+  "primary_key": [
+    "baccount.number",
+    "locationId"
+  ],
+  "logical_keys": [
+    "baccount.number",
+    "locationId"
+  ],
+  "source": "erp_rest",
+  "api_method": "get_supplier_locations",
+  "api_endpoint": "/v1/supplierlocation",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "baccount.number",
+    "locationId",
+    "active",
+    "vatZone.id",
+    "lastModifiedDateTime"
+  ],
+  "notes": "Per-supplier locations. Natural key is the composite (baccount.number, locationId) — both required and non-NULL in the MERGE ON clause (Bug E lesson). v1 sync_contract: foreground_only request mode, no reconciliation, empty_result=noop_success (an empty page is a successful no-op, not an error). locationName removed from validation_fields: 1 of 6,891 rows (baccount 500133, location HOVED) has none, which rejected the whole endpoint."
+}

@@ -1,0 +1,74 @@
+query CustomerDocuments(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  customerDocuments(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    paymentMethodId
+    postPeriod
+    financialPeriod
+    customerRefNbr
+    referenceNumber
+    paymentReference
+    voucherId
+    contractDocRef
+    childRecordNumber
+    vatTotal
+    vatTotalInCurrency
+    accountId
+    subAccountId
+    dueDate
+    documentType
+    documentDate
+    status
+    currencyId
+    amount
+    amountInCurrency
+    balance
+    balanceInCurrency
+    cashDiscount
+    cashDiscountInCurrency
+    invoiceText
+    locationId
+    lastModifiedDateTime
+    createdDateTime
+    customerId
+    branchId
+    deletedDatabaseRecord
+    creditTermsId
+    cashDiscountDate
+    externalReference
+    isRotRutDeductible
+    exchangeRate
+    hold
+    detailTotal
+    detailTotalInCurrency
+    vatTaxableTotal
+    vatTaxableTotalInCurrency
+    vatExemptTotal
+    vatExemptTotalInCurrency
+    salesPersonId
+    note
+    projectId
+    dunningLetterDate
+    dunningLetterLevel
+    releasedDateTime
+    createdInDataMartDateTime
+    attachments {
+      name
+      fileId
+      lastRevisionId
+    }
+  }
+}

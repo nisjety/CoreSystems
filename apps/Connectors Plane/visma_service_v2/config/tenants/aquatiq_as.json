@@ -1,0 +1,6 @@
+{
+  "tenant_id": "33f319b9-4d57-11ee-960c-025417856183",
+  "tenant_name": "Aquatiq AS",
+  "datamart_company_id": null,
+  "notes": "datamart_company_id is filled by Phase 0 introspection (vsv2-discover companies)."
+}

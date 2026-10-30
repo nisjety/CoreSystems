@@ -590,7 +590,7 @@ services:
       # "retrieval-engine-gdpr"), kept entirely separate from NATS_URL/
       # DATAPLANE_NATS_TOKEN above (the Data-Plane-local broker this
       # service's cache invalidator + cost-ledger publisher use — that
-      # broker does not host AQENCIA_CONTROLPLANE). Deliberately distinct env
+      # broker does not host CONTROLPLANE). Deliberately distinct env
       # var names from NATS_SHARED_URL/SHARED_NATS_URL already in play for
       # other services/fallbacks — see src/gdpr/consumer.rs's module doc.
       # Empty URL leaves the consumer disabled (logged, non-fatal) rather
@@ -996,7 +996,7 @@ services:
       # "embedding-engine-gdpr"), kept entirely separate from NATS_URL/
       # DATAPLANE_NATS_TOKEN above (the Data-Plane-local broker this
       # service's embedding/wiki/page-image consumers use — that broker does
-      # not host AQENCIA_CONTROLPLANE). Deliberately distinct env var names
+      # not host CONTROLPLANE). Deliberately distinct env var names
       # from NATS_SHARED_URL/SHARED_NATS_URL already in play for other
       # services/fallbacks — see src/gdpr_nats.rs's module doc. Empty URL
       # leaves the consumer disabled (logged, non-fatal) rather than
@@ -1155,7 +1155,7 @@ services:
       # "graph-index-gdpr"), kept entirely separate from NATS_URL/
       # DATAPLANE_NATS_TOKEN above (the Data-Plane-local broker this
       # service's graph-extraction/cleanup consumers use — that broker does
-      # not host AQENCIA_CONTROLPLANE). Deliberately distinct env var names
+      # not host CONTROLPLANE). Deliberately distinct env var names
       # from NATS_SHARED_URL/SHARED_NATS_URL already in play for other
       # services/fallbacks — see src/gdpr_nats.rs's module doc. Empty URL
       # leaves the consumer disabled (logged, non-fatal) rather than
@@ -1206,7 +1206,7 @@ services:
       # Dedicated shared-broker identity for the cross-plane GDPR
       # organization-erasure consumer only (see src/gdpr_nats.rs). This is
       # NOT the plane-local NATS_URL/DATAPLANE_NATS_TOKEN pair above and must
-      # never be repointed at data-nats — AQENCIA_CONTROLPLANE only exists on
+      # never be repointed at data-nats — CONTROLPLANE only exists on
       # control-shared-nats. Left empty (e.g. standalone/isolated posture),
       # the consumer logs a warning and stays disabled rather than
       # hot-looping doomed connection attempts.

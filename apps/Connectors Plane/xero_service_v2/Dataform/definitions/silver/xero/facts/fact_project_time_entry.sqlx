@@ -1,0 +1,27 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  name: "fact_project_time_entry",
+  disabled: dataform.projectConfig.vars.enable_xero_extended !== "true",
+  description: "Xero Projects time entries, including the full source payload.",
+  tags: ["silver", "xero", "fact"]
+}
+
+WITH source AS (
+  SELECT tenant_id, native_id, payload_json, synced_at
+  FROM ${ref("dw_1_silver_xero", "current_extended_records")}
+  WHERE endpoint = 'projects_time'
+)
+SELECT
+  tenant_id,
+  native_id AS time_entry_id,
+  JSON_VALUE(payload_json, '$.projectId') AS project_id,
+  JSON_VALUE(payload_json, '$.taskId') AS task_id,
+  JSON_VALUE(payload_json, '$.userId') AS user_id,
+  SAFE_CAST(JSON_VALUE(payload_json, '$.dateUtc') AS TIMESTAMP) AS entry_date_utc,
+  SAFE_CAST(JSON_VALUE(payload_json, '$.duration') AS INT64) AS duration_minutes,
+  JSON_VALUE(payload_json, '$.status') AS entry_status,
+  JSON_VALUE(payload_json, '$.description') AS description,
+  payload_json,
+  synced_at
+FROM source

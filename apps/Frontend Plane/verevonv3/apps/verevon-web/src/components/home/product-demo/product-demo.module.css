@@ -18,6 +18,43 @@
 .embedded .body { height: auto; min-height: 0; flex: 1; }
 .embedded .conversation { padding: 24px; }
 .embedded .outputContent { padding: 20px; }
+
+/* The three scroll-led examples present a short, deterministic product story.
+   They remain genuine interactive demos; the animation changes no demo state. */
+:global([data-product-loop-layer][data-active="true"]) .embedded .userMessage {
+	animation: embedded-demo-rise 520ms 120ms both cubic-bezier(.22, 1, .36, 1);
+}
+:global([data-product-loop-layer][data-active="true"]) .embedded .response {
+	animation: embedded-demo-rise 620ms 430ms both cubic-bezier(.22, 1, .36, 1);
+}
+:global([data-product-loop-layer][data-active="true"]) .embedded .output {
+	animation: embedded-demo-slide 660ms 780ms both cubic-bezier(.22, 1, .36, 1);
+}
+:global([data-product-loop-layer][data-active="true"]) .embedded .taskActivity li {
+	animation: embedded-demo-rise 360ms both cubic-bezier(.22, 1, .36, 1);
+}
+:global([data-product-loop-layer][data-active="true"]) .embedded .taskActivity li:nth-child(1) { animation-delay: 800ms; }
+:global([data-product-loop-layer][data-active="true"]) .embedded .taskActivity li:nth-child(2) { animation-delay: 970ms; }
+:global([data-product-loop-layer][data-active="true"]) .embedded .taskActivity li:nth-child(3) { animation-delay: 1140ms; }
+
+@keyframes embedded-demo-rise {
+	from { opacity: 0; transform: translateY(14px); }
+	to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes embedded-demo-slide {
+	from { opacity: 0; transform: translateX(24px); }
+	to { opacity: 1; transform: translateX(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	:global(html:not([data-motion="full"])) :global([data-product-loop-layer][data-active="true"]) .embedded .userMessage,
+	:global(html:not([data-motion="full"])) :global([data-product-loop-layer][data-active="true"]) .embedded .response,
+	:global(html:not([data-motion="full"])) :global([data-product-loop-layer][data-active="true"]) .embedded .output,
+	:global(html:not([data-motion="full"])) :global([data-product-loop-layer][data-active="true"]) .embedded .taskActivity li {
+		animation: none;
+	}
+}
 @media (max-width: 899px) {
   .embedded.page { height: auto; }
   .embedded .scene { padding: 14px 8px; }

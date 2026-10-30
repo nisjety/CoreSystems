@@ -45,12 +45,23 @@ describe('streamCrawlPreview failures', () => {
   })
 
   it('hands a warning packet to the page with its code, which has copy', async () => {
-    const body = 'event: warning\ndata: {"code":"empty_crawl","message":"Vi fikk ikke hentet innhold fra nettsiden."}\n\n'
+    // The gateway (onboarding/crawl_preview/audit_handler.rs) always closes the stream with a `done`
+    // receipt, a failed one after a warning; the client refuses a stream that ends without it.
+    const body =
+      'event: warning\ndata: {"code":"empty_crawl","message":"Vi fikk ikke hentet innhold fra nettsiden."}\n\n' +
+      'event: done\ndata: {"count":0,"pages":0,"elements":0,"status":"failed"}\n\n'
     vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })))
     const onWarning = vi.fn()
 
     await streamCrawlPreview({ url: 'https://example.no' }, { onWarning })
     expect(onWarning).toHaveBeenCalledWith({ code: 'empty_crawl', message: 'Vi fikk ikke hentet innhold fra nettsiden.' })
     expect(translateApiError({ code: 'empty_crawl' }, no)).toMatch(/Prøv på nytt, eller fortsett uten forhåndsvisning/)
+  })
+
+  it('refuses a stream that ends without the completion receipt', async () => {
+    const body = 'event: warning\ndata: {"code":"empty_crawl","message":"Vi fikk ikke hentet innhold fra nettsiden."}\n\n'
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })))
+
+    await expect(streamCrawlPreview({ url: 'https://example.no' }, {})).rejects.toThrow('without a completion receipt')
   })
 })

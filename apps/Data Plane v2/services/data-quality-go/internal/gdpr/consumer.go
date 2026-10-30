@@ -16,7 +16,7 @@ const (
 	// which already carries ErasureRequestedSubject via its
 	// GDPRErasureRequestedSubject constant. No new stream or subject is
 	// needed here — only a new pre-provisioned CONSUMER on it.
-	controlSharedStream = "AQENCIA_CONTROLPLANE"
+	controlSharedStream = "CONTROLPLANE"
 
 	// OrgErasureDurableName is this service's own pre-provisioned JetStream
 	// consumer name on controlSharedStream. It MUST be added to audit-core's

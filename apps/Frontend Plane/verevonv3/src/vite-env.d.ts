@@ -7,6 +7,8 @@ interface ImportMetaEnv {
 	readonly VITE_TURNSTILE_SITE_KEY?: string;
 	readonly VITE_FLEET_CONSOLE?: string;
 	readonly VITE_BROWSER_OMNIBOX_SEARCH?: string;
+	/** "1" includes the fictional product-scene runtime; never enable in production. */
+	readonly VITE_SCENE_MODE?: string;
 }
 
 interface ImportMeta {

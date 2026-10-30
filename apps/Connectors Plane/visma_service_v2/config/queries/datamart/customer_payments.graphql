@@ -1,0 +1,47 @@
+query CustomerPayments(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false,
+  $includeCashDocumentTypes: Boolean! = false
+) {
+  customerPayments(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted,
+    includeCashDocumentTypes: $includeCashDocumentTypes
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    documentType
+    referenceNumber
+    status
+    hold
+    applicationDate
+    applicationPeriod
+    paymentRef
+    customerId
+    locationId
+    paymentMethodId
+    cashAccountId
+    currencyId
+    paymentAmount
+    invoiceText
+    appliedToDocuments
+    appliedToOrders
+    availableBalance
+    writeOffAmount
+    financeCharges
+    deductedCharges
+    branchId
+    paymentDate
+    lastModifiedDateTime
+    postedDateTime
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+  }
+}

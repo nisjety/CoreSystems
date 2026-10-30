@@ -70,6 +70,11 @@ const UNREVIEWED =
   'not part of the sites converted in rounds 3 to 5; not yet reviewed for whether the raw text can reach a person'
 
 const NOT_CONVERTED: Record<string, { sites: number; reason: string }> = {
+  'demo/ScenePage.tsx': {
+    sites: 2,
+    reason:
+      'reviewed: development-only scene capture harness (mounted only when import.meta.env.DEV and scene mode are on); it shows the operator the raw setup failure in the capture page so a missing selector or font is diagnosable, and no customer ever sees it',
+  },
   'features/agents/lib/use-chatbot-support-status.ts': { sites: 1, reason: UNREVIEWED },
   'features/auth/components/AuthPage.tsx': {
     sites: 6,
@@ -138,8 +143,43 @@ const NOT_CONVERTED: Record<string, { sites: number; reason: string }> = {
     reason:
       "reviewed: this is the transport itself reading the gateway envelope's message field into ApiError.message (one line); describeApiError and translateApiError never show that text",
   },
+  'shared/api/marketing/algolia-collection-client.ts': {
+    sites: 1,
+    reason:
+      `reviewed: no caught error is read; \`String(x.reason)\` / \`String(x.refreshReason)\` stringifies a payload enumeration field before an \`includes\` check on the response shape (the name heuristic matches the field name \`reason\`)`,
+  },
+  'shared/api/marketing/outcomes-client.ts': {
+    sites: 1,
+    reason:
+      `reviewed: no caught error is read; \`String(x.reason)\` / \`String(x.refreshReason)\` stringifies a payload enumeration field before an \`includes\` check on the response shape (the name heuristic matches the field name \`reason\`)`,
+  },
+  'shared/api/marketing/pagespeed-client.ts': {
+    sites: 2,
+    reason:
+      `reviewed: no caught error is read; \`String(x.reason)\` / \`String(x.refreshReason)\` stringifies a payload enumeration field before an \`includes\` check on the response shape (the name heuristic matches the field name \`reason\`)`,
+  },
+  'shared/api/marketing/pulse-client.ts': {
+    sites: 1,
+    reason:
+      `reviewed: no caught error is read; \`String(x.reason)\` / \`String(x.refreshReason)\` stringifies a payload enumeration field before an \`includes\` check on the response shape (the name heuristic matches the field name \`reason\`)`,
+  },
+  'shared/api/marketing/search-comparison-client.ts': {
+    sites: 1,
+    reason:
+      `reviewed: no caught error is read; \`String(x.reason)\` / \`String(x.refreshReason)\` stringifies a payload enumeration field before an \`includes\` check on the response shape (the name heuristic matches the field name \`reason\`)`,
+  },
+  'shared/api/marketing/trends-client.ts': {
+    sites: 1,
+    reason:
+      `reviewed: no caught error is read; \`String(x.reason)\` / \`String(x.refreshReason)\` stringifies a payload enumeration field before an \`includes\` check on the response shape (the name heuristic matches the field name \`reason\`)`,
+  },
   'shared/api/knowledge-client.ts': { sites: 1, reason: UNREVIEWED },
   'shared/api/search-client.ts': { sites: 1, reason: UNREVIEWED },
+  'shared/api/visibility/research-client.ts': {
+    sites: 1,
+    reason:
+      `reviewed: no caught error is read; \`String(x.reason)\` / \`String(x.refreshReason)\` stringifies a payload enumeration field before an \`includes\` check on the response shape (the name heuristic matches the field name \`reason\`)`,
+  },
 }
 
 // Fallback copy that is the raw message of a stream event, on purpose: the room shows the

@@ -130,6 +130,7 @@ const CALLER_WORDS_IT: Record<string, string> = {
 
 // Strings the scan meets that are not error codes at all.
 const NOT_AN_ERROR_CODE: Record<string, string> = {
+  authorization: 'header name in the Rust tests of the Algolia and Marketing proxies (`("authorization", "Bearer ..")` pairs), not an error code',
   minio: 'name of a dependency in the knowledge diagnostics readiness list, not an error',
   qdrant: 'name of a dependency in the knowledge diagnostics readiness list, not an error',
   quickwit: 'name of a dependency in the knowledge diagnostics readiness list, not an error',
@@ -184,7 +185,6 @@ const INTERNAL_ONLY: Record<string, string> = {
   unsupported_space_kind: 'the SPA only creates a personal Space or a room',
   mail_task_pipeline_failed: 'the mail-task ingest endpoint is called service to service; no SPA code calls it',
   mail_task_pipeline_not_configured: 'the mail-task ingest endpoint is called service to service; no SPA code calls it',
-  payload_too_large: 'the mail-task ingest endpoint is called service to service; no SPA code calls it',
 }
 
 function hasCopy(code: string): boolean {

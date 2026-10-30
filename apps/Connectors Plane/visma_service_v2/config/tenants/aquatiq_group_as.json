@@ -1,0 +1,8 @@
+{
+  "tenant_id": "7d2c489e-21cc-11e9-b307-0aa512338dd6",
+  "tenant_name": "Aquatiq Group AS",
+  "datamart_company_id": "1042103",
+  "status": "active",
+  "bu_label": "Group Services",
+  "notes": "Holding/shared-services entity. Registered in v1 scripts/add_tenants.py; DataMart company discovered with `vsv2 dm-companies` on 2026-10-01."
+}

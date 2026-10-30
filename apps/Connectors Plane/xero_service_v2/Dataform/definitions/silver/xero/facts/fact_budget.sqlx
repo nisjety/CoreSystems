@@ -1,0 +1,37 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  name: "fact_budget",
+  description: "Silver: current Xero budget headers from detail-derived staging. Grain: one row per tenant and budget.",
+  tags: ["silver", "xero", "fact"]
+}
+
+WITH current_budgets AS (
+  SELECT *
+  FROM ${ref("dw_staging_xero", "budgets")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, record_id
+    ORDER BY synced_at DESC
+  ) = 1
+)
+
+SELECT
+  tenant_id,
+  synced_at,
+  first_seen_at,
+  budget_id,
+  record_id AS budget_internal_id,
+  budget_type,
+  status,
+  description,
+  updated_at,
+  JSON_VALUE(tracking_json, '$[0].TrackingCategoryID') AS tracking_category_id,
+  JSON_VALUE(tracking_json, '$[0].TrackingCategoryName') AS tracking_category_name,
+  JSON_VALUE(tracking_json, '$[0].TrackingOptionID') AS tracking_option_id,
+  COALESCE(
+    JSON_VALUE(tracking_json, '$[0].Option'),
+    JSON_VALUE(tracking_json, '$[0].Name')
+  ) AS tracking_option_name,
+  budget_line_count,
+  'xero' AS _source
+FROM current_budgets

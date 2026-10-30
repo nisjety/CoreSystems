@@ -1,0 +1,67 @@
+query JournalTransactionById(
+  $id: String!
+) {
+  journalTransactionById(
+    id: $id
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    tranId
+    branchId
+    ledgerId
+    batchNbr
+    tranType
+    accountId
+    finPeriodId
+    tranDate
+    refNbr
+    lineNbr
+    debitAmt
+    creditAmt
+    debitTotal
+    creditTotal
+    curyId
+    currencyId
+    curyDebitAmt
+    curyCreditAmt
+    amount
+    lineAmount
+    curyAmount
+    lineCuryAmount
+    subaccountId
+    tranDesc
+    supplierId
+    customerId
+    uom
+    inventoryId
+    projectId
+    taskId
+    reclassBatchNbr
+    isReclassReverse
+    reclassSourceTranBatchNbr
+    reclassSourceTranLineNbr
+    reclassSourceTranModule
+    reconRefNbr
+    reconDate
+    reconDescription
+    releasedUserId
+    reconHide
+    batchBranchId
+    tranCode
+    batchDescription
+    autoReverse
+    autoReverseCopy
+    postedDateTime
+    quantity
+    transactionCodeDescription
+    lastModifiedDateTime
+    createdInDataMartDateTime
+    module
+    attachments {
+      name
+      fileId
+      lastRevisionId
+    }
+  }
+}

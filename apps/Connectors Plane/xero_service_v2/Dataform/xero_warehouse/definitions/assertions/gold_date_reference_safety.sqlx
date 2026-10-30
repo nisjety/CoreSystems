@@ -1,0 +1,45 @@
+config { type: "assertion", schema: "dw_1_silver_xero_assertions", name: "xero_gold_date_reference_safety" }
+
+WITH fact_date_keys AS (
+  SELECT 'fact_customer_invoice' AS entity, date_key FROM ${ref("xero_gold_finance", "fact_customer_invoice")}
+  UNION ALL SELECT 'fact_supplier_invoice', date_key FROM ${ref("xero_gold_finance", "fact_supplier_invoice")}
+  UNION ALL SELECT 'fact_customer_invoice_line', date_key FROM ${ref("xero_gold_finance", "fact_customer_invoice_line")}
+  UNION ALL SELECT 'fact_supplier_invoice_line', date_key FROM ${ref("xero_gold_finance", "fact_supplier_invoice_line")}
+  UNION ALL SELECT 'fact_customer_payment', date_key FROM ${ref("xero_gold_finance", "fact_customer_payment")}
+  UNION ALL SELECT 'fact_supplier_payment', date_key FROM ${ref("xero_gold_finance", "fact_supplier_payment")}
+  UNION ALL SELECT 'fact_customer_credit_note', date_key FROM ${ref("xero_gold_finance", "fact_customer_credit_note")}
+  UNION ALL SELECT 'fact_supplier_credit_note', date_key FROM ${ref("xero_gold_finance", "fact_supplier_credit_note")}
+  UNION ALL SELECT 'fact_customer_credit_note_line', date_key FROM ${ref("xero_gold_finance", "fact_customer_credit_note_line")}
+  UNION ALL SELECT 'fact_supplier_credit_note_line', date_key FROM ${ref("xero_gold_finance", "fact_supplier_credit_note_line")}
+  UNION ALL SELECT 'fact_customer_credit_note_allocation', date_key FROM ${ref("xero_gold_finance", "fact_customer_credit_note_allocation")}
+  UNION ALL SELECT 'fact_supplier_credit_note_allocation', date_key FROM ${ref("xero_gold_finance", "fact_supplier_credit_note_allocation")}
+  UNION ALL SELECT 'fact_customer_overpayment', date_key FROM ${ref("xero_gold_finance", "fact_customer_overpayment")}
+  UNION ALL SELECT 'fact_supplier_overpayment', date_key FROM ${ref("xero_gold_finance", "fact_supplier_overpayment")}
+  UNION ALL SELECT 'fact_customer_overpayment_line', date_key FROM ${ref("xero_gold_finance", "fact_customer_overpayment_line")}
+  UNION ALL SELECT 'fact_supplier_overpayment_line', date_key FROM ${ref("xero_gold_finance", "fact_supplier_overpayment_line")}
+  UNION ALL SELECT 'fact_bank_transaction', date_key FROM ${ref("xero_gold_finance", "fact_bank_transaction")}
+  UNION ALL SELECT 'fact_bank_transaction_line', date_key FROM ${ref("xero_gold_finance", "fact_bank_transaction_line")}
+  UNION ALL SELECT 'fact_bank_transfer', date_key FROM ${ref("xero_gold_finance", "fact_bank_transfer")}
+  UNION ALL SELECT 'fact_batch_payment', date_key FROM ${ref("xero_gold_finance", "fact_batch_payment")}
+  UNION ALL SELECT 'fact_batch_payment_line', date_key FROM ${ref("xero_gold_finance", "fact_batch_payment_line")}
+  UNION ALL SELECT 'fact_financial_report_snapshot', date_key FROM ${ref("xero_gold_finance", "fact_financial_report_snapshot")}
+  UNION ALL SELECT 'fact_financial_report_cell', date_key FROM ${ref("xero_gold_finance", "fact_financial_report_cell")}
+  UNION ALL SELECT 'fact_customer_invoice_payment_application', date_key FROM ${ref("xero_gold_finance", "fact_customer_invoice_payment_application")}
+  UNION ALL SELECT 'fact_supplier_invoice_payment_application', date_key FROM ${ref("xero_gold_finance", "fact_supplier_invoice_payment_application")}
+  UNION ALL SELECT 'fact_budget_balance', date_key FROM ${ref("xero_gold_finance", "fact_budget_balance")}
+  UNION ALL SELECT 'fact_financial_statement_line_snapshot', date_key FROM ${ref("xero_gold_finance", "fact_financial_statement_line_snapshot")}
+  UNION ALL SELECT 'fact_bank_balance_snapshot', date_key FROM ${ref("xero_gold_finance", "fact_bank_balance_snapshot")}
+  UNION ALL SELECT 'fact_general_ledger', date_key FROM ${ref("xero_gold_finance", "fact_general_ledger")}
+  UNION ALL SELECT 'fact_quote', date_key FROM ${ref("xero_gold_sales", "fact_quote")}
+  UNION ALL SELECT 'fact_quote_line', date_key FROM ${ref("xero_gold_sales", "fact_quote_line")}
+  UNION ALL SELECT 'fact_purchase_order', date_key FROM ${ref("xero_gold_procurement", "fact_purchase_order")}
+  UNION ALL SELECT 'fact_purchase_order_line', date_key FROM ${ref("xero_gold_procurement", "fact_purchase_order_line")}
+)
+SELECT
+  f.entity,
+  CAST(f.date_key AS STRING) AS record_id
+FROM fact_date_keys AS f
+LEFT JOIN ${ref("xero_gold_common", "dim_date")} AS d
+  ON f.date_key = d.date_key
+WHERE f.date_key IS NOT NULL
+  AND d.date_key IS NULL

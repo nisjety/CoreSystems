@@ -1,9 +1,4 @@
-import {
-  createEffect,
-  createContext,
-  useContext,
-  type Accessor,
-} from 'solid-js'
+import { createEffect, createContext, useContext, type Accessor } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import { createStore } from 'solid-js'
 import {

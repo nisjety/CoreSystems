@@ -1,0 +1,49 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_gold_open_item_safety"
+}
+
+SELECT 'sign_convention.accounts_receivable' AS safety_check,
+       tenant_id,
+       source_document_id,
+       source_document_type,
+       open_item_direction,
+       open_balance_in_currency
+FROM ${ref("xero_gold_finance", "fact_accounts_receivable_open_item")}
+WHERE (open_item_direction = 'debit' AND open_balance_in_currency < 0)
+   OR (open_item_direction = 'credit' AND open_balance_in_currency > 0)
+
+UNION ALL
+
+SELECT 'sign_convention.accounts_payable',
+       tenant_id,
+       source_document_id,
+       source_document_type,
+       open_item_direction,
+       open_balance_in_currency
+FROM ${ref("xero_gold_finance", "fact_accounts_payable_open_item")}
+WHERE (open_item_direction = 'debit' AND open_balance_in_currency < 0)
+   OR (open_item_direction = 'credit' AND open_balance_in_currency > 0)
+
+UNION ALL
+
+SELECT 'native_currency_only.accounts_receivable',
+       tenant_id,
+       source_document_id,
+       source_document_type,
+       NULL,
+       amount_nok
+FROM ${ref("xero_gold_finance", "fact_accounts_receivable_open_item")}
+WHERE amount_nok IS NOT NULL OR is_nok_amount_available
+
+UNION ALL
+
+SELECT 'native_currency_only.accounts_payable',
+       tenant_id,
+       source_document_id,
+       source_document_type,
+       NULL,
+       amount_nok
+FROM ${ref("xero_gold_finance", "fact_accounts_payable_open_item")}
+WHERE amount_nok IS NOT NULL OR is_nok_amount_available

@@ -1,0 +1,59 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Native Xero budget account-period balances from authoritative budget-detail responses. Amount and unit amount remain separate source measures because Xero documents both fields without a common aggregate contract. Lifecycle rows remain visible and are marked non-reportable rather than removed.",
+  assertions: {
+    nonNull: ["tenant_id", "budget_id", "budget_balance_key"],
+    uniqueKey: ["budget_balance_key"]
+  }
+}
+
+WITH source AS (
+  SELECT
+    observation.*,
+    COALESCE(
+      SAFE_CAST(observation.budget_period_raw AS DATE),
+      SAFE.PARSE_DATE('%Y-%m-%d', CONCAT(observation.budget_period_raw, '-01')),
+      DATE(TIMESTAMP_MILLIS(SAFE_CAST(
+        REGEXP_EXTRACT(observation.budget_period_raw, r'/Date\\((-?\\d+)') AS INT64
+      )))
+    ) AS budget_period_date
+  FROM ${ref("dw_bronze_xero", "xero_budget_balance_observations")} AS observation
+)
+SELECT
+  CONCAT(
+    tenant_id, '|', budget_id, '|',
+    COALESCE(account_id, CONCAT('position:', CAST(budget_line_position AS STRING))), '|',
+    COALESCE(CAST(budget_period_date AS STRING), budget_period_raw)
+  ) AS budget_balance_key,
+  CONCAT(tenant_id, '|', budget_id) AS budget_key,
+  tenant_id,
+  budget_id,
+  budget_type,
+  budget_description,
+  budget_status,
+  account_id,
+  account_code,
+  budget_line_position,
+  budget_balance_position,
+  budget_period_raw,
+  budget_period_date,
+  source_amount AS source_budget_amount,
+  source_unit_amount AS source_budget_unit_amount,
+  notes,
+  budget_period_date IS NOT NULL AS is_budget_period_valid,
+  source_amount IS NOT NULL AS is_amount_available,
+  source_unit_amount IS NOT NULL AS is_unit_amount_available,
+  budget_period_date IS NOT NULL AS is_additive_within_budget_period,
+  TRUE AS is_non_additive_across_budget_versions,
+  budget_period_date IS NOT NULL
+    AND NOT source_deleted AS is_reportable,
+  NOT source_deleted AS is_current,
+  source_deleted AS is_source_deleted,
+  generation,
+  version_id,
+  run_id,
+  receipt_id,
+  observed_at,
+  source_updated_at
+FROM source

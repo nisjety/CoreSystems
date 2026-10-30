@@ -1,0 +1,15 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_gold_payment_application_safety"
+}
+
+SELECT 'customer' AS application_type, payment_application_key
+FROM ${ref("xero_gold_finance", "fact_customer_invoice_payment_application")}
+WHERE (NOT is_reportable AND application_amount_in_currency IS NOT NULL)
+   OR (is_invoice_type_mismatch AND is_reportable)
+UNION ALL
+SELECT 'supplier' AS application_type, payment_application_key
+FROM ${ref("xero_gold_finance", "fact_supplier_invoice_payment_application")}
+WHERE (NOT is_reportable AND application_amount_in_currency IS NOT NULL)
+   OR (is_invoice_type_mismatch AND is_reportable)

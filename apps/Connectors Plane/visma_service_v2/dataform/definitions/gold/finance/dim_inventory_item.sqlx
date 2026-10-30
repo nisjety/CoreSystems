@@ -1,0 +1,10 @@
+config {
+  type: "view",
+  schema: "visma_gold_finance",
+  name: "dim_inventory_item",
+  description: "Compatibility view over visma_gold_common.dim_inventory_item. Inventory items are tenant-scoped and no longer modeled as business-unit-owned items.",
+  tags: ["gold", "finance", "dimension", "compatibility"]
+}
+
+SELECT *
+FROM ${ref("visma_gold_common", "dim_inventory_item")}

@@ -208,6 +208,17 @@ pub const ROWS: &[Row] = &[
         log: Log::Unverified,
     },
     Row {
+        id: "audit_page",
+        routes: &["/v1/audit/page"],
+        treatment: Treatment::Inert {
+            reason: "fetches robots and one page and returns bounded evidence; nothing is stored",
+        },
+        status: Status::Enforced,
+        enforced_by: &[],
+        basis: "audit_page::capture touches no cache, artifact store, index or event sink",
+        log: Log::Unverified,
+    },
+    Row {
         id: "audio",
         routes: &["/v1/audio"],
         treatment: Treatment::Honored,

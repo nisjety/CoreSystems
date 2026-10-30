@@ -1,0 +1,53 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Xero VAT activity at source line grain for MVA control and audit. This retains reportable and non-reportable activity; it is not a statutory Norwegian VAT return.",
+  assertions: {
+    nonNull: ["tenant_id", "vat_activity_key", "source_document_id", "source_line_id"],
+    uniqueKey: ["vat_activity_key"]
+  }
+}
+
+SELECT
+  FARM_FINGERPRINT(t.tax_activity_key) AS vat_activity_key,
+  FARM_FINGERPRINT(t.tenant_id) AS company_key,
+  FARM_FINGERPRINT(CAST(t.activity_date AS STRING)) AS date_key,
+  period.financial_period_key,
+  period.financial_period_basis,
+  period.is_derived AS is_financial_period_derived,
+  IF(t.account_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(t.tenant_id, '|', t.account_id))) AS account_key,
+  t.tax_activity_key,
+  t.tenant_id,
+  t.tax_activity_source,
+  t.source_document_type,
+  t.source_document_id,
+  t.source_document_key,
+  t.source_line_id,
+  t.source_line_key,
+  t.activity_date,
+  t.currency_code,
+  t.account_id,
+  t.account_code,
+  t.tax_type,
+  t.report_tax_type,
+  t.tax_direction,
+  t.net_amount_in_currency,
+  t.signed_tax_amount_in_currency,
+  t.status,
+  t.is_deleted,
+  t.is_voided,
+  t.is_line_set_ambiguous,
+  t.is_source_document_reconciled,
+  t.is_reportable,
+  CAST(NULL AS NUMERIC) AS amount_nok,
+  FALSE AS is_nok_amount_available,
+  t.source_observed_at,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_tax_activity")} AS t
+LEFT JOIN ${ref("dw_1_silver_xero", "bridge_company_date_fiscal_period")} AS fiscal_date
+  ON t.tenant_id = fiscal_date.tenant_id
+ AND t.activity_date = fiscal_date.calendar_date
+LEFT JOIN ${ref("xero_gold_common", "dim_financial_period")} AS period
+  ON fiscal_date.tenant_id = period.tenant_id
+ AND fiscal_date.fiscal_configuration_state_key = period.fiscal_configuration_state_key
+ AND fiscal_date.financial_period_id = period.financial_period_id

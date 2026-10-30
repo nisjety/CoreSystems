@@ -384,3 +384,19 @@ func TestMetaInboxScopesIncludeInstagramMessaging(t *testing.T) {
 		}
 	}
 }
+
+func TestGoogleSearchConsoleBundleUsesReadOnlyScope(t *testing.T) {
+	provider := GoogleWorkspace()
+	capabilities := ResolveCapabilities(provider, nil, []string{"search_console"})
+	scopes := ResolveScopes(provider, capabilities)
+
+	if !slices.Contains(capabilities, "search_console.read") {
+		t.Fatalf("capabilities = %#v, want search_console.read", capabilities)
+	}
+	if !slices.Contains(scopes, "https://www.googleapis.com/auth/webmasters.readonly") {
+		t.Fatalf("scopes = %#v, want webmasters.readonly", scopes)
+	}
+	if slices.Contains(scopes, "https://www.googleapis.com/auth/adwords") {
+		t.Fatalf("search console scopes = %#v, must not include ads management", scopes)
+	}
+}

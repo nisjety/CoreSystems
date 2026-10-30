@@ -1,0 +1,31 @@
+config {
+  type: "view",
+  name: "xero_invoice_attachment_observations",
+  schema: "dw_bronze_xero",
+  description: "Invoice attachment metadata observed in complete getInvoice detail responses. Raw detail history retains every response, including later empty attachment lists."
+}
+
+WITH attachments AS (
+  SELECT
+    response.*,
+    attachment,
+    attachment_position
+  FROM ${ref("dw_bronze_xero", "xero_invoice_attachment_lists")} AS response
+  CROSS JOIN UNNEST(IFNULL(JSON_QUERY_ARRAY(attachments_json), [])) AS attachment
+    WITH OFFSET AS attachment_position
+)
+SELECT
+  generation,
+  tenant_id,
+  invoice_id,
+  JSON_VALUE(attachment, '$.AttachmentID') AS attachment_id,
+  attachment_position,
+  JSON_VALUE(attachment, '$.FileName') AS file_name,
+  JSON_VALUE(attachment, '$.MimeType') AS mime_type,
+  SAFE_CAST(JSON_VALUE(attachment, '$.ContentLength') AS INT64) AS content_length_bytes,
+  JSON_VALUE(attachment, '$.Url') AS source_url,
+  observed_at,
+  source_version_id,
+  source_receipt_id,
+  source_run_id
+FROM attachments

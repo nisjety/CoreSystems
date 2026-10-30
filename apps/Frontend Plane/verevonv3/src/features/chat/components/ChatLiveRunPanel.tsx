@@ -14,14 +14,7 @@
  * each renders its own honest copy plus whatever metadata IS present.
  */
 
-import {
-  For,
-  Show,
-  createEffect,
-  createMemo,
-  createSignal,
-  untrack,
-} from 'solid-js'
+import { For, Show, createEffect, createMemo, createSignal, untrack } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import {
   CameraOff,

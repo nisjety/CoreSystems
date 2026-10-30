@@ -337,7 +337,8 @@ export function FeaturesSection() {
 
 					// Keep this as one shared timeline, matching FeatureCardsSection.
 					// The opacity beat leads, then the cards settle with the same
-					// stagger, tilt, scale, and horizontal spread as the original.
+					// stagger, tilt, and scale without letting adjacent cards collide
+					// while the visitor scrolls through the entrance.
 					gsap.set(cards, {
 						autoAlpha: 0,
 						backfaceVisibility: "hidden",
@@ -345,7 +346,7 @@ export function FeaturesSection() {
 						scale: 1.04,
 						transformOrigin: "50% 0%",
 						transformStyle: "preserve-3d",
-						xPercent: (index) => 72 - index * 48,
+						xPercent: 0,
 						y: -8,
 						force3D: true,
 					});
@@ -448,11 +449,10 @@ export function FeaturesSection() {
 						className="verevon-home-heading text-verevon-j-text text-balance"
 						id="features-title"
 					>
-						Fra kunnskap til handling. Med kontroll hele veien.
+						Virksomheten, i én sammenheng.
 					</h2>
-					<p className="mx-auto mt-5 max-w-[540px] font-geist text-[clamp(0.95rem,1vw,1.1rem)] font-light leading-[1.45] text-verevon-text-muted">
-						Fra kunnskap til handling i systemene. Se hvordan Verevon samler arbeidet
-						og holder dere i kontroll.
+					<p className="mx-auto mt-5 max-w-[42ch] font-manrope text-[clamp(1rem,1.05vw,1.125rem)] font-light leading-[1.5] tracking-[-0.015em] text-verevon-text-muted">
+						Se hvordan systemer, kunnskap, AI og kontroll henger sammen i det samme arbeidsmiljøet.
 					</p>
 				</header>
 
@@ -461,7 +461,7 @@ export function FeaturesSection() {
 						className="relative w-full cursor-none"
 						ref={viewportRef}
 					>
-						<div className="relative w-full">
+					<div className="relative w-full" data-features-viewport="">
 							<div
 								className="relative flex w-full snap-x snap-mandatory gap-x-[var(--feature-card-gap)] overflow-x-auto overscroll-x-contain pb-4 pt-2 [--feature-card-gap:clamp(20px,2vw,36px)] [--feature-card-width:clamp(250px,22vw,280px)] lg:[--feature-card-width:calc((100%_-_3*var(--feature-card-gap))/4)] [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden touch-pan-x"
 								aria-label="Verevons arbeidsområder"
@@ -489,24 +489,39 @@ export function FeaturesSection() {
 						</div>
 						</div>
 
-							<button
-								aria-label="Forrige plattformkort"
-								className="absolute inset-y-2 left-0 z-40 w-[clamp(36px,4vw,56px)] cursor-none bg-transparent focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-verevon-coral disabled:pointer-events-none"
-								disabled={activeCardIndex === 0}
-								onClick={() => scrollToCard(activeCardIndex - 1)}
-								type="button"
-							>
-								<span className="sr-only">Forrige</span>
-							</button>
-							<button
-								aria-label="Neste plattformkort"
-								className="absolute inset-y-2 right-0 z-40 w-[clamp(36px,4vw,56px)] cursor-none bg-transparent focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-verevon-coral disabled:pointer-events-none"
-								disabled={activeCardIndex === lastStartIndex}
-								onClick={() => scrollToCard(activeCardIndex + 1)}
-								type="button"
-							>
-								<span className="sr-only">Neste</span>
-							</button>
+							{activeCardIndex > 0 ? (
+								<button
+									aria-label="Forrige plattformkort"
+									className="absolute left-0 top-1/2 z-40 grid size-[clamp(48px,4vw,64px)] -translate-y-1/2 cursor-none place-items-center bg-transparent text-verevon-j-text transition-colors hover:text-verevon-coral-deep focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-verevon-coral"
+									onClick={() => scrollToCard(activeCardIndex - 1)}
+									type="button"
+								>
+									<span className="sr-only">Forrige</span>
+									<svg
+										aria-hidden="true"
+										className="h-[58%] w-auto fill-none stroke-current stroke-[4] [stroke-linecap:round] [stroke-linejoin:round]"
+										viewBox="0 0 36 64"
+									>
+										<path d="m30 4-24 28 24 28" />
+									</svg>
+								</button>
+							) : lastStartIndex > 0 ? (
+								<button
+									aria-label="Neste plattformkort"
+									className="absolute right-0 top-1/2 z-40 grid size-[clamp(48px,4vw,64px)] -translate-y-1/2 cursor-none place-items-center bg-transparent text-verevon-j-text transition-colors hover:text-verevon-coral-deep focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-verevon-coral"
+									onClick={() => scrollToCard(activeCardIndex + 1)}
+									type="button"
+								>
+									<span className="sr-only">Neste</span>
+									<svg
+										aria-hidden="true"
+										className="h-[58%] w-auto fill-none stroke-current stroke-[4] [stroke-linecap:round] [stroke-linejoin:round]"
+										viewBox="0 0 36 64"
+									>
+										<path d="m6 4 24 28L6 60" />
+									</svg>
+								</button>
+							) : null}
 
 					</div>
 				</div>

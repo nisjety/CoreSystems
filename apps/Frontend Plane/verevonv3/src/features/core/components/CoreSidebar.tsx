@@ -45,6 +45,8 @@ import {
 import { SpaceConfirmButton } from '@/features/spaces/components/SpaceConfirmButton'
 import { AgentsExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarAgentsPanel'
 import { KnowledgeExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarKnowledgePanel'
+import { VisibilitySidebarPanel } from '@/features/visibility/components/VisibilitySidebarPanel'
+import { AnbudExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarAnbudPanel'
 import { SupportExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarSupportPanel'
 import { SpacesExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarSpacesPanel'
 import {
@@ -84,18 +86,28 @@ export function CoreSidebar(props: {
   expanded: boolean
   expandedWidth?: number
   expansionLocked?: boolean
+  /**
+   * Lets an intentionally constrained surface reuse the product navigation
+   * chrome without exposing routes it cannot safely serve.
+   */
+  navigationSections?: SidebarSection[]
   onExpandedChange: (expanded: boolean) => void
   onOpenSearch: () => void
+  showAccountActions?: boolean
+  showSearchAction?: boolean
 }) {
   const i18n = useI18n()
   const location = useLocation()
   const session = getSession()
-  const visibleSections = () => applyDemoModeNavGate(sidebarSections)
+  const visibleSections = () => applyDemoModeNavGate(props.navigationSections ?? sidebarSections)
     .filter((section) => section.id !== 'settings' || shouldShowWorkspaceAdminNavigation(session))
     .map((section) => localizeSidebarSection(section, i18n))
   const activeSection = () => getSidebarSectionForPath(location.pathname, props.activeRoute, visibleSections())
-  const mainSections = () => visibleSections().filter((section) => !section.pinnedBottom)
+  // Ingestions remains directly routable, but the compact rail is intentionally
+  // limited to the operator-facing workspaces shown in the product shell.
+  const mainSections = () => visibleSections().filter((section) => !section.pinnedBottom && !section.parentSectionId && section.id !== 'ingestions')
   const pinnedSections = () => visibleSections().filter((section) => section.pinnedBottom)
+  const activeRailId = () => activeSection().parentSectionId ?? activeSection().id
   const accountActive = () => location.pathname === '/account' || location.pathname.startsWith('/account/')
   const width = () => `${props.expanded ? (props.expandedWidth ?? SIDEBAR_EXPANDED_WIDTH) : SIDEBAR_MINIMIZED_WIDTH}px`
 
@@ -125,7 +137,7 @@ export function CoreSidebar(props: {
                 {(section) => (
                   <MiniSectionLink
                     section={section}
-                    active={!accountActive() && activeSection().id === section.id}
+                    active={!accountActive() && activeRailId() === section.id}
                     onOpen={openSection}
                   />
                 )}
@@ -136,28 +148,32 @@ export function CoreSidebar(props: {
 
           <div class="core-sidebar__bottom-actions">
             <div class="core-sidebar__mini-divider" />
-            <MiniAccountLink active={accountActive()} i18n={i18n} onOpen={openSection}>
-              <CircleUserRound class="size-[18px]" strokeWidth={1.65} />
-            </MiniAccountLink>
+            <Show when={props.showAccountActions ?? true}>
+              <MiniAccountLink active={accountActive()} i18n={i18n} onOpen={openSection}>
+                <CircleUserRound class="size-[18px]" strokeWidth={1.65} />
+              </MiniAccountLink>
+            </Show>
             <For each={pinnedSections()}>
               {(section) => (
                 <MiniSectionLink
                   section={section}
-                  active={!accountActive() && activeSection().id === section.id}
+                  active={!accountActive() && activeRailId() === section.id}
                   onOpen={openSection}
                 />
               )}
             </For>
-            <MiniActionButton
-              label={i18n.tr('Søk', 'Search')}
-              active={false}
-              onClick={() => {
-                props.onOpenSearch()
-                props.onExpandedChange(true)
-              }}
-            >
-              <sidebarSearchAction.icon class="size-[18px]" strokeWidth={1.65} />
-            </MiniActionButton>
+            <Show when={props.showSearchAction ?? true}>
+              <MiniActionButton
+                label={i18n.tr('Søk', 'Search')}
+                active={false}
+                onClick={() => {
+                  props.onOpenSearch()
+                  props.onExpandedChange(true)
+                }}
+              >
+                <sidebarSearchAction.icon class="size-[18px]" strokeWidth={1.65} />
+              </MiniActionButton>
+            </Show>
           </div>
         </div>
 
@@ -194,6 +210,8 @@ function ExpandedSidebarPanel(props: {
   const panelKind = createMemo(() => {
     if (props.activeSection.id === 'messages') return 'messages'
     if (props.activeSection.id === 'spaces') return 'spaces'
+    if (props.activeSection.id === 'visibility') return 'visibility'
+    if (props.activeSection.id === 'anbud') return 'anbud'
     if (props.activeSection.id === 'inbox') return 'support'
     if (props.activeSection.id === 'agents') return 'agents'
     if (props.activeSection.id === 'knowledge') return 'knowledge'
@@ -230,6 +248,10 @@ function ExpandedSidebarPanel(props: {
       </Match>
       <Match when={panelKind() === 'spaces'}>
         <SpacesExpandedSidebarPanel onCollapse={props.onCollapse} />
+      </Match>
+      <Match when={panelKind() === 'visibility'}><VisibilitySidebarPanel onCollapse={props.onCollapse}/></Match>
+      <Match when={panelKind() === 'anbud'}>
+        <AnbudExpandedSidebarPanel onCollapse={props.onCollapse} />
       </Match>
       <Match when={panelKind() === 'support'}>
         <SupportExpandedSidebarPanel onCollapse={props.onCollapse} />
@@ -1207,7 +1229,8 @@ function normalizeSearchText(value: string) {
 const sidebarLabels: Record<string, readonly [string, string]> = {
   'section:overview': ['Hjem', 'Home'],
   'section:messages': ['Chat', 'Chat'],
-  'section:marketing': ['Markedsføring', 'Marketing'],
+  'section:engagement': ['Engasjement', 'Engagement'],
+  'section:anbud': ['Anbud', 'Tenders'],
   'section:studio': ['Studio', 'Studio'],
   'section:inbox': ['Support', 'Support'],
   'section:social': ['Kalender', 'Calendar'],
@@ -1218,9 +1241,12 @@ const sidebarLabels: Record<string, readonly [string, string]> = {
   'section:settings': ['Innstillinger', 'Settings'],
   'tab:my-account': ['Min konto', 'My account'],
   'tab:shared': ['Delt med meg', 'Shared with me'],
+  'group:engagement-visibility': ['Søk', 'Search'],
+  'item:engagement-visibility': ['Synlighet', 'Visibility'],
   'group:overview-core': ['Oversikt', 'Overview'],
   'group:messages-core': ['Chat', 'Chat'],
   'group:studio-create': ['Opprett', 'Create'],
+  'group:anbud-core': ['Oppfølging', 'Follow-up'],
   'group:studio-linked': ['Tilkoblede systemer', 'Linked systems'],
   'group:inbox-core': ['Support', 'Support'],
   'group:social-channels': ['Kanaler', 'Channels'],
@@ -1233,6 +1259,8 @@ const sidebarLabels: Record<string, readonly [string, string]> = {
   'group:insights-core': ['Måling', 'Measure'],
   'group:settings-core': ['Innstillinger', 'Settings'],
   'item:overview-home': ['Hjem', 'Home'],
+  'item:anbud-matches': ['Anbud', 'Tenders'],
+  'item:anbud-radar': ['Radar', 'Radar'],
   'item:overview-chat': ['Verevon Chat', 'Verevon Chat'],
   'item:overview-studio': ['Studio', 'Studio'],
   'item:overview-inbox': ['Support', 'Support'],

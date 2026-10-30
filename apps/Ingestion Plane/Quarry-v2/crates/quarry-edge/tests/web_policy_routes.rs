@@ -300,6 +300,7 @@ fn fetching_routes() -> Vec<(&'static str, Value)> {
         ("/v1/crawl", json!({ "url": url })),
         ("/v1/batch", json!({ "urls": [url] })),
         ("/v1/map", json!({ "url": url })),
+        ("/v1/audit/page", json!({ "url": url })),
         ("/v1/extract", json!({ "urls": [url] })),
         ("/v1/search/similar", json!({ "url": url })),
         (
@@ -409,6 +410,7 @@ fn route_manifest() -> Vec<(&'static str, Gate)> {
         ("/v1/search/similar", Gated),
         ("/v1/search/suggest", NoUrl),
         ("/v1/map", Gated),
+        ("/v1/audit/page", Gated),
         ("/v1/extract", Gated),
         // The pipeline fetches the pages its own search returned; no caller URL.
         ("/v1/answer", OtherPlane),

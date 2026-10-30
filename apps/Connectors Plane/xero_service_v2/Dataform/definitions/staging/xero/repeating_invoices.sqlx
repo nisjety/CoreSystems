@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "dw_staging_xero",
+  name: "repeating_invoices",
+  description: "Current Xero repeating-invoice template headers from etl/xero/repeating_invoices.py."
+}

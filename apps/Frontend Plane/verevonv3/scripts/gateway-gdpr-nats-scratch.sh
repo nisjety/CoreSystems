@@ -2,7 +2,7 @@
 # Throwaway NATS JetStream (and Redis) for the WS4.C erasure evidence.
 #
 # The gateway's GDPR consumer (apps/gateway/src/gdpr_nats.rs) binds a PROVISIONED durable
-# pull consumer on stream AQENCIA_CONTROLPLANE and refuses a different filter subject, so
+# pull consumer on stream CONTROLPLANE and refuses a different filter subject, so
 # a bare NATS server is not enough. This script starts a scratch nats:2-alpine -js, creates
 # the stream and the durable the way audit-core's provisioner declares them
 # (verevonGatewayOrgErasureConsumerConfig: durable verevon-gateway-gdpr-erasure-v1, filter
@@ -47,7 +47,7 @@ PROVISION_DURABLE_WITH=${PROVISION_DURABLE_WITH:-natsbox}
 NATS_NAME=scratch-gdpr-nats
 REDIS_NAME=scratch-gdpr-redis
 
-STREAM=AQENCIA_CONTROLPLANE
+STREAM=CONTROLPLANE
 SUBJECT=verevon.gdpr.erasure.requested
 DURABLE=verevon-gateway-gdpr-erasure-v1
 

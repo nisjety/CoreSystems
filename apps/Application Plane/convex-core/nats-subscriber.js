@@ -23,11 +23,11 @@ if (!CONVEX_CONTROL_PROJECTION_KEY) {
 }
 
 const CONTROL_PLANE_SUBJECTS = Object.freeze({
-  organizationChanged: "aqencia.controlplane.org.changed",
-  memberChanged: "aqencia.controlplane.org.member_changed",
+  organizationChanged: "controlplane.org.changed",
+  memberChanged: "controlplane.org.member_changed",
 });
 const CONTROL_PLANE_DLQ_SUBJECT = "verevon.application.dlq.convex.controlplane";
-const CONTROL_PLANE_STREAM = "AQENCIA_CONTROLPLANE";
+const CONTROL_PLANE_STREAM = "CONTROLPLANE";
 const DEAD_LETTER_AFTER = 5;
 
 function controlPlaneConnectionOptions({ url, user, password }) {

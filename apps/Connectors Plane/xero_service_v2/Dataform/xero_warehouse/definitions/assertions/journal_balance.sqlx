@@ -1,0 +1,6 @@
+config { type: "assertion", schema: "dw_1_silver_xero_assertions", name: "xero_journal_balance_reconciliation" }
+
+SELECT tenant_id, journal_id, SUM(signed_net_amount) AS signed_balance
+FROM ${ref("dw_1_silver_xero", "fact_general_ledger")}
+GROUP BY 1, 2
+HAVING ABS(SUM(signed_net_amount)) > 0.02 OR COUNTIF(is_orphan_line) > 0

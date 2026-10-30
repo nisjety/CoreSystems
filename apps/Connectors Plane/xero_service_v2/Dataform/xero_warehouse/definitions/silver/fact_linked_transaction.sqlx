@@ -1,0 +1,14 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Xero linked-transaction bridge; it preserves source and target document references without inventing financial measures.",
+  assertions: { nonNull: ["tenant_id", "linked_transaction_id", "linked_transaction_key"], uniqueKey: ["linked_transaction_key"] }
+}
+
+SELECT CONCAT(tenant_id, '|', linked_transaction_id) AS linked_transaction_key,
+       tenant_id, linked_transaction_id, record_id AS linked_transaction_internal_id,
+       linked_transaction_type, status, COALESCE(status = 'VOIDED', FALSE) AS is_voided,
+       source_transaction_id, source_transaction_type, source_line_item_id,
+       target_transaction_id, target_line_item_id, contact_id,
+       updated_at, first_seen_at, synced_at
+FROM ${ref("dw_bronze_xero", "xero_linked_transactions")}

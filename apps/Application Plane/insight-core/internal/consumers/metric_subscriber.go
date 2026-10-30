@@ -306,21 +306,28 @@ func (s *MetricSubscriber) processProviderMetricsSnapshotted(ctx context.Context
 
 	anyFailure := false
 	for _, row := range rows {
-		campaignID, _ := row.Dimensions["campaign_id"].(string)
 		// Include tenant identity in the deterministic key. Account IDs are not
 		// guaranteed globally unique across organizations.
-		dedupKey := fmt.Sprintf("%s|%s|%s|%s|%s|%s", orgID, accountID, row.ProviderKey, row.MetricName, campaignID, row.SnapshotDate.Format("2006-01-02"))
+		dedupKey := providerMetricDedupKey(orgID, accountID, row)
+		observedAt := ev.OccurredAt.UTC()
+		if observedAt.IsZero() {
+			observedAt = row.SnapshotDate.UTC()
+		}
 		input := insights.IngestMetricEventInput{
-			ID:            "ins_evt_socialmetric_" + stableHex(dedupKey),
-			OrgID:         orgID,
-			Surface:       insights.SurfaceExternalAnalytics,
-			Metric:        row.MetricName,
-			Value:         row.MetricValue,
-			Unit:          metricUnit(row.Dimensions),
-			Source:        metricSourceSocial,
-			ConnectorType: row.ProviderKey,
-			Dimensions:    row.Dimensions,
-			OccurredAt:    row.SnapshotDate,
+			ID:             "ins_evt_socialmetric_" + stableHex(dedupKey),
+			OrgID:          orgID,
+			Surface:        insights.SurfaceExternalAnalytics,
+			Metric:         row.MetricName,
+			Value:          row.MetricValue,
+			Unit:           metricUnit(row.Dimensions),
+			Source:         metricSourceSocial,
+			ConnectorType:  row.ProviderKey,
+			Dimensions:     row.Dimensions,
+			TimeWindow:     providerMetricTimeWindow(row.SnapshotDate),
+			ObservedAt:     observedAt,
+			SourceTraceRef: "social-core:provider-metric:" + stableHex(dedupKey),
+			RetentionClass: "durable",
+			OccurredAt:     row.SnapshotDate,
 		}
 		var err error
 		if recorder, ok := s.recorder.(metricSnapshotRecorder); ok {
@@ -351,6 +358,24 @@ func metricUnit(dimensions map[string]any) string {
 		return unit
 	}
 	return "unverified"
+}
+
+func providerMetricDedupKey(orgID, accountID string, row socialmetrics.Metric) string {
+	// JSON encoding sorts map keys, so the stable hash represents every metric
+	// dimension (including ad_account_id) rather than collapsing account-level
+	// rows from separate Meta ad accounts into the same event id. The tenant is
+	// part of the key because account IDs are not globally unique.
+	dimensions, err := json.Marshal(row.Dimensions)
+	if err != nil {
+		dimensions = []byte("{}")
+	}
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%s", orgID, accountID, row.ProviderKey, row.MetricName, row.SnapshotDate.Format("2006-01-02"), dimensions)
+}
+
+func providerMetricTimeWindow(snapshotDate time.Time) *insights.TimeWindow {
+	windowEnd := snapshotDate.UTC().Truncate(24 * time.Hour)
+	windowStart := windowEnd.Add(-24 * time.Hour)
+	return &insights.TimeWindow{From: &windowStart, To: &windowEnd}
 }
 
 func stringFromEventData(data map[string]any, key string) string {

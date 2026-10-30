@@ -1,0 +1,46 @@
+query Subaccounts(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  subaccounts(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    subaccountId
+    subaccountCd
+    active
+    deletedDatabaseRecord
+    description
+    cd01
+    cd02
+    cd03
+    cd04
+    cd05
+    cd06
+    cd07
+    cd08
+    cd09
+    cd10
+    description01
+    description02
+    description03
+    description04
+    description05
+    description06
+    description07
+    description08
+    description09
+    description10
+    lastModifiedDateTime
+    createdInDataMartDateTime
+  }
+}
