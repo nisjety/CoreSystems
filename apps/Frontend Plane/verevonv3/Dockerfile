@@ -43,12 +43,14 @@ COPY --from=quarry-client --chown=node:node [".", "/Ingestion Plane/Quarry-v2/sd
 # The generated SDK's tsconfig still names moduleResolution "node" (node10),
 # which TypeScript 6 removed; it stays as generated for its own TS 4/5 build,
 # so the resolution is overridden here: node16 for the CommonJS output and
-# bundler for the ESM output.
+# bundler for the ESM output. With the workspace:* dependency,
+# node_modules/@quarry/client links to the SDK and already sees its dist.
 RUN --mount=type=cache,target=/home/node/.local/share/pnpm/store,uid=1000,gid=1000 \
     pnpm install --frozen-lockfile \
     && pnpm exec tsc --ignoreDeprecations 6.0 --module node16 --moduleResolution node16 --rootDir '/Ingestion Plane/Quarry-v2/sdks/typescript/src' -p '/Ingestion Plane/Quarry-v2/sdks/typescript/tsconfig.json' \
     && pnpm exec tsc --ignoreDeprecations 6.0 --module esnext --moduleResolution bundler --rootDir '/Ingestion Plane/Quarry-v2/sdks/typescript/src' -p '/Ingestion Plane/Quarry-v2/sdks/typescript/tsconfig.esm.json' \
-    && cp -R '/Ingestion Plane/Quarry-v2/sdks/typescript/dist' node_modules/@quarry/client/dist
+    && { [ "$(readlink -f node_modules/@quarry/client)" = '/Ingestion Plane/Quarry-v2/sdks/typescript' ] \
+         || cp -R '/Ingestion Plane/Quarry-v2/sdks/typescript/dist' node_modules/@quarry/client/dist; }
 
 # Copy source code (will be overridden by volume mount in dev)
 COPY --chown=node:node . .
