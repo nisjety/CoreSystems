@@ -187,6 +187,32 @@ pub struct JobSummary {
     /// What a person reads: "queued" while waiting, otherwise the status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    /// Derived credit estimate, sent by control only while its
+    /// `QUARRY_CONTROL__JOB_CREDITS` flag is on and only for page-priced kinds
+    /// (crawl, batch, scrape, extract). Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<JobCredits>,
+}
+
+/// The credits a job has used, derived by control at read time from the job's
+/// fetched-page count (INNH-9). It is a Quarry-side estimate (`estimated` is
+/// always true), not what billing-core invoices: a flat price per fetched page,
+/// failed and blocked pages free.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JobCredits {
+    /// Credits used so far: fetched pages x `price_per_page`.
+    pub used: f64,
+    /// Always `credit`.
+    pub unit: String,
+    /// What `used` counts: `pages_fetched`.
+    pub basis: String,
+    pub price_per_page: f64,
+    /// True: this is an estimate, not the invoiced amount.
+    pub estimated: bool,
+    /// False while the job can still fetch pages; true once its status is
+    /// terminal. (`final` is a Rust keyword, hence the rename.)
+    #[serde(rename = "final")]
+    pub is_final: bool,
 }
 
 /// Who started a job and from which run. `origin_type` is one of `user`,
@@ -268,6 +294,10 @@ pub struct JobStatusView {
     /// reads by run id (`/v1/runs/:id/events`) use this, never `job_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
+    /// Derived credit estimate; absent for non-page-priced kinds and while
+    /// control's `QUARRY_CONTROL__JOB_CREDITS` flag is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<JobCredits>,
 }
 
 /// One failed page of a job (a final attempt only).
@@ -564,6 +594,74 @@ mod tests {
         assert_eq!(summary.org_id, "org_a");
         assert!(summary.started_at.is_none());
         assert!(summary.completed_at.is_none());
+    }
+
+    /// INNH-9: control's `credits` object rides on the list row and the status
+    /// document, and a row without it (flag off, or a non-page kind) still decodes.
+    #[test]
+    fn job_credits_round_trip_and_are_optional() {
+        let credits = serde_json::json!({
+            "used": 12.0, "unit": "credit", "basis": "pages_fetched",
+            "price_per_page": 1.0, "estimated": true, "final": false
+        });
+        let with = serde_json::json!({
+            "job_id": "job_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "kind": "crawl",
+            "org_id": "org_a",
+            "status": "running",
+            "created_at": "2026-07-20T12:00:00Z",
+            "credits": credits
+        });
+        let summary: JobSummary = serde_json::from_value(with).unwrap();
+        let c = summary.credits.clone().expect("credits");
+        assert_eq!(c.used, 12.0);
+        assert_eq!(c.basis, "pages_fetched");
+        assert!(c.estimated);
+        assert!(!c.is_final);
+        // Serializes back under the wire name `final`, not `is_final`.
+        let out = serde_json::to_value(&summary).unwrap();
+        assert_eq!(out["credits"], credits);
+
+        let without = serde_json::json!({
+            "job_id": "job_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "kind": "agent",
+            "org_id": "org_a",
+            "status": "running",
+            "created_at": "2026-07-20T12:00:00Z"
+        });
+        let summary: JobSummary = serde_json::from_value(without).unwrap();
+        assert!(summary.credits.is_none());
+        let out = serde_json::to_value(&summary).unwrap();
+        assert!(out.get("credits").is_none(), "absent, not null: {out}");
+    }
+
+    #[test]
+    fn job_status_view_credits_are_omitted_when_absent() {
+        let view = serde_json::json!({
+            "job_id": "job_1", "kind": "crawl", "status": "completed", "phase": "completed",
+            "terminal": true, "created_at": "2026-10-23T10:00:00Z",
+            "counts": { "completed": 4 },
+            "control": { "pending": false },
+            "credits": {
+                "used": 4.0, "unit": "credit", "basis": "pages_fetched",
+                "price_per_page": 1.0, "estimated": true, "final": true
+            }
+        });
+        let parsed: JobStatusView = serde_json::from_value(view.clone()).unwrap();
+        assert!(parsed.credits.as_ref().expect("credits").is_final);
+        assert_eq!(
+            serde_json::to_value(&parsed).unwrap()["credits"],
+            view["credits"]
+        );
+
+        let mut bare = view;
+        bare.as_object_mut().unwrap().remove("credits");
+        let parsed: JobStatusView = serde_json::from_value(bare).unwrap();
+        assert!(parsed.credits.is_none());
+        assert!(serde_json::to_value(&parsed)
+            .unwrap()
+            .get("credits")
+            .is_none());
     }
 
     #[test]

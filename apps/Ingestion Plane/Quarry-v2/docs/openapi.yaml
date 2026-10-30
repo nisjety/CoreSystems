@@ -1582,7 +1582,10 @@ paths:
       description: >-
         Org-scoped by the verified token. A job id of another organization, or an id
         that is not a job, answers 404. The document carries status, phase, origin,
-        counts, total and total_kind, warnings and the control state.
+        counts, total and total_kind, warnings and the control state. For a page-priced
+        job (crawl, batch, scrape, extract) it also carries `credits`, an estimate derived
+        from the fetched-page count, once the control service has `QUARRY_CONTROL__JOB_CREDITS`
+        on (default off).
       parameters:
         - name: job_id
           in: path
@@ -1597,6 +1600,9 @@ paths:
             application/json:
               schema:
                 type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/JobStatusView'
         '404':
           description: Not found for this organization, or not a job id.
   /v1/crawl/ongoing:
@@ -1629,6 +1635,9 @@ paths:
             application/json:
               schema:
                 type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/JobStatusView'
         '404':
           description: Not found, a foreign id, or a job of another kind.
     delete:
@@ -1789,6 +1798,9 @@ paths:
             application/json:
               schema:
                 type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/JobStatusView'
         '404':
           description: Not found, a foreign id, or a job of another kind.
     delete:
@@ -3464,6 +3476,140 @@ components:
           nullable: true
         stats:
           description: Kind-specific counters
+        origin:
+          $ref: '#/components/schemas/JobRunOrigin'
+        phase:
+          type: string
+          description: What a person reads; queued while waiting, otherwise the status.
+        credits:
+          $ref: '#/components/schemas/JobCredits'
+    JobRunOrigin:
+      type: object
+      required:
+      - type
+      properties:
+        type:
+          type: string
+          description: user, agent, schedule, webhook, api, or unknown for rows written before the origin existed.
+        actor:
+          type: string
+        ref:
+          type: string
+          description: The Model Plane run id, for agent origins only.
+    JobCredits:
+      type: object
+      description: >-
+        Credits a job has used, derived at read time from its fetched-page count
+        (pages fetched x price_per_page). A Quarry-side estimate, not what billing-core
+        invoices: a flat price per fetched page, a browser-rendered page priced like any
+        other, failed and blocked pages free. Present only for page-priced kinds (crawl,
+        batch, scrape, extract) and only while the control service runs with
+        QUARRY_CONTROL__JOB_CREDITS on (default off); absent, never null, otherwise.
+        GET /v1/team/credit-usage sums the same page_fetched events at the same price.
+      required:
+      - used
+      - unit
+      - basis
+      - price_per_page
+      - estimated
+      - final
+      properties:
+        used:
+          type: number
+          description: Credits used so far.
+        unit:
+          type: string
+          enum:
+          - credit
+        basis:
+          type: string
+          enum:
+          - pages_fetched
+        price_per_page:
+          type: number
+        estimated:
+          type: boolean
+          description: Always true.
+        final:
+          type: boolean
+          description: False while the job can still fetch pages; true once its status is terminal.
+    JobStatusView:
+      type: object
+      description: The status document of a crawl, batch or other durable job (WS15.L1).
+      required:
+      - job_id
+      - kind
+      - status
+      - phase
+      - terminal
+      - created_at
+      - counts
+      - control
+      properties:
+        job_id:
+          type: string
+        kind:
+          type: string
+        status:
+          type: string
+        phase:
+          type: string
+        terminal:
+          type: boolean
+        origin:
+          $ref: '#/components/schemas/JobRunOrigin'
+        created_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        deadline_at:
+          type: string
+          format: date-time
+        counts:
+          type: object
+          properties:
+            completed:
+              type: integer
+            failed:
+              type: integer
+            blocked:
+              type: integer
+            retried:
+              type: integer
+        total:
+          type: integer
+        total_kind:
+          type: string
+          enum:
+          - exact
+          - budget
+        warnings:
+          type: array
+          items:
+            type: object
+            required:
+            - code
+            - message
+            properties:
+              code:
+                type: string
+              message:
+                type: string
+        control:
+          type: object
+          properties:
+            desired:
+              type: string
+            pending:
+              type: boolean
+        schedule_id:
+          type: string
+        run_id:
+          type: string
+        credits:
+          $ref: '#/components/schemas/JobCredits'
     RequestQueueSummary:
       type: object
       required:

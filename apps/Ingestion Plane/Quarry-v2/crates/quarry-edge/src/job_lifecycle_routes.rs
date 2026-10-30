@@ -22,7 +22,8 @@ use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::ids::kinds::JobKind;
 use quarry_core::pagination::Page;
 use quarry_core::resources::{
-    JobControlState, JobCounts, JobErrorsView, JobStatusView, JobSummary, JobWarning, RunOrigin,
+    JobControlState, JobCounts, JobCredits, JobErrorsView, JobStatusView, JobSummary, JobWarning,
+    RunOrigin,
 };
 
 use crate::auth::Claims;
@@ -91,6 +92,11 @@ struct ControlSummary {
     total_kind: Option<String>,
     #[serde(default)]
     warnings: Vec<JobWarning>,
+    /// Control's derived credit estimate (INNH-9); present only while control's
+    /// `QUARRY_CONTROL__JOB_CREDITS` flag is on. Forwarded unchanged: the edge
+    /// holds no price and no flag of its own.
+    #[serde(default)]
+    credits: Option<JobCredits>,
 }
 
 fn is_terminal(status: &str) -> bool {
@@ -109,6 +115,7 @@ fn status_view(summary: ControlSummary) -> JobStatusView {
         total,
         total_kind,
         warnings,
+        credits,
     } = summary;
     let terminal = is_terminal(&job.status);
     let control = JobControlState {
@@ -137,6 +144,7 @@ fn status_view(summary: ControlSummary) -> JobStatusView {
         control,
         schedule_id: job.schedule_id,
         run_id: job.run_id,
+        credits,
     }
 }
 

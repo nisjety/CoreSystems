@@ -52,6 +52,9 @@ type jobWire struct {
 	DeadlineAt   *string        `json:"deadline_at,omitempty"`
 	DesiredState string         `json:"desired_state,omitempty"`
 	Stats        map[string]any `json:"stats"`
+	// Credits is the derived per-job credit estimate (job_credits.go), present
+	// only for page-priced kinds and only while QUARRY_CONTROL__JOB_CREDITS is on.
+	Credits *jobCredits `json:"credits,omitempty"`
 }
 
 // jobWireOrigin is a job's origin as the list and status views show it.
@@ -110,6 +113,7 @@ func jobWires(db store.DB, jobs []store.Job) []jobWire {
 		ids = append(ids, j.ID)
 	}
 	counts := db.Events().CountsForJobs(ids)
+	withCredits := jobCreditsEnabled()
 	out := make([]jobWire, 0, len(jobs))
 	for _, j := range jobs {
 		wire, ok := toJobWire(j)
@@ -117,6 +121,9 @@ func jobWires(db store.DB, jobs []store.Job) []jobWire {
 			continue
 		}
 		wire.Stats = jobStats(j, counts[j.ID])
+		if withCredits {
+			wire.Credits = creditsFor(j.Kind, j.Status, counts[j.ID][quarrycontracts.EvtPageFetched])
+		}
 		out = append(out, wire)
 	}
 	return out

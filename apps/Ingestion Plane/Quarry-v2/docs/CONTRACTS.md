@@ -747,6 +747,27 @@ page ceiling, not a prediction), `warnings` (closed codes; `max_pages_clamped` w
 requested page limit was lowered), `control` (`desired`, `pending`), `schedule_id`,
 `run_id`. A foreign id and a kind mismatch are both 404.
 
+**Credits per job (INNH-9, built, NOT run, 2026-10-31).** `GET /v1/crawl/{id}`, `/v1/batch/{id}`,
+`/v1/jobs/{id}` and the list rows (`GET /v1/{kind}/jobs`, `/v1/crawl/ongoing`, `/v1/batch/ongoing`)
+gain an optional `credits` object:
+`{"used": 12.0, "unit": "credit", "basis": "pages_fetched", "price_per_page": 1.0,
+"estimated": true, "final": false}`. It is derived at read time, never stored: `used` is the
+job's `page_fetched` event count (`counts.completed`) times `price_per_page`, so it is
+retroactive for old jobs and a late page after the terminal event is still counted.
+`final` is false while the status is `accepted`, `running` or `paused` and true once it is
+terminal. It is an estimate (`estimated` is always true), not what billing-core invoices:
+a flat price per fetched page, a browser-rendered page priced like any other, failed and
+blocked pages free. The field is absent (not null) for `search`, `research` and `agent`
+jobs, which are not page-priced, and for every job while control runs with
+`QUARRY_CONTROL__JOB_CREDITS` off (the default, read per request). The edge forwards what
+control sends and holds no price or flag. Additive: no request change, no new route, no new
+error code. The one price is `store.CreditsPerPage` in quarry-control, used by both this
+figure and `GET /v1/team/credit-usage`. That team figure changed on Postgres: it used to add
+one credit for every event with a job id (`run_started`, `page_queued`, ...) and now counts
+`page_fetched` events only, as the in-memory store always did (the unused `payload.pages`
+multiplier is gone). Team credits on Postgres therefore read lower than before and equal the
+sum of the per-job credits. Control's own `GET /v1/jobs/{id}/summary` carries `credits` first.
+
 **Errors (edge).** `GET .../errors`: `errors` lists failed or retried pages whose final
 attempt the orchestrator marked (`final: true`), with `code` and `category`, `status` and
 `retryable` where known. `blocked` lists pages a rule blocked, with `reason`.

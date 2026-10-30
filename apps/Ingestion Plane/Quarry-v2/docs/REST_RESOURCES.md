@@ -125,3 +125,5 @@ Defined in `crates/quarry-core/src/resources.rs`:
 Shapes, origin set, status vocabulary and the errors rules are in `CONTRACTS.md`
 ("Job lifecycle reads and origin"). Tenant isolation: every read is scoped by the
 verified org; a service principal has no route to these paths.
+
+Credits per job (INNH-9): the status document and the list rows carry an optional derived `credits` object (`used`, `unit`, `basis`, `price_per_page`, `estimated`, `final`) for crawl, batch, scrape and extract jobs while control's `QUARRY_CONTROL__JOB_CREDITS` is on (default off). See `CONTRACTS.md` ("Credits per job").

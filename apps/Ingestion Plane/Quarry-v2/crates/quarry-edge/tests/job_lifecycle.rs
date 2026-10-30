@@ -36,7 +36,7 @@ const TEST_ORG: &str = "org_placeholder";
 struct Captured(Arc<Mutex<Vec<(HeaderMap, Value)>>>);
 
 fn summary_json(id: &str, kind: &str) -> Value {
-    json!({
+    let mut summary = json!({
         "job": {
             "id": id,
             "org_id": TEST_ORG,
@@ -53,7 +53,16 @@ fn summary_json(id: &str, kind: &str) -> Value {
         "total_kind": "budget",
         "last_seq": 5,
         "warnings": []
-    })
+    });
+    // Control sends `credits` for a crawl only (the double models the flag on for
+    // it); the batch answer has none, as a non-page kind or the flag off would.
+    if kind == "crawl" {
+        summary["credits"] = json!({
+            "used": 3.0, "unit": "credit", "basis": "pages_fetched",
+            "price_per_page": 1.0, "estimated": true, "final": false
+        });
+    }
+    summary
 }
 
 async fn control_summary(
@@ -160,9 +169,29 @@ async fn crawl_status_is_org_scoped_and_404s_foreign_id() {
     assert_eq!(data["total"], 20);
     assert_eq!(data["total_kind"], "budget");
     assert_eq!(data["origin"]["type"], "user");
+    // INNH-9: control's credits object reaches the caller unchanged.
+    assert_eq!(data["credits"]["used"], 3.0);
+    assert_eq!(data["credits"]["unit"], "credit");
+    assert_eq!(data["credits"]["basis"], "pages_fetched");
+    assert_eq!(data["credits"]["estimated"], true);
+    assert_eq!(data["credits"]["final"], false);
 
     let (status, body) = get_json(addr, "/v1/crawl/job_01J9FFFFFFFFFFFFFFFFFFFFFF").await;
     assert_eq!(status, 404, "{body}");
+}
+
+#[tokio::test]
+async fn status_without_credits_from_control_still_works() {
+    let addr = spawn_edge(spawn_control(Captured::default()).await, None).await;
+    let (status, body) = get_json(addr, "/v1/batch/job_01J9BBBBBBBBBBBBBBBBBBBBBB").await;
+    assert_eq!(status, 200, "{body}");
+    let data = &body["data"];
+    assert_eq!(data["kind"], "batch");
+    assert_eq!(data["counts"]["completed"], 3);
+    assert!(
+        data.get("credits").is_none(),
+        "credits is absent, not null, when control sends none: {data}"
+    );
 }
 
 #[tokio::test]

@@ -182,10 +182,21 @@ func TestTeamCreditUsage_DerivesFromEvents(t *testing.T) {
 			Type:      quarrycontracts.EvtPageFetched,
 			JobID:     &jid,
 			Timestamp: now,
-			Payload:   map[string]any{"pages": 2.0},
+			Payload:   map[string]any{"url": "https://a.example/p"},
 		}); err != nil {
 			t.Fatalf("seed event: %v", err)
 		}
+	}
+	// Other events of the job earn nothing: only page_fetched is a credit.
+	jid := job.ID
+	if err := db.Events().Append(quarrycontracts.Event{
+		EventID:   quarrycontracts.NewID(quarrycontracts.KindEvent),
+		Type:      quarrycontracts.EvtRunStarted,
+		JobID:     &jid,
+		Timestamp: now,
+		Payload:   map[string]any{},
+	}); err != nil {
+		t.Fatalf("seed run_started: %v", err)
 	}
 
 	var credit struct {
@@ -193,8 +204,8 @@ func TestTeamCreditUsage_DerivesFromEvents(t *testing.T) {
 		Period      string  `json:"period"`
 	}
 	getJSON(t, h, "/v1/team/credit-usage?org_id=o1&period=7d", &credit)
-	if credit.CreditsUsed != 6.0 { // 3 events × 2 pages × 1.0 credits/page
-		t.Fatalf("credits_used=%v want=6.0", credit.CreditsUsed)
+	if credit.CreditsUsed != 3.0 { // 3 page_fetched events x store.CreditsPerPage; run_started earns nothing
+		t.Fatalf("credits_used=%v want=3.0", credit.CreditsUsed)
 	}
 
 	// A different org must see zero — org scoping on aggregates.

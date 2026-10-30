@@ -46,6 +46,9 @@ type jobSummaryView struct {
 	LastTS     *string      `json:"last_ts,omitempty"`
 	DeadlineAt *string      `json:"deadline_at,omitempty"`
 	Warnings   []jobWarning `json:"warnings"`
+	// Credits is the derived per-job credit estimate, present only for
+	// page-priced kinds and only while QUARRY_CONTROL__JOB_CREDITS is on.
+	Credits *jobCredits `json:"credits,omitempty"`
 }
 
 // jobErrorView is one entry of GET /v1/jobs/{id}/errors. The raw error text a
@@ -184,6 +187,7 @@ func buildSummary(job store.Job, sum map[quarrycontracts.EventType]store.EventTy
 		DeadlineAt: optRFC3339Millis(job.DeadlineAt),
 	}
 	view.Total, view.TotalKind = jobTotal(job)
+	view.Credits = creditsFor(job.Kind, job.Status, view.Counts.Completed)
 
 	var first, last time.Time
 	for _, s := range sum {
@@ -277,7 +281,11 @@ func jobSummary(db store.DB) http.HandlerFunc {
 			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
 			return
 		}
-		httpx.WriteJSON(w, r, http.StatusOK, buildSummary(job, db.Events().SummaryForJob(id)))
+		view := buildSummary(job, db.Events().SummaryForJob(id))
+		if !jobCreditsEnabled() {
+			view.Credits = nil
+		}
+		httpx.WriteJSON(w, r, http.StatusOK, view)
 	}
 }
 

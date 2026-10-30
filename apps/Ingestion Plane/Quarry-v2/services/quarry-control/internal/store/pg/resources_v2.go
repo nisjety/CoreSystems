@@ -55,14 +55,14 @@ func (s *teamUsageStore) CreditUsage(orgID, period string) (store.TeamCreditUsag
 	)
 	err := s.pool.QueryRow(context.Background(),
 		`SELECT
-		    COALESCE((SELECT SUM(COALESCE((e->>'pages')::numeric, 1)) * $2::numeric
-		              FROM events, LATERAL (SELECT payload AS e) x
-		             WHERE job_id IS NOT NULL AND ts >= $3
-		               AND EXISTS (SELECT 1 FROM jobs j WHERE j.id = events.job_id AND j.org_id = $1)),
+		    COALESCE((SELECT COUNT(*) * $2::numeric
+		              FROM events e
+		             WHERE e.job_id IS NOT NULL AND e.type = $4 AND e.ts >= $3
+		               AND EXISTS (SELECT 1 FROM jobs j WHERE j.id = e.job_id AND j.org_id = $1)),
 		            0)::float8,
 		    NULL,
 		    0::float8`,
-		orgID, creditsPerPage, since,
+		orgID, store.CreditsPerPage, since, store.CreditEventType,
 	).Scan(&used, &limit, &pctZero)
 	if err != nil {
 		return store.TeamCreditUsageRow{}, err
@@ -525,11 +525,6 @@ func scanSnapshotV2Row(row interface {
 }
 
 // ---- small helpers ---------------------------------------------------------
-
-// creditsPerPage is the credit price of one fetched page, mirroring
-// quarry_core::credits::CREDIT_COST_PER_PAGE — the same constant the Rust
-// side prices /v1/crawl budget checks with.
-const creditsPerPage = 1.0
 
 // periodWindowPG resolves the period token to an inclusive start bound as
 // a timestamptz-ready time. Mirrors the in-memory periodWindow exactly —

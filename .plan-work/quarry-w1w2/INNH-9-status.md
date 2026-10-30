@@ -1,6 +1,6 @@
 # INNH-9: Credits per job on JobSummary and JobStatusView
 
-Status: not started
+Status: built and committed locally on quarryv2-next (2026-10-31). Go and Rust tests green (Rust run in the rust:1 container after Docker came back); Postgres SQL and side stack still unproven. Flag QUARRY_CONTROL__JOB_CREDITS defaults off; nothing deployed.
 Lane: B (control/orchestrator). Plan home: WS6.C. Estimate: 3 d. Innhenting UI reads this one first (with item 1).
 Verified by reading quarryv2-next. Nothing was built or run. Paths under `apps/Ingestion Plane/Quarry-v2`.
 
@@ -44,11 +44,36 @@ Evidence for "done" needs a rebuilt control image on a side stack; unit tests al
 - Security: credits read through the same org-scoped GetByOrg (jobs_lifecycle.go jobSummary) so a foreign id stays 404; no new route.
 - Compat: Rust JobSummary/JobStatusView deserializers must stay tolerant (`#[serde(default, skip_serializing_if = "Option::is_none")]`). Dev compose uses memory stores; the mem CountsForJobs impl must be checked.
 
+## Built (what changed vs the plan above)
+All paths under `apps/Ingestion Plane/Quarry-v2`. Line endings preserved per file (CRLF files kept CRLF).
+Go (services/quarry-control):
+- NEW `internal/store/credits.go`: `store.CreditsPerPage = 1.0` (the one shared price) and `store.CreditEventType = "page_fetched"`. The two old `creditsPerPage` copies and their false comment (`quarry_core::credits::CREDIT_COST_PER_PAGE` does not exist) are deleted.
+- MODIFY `internal/store/pg/resources_v2.go`: CreditUsage SQL now `COUNT(*) * price` over `type = 'page_fetched'` events of the org's jobs (was: SUM of `payload->>'pages'` defaulting to 1 over EVERY event with a job_id). `internal/store/resources_v2_mem.go`: counts page_fetched only (the unused `payload.pages` multiplier is gone; no producer ever emitted it). Team figure on Postgres now equals the sum of per-job credits and reads lower than before.
+- NEW `internal/resources/job_credits.go`: `creditsFor(kind, status, fetchedPages)` pure (crawl, batch, scrape, extract only; search/research/agent/unknown -> nil), `jobCredits` struct, flag helper `jobCreditsEnabled()` reading `QUARRY_CONTROL__JOB_CREDITS` per request (`1|true|on|yes`), hook `jobCreditsGetenv` for tests.
+- MODIFY `internal/resources/jobs_lifecycle.go`: `jobSummaryView.Credits` (omitempty), filled in `buildSummary`, dropped by the `jobSummary` handler when the flag is off. `internal/resources/job_wire.go`: `jobWire.Credits`, filled in `jobWires` (same grouped `CountsForJobs` query, no N+1) when the flag is on. `jobWires` backs `/v1/{kind}/jobs`, `/v1/jobs/ongoing` and the crawl/batch ongoing lists.
+Rust (written, not compiled):
+- `crates/quarry-core/src/resources.rs`: `JobCredits {used, unit, basis, price_per_page, estimated, is_final (serde "final")}`; `credits: Option<JobCredits>` on `JobSummary` and `JobStatusView` (default, skip_serializing_if none); 2 new unit tests.
+- `crates/quarry-edge/src/job_lifecycle_routes.rs`: `ControlSummary.credits` (serde default) passed into `status_view`. List rows pass through `JobSummary` via forward_list with no code change. No edge flag.
+- `crates/quarry-edge/tests/job_lifecycle.rs`: control double sends credits for a crawl; asserts they reach `GET /v1/crawl/{id}`; new test `status_without_credits_from_control_still_works` (batch, key absent).
+Docs: `docs/openapi.yaml` (typed `JobStatusView`, `JobCredits`, `JobRunOrigin`; `JobSummary` gains origin, phase, credits; the three status 200s now reference JobStatusView), `docs/CONTRACTS.md` ("Credits per job" paragraph, includes the team-figure change), `docs/REST_RESOURCES.md`. SDKs not regenerated (WS13.8 blocker) and not hand-edited.
+
+## Response shape
+GET /v1/crawl/{id} (also /v1/batch/{id}, /v1/jobs/{id}), flag on, running crawl:
+`"credits": {"used": 12.0, "unit": "credit", "basis": "pages_fetched", "price_per_page": 1.0, "estimated": true, "final": false}`
+Same object on each list row. Absent (not null) for search/research/agent and whenever the flag is off.
+
 ## Commits
-(none yet)
+feat(quarry-control): credits per job on job summaries and status (INNH-9), local on quarryv2-next (sha in git log).
 
 ## Tests (counts)
-(none yet)
+Go, `cd services/quarry-control && GOWORK=off go test ./...`: all 19 packages ok (build clean). New/changed tests, `-run 'Credit|TeamCredit' -v`: 28 PASS, 1 SKIP.
+- resources/job_credits_test.go: TestCreditsFor (14 table cases), TestCreditsJSONShape, TestJobCreditsEnabled, TestBuildSummary_CarriesCredits, TestJobSummary_CreditsOnlyWhenFlagOn (off absent, on used 3, final false -> terminal final true, a late page_fetched still counted), ..._CreditsAbsentForNonPageKinds, ..._CreditsOrgScoped (foreign org 404), TestJobLists_CarryCreditsAndStillDecode (ongoing + by-kind rows decode into jobWire, search row has none), TestJobCredits_AgreeWithTeamCreditUsage.
+- storetest.CreditUsageConformance (run_started/page_queued/page_failed earn nothing, page_fetched earns the price, org isolation, empty org 0): TestMemoryCreditUsage PASS (3 subtests); TestPostgres_CreditUsage SKIPPED (needs QUARRY_TEST_DSN, no Postgres; the SQL fix is therefore untested against a real database).
+- cycle24_test TestTeamCreditUsage_DerivesFromEvents updated (3 page_fetched + a run_started = 3.0; was 6.0 from a `pages: 2` payload that no producer sends).
+Node: docs-contract 7 pass / 0 fail (12 pre-existing pending), openapi-no-bare-null 2/2, openapi-route-coverage 10/10, openapi-internal-guard 9/9, openapi-scrape-parity 5/5, openapi-challenge-parity 8/8.
+Rust (qtest.sh, rust:1 image, 2026-10-31): `cargo test -p quarry-core --lib` 253 passed / 0 failed; `cargo test -p quarry-edge --test job_lifecycle` 14 passed / 0 failed (incl. status_without_credits_from_control_still_works and the credits passthrough); `cargo check -p quarry-edge --tests` Finished, no errors. Go re-run with -count=1: all packages ok. Node contract tests re-run: docs-contract 7 pass/0 fail, no-bare-null 2, route-coverage 10, internal-guard 9, scrape-parity 5, challenge-parity 8, all 0 fail.
 
 ## Not verified
-Code reading only; nothing built or run. Unverified: AppendNext dedupe on page_fetched; the SQL defect is from reading, not executing.
+- The Postgres SQL (TestPostgres_CreditUsage skipped; also the numeric cast of the COUNT * float param) is unproven against a real database; needs QUARRY_TEST_DSN or the side stack.
+- Nothing built into an image or deployed; no side-by-side stack run. Duplicate page_fetched events (activity replay): pg dedupes on idempotency_key only if the orchestrator sets it (UNVERIFIED; the in-memory log never dedupes).
+- Owner decisions still open: is 1 credit per fetched page the product price; should browser pages weigh more; turning QUARRY_CONTROL__JOB_CREDITS on needs a control image rebuild.
