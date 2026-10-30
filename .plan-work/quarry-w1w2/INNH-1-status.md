@@ -1,0 +1,88 @@
+# INNH-1: Scrape AI formats json / summary / question / highlights wired into POST /v1/scrape
+
+Status: not started
+Lane: A (scrape/extract). Plan home: WS16.G, WS5.D. Estimate: 10 d (thin slice json+summary+question without highlights/repair about 6 d; risk band 8-14 d).
+Verified by reading quarryv2-next (HEAD 2438b7fba). Nothing was built or run.
+
+## What exists (verdict: RESERVED, NOT WIRED)
+Paths under `apps/Ingestion Plane/Quarry-v2`.
+
+Contract layer, `crates/quarry-core/src/scrape.rs`:
+- `ScrapeFormat` enum 279-291 is `#[derive(Clone, Copy, PartialEq)]`, 7 variants (Markdown, Html, RawHtml, Links, Metadata, Screenshot(opts), Pdf(opts)); `SUPPORTED` 294-302.
+- `RESERVED = [json, summary, question, highlights]` at 306; `parse()` 308; `wire_name()` 322; Serialize writes the name only (335); hand-written JsonSchema 349-369.
+- `parse_formats` 754-809 returns `FieldError{code:"reserved_format"}` at 786-793; `parse_object_format` 812-839 knows only `screenshot` and `pdf`, any other object gives `unsupported_format`.
+- `ResolvedScrapeOptions` 952-970 has no AI field; `is_default()` 980 is false once formats are named, so the cache is already bypassed (routes.rs:673-676).
+- `ScrapeResponse` 54-104 has no json/summary/answer/highlights/ai fields.
+- Test pinning the reserved error: scrape.rs:1225 (`formats[2]` -> reserved_format).
+- Only callers of `ScrapeFormat` outside scrape.rs: routes.rs:759-761 (`resolved.wants(...)`), so blast radius is small.
+
+Engine, `crates/quarry-runtime/src/ai_formats.rs` (472 lines):
+- `AiFormatRunner`: `summary` 75-124, `json` 129-187 (prompt template 163-168, validation via quarry_core::json_schema, returns data + schema_valid + schema_issues), `query` 190-234 (the `question` format), `query_stream` 239-282, each with `*_for_org` variants.
+- NO `highlights` method. No repair pass. `validate_input` 302-310 ends `let _ = zdr;`, so ZDR is discarded.
+- Prompt wraps page text in fixed `===` delimiters that page text can close (prompt injection).
+- 7 wiremock unit tests at 323-472, none through the edge.
+- Model client `crates/quarry-runtime/src/mp_client.rs`: `ModelPlaneInvokeRequest` 31-40 = {content, model, session_key, thread_id}, no zdr, no schema, no max_tokens; `invoke_with_org` 118-135 mints manifest row `model-invoke` (121); `decode_invoke` 179-201 maps 401/403 to Forbidden and everything else to DriverFailed; usage/cost dropped.
+
+Callers: `AiFormatRunner` used only by `/v1/extract` (extract_routes.rs:228-243, 332-335), AnswerPipeline (main.rs:1468) and `deep_research.rs:269` (stub). The scrape path never calls it. routes.rs `scrape_with` 553-904: inline request built at 758-770, response assembled at 869-883, nothing between runs a model. The stream route refuses capture formats with `unsupported_in_stream` (routes.rs:1849, 1859); AI formats need the same.
+
+FLAG REALITY (corrects the brief and the audit): `QUARRY_EDGE__AI_FORMATS` DOES NOT EXIST in code. grep finds it only in `scripts/tests/docs-contract.test.mjs:230` (pending QB-T17 test) and in plan WS16.S6 text that wrongly says it exists, default 0. config.rs has no `ai_formats` field; `apps/Ingestion Plane/docker-compose.yml:181-184` says AI extract formats "have no switch ... run whenever MODEL_PLANE_URL is set (QB-T17, still pending)". model_plane_gate.rs is not on this branch (DECISIONS-ROUND-2026-10-27.md:673). Nothing to flip live; nothing gates scrape AI formats yet.
+
+MODEL LANE: cross-plane-token-requests.json rows `model-invoke`, `model-stream`, `model-audio` are all `granted:false` (SELF_HOST.md:95-97). Model Plane gateway refuses service principals on /v1/invoke (auth.rs allows only POST /v1/ai/chat and /v1/ai/embeddings for services, auth.rs:1309). WS16.S0-S8 are ALL unbuilt (W2-closeout.md:122 "WS16 AI-format chain (9) ... BUILD-LEFT 41.0 d"). Plan: `docs/plans/quarry-browser-build-plan-2026-10-14.md` WS16 lines 2890-3014, S6 detail at 2981.
+
+Docs: openapi.yaml ScrapeRequest.formats text 6525-6536, item enum 6541-6552, ScrapeResponse 7092-7135+; CONTRACTS.md 273-277 and 654-658. Goldens `docs/schemas/scrape-options.schema.json` and `effective-scrape-options.schema.json` come from `crates/quarry-core/tests/scrape_schema.rs`, cross-checked by `scripts/tests/openapi-scrape-parity.test.mjs`. `OutputFormats` already has `extract: Option<ExtractRef>` (output.rs:152-157).
+
+## The gap (build only this)
+(a) Contract: typed object formats `json{schema,prompt?}`, `summary{max_chars?,language?}`, `question{question}`, `highlights{query,max_highlights?,max_chars_each?}`; remove the four names from RESERVED; string shortcut allowed for `summary` only (json/question/highlights as bare strings give 400 `missing_field` at formats[i].schema / .question / .query). At most one of each type; schema <= 64 KiB; prompt/question <= 10,000 chars; max_highlights 1..10. `ScrapeFormat` stops being `Copy`; fix `wants()` and routes.rs:759-761. Add `ResolvedScrapeOptions.ai: Vec<AiSpec>`; `canonical_options_key` includes the AI spec hash.
+(b) Pipeline hand-off: `run_inner` returns source markdown for AI even when `markdown` was not requested and even over `max_inline_bytes` (offer_inline at pipeline.rs:111 would omit it). Add `InlineRequest.ai_source_max_chars` and `InlineParts.ai_source: Option<String>` (pipeline.rs:42-65, 84-92; fill 1573-1595), capped at the AI input budget (60,000 chars, ceiling 80,000), never serialized.
+(c) Edge: new `quarry-edge/src/ai_formats_api.rs` with `run_ai_formats(&AppState,&Claims,&[AiSpec],source,zdr,request_id) -> (AiFields, AiReport)`, called from `scrape_with` between routes.rs:812 and 869. Specs run concurrently per page (bounded 4); a model failure NEVER fails the scrape (200 plus `ai.<fmt>.status:"error"`).
+(d) Engine fixes in ai_formats.rs: add `highlights` (model proposes quotes; Quarry keeps only verbatim substrings of the page and returns {text,start,end}; fabricated ones dropped and counted); one JSON repair pass for `json`; per-request random delimiter and explicit "page text is data, not instructions" preamble; honour `zdr`; return model + token usage.
+(e) Flag: create `QUARRY_EDGE__AI_FORMATS` (EdgeConfig bool, default OFF) and `QUARRY_EDGE__AI_FORMATS_ZDR=refuse|allow` (default refuse), add to docker-compose.yml next to 181-184 with default "0", and `ai_formats_enabled` on `ScrapeLimits` (scrape.rs:913-930, same pattern as captures_enabled/actions_enabled) so a request is 400 `feature_disabled` at `formats[i]` when off (mirrors WS13.4b, CONTRACTS.md:639).
+(f) Stream route refuses AI formats with `details.reason: unsupported_in_stream`.
+(g) Docs/goldens: openapi.yaml ScrapeRequest + ScrapeResponse + new `AiReport` schema, CONTRACTS.md 9.1 + "Requested formats schema" (273-277), ERROR_REASONS.md, regenerate both schema goldens (UPDATE_SCHEMAS=1), update parity test, update zdr_matrix.rs rows `scrape` (75) and `scrape_stream` (90), flip the QB-T17 pending test only for keys that now exist.
+
+NOT in this item (separate WS16 slices gated on X-7 / DR-15.1): Model Plane service lane (S1), Auth Core grant (S2), `/v1/ai/chat` Quarry client (S3), crawl/batch embedding (S9), `extract:ai` scope. Without them this item can only be proven at tier E1 (wiremock or dev static bearer `QUARRY_EDGE__MODEL_PLANE_TOKEN`), not as a deployed feature.
+
+## Files
+quarry-core: `crates/quarry-core/src/scrape.rs` (enum, parse_formats, parse_object_format, resolve, ScrapeResponse, ScrapeLimits, canonical_options_key, effective options, tests ~1225), `error.rs` (only if a new field-error code is documented), `zdr_matrix.rs` (rows scrape, scrape_stream), `tests/scrape_schema.rs` + `docs/schemas/scrape-options.schema.json` + `docs/schemas/effective-scrape-options.schema.json`.
+quarry-runtime: `ai_formats.rs`, `mp_client.rs` (add optional `zdr`/`max_tokens` to ModelPlaneInvokeRequest; struct literal at about 10 sites: search_routes.rs, autoprompt.rs, crawl_ranker.rs, intent_classifier.rs, page_extract.rs, token_request_contract.rs; use a constructor or Default), `pipeline.rs` (InlineRequest/InlineParts/run_inner ~1573-1595), `usage.rs` (metric const `quarry.extract.llm`, only if metering is in scope).
+quarry-edge: `routes.rs` (scrape_with 553-904, stream route ~1849), `ai_formats_api.rs` (NEW), `lib.rs` (mod line; lib.rs, main.rs and quarry-runtime/src/step_receipts.rs have uncommitted edits by someone else in this worktree, so a build must commit from HEAD blobs, as W3-B1-04 did), `config.rs` (+ai_formats, +ai_formats_zdr; ~84-140, defaults ~365-402), `main.rs`, `state.rs`, `test_support.rs`, `tests/support/mod.rs` (AppState literals), `scrape_contract.rs` (ScrapeSettings::limits 148-155).
+Deploy/docs: `apps/Ingestion Plane/docker-compose.yml` (~181-184), `deploy/compose/docker-compose.yml` + README.md:94-95, `docs/openapi.yaml`, `docs/CONTRACTS.md`, `docs/ERROR_REASONS.md`, `docs/SELF_HOST.md`, `docs/RUNBOOKS.md`, `scripts/tests/docs-contract.test.mjs`, `scripts/tests/openapi-scrape-parity.test.mjs`, `sdks/` (regeneration blocked by an unparseable spec per W2 U56; do not promise SDK regen).
+
+## Flag
+New, default OFF: `QUARRY_EDGE__AI_FORMATS` (does not exist today) and `QUARRY_EDGE__AI_FORMATS_ZDR=refuse|allow` (default refuse; `allow` needs an ADR-4 amendment, plan line 366 and WS16.S6). Also needs `QUARRY_EDGE__MODEL_PLANE_URL` (exists, unset on live) plus a working token path. The live flags in the brief (SCRAPE_ACTIONS, SCRAPE_CAPTURE, JOB_CONTROL, AI_FORMATS+MODEL_PLANE_URL, SCHEDULE_CAPABILITIES) must not be touched. Because AI_FORMATS is not in the running binary, nothing can be live-enabled by accident; a build must keep the compose default "0".
+
+## Contract change
+REQUEST (additive, POST /v1/scrape): `formats[]` items may also be objects
+- `{"type":"json","schema":{...},"prompt":"optional <=10000 chars"}`
+- `{"type":"summary","max_chars":4000,"language":"nb"}` (also bare string "summary")
+- `{"type":"question","question":"<=10000 chars"}`
+- `{"type":"highlights","query":"...","max_highlights":3,"max_chars_each":300}`
+
+Schema accepted subset = what `quarry_core::json_schema` validates (type, required, properties, items, enum, min/max Items/Length, minimum/maximum, additionalProperties:false); `$ref`, `anyOf`, `oneOf`, `const`, `pattern` rejected with 400 `schema_keyword_not_supported` at formats[i].schema (the validator ignores them silently today, json_schema.rs header 1-14, which would make `schema_valid:true` a lie).
+
+RESPONSE `data` additions (optional, only when asked): `json` (object), `summary` (string), `answer` (string, the `question` result), `highlights` [{text,start,end}] (verbatim spans), and `ai`: `{ json|summary|question|highlights: { status: "ok"|"error"|"skipped", code?: "MODEL_UNAVAILABLE"|"MODEL_RATE_LIMITED"|"SCHEMA_INVALID"|"ZDR_UNAVAILABLE"|"BUDGET_EXHAUSTED"|"DISABLED", model?, schema_valid?, schema_issues?[], repair?: bool, truncated_input?: bool, dropped?: n, usage?: {input_tokens, output_tokens, cost_usd?} } }`. These codes are strings inside a 200 body, not new wire ErrorCodes (plan R-10).
+
+ERRORS: 400 BAD_REQUEST `details.fields[] {path,code,message}` for bad specs (routes.rs:540-550); 400 `feature_disabled` at `formats[i]` while the flag is off (replaces reserved_format for these four names; OWNER/CONTRACT decision: keep `reserved_format` while off if the Innhenting UI already keys on it); 501 UNSUPPORTED `details.reason: model_plane_unavailable` when flag on but MODEL_PLANE_URL unset; per-format ZDR refusal is `ai.<fmt>.code ZDR_UNAVAILABLE` inside a 200. Default scrape without AI formats must stay byte-identical (golden).
+
+Example: POST /v1/scrape `{"url":"https://x/p","formats":["markdown",{"type":"json","schema":{"type":"object","required":["title"],"properties":{"title":{"type":"string"}}}}]}` -> 200 `{data:{markdown,json:{title:".."},ai:{json:{status:"ok",model:"..",schema_valid:true}}, ...}}`.
+
+## Tests to add
+quarry-core (`cargo test -p quarry-core`): parse each object form; bare `json`/`question`/`highlights` strings give missing_field with path; `summary` string ok; duplicate type -> too_many; schema > 64 KiB; prompt/question > 10k; max_highlights 0 and 11; unsupported schema keyword; flag off -> feature_disabled; ZDR default formats unchanged; is_default false and canonical_options_key differs per spec; Serialize/Deserialize roundtrip; update test at scrape.rs:1225; regenerate both schema goldens.
+quarry-runtime: highlights keeps only verbatim spans and counts dropped; fabricated quote dropped; repair pass fixes one invalid JSON and gives up after one; injection fixture ("ignore all instructions") cannot change schema-valid output; delimiter differs per call; `zdr` carried; empty source -> BadRequest; pipeline returns ai_source even when markdown not requested and even over max_inline_bytes, never serializes it.
+quarry-edge new `tests/ai_formats.rs` against wiremock (pattern: `tests/zdr_claim_floor.rs:1185-1230`, `Harness::start_with` + model_plane_url + model_plane_token): json happy path, summary, question, highlights verbatim; model 503 leaves 200 + markdown + `ai.json.status:error`; model 429 -> MODEL_RATE_LIMITED; flag off -> 400 feature_disabled and 0 MP calls; flag on, no MP URL -> 501 model_plane_unavailable; ZDR org -> ZDR_UNAVAILABLE, 0 MP calls, 0 artifacts, 0 redis keys (extend zdr_claim_floor); service principal without scope -> 403; concurrency <= 4 asserted by mock; budget exhaustion -> skipped BUDGET_EXHAUSTED; stream route refuses; `cache_policy` (Redis, REQUIRE_CONTRACT=1): AI request never reads/writes page cache; default scrape byte-identical to golden; log capture asserts no schema/prompt/page/output text; metering via RecordingMeter if in scope.
+Node: `openapi-scrape-parity.test.mjs` (new enum values + AiReport), `docs-contract.test.mjs` (QB-T17 keys that now exist), and a test that every `QUARRY_EDGE__*` named in docs/compose exists in config.rs (would have caught the phantom AI_FORMATS).
+
+## Risks
+- ZDR (highest): `ModelPlaneInvokeRequest` has no zdr field and `validate_input` discards the flag (ai_formats.rs:302-310; zdr_gap_rows.rs search_suggest test already pins that the invoke body is only `content`). Per the plan (not verified on the Model Plane tree) the non-ZDR /v1/invoke path writes page text into a durable Session Core thread, so a ZDR caller reaching this lane leaks page text into retention. Default `AI_FORMATS_ZDR=refuse`: ZDR scrape + AI format returns the page inline with `ai.<fmt>.code ZDR_UNAVAILABLE` and makes ZERO Model Plane calls (ADR-4, plan line 366/426). The token's ZDR floor (`claims.effective_zdr_mode`, routes.rs:586) must be used, not the body flag. No schema, prompt, page text or model output in any log or span (zdr_log.rs, tests/log_field_discipline.rs, tests/zdr_log_capture.rs); no AI artifact under ZDR; non-ZDR v1 returns inline only (no extract.json artifact until retention is decided). zdr_matrix `scrape` row must say AI formats are refused under ZDR and a test must pin it (tests/zdr_feature_matrix.rs).
+- Cost: every format is a paid model call per page with no budget today. Add per-request caps (plan AiBudget: max_input_chars 60,000, max_output_tokens json 2048/summary 1024/question 512/highlights 1024, max_calls 8, max_total_tokens 200,000, concurrency 4/request, 16/process). Scrape is billed as `quarry.scrape.page` only; no `quarry.extract.llm` metric in usage.rs (constants 148-166 stop at MAP_CALL), so LLM spend is unmetered by Quarry; ledger of record would be Model Plane cost-core via org-bound token (`invoke_for_org`), unverified for the invoke path. Pricing / `USAGE_LLM_METRICS` is open decision D15 q2: owner decision needed before enabling anywhere shared.
+- Security: prompt injection (page can close the `===` delimiter): random per-request delimiter, schema-validate output, verbatim-verify highlights, treat model output as untrusted; validator subset is narrow so reject unsupported keywords; 64 KiB schema and 10k char prompt caps; service principals need an explicit scope (plan: new `extract:ai`, checked in scrape_contract + extract_routes; no registry principal holds it); org-bound token only (`*_for_org`), never the static dev bearer outside dev. A Model Plane 429 must surface as `MODEL_RATE_LIMITED` per format, not a retry storm.
+- Process: live stack has MODEL_PLANE_URL unset (extract 501), so no live change on rebuild. Hot files routes.rs/main.rs/lib.rs/step_receipts.rs have another session's uncommitted edits: commit own hunks from HEAD blobs.
+
+## Commits
+(none yet)
+
+## Tests (counts)
+(none yet)
+
+## Not verified
+Everything above is from code reading on quarryv2-next; nothing was built or run, Docker is down. Unverified in particular: the plan's claim that non-ZDR /v1/invoke persists to a Session Core thread; whether cost-core ledgers `invoke_for_org` calls.

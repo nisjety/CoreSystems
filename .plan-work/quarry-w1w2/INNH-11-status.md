@@ -1,0 +1,55 @@
+# INNH-11: Public route that parses a PDF/DOCX to Markdown without storing
+
+Status: not started
+Lane: C (crawl/change/parse). Plan home: E3.6 (plan item F-t2-037). Estimate: 5 d (phase 2 real Markdown structure is NOT included).
+Verified by reading quarryv2-next. Nothing was built or run. Paths under `apps/Ingestion Plane/Quarry-v2`.
+
+## What exists
+The audit's pointer pipeline.rs:1043 is stale. The parsing capability exists only INSIDE a URL scrape: PageRunner (`crates/quarry-runtime/src/pipeline.rs`) detects the body with quarry_transform::sniff::detect (~:1025), and when DocRouting is `on` routes PDF/DOCX to content_route::parse_document (pipeline.rs:1074-1098), using the parsed text as markdown (:1146-1148). DocRouting (pipeline.rs:142-189) is env QUARRY_EDGE__DOC_ROUTING = off|shadow(default)|skip|on; default shadow only detects, so a PDF URL scrape is 415 or garbage unless `on`.
+
+`content_route.rs`: parse_document(kind, Vec<u8>) (:44) bounded by DOC_PARSE_TIMEOUT 15 s, DOC_PARSE_CONCURRENCY 2 (process-wide semaphore), MAX_DOC_TEXT_BYTES 8 MiB (truncated flag), error mapping to 415 UNSUPPORTED_MEDIA with details.reason pdf_parse_failed|docx_parse_failed|too_large, and a child-process backend with RLIMIT_AS 768 MiB/CPU 20 s/16 fds (ParseBackend, env QUARRY_EDGE__DOC_PARSE_ISOLATION, default `process` on Unix for the edge binary; doc_parse_main.rs; boot calls parse_backend() at main.rs:168). Extractors: `quarry-transform/src/pdf.rs` extract_text (:69; lopdf, 25 MiB cap :40, inflate budget :577, classify_pages scan-vs-text :286) and `docx.rs` extract_text (:27; zip-bomb budgets). The "markdown" of a document is PLAIN TEXT: docx.rs strip_wordml (paragraph newlines only) and pdf.rs extract_text output; pdf.rs extract_headings (:103) has no caller outside pdf.rs. A parse cache module exists but is unwired (`quarry-transform/src/parse_cache.rs`, org+sha256 key, no-op under ZDR, docs/PARSE_CACHE.md). Fixture corpus: `quarry-transform/tests/fixtures/documents` (no-01..no-10 PDFs/DOCX, generate.py, corpus.json, docs/DOCUMENT_CORPUS.md) and DOCUMENT_PARSE_LIMITS.md.
+
+NO /v1/parse route exists (grep of routes.rs finds none; mentioned only in docs/SOVEREIGN_SCRAPING_RELIABILITY.md:268). The edge has no multipart support (axum features macros,http2,ws only, Cargo.toml:32) and no raw-upload route; the global body cap is 1 MiB (routes.rs:340), with a separate larger-cap router only for profile import (routes.rs:136-143, 4 MiB). /v1/extract deliberately does not sniff or parse documents (CONTRACTS.md section 9.5). Usage metrics list (`quarry-runtime/src/usage.rs:147-167`) has no parse metric; the file says to update Lago billable metric codes before shipping a new metric. Existing flagged-route pattern: off = 501 UNSUPPORTED naming the env var (job_lifecycle_routes.rs:338).
+
+## The gap
+Build only POST /v1/parse that takes the document BYTES in the request body (not a URL; URL parse is already /v1/scrape with DOC_ROUTING=on), parses with the existing sniff + parse_document (so child-process isolation, permits and deadline apply), and returns markdown inline, storing NOTHING (no artifact, no durable event, no cache, no local-index write, no ingest).
+1. Own router with larger limits (DefaultBodyLimit + RequestBodyLimitLayer ~26 MiB, mirroring profile_import at routes.rs:136-143) behind the standard auth chain (require_auth, require_service_route_scope, mark_floor); input = raw body with Content-Type application/pdf | application/vnd.openxmlformats-officedocument.wordprocessingml.document | application/octet-stream (kind decided by sniff::detect on the bytes, header only a fallback); optional X-Quarry-Filename not logged/stored; no multipart in v1 (adds multer; the gateway can proxy raw bytes): record as decision.
+2. Reject non-PDF/DOCX with 415 UNSUPPORTED_MEDIA reusing the supported list and reason codes of /v1/scrape; over 25 MiB 413/415 too_large.
+3. Response data `{markdown, kind, bytes, truncated, warnings[], page_count?}`; also run classify_pages for PDFs to emit warning `document_has_no_text_layer` (scans: OCR out of scope, WS5/E3.6 later) instead of silently returning empty text.
+4. Per-org concurrency/rate protection because the parser has only 2 process-wide permits: acquire with a short queue timeout and return 429/503 with Retry-After (limits.rs has the org-limit machinery); usage metering.
+5. Optional phase 2 (NOT in the 5 d): real Markdown structure (DOCX Heading1-6 via w:pStyle, lists via w:numPr, tables via w:tbl; PDF headings via extract_headings font-size ranking). Today the output is plain paragraphs; an honest contract says `structure: 'plain'`.
+6. PII redaction (pii.rs, E3.6-1, built dark) is NOT wired and stays out; the route must say redaction is not applied.
+
+## Files
+NEW `crates/quarry-edge/src/parse_routes.rs` (+ `pub mod parse_routes;` in lib.rs and main.rs mod list); `routes.rs` (router: new body-limited sub-router like profile_import, route /v1/parse, ~:136 and :340); `config.rs` or the flag reader in the new module; `usage_attrs.rs` + `quarry-runtime/src/usage.rs` (metering: prefer reusing quarry.scrape.page with attrs.op='parse' to avoid a new Lago metric); `limits.rs` or `run_limits.rs` (per-org parse concurrency); `crates/quarry-runtime/src/content_route.rs` (maybe a bytes-in helper returning ParsedDocument + truncated); `crates/quarry-transform/src/{sniff.rs,pdf.rs,docx.rs}` only for phase 2; `crates/quarry-core/src/zdr_matrix.rs` + `docs/ZDR_MATRIX.md` (new row 'parse', Honoured: nothing durable); `tests/web_policy_routes.rs` route_manifest (NoUrl) and zdr_feature_matrix; `docs/openapi.yaml` (+ SDK regeneration, `scripts/openapi-route-allowlist.json`), `docs/CONTRACTS.md` (new section), `docs/RUNBOOKS.md`, `docs/GAP.md` line 85, `docs/OSS_PARITY_BACKLOG.md`; docker-compose env (default off).
+
+## Flag
+`QUARRY_EDGE__PARSE_ROUTE=on` default OFF (off = 501 UNSUPPORTED with hint; route stays registered so route-coverage guards pass). Does NOT depend on QUARRY_EDGE__DOC_ROUTING (calls parse_document directly) but inherits QUARRY_EDGE__DOC_PARSE_ISOLATION (keep `process` in multi-tenant; boot line reports it) and should refuse to enable (boot error or 501 reason) if isolation resolved to inprocess on a multi-tenant deployment, as RUNBOOKS advises. Optional `QUARRY_EDGE__PARSE_MAX_BYTES` (default 26214400) and `QUARRY_EDGE__PARSE_CONCURRENCY_PER_ORG`. No change to the live flags.
+
+## Contract change
+POST /v1/parse. Request: raw bytes as HTTP body; headers Content-Type (hint only), optional X-Quarry-Filename (hint only, never echoed/stored); no JSON body in v1. Response 200 `{data:{markdown:string, kind:'pdf'|'docx', bytes:int, truncated:boolean, structure:'plain', warnings:[{code,message}] (e.g. document_has_no_text_layer, truncated_at_8mib), pages?:int}, meta}`; no artifact ids, no scrape_id. Errors in standard envelope: 400 empty body; 413 too large (>25 MiB, details.reason too_large); 415 UNSUPPORTED_MEDIA with details {reason: unsupported_media|pdf_parse_failed|docx_parse_failed|too_large, kind, supported:['pdf','docx']}; 408/504 TIMEOUT (15 s deadline); 429 RATE_LIMITED with Retry-After when the org's parse slots are busy; 501 UNSUPPORTED naming QUARRY_EDGE__PARSE_ROUTE when the flag is off; 401/403 from the auth chain; service principals need a scope (propose `parse:write`, added to the scope registry like scrape:read/write). Idempotent and side-effect free.
+
+## Tests to add
+Rust route tests (quarry-edge, in-process router): flag off -> 501 with hint; valid PDF fixture -> 200 markdown equals parse_document output, kind pdf; valid DOCX -> docx; octet-stream body with PDF magic bytes sniffed correctly; HTML/PNG/ZIP body -> 415 with supported list; empty body 400; >25 MiB 413 (body-limit layer); corrupt PDF/DOCX -> 415 pdf_parse_failed/docx_parse_failed; scanned PDF fixture (no-04/no-06) -> 200 with document_has_no_text_layer warning; truncated flag at 8 MiB (parse_with injectable extractor); deadline -> TIMEOUT (parse_with seam); permit exhaustion -> 429/503 with Retry-After and no hang; cross-org fairness.
+Nothing-stored proof (central test): with InMemoryStore artifacts and a counting event sink/usage meter/cache/local index, assert zero puts, zero content-bearing events, zero cache/index writes for both ZDR and non-ZDR callers.
+Log discipline: add the route to log_field_discipline / zdr_log_capture so filename and text never appear in logs. Auth: unauthenticated 401, service principal without scope 403, with scope 200. Guards: web_policy_routes route_manifest (NoUrl), zdr_feature_matrix row, openapi-route-coverage, openapi-no-bare-null, docs-contract, field names pinned in quarry-core/tests/contracts.rs.
+Isolation: run with ParseBackend::Process (child) in a Linux container and prove the memory-bomb PDF returns 415 too_large/parse_failed without killing the edge (reuse the WS5.C evidence recipe, quarry-rust-tests-in-docker). Phase 2 (if taken): golden Markdown for DOCX headings/lists/tables and PDF headings on the Norwegian corpus (corpus.json).
+Evidence on a side-by-side stack: `curl --data-binary @file.pdf` returns text and a follow-up GET /v1/artifacts list shows no new artifact.
+
+## Risks
+- ZDR: the ZDR-friendly way to parse a document, but only if nothing is persisted: no artifact put, no event_sink emit with text, no scrape record, no local index, no parse_cache write (the cache would STORE content for a non-ZDR caller; do not wire it here), no logging of filename/bytes/text (zdr_log discipline, tests/log_field_discipline.rs, zdr_log_capture.rs).
+- Security: a public upload surface to lopdf/zip: hostile files (inflate bombs, zip bombs, malformed PDFs) are the main risk; mitigated only by child-process rlimits on Unix (default process isolation; on non-Unix or inprocess it is a DoS vector), 25 MiB cap, 15 s deadline, 8 MiB output cap. The memory-bomb-through-full-HTTP test was NOT run for the scrape path either (GAP.md line 85); run it for this route before enabling.
+- Resource exhaustion: only 2 parse permits per process, shared with the scrape pipeline's own PDF handling; needs per-org caps and a queue timeout. A 25 MiB body is buffered per request: cap concurrent uploads and set the body limit only on this route.
+- Auth: no unauthenticated use; service-principal scope.
+- Quality: output is plain text not Markdown, lossy for Tj/TJ PDFs, scans return empty (no OCR); the contract must not oversell (structure:'plain', no_text_layer warning).
+- Cost: CPU only, no Model Plane or third-party calls; billing needs an owner decision (reuse quarry.scrape.page with op=parse vs a new quarry.parse.page needing a Lago metric code in Control Plane billing, cross-plane).
+- Redaction: pii.rs is not wired so personal data (fodselsnummer) in documents is returned as-is to the authenticated caller; state it.
+
+## Commits
+(none yet)
+
+## Tests (counts)
+(none yet)
+
+## Not verified
+Code reading only; nothing built or run. The memory-bomb behaviour through the full HTTP path was not verified for any route.
