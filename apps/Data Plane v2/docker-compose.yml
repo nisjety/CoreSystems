@@ -251,7 +251,10 @@ services:
       retries: 10
 
   minio-init:
-    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    # minio/mc is no longer pullable from Docker Hub or quay.io. The pinned
+    # server image ships the same mc release (RELEASE.2025-08-13T08-35-41Z)
+    # at /usr/bin/mc, so the bucket bootstrap reuses it.
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     restart: "no"
     entrypoint: ["/bin/sh", "-c"]
     # When CAS_INGESTION_ACCESS_KEY/SECRET_KEY are both set, provision the
