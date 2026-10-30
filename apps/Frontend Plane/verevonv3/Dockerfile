@@ -40,10 +40,14 @@ COPY --chown=node:node package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # than a permission problem. Prefer this over `package-import-method=copy`,
 # which would hide the cause and copy the whole SDK on every install.
 COPY --from=quarry-client --chown=node:node [".", "/Ingestion Plane/Quarry-v2/sdks/typescript/"]
+# The generated SDK's tsconfig still names moduleResolution "node" (node10),
+# which TypeScript 6 removed; it stays as generated for its own TS 4/5 build,
+# so the resolution is overridden here: node16 for the CommonJS output and
+# bundler for the ESM output.
 RUN --mount=type=cache,target=/home/node/.local/share/pnpm/store,uid=1000,gid=1000 \
     pnpm install --frozen-lockfile \
-    && pnpm exec tsc --ignoreDeprecations 6.0 --rootDir '/Ingestion Plane/Quarry-v2/sdks/typescript/src' -p '/Ingestion Plane/Quarry-v2/sdks/typescript/tsconfig.json' \
-    && pnpm exec tsc --ignoreDeprecations 6.0 --rootDir '/Ingestion Plane/Quarry-v2/sdks/typescript/src' -p '/Ingestion Plane/Quarry-v2/sdks/typescript/tsconfig.esm.json' \
+    && pnpm exec tsc --ignoreDeprecations 6.0 --module node16 --moduleResolution node16 --rootDir '/Ingestion Plane/Quarry-v2/sdks/typescript/src' -p '/Ingestion Plane/Quarry-v2/sdks/typescript/tsconfig.json' \
+    && pnpm exec tsc --ignoreDeprecations 6.0 --module esnext --moduleResolution bundler --rootDir '/Ingestion Plane/Quarry-v2/sdks/typescript/src' -p '/Ingestion Plane/Quarry-v2/sdks/typescript/tsconfig.esm.json' \
     && cp -R '/Ingestion Plane/Quarry-v2/sdks/typescript/dist' node_modules/@quarry/client/dist
 
 # Copy source code (will be overridden by volume mount in dev)
