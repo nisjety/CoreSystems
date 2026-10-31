@@ -17,6 +17,7 @@ import {
 } from '@/features/ingestions/lib/playground'
 import { countRunsByGroup, filterRuns, formatDuration, runDurationMs, runStatusGroup } from '@/features/ingestions/lib/runs'
 import type { RunItem } from '@/shared/api/ingestions-client'
+import { toScrapeView } from '@/features/ingestions/lib/scrape-view'
 
 const tr = (no: string) => no
 const state = (patch: Partial<PlaygroundState>): PlaygroundState => ({ ...defaultPlaygroundState, ...patch })
@@ -222,5 +223,85 @@ describe('browser steps, schemas and search filters', () => {
     expect(request.path).toBe('/api/v1/actions/execute')
     expect(request.body).toMatchObject({ actionId: 'ingestions.start_agent_run' })
     expect(request.note).toContain('Verevon')
+  })
+})
+
+describe('AI formats and extract prompt (INNH-1, INNH-2)', () => {
+  it('asks the model for the AI formats it has inputs for, as objects', () => {
+    const body = scrapeRequestFromState(
+      state({
+        url: 'https://a.no',
+        formats: ['markdown', 'json', 'summary', 'question', 'highlights'],
+        aiSchema: '{"type":"object","properties":{"title":{"type":"string"}}}',
+        aiPrompt: ' focus on the title ',
+        aiSummaryMaxChars: '500',
+        aiQuestion: 'Is it in stock?',
+        aiHighlightQuery: 'prices',
+      }),
+    )
+    expect(body.formats).toEqual([
+      'markdown',
+      { type: 'json', schema: { type: 'object', properties: { title: { type: 'string' } } }, prompt: 'focus on the title' },
+      { type: 'summary', max_chars: 500 },
+      { type: 'question', question: 'Is it in stock?' },
+      { type: 'highlights', query: 'prices' },
+    ])
+  })
+
+  it('leaves AI formats out of an ingest and names the input that is missing', () => {
+    const withJson = state({ url: 'https://a.no', formats: ['json'], aiSchema: '{"type":"object"}' })
+    expect(scrapeRequestFromState(withJson, true).formats).toEqual(['markdown'])
+    expect(missingInput(state({ url: 'https://a.no', formats: ['json'] }))).toBe('ai_schema')
+    expect(missingInput(state({ url: 'https://a.no', formats: ['question'] }))).toBe('ai_question')
+    expect(missingInput(state({ url: 'https://a.no', formats: ['highlights'] }))).toBe('ai_query')
+    expect(missingInput(state({ url: 'https://a.no', formats: ['summary'] }))).toBeNull()
+  })
+
+  it('sends the extraction prompt only when there is one', () => {
+    expect(quarryRequestFor(state({ endpoint: 'extract', url: 'https://a.no', prompt: ' Find the price ' })).body).toEqual({
+      urls: ['https://a.no'],
+      prompt: 'Find the price',
+    })
+    expect(quarryRequestFor(state({ endpoint: 'extract', url: 'https://a.no', prompt: '  ' })).body).toEqual({ urls: ['https://a.no'] })
+  })
+
+  it('reads the AI report, the structured answer and the highlights of a scrape', () => {
+    const view = toScrapeView(
+      {
+        data: {
+          url: { final_url: 'https://a.no/' },
+          status: 200,
+          markdown: '# A',
+          json: { title: 'Ridge 40' },
+          summary: 'A gravel bike.',
+          answer: null,
+          highlights: [{ text: 'NOK 2 190', start: 4, end: 12 }, { text: 'bad' }],
+          ai: {
+            json: { status: 'ok', untrusted_source: true, schema_valid: true, repair: 'none', model: 'verevon-balance' },
+            question: { status: 'ok', found: false, grounded: false, untrusted_source: true },
+            highlights: { status: 'ok', dropped: 1, untrusted_source: true },
+            summary: { status: 'skipped', code: 'ZDR_UNAVAILABLE', untrusted_source: false },
+            total: { calls: 3, input_tokens: 40, output_tokens: 9 },
+          },
+        },
+      },
+      'https://a.no',
+    )
+    expect(view.json).toEqual({ title: 'Ridge 40' })
+    expect(view.summary).toBe('A gravel bike.')
+    expect(view.answer).toBeNull()
+    expect(view.highlights).toEqual([{ text: 'NOK 2 190', start: 4, end: 12 }])
+    expect(view.ai?.entries.map((entry) => [entry.format, entry.status])).toEqual([
+      ['json', 'ok'],
+      ['summary', 'skipped'],
+      ['question', 'ok'],
+      ['highlights', 'ok'],
+    ])
+    expect(view.ai?.entries.find((entry) => entry.format === 'summary')?.code).toBe('ZDR_UNAVAILABLE')
+    expect(view.ai?.total).toEqual({ calls: 3, inputTokens: 40, outputTokens: 9 })
+  })
+
+  it('has no AI report when no AI format was asked for', () => {
+    expect(toScrapeView({ data: { markdown: 'x' } }, 'https://a.no').ai).toBeNull()
   })
 })

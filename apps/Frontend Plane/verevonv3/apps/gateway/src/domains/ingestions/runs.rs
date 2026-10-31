@@ -133,7 +133,7 @@ fn to_run_item(job: &Value) -> Value {
         query.map(Value::String).unwrap_or(Value::Null),
     );
 
-    json!({
+    let mut row = json!({
         "id": str_at(job, "job_id"),
         // The Temporal run id, stamped once the job starts. The evidence
         // endpoint (`/api/ingestions/evidence?runId=…`) proxies quarry-edge's
@@ -154,7 +154,43 @@ fn to_run_item(job: &Value) -> Value {
         "scheduleId": str_or_null(job, "schedule_id"),
         "phase": str_or_null(job, "phase"),
         "stats": stats,
-    })
+    });
+    if let Some(credits) = job.get("credits").and_then(to_credits) {
+        row["credits"] = credits;
+    }
+    row
+}
+
+/// Reshapes Quarry's `JobCredits` (`used`, `unit`, `basis`, `price_per_page`,
+/// `estimated`, `final`) into the SPA's camelCase. `None` when the edge sent no object.
+/// Quarry sends the field only while QUARRY_CONTROL__JOB_CREDITS is on, so a row
+/// without it stays as it was.
+pub(super) fn to_credits(credits: &Value) -> Option<Value> {
+    let object = credits.as_object()?;
+    Some(json!({
+        "used": object.get("used").cloned().unwrap_or(json!(0)),
+        "unit": object.get("unit").cloned().unwrap_or(json!("credit")),
+        "basis": object.get("basis").cloned().unwrap_or(json!("pages_fetched")),
+        "pricePerPage": object.get("price_per_page").cloned().unwrap_or(json!(0)),
+        "estimated": object.get("estimated").cloned().unwrap_or(json!(true)),
+        "final": object.get("final").cloned().unwrap_or(json!(false)),
+    }))
+}
+
+/// The extraction prompt of a run body, trimmed. Blank means none; a prompt over
+/// 10,000 characters is refused here, the same limit quarry-edge applies.
+fn extract_prompt(body: &Value) -> Result<Option<String>, String> {
+    let Some(raw) = body.get("prompt").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > 10_000 {
+        return Err("The extraction prompt must be at most 10,000 characters.".to_owned());
+    }
+    Ok(Some(trimmed.to_owned()))
 }
 
 // ── Create ────────────────────────────────────────────────────────────────
@@ -284,12 +320,18 @@ async fn create_extract(
         Err(message) => return validation(&message),
     };
 
-    // Structured extraction is schema-driven on quarry-edge (`/v1/extract` reads
-    // `schema`; its `prompt` is accepted but not used yet), so only the schema
-    // is forwarded.
+    // quarry-edge's `/v1/extract` reads both: a `schema` makes the extraction
+    // structured, and a `prompt` steers it (inside the schema) or asks for one
+    // free-form JSON object when it stands alone. With neither, the sources come
+    // back as markdown.
     let mut request = json!({ "urls": [url.clone()] });
     match extract_schema(body) {
         Ok(Some(schema)) => request["schema"] = schema,
+        Ok(None) => {}
+        Err(message) => return validation(&message),
+    }
+    match extract_prompt(body) {
+        Ok(Some(prompt)) => request["prompt"] = Value::String(prompt),
         Ok(None) => {}
         Err(message) => return validation(&message),
     }
@@ -446,6 +488,34 @@ fn handoff_accepted_at(data: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// INNH-1 / INNH-9: the job's credits pass through in camelCase, and a row without
+    /// them (the flag is off) has no `credits` key at all, not a null one.
+    #[test]
+    fn run_rows_carry_credits_only_when_quarry_sends_them() {
+        let with = json!({
+            "job_id": "job-2", "kind": "crawl", "status": "running", "created_at": "t",
+            "credits": { "used": 12.0, "unit": "credit", "basis": "pages_fetched",
+                         "price_per_page": 1.0, "estimated": true, "final": false }
+        });
+        let row = to_run_item(&with);
+        assert_eq!(row["credits"]["used"], 12.0);
+        assert_eq!(row["credits"]["pricePerPage"], 1.0);
+        assert_eq!(row["credits"]["final"], false);
+        let without = json!({ "job_id": "job-3", "kind": "crawl", "status": "running", "created_at": "t" });
+        assert!(to_run_item(&without).get("credits").is_none());
+    }
+
+    /// INNH-2: a prompt is trimmed; blank means none; over 10,000 characters is refused.
+    #[test]
+    fn extract_prompt_is_trimmed_and_bounded() {
+        assert_eq!(extract_prompt(&json!({ "prompt": "  Find the price  " })).unwrap().as_deref(), Some("Find the price"));
+        assert_eq!(extract_prompt(&json!({ "prompt": "   " })).unwrap(), None);
+        assert_eq!(extract_prompt(&json!({})).unwrap(), None);
+        let long = "x".repeat(10_001);
+        assert!(extract_prompt(&json!({ "prompt": long })).is_err());
+        assert!(extract_prompt(&json!({ "prompt": "y".repeat(10_000) })).is_ok());
+    }
 
     #[test]
     fn to_run_item_derives_target_and_progress() {

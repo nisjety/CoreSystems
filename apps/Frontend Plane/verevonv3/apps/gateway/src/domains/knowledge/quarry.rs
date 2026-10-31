@@ -25,14 +25,16 @@ use crate::{
 
 const PREVIEW_MARKDOWN_CHAR_LIMIT: usize = 80_000;
 
-/// WS13.5: the ceiling for a scrape that drives the browser (actions, a screenshot, a
-/// PDF). The edge bounds an actions run at 115 s and its router at 125 s, so the edge
-/// answers with its typed timeout before this one fires. Every other scrape keeps the
-/// standard client's 25 s.
-const SCRAPE_BROWSER_TIMEOUT: Duration = Duration::from_secs(125);
+/// WS13.5 and INNH-1: the ceiling for a scrape that drives the browser (actions, a
+/// screenshot, a PDF) or asks a model about the page (the AI formats). The edge's
+/// route allows 125 s for both, so this client waits a little longer and the edge
+/// answers with its own typed timeout first. Every other scrape keeps the standard
+/// client's 25 s.
+const SCRAPE_BROWSER_TIMEOUT: Duration = Duration::from_secs(135);
 
 /// Whether a scrape body asks for work that outlasts the standard 25 s: a non-empty
-/// `actions` list, an object-form format, or a `screenshot` or `pdf` format.
+/// `actions` list, an object-form format (a capture or an AI format), or a
+/// `screenshot`, `pdf` or `summary` string format.
 fn scrape_needs_browser_budget(body: &Value) -> bool {
     let has_actions = body
         .get("actions")
@@ -44,7 +46,7 @@ fn scrape_needs_browser_budget(body: &Value) -> bool {
         .is_some_and(|formats| {
             formats.iter().any(|format| match format {
                 Value::Object(_) => true,
-                Value::String(name) => matches!(name.as_str(), "screenshot" | "pdf"),
+                Value::String(name) => matches!(name.as_str(), "screenshot" | "pdf" | "summary"),
                 _ => false,
             })
         });
@@ -1240,7 +1242,77 @@ mod tests {
         assert!(!long(json!({ "url": "https://e.test/" })));
         assert!(!long(json!({ "url": "https://e.test/", "actions": [] })));
         assert!(!long(json!({ "formats": ["markdown", "html"] })));
-        assert_eq!(SCRAPE_BROWSER_TIMEOUT, Duration::from_secs(125));
+        // INNH-1: the AI formats are model calls, so they share the long ceiling.
+        assert!(long(json!({ "formats": ["markdown", "summary"] })));
+        assert!(long(json!({ "formats": ["markdown", { "type": "json", "schema": { "type": "object" } }] })));
+        assert!(long(json!({ "formats": [{ "type": "highlights", "query": "price" }] })));
+        // The edge's route allows 125 s; this client must wait longer than that.
+        assert!(SCRAPE_BROWSER_TIMEOUT > Duration::from_secs(125));
+    }
+
+    /// INNH-1: the AI format objects reach the edge exactly as the caller sent them,
+    /// and an AI scrape runs under the long ceiling. The edge's answer (the inline
+    /// `json`, `summary` and `ai` report) comes back unchanged too.
+    #[tokio::test]
+    async fn ai_format_objects_pass_through_unchanged_and_get_the_long_ceiling() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(1500))
+                    .set_body_json(json!({
+                        "data": {
+                            "status": 200,
+                            "markdown": "# Price 2 190 NOK",
+                            "json": { "title": "Ridge 40" },
+                            "summary": "A gravel bike.",
+                            "ai": {
+                                "json": { "status": "ok", "untrusted_source": true, "schema_valid": true, "repair": "none" },
+                                "total": { "calls": 1, "input_tokens": 10, "output_tokens": 4 }
+                            }
+                        }
+                    })),
+            )
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        state.client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let format_objects = json!([
+            "markdown",
+            { "type": "json", "schema": { "type": "object", "required": ["title"], "properties": { "title": { "type": "string" } } } },
+            { "type": "summary", "max_chars": 300 },
+        ]);
+        let response = scrape(
+            State(state),
+            Extension(preview_user()),
+            None,
+            HeaderMap::new(),
+            Json(json!({ "url": "https://example.com/p", "formats": format_objects.clone() })),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK, "an AI scrape outlasts the 1 s client default");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let answer: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(answer["data"]["json"]["title"], "Ridge 40");
+        assert_eq!(answer["data"]["ai"]["total"]["calls"], 1);
+
+        let received = quarry.received_requests().await.unwrap();
+        let forwarded: Value = received
+            .iter()
+            .find(|request| request.url.path() == "/v1/scrape")
+            .map(|request| serde_json::from_slice(&request.body).unwrap())
+            .expect("the scrape reached the edge");
+        assert_eq!(forwarded["formats"], format_objects, "the AI format objects are forwarded unchanged");
+        assert!(forwarded.get("initiated_by").is_none(), "a person's scrape carries no origin stamp");
     }
 
     /// WS13.5: the origin stamp is tighten-only and comes from the verified caller.

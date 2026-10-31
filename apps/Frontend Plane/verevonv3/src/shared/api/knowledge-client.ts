@@ -97,7 +97,8 @@ export interface ScrapeRequest {
   signals?: Record<string, unknown>
   /** Output formats quarry-edge should return. The gateway adds `['markdown']` when absent so the
    * text comes back inline in `data.markdown` instead of as an artifact reference. */
-  formats?: string[]
+  /** Plain format names, or objects: `{type:'json',schema}`, `{type:'summary'}`, `{type:'question',question}`, `{type:'highlights',query}` (INNH-1). */
+  formats?: Array<string | Record<string, unknown>>
   only_main_content?: boolean
   include_tags?: string[]
   exclude_tags?: string[]

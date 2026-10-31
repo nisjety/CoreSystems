@@ -32,8 +32,8 @@ mangler. **Mangler** = Quarry har det ikke ennå; se avsnittet "Mangler i Quarry
 | Scrape: utdragsmodus (Quarry har mer enn Firecrawl) | `extractor`: `readability`, `clean_full`, `raw` | Koblet | `scrape.rs` |
 | Scrape: fjern base64-bilder (Quarry) | `remove_base64_images` | Koblet | |
 | Scrape: maks alder / cache | cache-policy finnes i Quarry, men scrape-endepunktet tar ikke imot `maxAge` i dag | Mangler (se under) | `quarry-core/src/cache.rs` |
-| Scrape: JSON-format med skjema per side | `formats: json` | Mangler (reservert) | `quarry-core/src/scrape.rs:306` |
-| Scrape: sammendrag, spørsmål, høydepunkter | `formats: summary / question / highlights` | Mangler (reservert) | samme |
+| Scrape: JSON-format med skjema per side | `formats: {type:'json', schema}` | Flagg `QUARRY_EDGE__AI_FORMATS` (live: av). Koblet i Verevon; Quarry-siden på `quarryv2-next` (a8331b38c, 15ca48ed8, d4fa6ee08) | `quarry-core/src/scrape.rs`, `playground.ts`, `IngestionsPlaygroundResult.tsx` |
+| Scrape: sammendrag, spørsmål, høydepunkter | `formats: {type:'summary'}`, `{type:'question',question}`, `{type:'highlights',query}` | Flagg `QUARRY_EDGE__AI_FORMATS` (live: av). Koblet i Verevon | samme |
 | Scrape: branding (farger, logo) | feltet `branding` finnes i svaret | Koblet (vises i JSON og metadata) | `pipeline.rs` |
 | Scrape: lagre i Kunnskap | `ingest: true` | Koblet ("Send til Kunnskap") | `knowledge/quarry.rs` |
 | Map: finn URL-er på et nettsted | `POST /v1/map` | Koblet | `knowledge/quarry.rs` (`crawl/discover`) |
@@ -48,7 +48,7 @@ mangler. **Mangler** = Quarry har det ikke ennå; se avsnittet "Mangler i Quarry
 | Crawl: pause, gjenoppta, avbryt | `POST /v1/crawl/{id}/pause` m.fl. | Flagg `QUARRY_EDGE__JOB_CONTROL` | `job_lifecycle_routes.rs` |
 | Batch: liste med URL-er | `POST /v1/batch` | Koblet, også pause/avbryt | |
 | Extract: strukturert data med JSON-skjema | `POST /v1/extract`, `schema` | Flagg `QUARRY_EDGE__AI_FORMATS=1` + `MODEL_PLANE_URL` (live: 501 med hint) | `extract_routes.rs` |
-| Extract: fri prompt | `prompt` | Mangler (lest, men ikke brukt) | `extract_routes.rs:48` |
+| Extract: fri prompt | `prompt` | Koblet i Verevon. Quarry-siden bruker den (5f1ac3ca2, ingen flagg) | `extract_routes.rs`, `runs.rs` (`extract_prompt`) |
 | Agent: autonom nettleseragent | `/v1/agent/runs` via Verevon | Koblet via `ingestions.start_agent_run` | `dispatchers.rs`, `browser.rs` |
 | Agent: direkte Quarry-API uten Verevon | krever nettleser-grant fra gatewayen | Mangler (se under) | `agent_routes/lifecycle.rs` |
 | Monitor: sjekk side for endring | `POST /v1/change/check` | Koblet | `change_routes.rs` |
@@ -59,7 +59,7 @@ mangler. **Mangler** = Quarry har det ikke ennå; se avsnittet "Mangler i Quarry
 | Tidsplaner: cron, pause, utløs | `/v1/schedules` | Koblet; lagring er av på live (se under) | `schedules.rs` |
 | Jobber: liste, status, feil per URL, robots-blokkert | `/v1/jobs/{id}`, `/v1/jobs/{id}/errors` | Koblet (ny i denne runden) | `ingestions/jobs.rs` |
 | Jobber: opprinnelse (manuell eller tidsplan) | `origin`, `schedule_id` | Koblet (ny i denne runden) | `ingestions/runs.rs` |
-| Jobber: kostnad per kjøring | jobbene har ingen kostnadsfelt | Mangler (se under) | |
+| Jobber: kostnad per kjøring | `credits` på jobbsvar og jobbrader | Flagg `QUARRY_CONTROL__JOB_CREDITS` (live: av). Koblet i Verevon; Quarry-siden på `quarryv2-next` (6bbd99763) | `ingestions/runs.rs` (`to_credits`), `jobs.rs` |
 | Forbruk: kreditter for perioden | `GET /v1/team/credit-usage` | Koblet (ny i denne runden) | `ingestions/jobs.rs` |
 | Parse: dokument (PDF, DOCX) til Markdown | intern opptak, ikke offentlig parse-rute | Mangler (se under) | `pipeline.rs:1043` |
 | Browser-økter og profiler | `/api/v1/browser/*` | Koblet i Nettleser (ikke i denne siden) | `browser.rs` |
@@ -75,7 +75,8 @@ slås på, virker funksjonen uten endring i koden.
 | `QUARRY_EDGE__SCRAPE_CAPTURE=on` | skjermbilde og PDF | av |
 | `QUARRY_EDGE__JOB_CONTROL=on` | pause, gjenoppta og avbryt av crawl og batch | av |
 | `QUARRY_SCHEDULE_CAPABILITIES` (JSON) | tidsplantyper, utløs og backfill | tom: lagring av tidsplaner er av |
-| `QUARRY_EDGE__AI_FORMATS=1` + `MODEL_PLANE_URL` | strukturert uttrekk med JSON-skjema | av: `/v1/extract` svarer 501 med hint |
+| `QUARRY_EDGE__AI_FORMATS=1` + `MODEL_PLANE_URL` | AI-formater på scrape (json, summary, question, highlights) og strukturert uttrekk | av: AI-formater gir 400 `feature_disabled`, `/v1/extract` gir 501 med hint |
+| `QUARRY_CONTROL__JOB_CREDITS=on` | kreditter per jobb (`credits`), default av | av: feltet mangler i svaret, og siden sier det |
 
 Ingen av disse er slått på i denne runden. Å slå dem på er en konfigurasjonsendring
 på den delte live-stacken, og det må godkjennes av eieren.
@@ -84,14 +85,12 @@ på den delte live-stacken, og det må godkjennes av eieren.
 
 Hver linje peker til stedet i Quarry-koden, slik at arbeidet kan starte der.
 
-0. **Live-kjøring er ikke oppdatert.** Den kjørende gateway-containeren (`verevon-gateway-rs`) kjører fortsatt bygget fra `main`, så de nye rutene (`/api/ingestions/jobs`, `/usage`, action-kontraktene) finnes ikke der før containeren byttes. Verifisert i en sidecontainer fra den nye imagen (`verevon-gateway-innh`, port 3186).
-1. **Scrape-formatene `json`, `summary`, `question`, `highlights`.** Reservert i
+0. **Live-gatewayen er ikke oppdatert med denne runden.** Den kjører build fra `14299e659`. Gateway-endringene for AI-formater, uttrekk-prompt og kreditter (se nedenfor) er bare testet med cargo og wiremock, ikke på live. Å bytte live krever eierens godkjenning.
+1. **Scrape-formatene `json`, `summary`, `question`, `highlights`: levert på `quarryv2-next`, ikke på live. Åpne blokkere i Quarry:** (a) `ai.<fmt>.truncated_input` settes ikke for sider over 60 000 tegn; (b) en personvernblokk på forespørselen (`credential_or_secret`, `zdr_ephemeral`) respekteres ikke. Fiksen gjør alle formater til `skipped` og kan legge til koden `PRIVACY_POLICY`. Ikke slå på AI-formater på live før (b) er lukket, siden en forespørsel med personvernblokk ellers kan sende innhold til modellen. Opprinnelig punkt: Reservert i
    `quarry-core/src/scrape.rs:306` (`RESERVED`), og avvist med `reserved_format`.
    Må: fjerne fra reservert liste, koble `AiFormatRunner` (`quarry-runtime/src/ai_formats.rs`)
    til scrape-svaret, og legge til kontrakttester. Krever modellplanen.
-2. **Fri `prompt` på `/v1/extract`.** Feltet leses, men er markert `dead_code`
-   (`extract_routes.rs:48`): "folded into schema-guided prompt in follow-up".
-   Må: bruke prompten i den skjemastyrte forespørselen til modellen.
+2. **Fri `prompt` på `/v1/extract`: levert** (5f1ac3ca2). Prompten brukes nå, også uten skjema. Verevon sender den videre.
 3. **Tekstdiff for overvåking.** `record_check` lagrer `artifact_id: None` på
    basislinjen (`change_routes.rs`), og diff-artefakten er bare fingeravtrykk-overgangen.
    Må: lagre markdown-artefakten for hver ny eller endret basislinje, sette
@@ -126,6 +125,29 @@ Hver linje peker til stedet i Quarry-koden, slik at arbeidet kan starte der.
     siden kan ikke lagre tidsplaner. Må: konfigurasjon, etter at utførelsen er verifisert.
 
 ## Endringer i denne runden
+
+Runden 2026-10-31 kobler punktene 1, 2 og 9 fra Quarry-listen til gatewayen og siden:
+
+- Gateway: `POST /api/v1/knowledge/scrape` videresender AI-format-objekter uendret
+  (testet med wiremock). Scrape med AI-format får 135 s klientgrense, over edgens 125 s.
+  `summary` som ren streng teller også som AI.
+- Gateway: uttrekk videresender `prompt` (tomt utelates, over 10 000 tegn gir 422).
+- Gateway: `credits` på jobbrader (`/api/ingestions/runs`) og jobbdetalj, camelCase, og
+  fraværende når Quarry ikke sender det.
+- Frontend: scrape med `json` (skjema og valgfri instruks), `summary`, `question` og
+  `highlights`. Svaret viser strukturert JSON, sammendrag, svar og høydepunkter med
+  tegnposisjoner. AI-rapporten viser status per format med produkttekst for ZDR_UNAVAILABLE,
+  BUDGET_EXHAUSTED, MODEL_RATE_LIMITED, MODEL_UNAVAILABLE, SCHEMA_INVALID og EMPTY_SOURCE,
+  og en tydelig merking av at svaret er data fra siden.
+- Frontend: uttrekk har et eget prompt-felt. Resultatet viser skjemastatus, skjemabrudd og
+  avkortet input per side.
+- Frontend: refusjoner navngir bryteren som er av: `QUARRY_EDGE__AI_FORMATS` for AI-formater,
+  `QUARRY_EDGE__SCRAPE_CAPTURE` for skjermbilde og PDF, og viser 403 `extract_ai_scope_required`
+  og 501 `model_plane_unavailable` / `model_lane_not_granted` med egen tekst.
+- Frontend: kjøringsdetaljen viser kreditter med «estimert» og «endelig», eller hvorfor de mangler.
+
+Ikke verifisert: en ekte AI-kall. Quarry-siden er testet mot en modelldobbel, og live har
+ikke AI-formater på. Skjermbilde av AI-svar på live er ikke tatt.
 
 - Gateway: nye ruter `GET /api/ingestions/jobs/{id}`, `GET /api/ingestions/jobs/{id}/errors`,
   `POST /api/ingestions/jobs/{id}/control` og `GET /api/ingestions/usage`

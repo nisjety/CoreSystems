@@ -230,7 +230,7 @@ pub(super) fn to_job_detail(job: &Value) -> Value {
         .into_iter()
         .map(|w| json!({ "code": str_at(&w, "code"), "message": str_at(&w, "message") }))
         .collect();
-    json!({
+    let mut detail = json!({
         "id": str_at(job, "job_id"),
         "kind": str_at(job, "kind"),
         "status": str_at(job, "status"),
@@ -256,7 +256,12 @@ pub(super) fn to_job_detail(job: &Value) -> Value {
         "scheduleId": str_or_null(job, "schedule_id"),
         "runId": str_or_null(job, "run_id"),
         "controllable": CONTROLLABLE_KINDS.contains(&str_at(job, "kind").as_str()),
-    })
+    });
+    // INNH-9: credits are present only while Quarry's job-credits flag is on.
+    if let Some(credits) = job.get("credits").and_then(super::runs::to_credits) {
+        detail["credits"] = credits;
+    }
+    detail
 }
 
 /// Reshape a Quarry `JobErrorsView`: failed pages, blocked pages and pages
@@ -310,6 +315,21 @@ pub(super) fn to_usage_view(usage: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// INNH-9: credits are passed through when Quarry sends them, and absent otherwise.
+    #[test]
+    fn job_detail_forwards_credits_only_when_present() {
+        let with = json!({
+            "job_id": "job_c", "kind": "batch", "status": "completed", "created_at": "t",
+            "credits": { "used": 3.0, "unit": "credit", "basis": "pages_fetched",
+                         "price_per_page": 1.0, "estimated": true, "final": true }
+        });
+        let view = to_job_detail(&with);
+        assert_eq!(view["credits"]["used"], 3.0);
+        assert_eq!(view["credits"]["final"], true);
+        let without = json!({ "job_id": "job_d", "kind": "batch", "status": "completed", "created_at": "t" });
+        assert!(to_job_detail(&without).get("credits").is_none());
+    }
 
     #[test]
     fn job_ids_must_be_quarry_job_ids() {

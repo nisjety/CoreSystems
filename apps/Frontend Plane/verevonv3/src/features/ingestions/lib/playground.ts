@@ -11,7 +11,15 @@ import type { WebSearchFilters } from '@/shared/api/search-client'
  */
 export type PlaygroundEndpoint = 'search' | 'map' | 'scrape' | 'extract' | 'crawl' | 'batch' | 'agent'
 
-export type ScrapeFormat = 'markdown' | 'html' | 'rawHtml' | 'links' | 'screenshot' | 'pdf'
+export type ScrapeFormat = 'markdown' | 'html' | 'rawHtml' | 'links' | 'screenshot' | 'pdf' | AiFormat
+
+/** Quarry's AI scrape formats (INNH-1): a model reads the page and answers. Off on live until the owner enables them. */
+export const AI_FORMATS = ['json', 'summary', 'question', 'highlights'] as const
+export type AiFormat = (typeof AI_FORMATS)[number]
+
+export function isAiFormat(format: string): format is AiFormat {
+  return (AI_FORMATS as readonly string[]).includes(format)
+}
 
 export type ExtractTemplate = 'general' | 'product' | 'article'
 
@@ -52,6 +60,17 @@ export type PlaygroundState = {
   actions: PlaygroundAction[]
   actionsOnError: 'abort' | 'continue'
   schema: string
+  /** Instructions for `/v1/extract`: alone one free-form JSON object, with a schema the extraction steered inside it. */
+  prompt: string
+  /** The `json` AI format: a JSON Schema the scrape's answer must satisfy. */
+  aiSchema: string
+  aiPrompt: string
+  aiSummaryMaxChars: string
+  aiSummaryLanguage: string
+  /** The `question` AI format. */
+  aiQuestion: string
+  /** The `highlights` AI format: what to find on the page. */
+  aiHighlightQuery: string
   maxPages: string
   maxDepth: string
   includePaths: string
@@ -90,6 +109,13 @@ export const defaultPlaygroundState: PlaygroundState = {
   actions: [],
   actionsOnError: 'abort',
   schema: '',
+  prompt: '',
+  aiSchema: '',
+  aiPrompt: '',
+  aiSummaryMaxChars: '',
+  aiSummaryLanguage: '',
+  aiQuestion: '',
+  aiHighlightQuery: '',
   maxPages: '10',
   maxDepth: '',
   includePaths: '',
@@ -139,7 +165,7 @@ export function boundedInt(value: string, min: number, max: number): number | un
   return Math.min(max, Math.max(min, parsed))
 }
 
-export type MissingInput = 'url' | 'urls' | 'query' | 'goal'
+export type MissingInput = 'url' | 'urls' | 'query' | 'goal' | 'ai_schema' | 'ai_question' | 'ai_query'
 
 /** What is missing before the endpoint can run, or `null` when it is ready. */
 export function missingInput(state: PlaygroundState): MissingInput | null {
@@ -151,9 +177,21 @@ export function missingInput(state: PlaygroundState): MissingInput | null {
     case 'agent':
       if (!state.url.trim()) return 'url'
       return state.goal.trim() ? null : 'goal'
+    case 'scrape':
+      if (!state.url.trim()) return 'url'
+      if (state.formats.includes('json') && !aiSchemaObject(state)) return 'ai_schema'
+      if (state.formats.includes('question') && !state.aiQuestion.trim()) return 'ai_question'
+      if (state.formats.includes('highlights') && !state.aiHighlightQuery.trim()) return 'ai_query'
+      return null
     default:
       return state.url.trim() ? null : 'url'
   }
+}
+
+/** The `json` AI format's schema when the text holds a JSON object; `null` otherwise. */
+function aiSchemaObject(state: PlaygroundState): Record<string, unknown> | null {
+  const parsed = parseSchema(state.aiSchema)
+  return parsed.ok && parsed.schema ? parsed.schema : null
 }
 
 export type SchemaParse =
@@ -234,11 +272,45 @@ const QUARRY_FORMAT: Record<'markdown' | 'html' | 'rawHtml' | 'links', string> =
   links: 'links',
 }
 
+/**
+ * The AI format objects the state asks for (INNH-1). A format without its input is
+ * left out here, and `missingInput` names it before anything is sent. Nothing AI is
+ * sent for an ingest: a model call would not reach Kunnskap anyway.
+ */
+export function aiFormatsFromState(state: PlaygroundState, ingest = false): Array<Record<string, unknown>> {
+  if (ingest) return []
+  const out: Array<Record<string, unknown>> = []
+  const schema = aiSchemaObject(state)
+  if (state.formats.includes('json') && schema) {
+    const prompt = state.aiPrompt.trim()
+    out.push({ type: 'json', schema, ...(prompt ? { prompt } : {}) })
+  }
+  if (state.formats.includes('summary')) {
+    const maxChars = boundedInt(state.aiSummaryMaxChars, 200, 10_000)
+    const language = state.aiSummaryLanguage.trim()
+    out.push({
+      type: 'summary',
+      ...(maxChars ? { max_chars: maxChars } : {}),
+      ...(language ? { language } : {}),
+    })
+  }
+  if (state.formats.includes('question') && state.aiQuestion.trim()) {
+    out.push({ type: 'question', question: state.aiQuestion.trim() })
+  }
+  if (state.formats.includes('highlights') && state.aiHighlightQuery.trim()) {
+    out.push({ type: 'highlights', query: state.aiHighlightQuery.trim() })
+  }
+  return out
+}
+
 /** The scrape body for `scrapeUrl` (`/api/v1/knowledge/scrape` → `/v1/scrape`). */
 export function scrapeRequestFromState(state: PlaygroundState, ingest = false): ScrapeRequest {
-  const formats = state.formats
-    .filter((format): format is keyof typeof QUARRY_FORMAT => format in QUARRY_FORMAT)
-    .map((format) => QUARRY_FORMAT[format])
+  const formats: Array<string | Record<string, unknown>> = [
+    ...state.formats
+      .filter((format): format is keyof typeof QUARRY_FORMAT => format in QUARRY_FORMAT)
+      .map((format) => QUARRY_FORMAT[format]),
+    ...aiFormatsFromState(state, ingest),
+  ]
   const includeTags = splitList(state.includeTags)
   const excludeTags = splitList(state.excludeTags)
   const waitMs = boundedInt(state.waitMs, 0, 30_000)
@@ -342,12 +414,14 @@ export function quarryRequestFor(state: PlaygroundState): QuarryRequest {
     }
     case 'extract': {
       const parsed = parseSchema(state.schema)
+      const prompt = state.prompt.trim()
       return {
         method: 'POST',
         path: '/v1/extract',
         body: {
           urls: [state.url.trim()],
           ...(parsed.ok && parsed.schema ? { schema: parsed.schema } : {}),
+          ...(prompt ? { prompt } : {}),
         },
       }
     }

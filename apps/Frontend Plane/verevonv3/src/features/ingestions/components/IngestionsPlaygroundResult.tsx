@@ -19,7 +19,8 @@ import { VerevonSegmented, VerevonSegmentedButton } from '@/shared/ui/verevon/Ve
 import type { DiscoveredPage } from '@/shared/api/knowledge-client'
 import type { WebSearchCitation, WebSearchResult } from '@/shared/api/search-client'
 import type { ExtractItem } from '@/shared/api/ingestions-client'
-import type { ScrapeView } from '@/features/ingestions/lib/scrape-view'
+import type { AiFormatEntry, AiReportView, ScrapeView } from '@/features/ingestions/lib/scrape-view'
+import { aiCodeMessage } from '@/features/ingestions/lib/errors'
 import { shortFingerprint } from '@/features/ingestions/lib/monitoring'
 import { formatDuration } from '@/features/ingestions/lib/runs'
 import {
@@ -202,7 +203,18 @@ function extractStatusLabel(status: string, tr: (no: string, en: string) => stri
   }
 }
 
-type ScrapeTab = 'markdown' | 'json' | 'links' | 'metadata' | 'html' | 'screenshot' | 'pdf'
+type ScrapeTab =
+  | 'markdown'
+  | 'json'
+  | 'links'
+  | 'metadata'
+  | 'html'
+  | 'screenshot'
+  | 'pdf'
+  | 'structured'
+  | 'summary'
+  | 'answer'
+  | 'highlights'
 
 function ScrapeResultView(props: {
   view: ScrapeView
@@ -223,8 +235,16 @@ function ScrapeResultView(props: {
       { id: 'links', label: `${tr('Lenker', 'Links')} (${props.view.links.length})` },
       { id: 'metadata', label: tr('Metadata', 'Metadata') },
     ]
+    if (props.view.json !== null) list.push({ id: 'structured', label: tr('Strukturert svar', 'Structured answer') })
+    if (props.view.summary) list.push({ id: 'summary', label: tr('Sammendrag', 'Summary') })
+    if (props.view.answer) list.push({ id: 'answer', label: tr('Svar', 'Answer') })
+    if (props.view.ai?.entries.some((entry) => entry.format === 'highlights')) {
+      list.push({ id: 'highlights', label: tr(`Høydepunkter (${props.view.highlights.length})`, `Highlights (${props.view.highlights.length})`) })
+    }
     if (html()) list.push({ id: 'html', label: 'HTML' })
-    if (props.view.captures?.screenshotInline || props.view.captures?.screenshotUrl) list.push({ id: 'screenshot', label: tr('Skjermbilde', 'Screenshot') })
+    if (props.view.captures?.screenshotInline || props.view.captures?.screenshotUrl) {
+      list.push({ id: 'screenshot', label: tr('Skjermbilde', 'Screenshot') })
+    }
     if (props.view.captures?.pdfUrl) list.push({ id: 'pdf', label: 'PDF' })
     return list
   })
@@ -238,11 +258,20 @@ function ScrapeResultView(props: {
         return JSON.stringify(props.view.metadata, null, 2)
       case 'html':
         return html() ?? ''
+      case 'structured':
+        return JSON.stringify(props.view.json, null, 2)
+      case 'summary':
+        return props.view.summary ?? ''
+      case 'answer':
+        return props.view.answer ?? ''
+      case 'highlights':
+        return props.view.highlights.map((span) => span.text).join('\n\n')
       default:
         return json()
     }
   }
   const ok = () => props.view.statusCode === null || (props.view.statusCode >= 200 && props.view.statusCode < 400)
+  const questionEntry = () => props.view.ai?.entries.find((entry) => entry.format === 'question')
 
   return (
     <div class="ingestions-result__body">
@@ -318,6 +347,7 @@ function ScrapeResultView(props: {
           </ul>
         </div>
       </Show>
+      <Show when={props.view.ai}>{(report) => <AiReportPanel report={report()} />}</Show>
 
       <div class="ingestions-result__tabs">
         <VerevonSegmented aria-label={tr('Visning', 'View')}>
@@ -333,9 +363,9 @@ function ScrapeResultView(props: {
         <Show when={tab() !== 'screenshot' && tab() !== 'pdf'}>
           <CopyButton text={tabText} />
           <DownloadButton
-            filename={tab() === 'markdown' ? 'scrape.md' : tab() === 'html' ? 'scrape.html' : tab() === 'links' ? 'links.txt' : 'scrape.json'}
+            filename={tab() === 'markdown' ? 'scrape.md' : tab() === 'html' ? 'scrape.html' : tab() === 'links' ? 'links.txt' : tab() === 'summary' || tab() === 'answer' || tab() === 'highlights' ? 'scrape.txt' : 'scrape.json'}
             content={tabText}
-            type={tab() === 'markdown' ? 'text/markdown' : tab() === 'html' ? 'text/html' : tab() === 'links' ? 'text/plain' : 'application/json'}
+            type={tab() === 'markdown' ? 'text/markdown' : tab() === 'html' ? 'text/html' : tab() === 'links' || tab() === 'summary' || tab() === 'answer' || tab() === 'highlights' ? 'text/plain' : 'application/json'}
           />
         </Show>
         <Show when={tab() === 'links' && props.view.links.length > 0}>
@@ -367,6 +397,41 @@ function ScrapeResultView(props: {
         </Show>
         <Show when={tab() === 'html'}>
           <pre class="ingestions-json-pre">{html()}</pre>
+        </Show>
+        <Show when={tab() === 'structured'}>
+          <div class="ingestions-ai-answer">
+            <span class="ingestions-status ingestions-status--info">{tr('Ikke verifisert: generert fra sidetekst', 'Not verified: generated from page text')}</span>
+            <pre class="ingestions-json-pre">{JSON.stringify(props.view.json, null, 2)}</pre>
+          </div>
+        </Show>
+        <Show when={tab() === 'summary'}>
+          <div class="ingestions-ai-answer">
+            <span class="ingestions-status ingestions-status--info">{tr('Ikke verifisert: generert fra sidetekst', 'Not verified: generated from page text')}</span>
+            <p>{props.view.summary}</p>
+          </div>
+        </Show>
+        <Show when={tab() === 'answer'}>
+          <div class="ingestions-ai-answer">
+            <span class="ingestions-status ingestions-status--info">{tr('Ikke verifisert: generert fra sidetekst', 'Not verified: generated from page text')}</span>
+            <p>{props.view.answer}</p>
+            <Show when={questionEntry()?.grounded === false}>
+              <small class="ingestions-muted">{tr('Sitatet modellen støtter svaret på er ikke ordrett på siden.', 'The quote the model rests the answer on is not verbatim on the page.')}</small>
+            </Show>
+          </div>
+        </Show>
+        <Show when={tab() === 'highlights'}>
+          <ol class="ingestions-highlight-list">
+            <For each={props.view.highlights} fallback={<li class="ingestions-muted">{tr('Ingen høydepunkter funnet på siden.', 'No highlights found on the page.')}</li>}>
+              {(span) => (
+                <li>
+                  <q>{span.text}</q>
+                  <small class="ingestions-mono">
+                    {span.start}–{span.end}
+                  </small>
+                </li>
+              )}
+            </For>
+          </ol>
         </Show>
         <Show when={tab() === 'links'}>
           <ol class="ingestions-link-list">
@@ -426,6 +491,75 @@ function ScrapeResultView(props: {
   )
 }
 
+const AI_FORMAT_LABELS: Record<AiFormatEntry['format'], (tr: (no: string, en: string) => string) => string> = {
+  json: (tr) => tr('Strukturert svar', 'Structured answer'),
+  summary: (tr) => tr('Sammendrag', 'Summary'),
+  question: (tr) => tr('Spørsmål', 'Question'),
+  highlights: (tr) => tr('Høydepunkter', 'Highlights'),
+}
+
+/** What each AI format did on this scrape: its status, the reason in product copy, and what the caller must check. */
+function AiReportPanel(props: { report: AiReportView }) {
+  const i18n = useI18n()
+  const tr = i18n.tr
+  return (
+    <section class="ingestions-ai-report" aria-label={tr('AI-rapport', 'AI report')}>
+      <h3>{tr('AI-rapport', 'AI report')}</h3>
+      <ul>
+        <For each={props.report.entries}>
+          {(entry) => (
+            <li>
+              <div class="ingestions-title-row">
+                <span
+                  class={cn(
+                    'ingestions-status',
+                    entry.status === 'ok' ? 'ingestions-status--success' : entry.status === 'skipped' ? 'ingestions-status--neutral' : 'ingestions-status--warning',
+                  )}
+                >
+                  {AI_FORMAT_LABELS[entry.format](tr)}: {entry.status === 'ok' ? tr('ok', 'ok') : entry.status === 'skipped' ? tr('hoppet over', 'skipped') : tr('feilet', 'failed')}
+                </span>
+                <Show when={entry.status === 'ok' && entry.untrustedSource}>
+                  <span class="ingestions-muted">{tr('data fra sidetekst', 'data from page text')}</span>
+                </Show>
+              </div>
+              <Show when={entry.status !== 'ok'}>
+                <p>{aiCodeMessage(entry.code, tr, entry.retryAfterSeconds)}</p>
+              </Show>
+              <Show when={entry.truncatedInput}>
+                <p>{tr('Siden var for lang: bare starten ble analysert.', 'The page was too long: only its start was analysed.')}</p>
+              </Show>
+              <Show when={entry.schemaValid === false}>
+                <p>{tr('Svaret bryter skjemaet. Feltene under er der det feiler.', 'The answer breaks the schema. The fields below are where it fails.')}</p>
+                <ul class="ingestions-issue-list">
+                  <For each={entry.schemaIssues}>{(issue) => <li class="ingestions-mono">{`${issue.path || '/'}: ${issue.code}`}</li>}</For>
+                </ul>
+              </Show>
+              <Show when={entry.format === 'question' && entry.found === false}>
+                <p>{tr('Svaret finnes ikke på siden.', 'The page does not answer the question.')}</p>
+              </Show>
+              <Show when={entry.format === 'question' && entry.grounded === false && entry.found !== false}>
+                <p>{tr('Sitatet svaret bygger på er ikke ordrett på siden.', 'The quote the answer rests on is not verbatim on the page.')}</p>
+              </Show>
+              <Show when={entry.format === 'highlights' && (entry.dropped ?? 0) > 0}>
+                <p>{tr(`${entry.dropped} sitater ble fjernet fordi de ikke står på siden.`, `${entry.dropped} quotes were dropped because they are not on the page.`)}</p>
+              </Show>
+              <Show when={entry.repair && entry.repair !== 'none'}>
+                <p class="ingestions-muted">{tr(`Svaret ble reparert (${entry.repair}) før det ble vist.`, `The answer was repaired (${entry.repair}) before it was shown.`)}</p>
+              </Show>
+            </li>
+          )}
+        </For>
+      </ul>
+      <p class="ingestions-muted">
+        {tr(
+          `Kall til modellen: ${props.report.total.calls} · tokens inn ${props.report.total.inputTokens}, ut ${props.report.total.outputTokens}. Ingen belastning for tokens i denne versjonen.`,
+          `Model calls: ${props.report.total.calls} · tokens in ${props.report.total.inputTokens}, out ${props.report.total.outputTokens}. Tokens are not billed in this version.`,
+        )}
+      </p>
+    </section>
+  )
+}
+
 function ExtractResultView(props: { url: string; items: ExtractItem[]; schemaUsed: boolean; raw: unknown }) {
   const i18n = useI18n()
   const tr = i18n.tr
@@ -446,7 +580,7 @@ function ExtractResultView(props: { url: string; items: ExtractItem[]; schemaUse
         <div class="ingestions-min-width">
           <div class="ingestions-title-row">
             <Sparkles class="size-4" strokeWidth={1.9} />
-            <h3>{props.schemaUsed ? tr('Strukturert uttrekk', 'Structured extraction') : tr('Uttrekk som Markdown', 'Extraction as Markdown')}</h3>
+            <h3>{props.schemaUsed ? tr('Strukturert uttrekk', 'Structured extraction') : tr('Uttrekk', 'Extraction')}</h3>
           </div>
           <span class="ingestions-result__url">{props.url}</span>
         </div>
@@ -467,7 +601,7 @@ function ExtractResultView(props: { url: string; items: ExtractItem[]; schemaUse
       <div class="ingestions-result__viewport">
         <Show when={tab() === 'data'} fallback={<pre class="ingestions-json-pre">{text()}</pre>}>
           <ul class="ingestions-extract-list">
-            <For each={data()} fallback={<li class="ingestions-muted">{tr('Quarry ga ingen resultater.', 'Quarry returned no results.')}</li>}>
+            <For each={props.items} fallback={<li class="ingestions-muted">{tr('Quarry ga ingen resultater.', 'Quarry returned no results.')}</li>}>
               {(item) => (
                 <li class="ingestions-extract-item">
                   <div class="ingestions-title-row ingestions-title-row--spread">
@@ -478,11 +612,27 @@ function ExtractResultView(props: { url: string; items: ExtractItem[]; schemaUse
                       {extractStatusLabel(item.status, tr)}
                     </span>
                   </div>
-                  <Show when={item.error}>{(message) => <div class="ingestions-alert">{message()}</div>}</Show>
-                  <Show when={item.data !== null}>
+                  <Show when={item.schema_valid === true}>
+                    <span class="ingestions-status ingestions-status--success">{tr('Følger skjemaet', 'Follows the schema')}</span>
+                  </Show>
+                  <Show when={item.schema_valid === false}>
+                    <div class="ingestions-alert">
+                      {tr('Svaret bryter skjemaet. Feltene under er der det feiler.', 'The answer breaks the schema. The fields below are where it fails.')}
+                      <ul class="ingestions-issue-list">
+                        <For each={item.schema_issues ?? []}>{(issue) => <li class="ingestions-mono">{issue}</li>}</For>
+                      </ul>
+                    </div>
+                  </Show>
+                  <Show when={item.truncated_input}>
+                    <p class="ingestions-muted">{tr('Siden var for lang: bare starten ble analysert.', 'The page was too long: only its start was analysed.')}</p>
+                  </Show>
+                  <Show when={item.error}>
+                    {(message) => <div class="ingestions-alert">{/^[A-Z_]+$/.test(message()) ? aiCodeMessage(message(), tr) : message()}</div>}
+                  </Show>
+                  <Show when={item.data !== null && item.data !== undefined}>
                     <pre class="ingestions-json-pre">{JSON.stringify(item.data, null, 2)}</pre>
                   </Show>
-                  <Show when={item.data === null && item.markdown}>
+                  <Show when={(item.data === null || item.data === undefined) && item.markdown}>
                     <pre class="ingestions-prose-pre">{item.markdown}</pre>
                   </Show>
                 </li>

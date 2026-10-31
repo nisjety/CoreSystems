@@ -300,6 +300,12 @@ export default function VerevonIngestionsPage() {
         return tr('Beskriv hva agenten skal oppnå.', 'Describe what the agent should achieve.')
       case 'url':
         return tr('Angi en mål-URL.', 'Enter a target URL.')
+      case 'ai_schema':
+        return tr('Skriv et JSON-skjema (et objekt) for det strukturerte svaret.', 'Write a JSON schema (an object) for the structured answer.')
+      case 'ai_question':
+        return tr('Skriv spørsmålet du vil stille til siden.', 'Write the question you want to ask the page.')
+      case 'ai_query':
+        return tr('Skriv hva som skal finnes på siden.', 'Write what should be found on the page.')
     }
   }
 
@@ -321,6 +327,10 @@ export default function VerevonIngestionsPage() {
         )
         return
       }
+    }
+    if (state.endpoint === 'extract' && state.prompt.trim().length > 10_000) {
+      setPlaygroundError(tr('Instruksen kan være høyst 10 000 tegn.', 'The instruction may be at most 10,000 characters.'))
+      return
     }
     let schema: ReturnType<typeof parseSchema> | null = null
     if (state.endpoint === 'extract') {
@@ -354,10 +364,12 @@ export default function VerevonIngestionsPage() {
         }
         case 'extract': {
           const schemaObject = schema?.ok ? schema.schema : null
+          const prompt = state.prompt.trim()
           const created = await createIngestionRun({
             kind: 'extract',
             url: state.url.trim(),
             ...(schemaObject ? { schema: schemaObject } : {}),
+            ...(prompt ? { prompt } : {}),
           })
           const items = created.evidence?.kind === 'extract' ? (created.evidence.results as ExtractItem[]) : []
           setPlaygroundResult({ kind: 'extract', url: state.url.trim(), items, schemaUsed: schemaObject !== null, raw: created })
@@ -433,7 +445,7 @@ export default function VerevonIngestionsPage() {
       const fallback = { no: 'Kjøringen kunne ikke fullføres.', en: 'The run could not be completed.' }
       if (!isAsyncEndpoint(state.endpoint)) {
         setPlaygroundResult(null)
-        setPlaygroundError(playgroundErrorMessage(caught, tr, fallback, state.endpoint))
+        setPlaygroundError(playgroundErrorMessage(caught, tr, fallback, { endpoint: state.endpoint, requested: state.formats }))
         return
       }
       // A durable hand-off can fail (e.g. a transient 502) after the job was
@@ -469,7 +481,7 @@ export default function VerevonIngestionsPage() {
         })
       } else if (reconciled) {
         setPlaygroundResult(null)
-        setPlaygroundError(playgroundErrorMessage(caught, tr, fallback))
+        setPlaygroundError(playgroundErrorMessage(caught, tr, fallback, { endpoint: state.endpoint }))
       } else {
         setPlaygroundResult(null)
         setPlaygroundError(

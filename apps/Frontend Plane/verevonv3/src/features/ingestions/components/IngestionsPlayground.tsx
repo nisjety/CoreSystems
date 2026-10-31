@@ -30,6 +30,7 @@ import {
   codeSnippet,
   endpointGroups,
   extractTemplateSchema,
+  isAiFormat,
   newAction,
   quarryRequestFor,
   type ActionType,
@@ -69,6 +70,10 @@ const formatOptions: Array<{ id: ScrapeFormat; icon: Component<LucideProps> }> =
   { id: 'links', icon: Link },
   { id: 'screenshot', icon: Image },
   { id: 'pdf', icon: FileText },
+  { id: 'json', icon: Sparkles },
+  { id: 'summary', icon: FileText },
+  { id: 'question', icon: Search },
+  { id: 'highlights', icon: ScanSearch },
 ]
 
 const actionTypes: ActionType[] = ['wait', 'click', 'write', 'press', 'scroll', 'select']
@@ -102,6 +107,14 @@ function formatLabel(id: ScrapeFormat, tr: Tr) {
       return tr('Skjermbilde', 'Screenshot')
     case 'pdf':
       return 'PDF'
+    case 'json':
+      return tr('Strukturert svar (JSON)', 'Structured answer (JSON)')
+    case 'summary':
+      return tr('Sammendrag', 'Summary')
+    case 'question':
+      return tr('Spørsmål til siden', 'Question about the page')
+    case 'highlights':
+      return tr('Høydepunkter', 'Highlights')
   }
 }
 
@@ -378,6 +391,25 @@ export function IngestionsPlayground(props: {
           </div>
         </Show>
 
+        <Show when={endpoint() === 'extract'}>
+          <div class="ingestions-field">
+            <label for="ingestions-extract-prompt">{tr('Instruks (valgfritt)', 'Instruction (optional)')}</label>
+            <VerevonTextarea
+              id="ingestions-extract-prompt"
+              rows={3}
+              value={props.state.prompt}
+              onInput={(event) => props.onChange({ prompt: event.currentTarget.value })}
+              placeholder={tr(
+                'Uten skjema: ett fritt JSON-objekt. Med skjema: styrer uttrekket innenfor skjemaet.',
+                'Without a schema: one free-form JSON object. With a schema: steers the extraction within it.',
+              )}
+            />
+            <small class="ingestions-field__help">
+              {tr(`${props.state.prompt.trim().length} av 10 000 tegn`, `${props.state.prompt.trim().length} of 10,000 characters`)}
+            </small>
+          </div>
+        </Show>
+
         <div class="ingestions-pg__toolbar">
           <Show when={['scrape', 'crawl', 'map', 'search'].includes(endpoint())}>
             <button
@@ -461,6 +493,103 @@ export function IngestionsPlayground(props: {
                 'Markdown always comes along, so the preview has text. Screenshot and PDF must be switched on in Quarry-edge; when they are off, the result names the switch that is missing.',
               )}
             </p>
+            <Show when={props.state.formats.some(isAiFormat)}>
+              <div class="ingestions-ai-inputs">
+                <p class="ingestions-pg__note">
+                  {tr(
+                    'AI-formatene lar en modell lese siden. Svaret er data fra siden, ikke verifisert fakta. Quarry må ha AI-formater slått på; er de av, sier resultatet hvilken bryter som mangler.',
+                    'The AI formats let a model read the page. The answer is data from the page, not verified fact. Quarry must have AI formats switched on; when they are off, the result names the switch that is missing.',
+                  )}
+                </p>
+                <Show when={props.state.formats.includes('json')}>
+                  <div class="ingestions-field">
+                    <span class="ingestions-field__row">
+                      <label for="ingestions-ai-schema">{tr('JSON-skjema for svaret', 'JSON schema for the answer')}</label>
+                      <span class="ingestions-pill-row ingestions-pill-row--inline">
+                        <For each={['general', 'product', 'article'] as ExtractTemplate[]}>
+                          {(template) => (
+                            <button
+                              type="button"
+                              class="ingestions-chip-button"
+                              onClick={() => props.onChange({ aiSchema: extractTemplateSchema(template) })}
+                            >
+                              {template === 'general' ? tr('Generell', 'General') : template === 'product' ? tr('Produkt', 'Product') : tr('Artikkel', 'Article')}
+                            </button>
+                          )}
+                        </For>
+                      </span>
+                    </span>
+                    <VerevonTextarea
+                      id="ingestions-ai-schema"
+                      class="ingestions-mono"
+                      rows={6}
+                      value={props.state.aiSchema}
+                      onInput={(event) => props.onChange({ aiSchema: event.currentTarget.value })}
+                      placeholder={tr('Et JSON-objekt som beskriver feltene du vil ha.', 'A JSON object describing the fields you want.')}
+                    />
+                    <small class="ingestions-field__help">
+                      {tr(
+                        'Quarry godtar et utvalg av JSON Schema-nøkkelord. Svaret valideres mot skjemaet før det vises.',
+                        'Quarry accepts a subset of JSON Schema keywords. The answer is checked against the schema before it is shown.',
+                      )}
+                    </small>
+                  </div>
+                  <div class="ingestions-field">
+                    <label for="ingestions-ai-json-prompt">{tr('Instruks til modellen (valgfritt)', 'Instruction to the model (optional)')}</label>
+                    <VerevonTextarea
+                      id="ingestions-ai-json-prompt"
+                      rows={2}
+                      value={props.state.aiPrompt}
+                      onInput={(event) => props.onChange({ aiPrompt: event.currentTarget.value })}
+                    />
+                  </div>
+                </Show>
+                <Show when={props.state.formats.includes('summary')}>
+                  <div class="ingestions-field">
+                    <label for="ingestions-ai-summary-length">{tr('Lengde på sammendrag (tegn)', 'Summary length (characters)')}</label>
+                    <VerevonInput
+                      id="ingestions-ai-summary-length"
+                      type="number"
+                      min="200"
+                      max="10000"
+                      value={props.state.aiSummaryMaxChars}
+                      onInput={(event) => props.onChange({ aiSummaryMaxChars: event.currentTarget.value })}
+                      placeholder="2000"
+                    />
+                    <label for="ingestions-ai-summary-language">{tr('Språk (valgfritt)', 'Language (optional)')}</label>
+                    <VerevonInput
+                      id="ingestions-ai-summary-language"
+                      value={props.state.aiSummaryLanguage}
+                      onInput={(event) => props.onChange({ aiSummaryLanguage: event.currentTarget.value })}
+                      placeholder={tr('Sidens eget språk', "The page's own language")}
+                    />
+                  </div>
+                </Show>
+                <Show when={props.state.formats.includes('question')}>
+                  <div class="ingestions-field">
+                    <label for="ingestions-ai-question">{tr('Spørsmålet til siden', 'The question about the page')}</label>
+                    <VerevonTextarea
+                      id="ingestions-ai-question"
+                      rows={2}
+                      value={props.state.aiQuestion}
+                      onInput={(event) => props.onChange({ aiQuestion: event.currentTarget.value })}
+                      placeholder={tr('Hva koster den billigste modellen, og er den på lager?', 'What does the cheapest model cost, and is it in stock?')}
+                    />
+                  </div>
+                </Show>
+                <Show when={props.state.formats.includes('highlights')}>
+                  <div class="ingestions-field">
+                    <label for="ingestions-ai-highlight-query">{tr('Hva skal finnes på siden?', 'What should be found on the page?')}</label>
+                    <VerevonInput
+                      id="ingestions-ai-highlight-query"
+                      value={props.state.aiHighlightQuery}
+                      onInput={(event) => props.onChange({ aiHighlightQuery: event.currentTarget.value })}
+                      placeholder={tr('priser, lagerstatus, garanti', 'prices, stock status, warranty')}
+                    />
+                  </div>
+                </Show>
+              </div>
+            </Show>
           </div>
         </Show>
 

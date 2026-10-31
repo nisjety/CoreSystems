@@ -20,6 +20,8 @@ export type RunItem = {
     query?: string | null
   }
   stats: Record<string, unknown>
+  /** Credits the job has used (INNH-9). Absent while Quarry's job-credits flag is off. */
+  credits?: JobCredits
   /** Who started the job: `{ type, actor?, ref? }` as Quarry records it (`manual`, `schedule`, `api`, …). */
   origin?: { type: string; actor?: string | null; ref?: string | null } | null
   /** The schedule that fired this job, when it was not started by hand. */
@@ -143,6 +145,17 @@ export type RunCreateResult = {
   evidence?: ManualEvidence
 }
 
+/** Quarry's per-job credit figure (INNH-9): pages fetched times the page price. A Quarry estimate, not an invoice. */
+export type JobCredits = {
+  used: number
+  unit: string
+  basis: string
+  pricePerPage: number
+  estimated: boolean
+  /** False while the job can still fetch pages; a late page event can still raise `used`. */
+  final: boolean
+}
+
 export type RunCreateRequest =
   | {
        kind: 'batch'
@@ -151,8 +164,10 @@ export type RunCreateRequest =
   | {
        kind: 'extract'
        url: string
-       /** JSON Schema for structured extraction; quarry-edge reads nothing else. */
+       /** JSON Schema for structured extraction. */
        schema?: Record<string, unknown> | string
+       /** Instructions for the model (1 to 10,000 characters). Alone, one free-form JSON object; with a schema, it steers the extraction within it. */
+       prompt?: string
      }
   | {
        kind: string
@@ -166,6 +181,8 @@ export type JobDetail = {
   status: string
   phase: string
   terminal: boolean
+  /** Present only while Quarry's job-credits flag is on. */
+  credits?: JobCredits
   origin: RunItem['origin']
   createdAt: string
   finishedAt: string | null
@@ -214,6 +231,12 @@ export type ExtractItem = {
   markdown?: string | null
   structured?: unknown
   error?: string | null
+  /** Present when a schema was sent and the model answered. `status` stays `ok` either way. */
+  schema_valid?: boolean
+  /** Why `data` does not conform to the schema, one line per issue. */
+  schema_issues?: string[]
+  /** True when the page was longer than the input cap and only its start was read. */
+  truncated_input?: boolean
 }
 
 export type ScheduleCreateRequest = {

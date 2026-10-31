@@ -229,6 +229,27 @@ export function originLabel(job: Pick<JobDetail, 'origin' | 'scheduleId'> | null
   }
 }
 
+/** Quarry's credit figure for a job, or why there is none. Credits are an estimate of page fetches, never an invoice. */
+export function creditsLabel(job: Pick<JobDetail, 'kind' | 'credits'> | null, tr: Tr): string {
+  if (!job) return '—'
+  const credits = job.credits
+  if (credits) {
+    const used = Math.round(credits.used * 10) / 10
+    const state = credits.final ? tr('endelig', 'final') : tr('kan fortsatt øke', 'can still rise')
+    return tr(
+      `${used} kreditter, ${credits.pricePerPage} per side · ${state} · estimert`,
+      `${used} credits, ${credits.pricePerPage} per page · ${state} · estimated`,
+    )
+  }
+  if (['crawl', 'batch', 'scrape', 'extract'].includes(job.kind)) {
+    return tr(
+      'Ikke tilgjengelig: QUARRY_CONTROL__JOB_CREDITS er av på Quarry.',
+      'Not available: QUARRY_CONTROL__JOB_CREDITS is off on Quarry.',
+    )
+  }
+  return tr('Beregnes ikke for denne jobbtypen.', 'Not calculated for this kind of job.')
+}
+
 function RunDetail(props: {
   run: RunItem
   evidence: EvidenceTimeline | null
@@ -383,6 +404,8 @@ function RunDetail(props: {
           <dd>{formatDuration(runDurationMs(props.run), tr)}</dd>
           <dt>{tr('Fase', 'Phase')}</dt>
           <dd>{job()?.phase ?? props.run.phase ?? '—'}</dd>
+          <dt>{tr('Kreditter', 'Credits')}</dt>
+          <dd>{creditsLabel(job(), tr)}</dd>
           <dt>{tr('Fremdrift', 'Progress')}</dt>
           <dd>
             {props.run.progress.completed ?? 0}

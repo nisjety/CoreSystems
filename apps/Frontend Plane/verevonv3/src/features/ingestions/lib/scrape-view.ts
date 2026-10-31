@@ -8,6 +8,32 @@ import { readScrapeCaptures, type ScrapeCaptureView, type ScrapeResult } from '@
  */
 export type ScrapeLink = { href: string; text?: string }
 
+/** One exact span of the page text the highlights format found (INNH-1). Offsets are char positions. */
+export type ScrapeHighlight = { text: string; start: number; end: number }
+
+/** What one AI format did, as the edge reports it (INNH-1). A failure is a status, never an HTTP error. */
+export type AiFormatEntry = {
+  format: 'json' | 'summary' | 'question' | 'highlights'
+  status: 'ok' | 'error' | 'skipped'
+  code: string | null
+  reason: string | null
+  model: string | null
+  retryAfterSeconds: number | null
+  untrustedSource: boolean
+  truncatedInput: boolean
+  schemaValid: boolean | null
+  schemaIssues: Array<{ path: string; code: string }>
+  repair: string | null
+  found: boolean | null
+  grounded: boolean | null
+  dropped: number | null
+}
+
+export type AiReportView = {
+  entries: AiFormatEntry[]
+  total: { calls: number; inputTokens: number; outputTokens: number }
+}
+
 export type ScrapeView = {
   requestedUrl: string
   finalUrl: string
@@ -30,6 +56,16 @@ export type ScrapeView = {
   warnings: string[]
   captures: ScrapeCaptureView | undefined
   metadata: Record<string, unknown>
+  /** The `json` AI format's result, schema-valid when `ai.json.status` is ok. */
+  json: unknown
+  /** The `summary` AI format's result. */
+  summary: string | null
+  /** The `question` AI format's answer, when the page answers it. */
+  answer: string | null
+  /** The `highlights` AI format's spans, in page order. */
+  highlights: ScrapeHighlight[]
+  /** Per-format status and the call total; `null` when no AI format was asked for. */
+  ai: AiReportView | null
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -87,5 +123,62 @@ export function toScrapeView(result: ScrapeResult | unknown, requestedUrl: strin
     warnings,
     captures: readScrapeCaptures(result),
     metadata,
+    json: data.json ?? null,
+    summary: text(data.summary) || null,
+    answer: text(data.answer) || null,
+    highlights: readHighlights(data.highlights),
+    ai: readAiReport(data.ai),
+  }
+}
+
+function readHighlights(value: unknown): ScrapeHighlight[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((entry) => record(entry))
+    .filter((entry) => typeof entry.text === 'string' && num(entry.start) !== null && num(entry.end) !== null)
+    .map((entry) => ({ text: text(entry.text), start: num(entry.start) ?? 0, end: num(entry.end) ?? 0 }))
+}
+
+const AI_FORMAT_NAMES: AiFormatEntry['format'][] = ['json', 'summary', 'question', 'highlights']
+
+/** Reads `data.ai`. Every field is optional on the wire, so each one is read defensively. */
+function readAiReport(value: unknown): AiReportView | null {
+  const report = record(value)
+  const entries: AiFormatEntry[] = []
+  for (const format of AI_FORMAT_NAMES) {
+    const entry = record(report[format])
+    if (Object.keys(entry).length === 0) continue
+    const status = entry.status === 'ok' || entry.status === 'error' || entry.status === 'skipped' ? entry.status : 'error'
+    entries.push({
+      format,
+      status,
+      code: typeof entry.code === 'string' ? entry.code : null,
+      reason: typeof entry.reason === 'string' ? entry.reason : null,
+      model: typeof entry.model === 'string' ? entry.model : null,
+      retryAfterSeconds: num(entry.retry_after_s),
+      untrustedSource: entry.untrusted_source === true,
+      truncatedInput: entry.truncated_input === true,
+      schemaValid: typeof entry.schema_valid === 'boolean' ? entry.schema_valid : null,
+      schemaIssues: Array.isArray(entry.schema_issues)
+        ? entry.schema_issues
+            .map((issue) => record(issue))
+            .filter((issue) => typeof issue.path === 'string')
+            .map((issue) => ({ path: text(issue.path), code: text(issue.code) }))
+        : [],
+      repair: typeof entry.repair === 'string' ? entry.repair : null,
+      found: typeof entry.found === 'boolean' ? entry.found : null,
+      grounded: typeof entry.grounded === 'boolean' ? entry.grounded : null,
+      dropped: num(entry.dropped),
+    })
+  }
+  if (entries.length === 0) return null
+  const total = record(report.total)
+  return {
+    entries,
+    total: {
+      calls: num(total.calls) ?? 0,
+      inputTokens: num(total.input_tokens) ?? 0,
+      outputTokens: num(total.output_tokens) ?? 0,
+    },
   }
 }

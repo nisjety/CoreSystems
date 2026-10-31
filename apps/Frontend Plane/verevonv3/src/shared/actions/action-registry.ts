@@ -908,6 +908,8 @@ const ingestionsCreateRunInput = z
     url: z.string().url().optional(),
     // Extract only: a JSON Schema object (or the same document as text).
     schema: z.union([z.record(z.string(), z.unknown()), z.string()]).optional(),
+    // Extract only: instructions for the model (1 to 10,000 characters after trimming).
+    prompt: z.string().trim().max(10_000).optional(),
   })
   .refine((value) => (value.kind === 'batch' ? (value.urls?.length ?? 0) > 0 : !!value.url), {
     message: "kind 'batch' requires a non-empty 'urls' array; any other kind requires 'url'",
