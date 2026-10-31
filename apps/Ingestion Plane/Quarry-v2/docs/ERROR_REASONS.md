@@ -269,3 +269,22 @@ Field errors (400, in `details.fields[]`, not in `details.reason`; each carries 
 | `job_result_urls` | `job_result_urls` | the caller is under Zero Data Retention | read the job's counts on `GET /v1/crawl/{id}` or `/v1/batch/{id}`; there are no page rows for a ZDR caller |
 
 The same routes answer 501 `UNSUPPORTED` while `QUARRY_EDGE__JOB_RESULTS` is off (checked before the refusal), and 400 `BAD_REQUEST` with `details.field` `limit`, `after_seq` or `latest`. `GET /v1/artifacts` answers 400 with `details.field` `kind` or `run_id` for a value that is not an artifact kind or a run id.
+
+## `POST /v1/crawl`: `sitemap` and `scrape_options` field errors (INNH-6, 2026-10-31)
+
+400 `BAD_REQUEST`, `details.fields[] {path, code, message}`; the path is the spelling the caller sent, prefixed `scrape_options.` for the object's own fields; a message never echoes a value.
+
+| Path | Code | When |
+|---|---|---|
+| `sitemap` | `unsupported_option` | `include` or `only` (or any non-`skip` value) while `QUARRY_EDGE__CRAWL_SITEMAP` is off, or while the crawl scope switch is off (`QUARRY_EDGE__CRAWL_SCOPE_MODE=off`) |
+| `sitemap` | `invalid_option`, `invalid_type` | flag on: a string other than `skip`, `include`, `only`; not a string |
+| `scrape_options` | `unsupported_option` | `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS` is off (any value) |
+| `scrape_options` | `invalid_type` | flag on: not an object |
+| `scrape_options.<key>` | `unsupported_option` | `actions`, `actions_on_error`, `max_inline_bytes`, `screenshot`, `pdf`, `json`, `summary`, `question`, `highlights`: they cannot apply to every page |
+| `scrape_options.formats[i]` | `unsupported_option`, `unsupported_format` | a capture, object or AI format; an unknown name |
+| `scrape_options.<key>` | `reserved_field`, `unknown_field` | a key `/v1/scrape` refuses (`headers`, `proxy`, ...); an unknown key in strict mode (a warning in lenient) |
+| `scrape_options.include_tags[i]`, `.exclude_tags[i]` | `empty`, `too_long`, `too_many` | the `/v1/scrape` selector limits (32 selectors, 256 characters) |
+| `scrape_options.timeout_ms` | `out_of_range` | not between 1000 and 55000 |
+| `scrape_options.extractor` | `unsupported_extractor`, `conflicts_with_only_main_content` | the shared validator's codes |
+
+Terminal events of a crawl: `run_failed` with `code` `sitemap_unavailable` (a `sitemap: only` crawl whose discovery failed) or `edge_scrape_options_unsupported` (the edge did not echo `scrape_applied`). `POST /v1/internal/crawl/sitemap` answers 501 `UNSUPPORTED` while `QUARRY_EDGE__CRAWL_SITEMAP` is off; `run_page` answers 400 with `details.fields` under `scrape.` for options that do not pass the same checks.

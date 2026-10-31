@@ -13,7 +13,10 @@
 //!   two spellings of one option is a 400.
 //! - Options that are known but not built yet (`sitemap` other than `skip`,
 //!   `ignore_query_parameters`, `scrape_options`) are a 400 `unsupported_option`
-//!   in both modes, so a caller learns that the option did nothing.
+//!   in both modes, so a caller learns that the option did nothing. INNH-6 builds
+//!   `sitemap` (`include`, `only`) and `scrape_options` behind the default-off
+//!   flags `QUARRY_EDGE__CRAWL_SITEMAP` and `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS`;
+//!   with a flag off the 400 stays exactly as it was.
 //! - `ignore_robots_txt: true` is a 403 `policy_denied` (WS14.S7 owns the
 //!   entitlement that would allow it; until then it is never allowed).
 //! - Patterns obey the D3 caps (100 patterns, 512 characters each, 8192 in total)
@@ -33,6 +36,9 @@ use quarry_core::crawl_scope::{
     MAX_PATTERN_TOTAL_CHARS,
 };
 use serde_json::{Map, Value};
+
+use crate::crawl_policy::CrawlFeatures;
+use crate::crawl_scrape::CrawlScrapeOptions;
 
 /// The environment name. Read once through [`CrawlRequestSettings::current`].
 pub const ENV_REQUEST_VALIDATION: &str = "QUARRY_EDGE__CRAWL_REQUEST_VALIDATION";
@@ -86,6 +92,8 @@ pub const RESERVED_KEYS: &[&str] = &[
 pub struct CrawlRequestSettings {
     /// `strict` refuses unknown keys and `max_pages: 0`. `lenient` (default) warns.
     pub strict: bool,
+    /// INNH-6: which of the two default-off options the handoff accepts.
+    pub features: CrawlFeatures,
 }
 
 impl CrawlRequestSettings {
@@ -94,13 +102,22 @@ impl CrawlRequestSettings {
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
         let value = lookup(ENV_REQUEST_VALIDATION).map(|value| value.trim().to_ascii_lowercase());
         match value.as_deref() {
-            None | Some("") | Some("lenient") => Self { strict: false },
-            Some("strict") => Self { strict: true },
+            None | Some("") | Some("lenient") => Self {
+                strict: false,
+                features: CrawlFeatures::from_lookup(&lookup),
+            },
+            Some("strict") => Self {
+                strict: true,
+                features: CrawlFeatures::from_lookup(&lookup),
+            },
             Some(_) => {
                 tracing::warn!(
                     "QUARRY_EDGE__CRAWL_REQUEST_VALIDATION is not lenient or strict; using lenient"
                 );
-                Self { strict: false }
+                Self {
+                    strict: false,
+                    features: CrawlFeatures::from_lookup(&lookup),
+                }
             }
         }
     }
@@ -109,6 +126,49 @@ impl CrawlRequestSettings {
     pub fn current() -> Self {
         static SETTINGS: OnceLock<CrawlRequestSettings> = OnceLock::new();
         *SETTINGS.get_or_init(|| Self::from_lookup(|name| std::env::var(name).ok()))
+    }
+}
+
+/// INNH-6a: what a crawl does with the site's sitemaps. The wire values are the
+/// Firecrawl ones. Absent is `skip`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SitemapMode {
+    /// Follow links only (today's behaviour).
+    #[default]
+    Skip,
+    /// Seed the frontier with the sitemap's URLs as well as following links.
+    Include,
+    /// Crawl the sitemap's URLs and do not follow the seed page's links.
+    Only,
+}
+
+impl SitemapMode {
+    /// The wire name.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Skip => "skip",
+            Self::Include => "include",
+            Self::Only => "only",
+        }
+    }
+}
+
+/// The wire code of a shared-validator error, as a static string for [`RequestField`].
+fn static_code(code: &str) -> &'static str {
+    match code {
+        "invalid_type" => "invalid_type",
+        "unsupported_format" => "unsupported_format",
+        "unsupported_option" => "unsupported_option",
+        "unsupported_extractor" => "unsupported_extractor",
+        "conflicts_with_only_main_content" => "conflicts_with_only_main_content",
+        "conflicting_aliases" => "conflicting_aliases",
+        "reserved_field" => "reserved_field",
+        "unknown_field" => "unknown_field",
+        "out_of_range" => "out_of_range",
+        "too_many" => "too_many",
+        "too_long" => "too_long",
+        "empty" => "empty",
+        _ => "invalid_option",
     }
 }
 
@@ -184,6 +244,11 @@ pub struct ParsedCrawl {
     pub zdr: Option<bool>,
     /// The scope the caller asked for. `legacy` is set later, by the handoff.
     pub scope: CrawlScope,
+    /// INNH-6a: `Skip` unless `sitemap` was `include` or `only` (and the flag is on).
+    pub sitemap: SitemapMode,
+    /// INNH-6b: the checked per-page options. `None` when absent (or the flag is off, which
+    /// refuses the key instead).
+    pub scrape_options: Option<CrawlScrapeOptions>,
     pub warnings: Vec<RequestWarning>,
 }
 
@@ -434,13 +499,27 @@ pub fn parse_body(body: &[u8], settings: CrawlRequestSettings) -> Result<ParsedC
         }
     }
 
+    let mut sitemap = SitemapMode::Skip;
     if let Some((path, value)) = lookup(object, "sitemap") {
-        if value.as_str() != Some("skip") {
-            invalid.push(RequestField::new(
+        match (value.as_str(), settings.features.sitemap) {
+            (Some("skip"), _) => {}
+            (Some("include"), true) => sitemap = SitemapMode::Include,
+            (Some("only"), true) => sitemap = SitemapMode::Only,
+            (Some(_), true) => invalid.push(RequestField::new(
+                path,
+                "invalid_option",
+                "must be skip, include or only",
+            )),
+            (None, true) => invalid.push(RequestField::new(
+                path,
+                "invalid_type",
+                "must be a string: skip, include or only",
+            )),
+            (_, false) => invalid.push(RequestField::new(
                 path,
                 "unsupported_option",
                 "only \"skip\" is accepted; sitemap seeding is not built yet (F-t2-041)",
-            ));
+            )),
         }
     }
     if let Some((path, _)) = lookup(object, "ignore_query_parameters") {
@@ -450,12 +529,37 @@ pub fn parse_body(body: &[u8], settings: CrawlRequestSettings) -> Result<ParsedC
             "is not supported yet (F-t2-041)",
         ));
     }
-    if let Some((path, _)) = lookup(object, "scrape_options") {
-        invalid.push(RequestField::new(
-            path,
-            "unsupported_option",
-            "is not accepted on /v1/crawl until WS5 slice 4 (references only)",
-        ));
+    let mut scrape_options = None;
+    if let Some((path, value)) = lookup(object, "scrape_options") {
+        if !settings.features.scrape_options {
+            invalid.push(RequestField::new(
+                path,
+                "unsupported_option",
+                "is not accepted on /v1/crawl until WS5 slice 4 (references only)",
+            ));
+        } else {
+            match crate::crawl_scrape::check(value, settings.strict) {
+                Ok(checked) => {
+                    for key in checked.unknown {
+                        warnings.push(RequestWarning {
+                            code: "unknown_field",
+                            field: format!("{path}.{key}"),
+                        });
+                    }
+                    scrape_options = Some(checked.options);
+                }
+                Err(found) => {
+                    for field in found {
+                        let full = if field.path == "$" {
+                            path.to_owned()
+                        } else {
+                            format!("{path}.{}", field.path)
+                        };
+                        invalid.push(RequestField::new(full, static_code(&field.code), field.message));
+                    }
+                }
+            }
+        }
     }
 
     // Errors from here on are pattern errors; the regex step runs only when there are none.
@@ -564,6 +668,8 @@ pub fn parse_body(body: &[u8], settings: CrawlRequestSettings) -> Result<ParsedC
             deny_extensions,
             legacy: false,
         },
+        sitemap,
+        scrape_options,
         warnings,
     })
 }
@@ -574,11 +680,15 @@ mod tests {
     use serde_json::json;
 
     fn lenient() -> CrawlRequestSettings {
-        CrawlRequestSettings { strict: false }
+        CrawlRequestSettings { strict: false, features: CrawlFeatures::default() }
     }
 
     fn strict() -> CrawlRequestSettings {
-        CrawlRequestSettings { strict: true }
+        CrawlRequestSettings { strict: true, features: CrawlFeatures::default() }
+    }
+
+    fn with_features(strict: bool, sitemap: bool, scrape_options: bool) -> CrawlRequestSettings {
+        CrawlRequestSettings { strict, features: CrawlFeatures { sitemap, scrape_options } }
     }
 
     fn parse(body: Value, settings: CrawlRequestSettings) -> Result<ParsedCrawl, Refusal> {
@@ -703,6 +813,143 @@ mod tests {
     fn sitemap_skip_is_accepted() {
         let ok = parse(json!({ "url": "https://e.test/", "sitemap": "skip" }), strict());
         assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn sitemap_include_and_only_are_accepted_with_the_flag_on() {
+        for settings in [with_features(false, true, false), with_features(true, true, false)] {
+            let include = parse(json!({ "url": "https://e.test/", "sitemap": "include" }), settings).unwrap();
+            assert_eq!(include.sitemap, SitemapMode::Include);
+            let only = parse(json!({ "url": "https://e.test/", "sitemap": "only" }), settings).unwrap();
+            assert_eq!(only.sitemap, SitemapMode::Only);
+            let skip = parse(json!({ "url": "https://e.test/", "sitemap": "skip" }), settings).unwrap();
+            assert_eq!(skip.sitemap, SitemapMode::Skip);
+            let absent = parse(json!({ "url": "https://e.test/" }), settings).unwrap();
+            assert_eq!(absent.sitemap, SitemapMode::Skip);
+        }
+    }
+
+    #[test]
+    fn sitemap_values_are_checked_with_the_flag_on() {
+        let settings = with_features(false, true, false);
+        let unknown = parse(json!({ "url": "https://e.test/", "sitemap": "both" }), settings);
+        assert_eq!(codes(&unknown), vec![("sitemap".to_owned(), "invalid_option")]);
+        let wrong_type = parse(json!({ "url": "https://e.test/", "sitemap": true }), settings);
+        assert_eq!(codes(&wrong_type), vec![("sitemap".to_owned(), "invalid_type")]);
+    }
+
+    #[test]
+    fn sitemap_stays_a_400_with_the_flag_off() {
+        for value in [json!("include"), json!("only"), json!("both"), json!(true)] {
+            let body = json!({ "url": "https://e.test/", "sitemap": value });
+            for settings in [lenient(), strict(), with_features(false, false, true)] {
+                assert_eq!(
+                    codes(&parse(body.clone(), settings)),
+                    vec![("sitemap".to_owned(), "unsupported_option")]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scrape_options_are_accepted_and_stamped_with_the_flag_on() {
+        let settings = with_features(false, false, true);
+        let ok = parse(
+            json!({
+                "url": "https://e.test/",
+                "scrapeOptions": { "formats": ["markdown"], "excludeTags": ["nav", "footer"], "colour": 1 },
+            }),
+            settings,
+        )
+        .unwrap();
+        let options = ok.scrape_options.expect("scrape options kept");
+        assert_eq!(options.exclude_tags, vec!["nav", "footer"]);
+        assert_eq!(
+            ok.warnings,
+            vec![RequestWarning { code: "unknown_field", field: "scrapeOptions.colour".to_owned() }]
+        );
+        let absent = parse(json!({ "url": "https://e.test/" }), settings).unwrap();
+        assert!(absent.scrape_options.is_none());
+        let null = parse(json!({ "url": "https://e.test/", "scrape_options": null }), settings).unwrap();
+        assert!(null.scrape_options.is_none());
+    }
+
+    #[test]
+    fn scrape_options_refuse_what_cannot_apply_per_page_with_prefixed_paths() {
+        let settings = with_features(false, false, true);
+        let body = json!({
+            "url": "https://e.test/",
+            "scrape_options": {
+                "actions": [{ "type": "wait", "ms": 10 }],
+                "screenshot": true,
+                "formats": ["markdown", "pdf"],
+                "include_tags": ["ok", "ok", " "],
+                "timeout_ms": 10,
+            },
+        });
+        let mut found = codes(&parse(body, settings));
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                ("scrape_options.actions".to_owned(), "unsupported_option"),
+                ("scrape_options.formats[1]".to_owned(), "unsupported_option"),
+                ("scrape_options.include_tags[2]".to_owned(), "empty"),
+                ("scrape_options.screenshot".to_owned(), "unsupported_option"),
+                ("scrape_options.timeout_ms".to_owned(), "out_of_range"),
+            ]
+        );
+        let not_object = parse(json!({ "url": "https://e.test/", "scrape_options": [1] }), settings);
+        assert_eq!(codes(&not_object), vec![("scrape_options".to_owned(), "invalid_type")]);
+        let conflict = parse(
+            json!({ "url": "https://e.test/", "scrape_options": { "extractor": "raw", "only_main_content": true } }),
+            settings,
+        );
+        assert_eq!(
+            codes(&conflict),
+            vec![("scrape_options.extractor".to_owned(), "conflicts_with_only_main_content")]
+        );
+    }
+
+    #[test]
+    fn scrape_options_unknown_keys_are_refused_in_strict_mode() {
+        let body = json!({ "url": "https://e.test/", "scrape_options": { "colour": 1 } });
+        assert_eq!(
+            codes(&parse(body, with_features(true, false, true))),
+            vec![("scrape_options.colour".to_owned(), "unknown_field")]
+        );
+    }
+
+    #[test]
+    fn scrape_options_stay_a_400_with_the_flag_off() {
+        for value in [json!({ "formats": ["markdown"] }), json!({}), json!("x")] {
+            let body = json!({ "url": "https://e.test/", "scrape_options": value });
+            for settings in [lenient(), strict(), with_features(false, true, false)] {
+                assert_eq!(
+                    codes(&parse(body.clone(), settings)),
+                    vec![("scrape_options".to_owned(), "unsupported_option")]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_flags_read_on_one_and_true_and_default_off() {
+        assert_eq!(CrawlFeatures::from_lookup(|_| None), CrawlFeatures::default());
+        let lookup = |on: &'static str| move |name: &str| {
+            (name == crate::crawl_policy::ENV_CRAWL_SITEMAP).then(|| on.to_owned())
+        };
+        for on in ["on", "1", "true", " TRUE ", "On"] {
+            let features = CrawlFeatures::from_lookup(lookup(on));
+            assert!(features.sitemap && !features.scrape_options, "{on}");
+        }
+        for off in ["", "off", "0", "yes", "enable"] {
+            assert!(!CrawlFeatures::from_lookup(lookup(off)).sitemap, "{off}");
+        }
+        let both = CrawlRequestSettings::from_lookup(|name| {
+            (name != ENV_REQUEST_VALIDATION).then(|| "on".to_owned())
+        });
+        assert!(both.features.sitemap && both.features.scrape_options && !both.strict);
     }
 
     #[test]

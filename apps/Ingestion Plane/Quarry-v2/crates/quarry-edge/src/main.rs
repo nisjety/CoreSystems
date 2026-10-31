@@ -57,6 +57,8 @@ mod job_results_routes;
 mod job_stream;
 mod crawl_policy;
 mod crawl_request;
+mod crawl_scrape;
+mod crawl_sitemap;
 mod batch_check;
 mod limits;
 mod map_routes;

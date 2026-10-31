@@ -3,6 +3,7 @@ package workflows
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"strconv"
 	"strings"
 	"time"
@@ -100,6 +101,12 @@ type CrawlJobInput struct {
 	ScopeMode string `json:"scope_mode,omitempty"`
 	// Robots is respect or ignore. Empty means respect.
 	Robots string `json:"robots,omitempty"`
+	// Sitemap is "include" or "only" when the job asked for sitemap seeding (INNH-6a). Empty
+	// means skip: the crawl follows links only, as it did before.
+	Sitemap string `json:"sitemap,omitempty"`
+	// ScrapeOptions is the crawl's per-page scrape options (INNH-6b), the canonical JSON the
+	// edge stamped on the job. Empty means the default cleaning.
+	ScrapeOptions json.RawMessage `json:"scrape_options,omitempty"`
 }
 
 type frontierEntry struct {
@@ -212,6 +219,23 @@ func runPageWith(
 	url string,
 	crawl *activities.CrawlContext,
 ) (activities.RunPageResult, error) {
+	return runPageScrape(ctx, a, ids, org, userID, ingest, kind, url, crawl, nil)
+}
+
+// runPageScrape is runPageWith for a crawl page that carries the crawl's scrape options
+// (INNH-6b). Nil options leave the page call exactly what runPageWith made.
+func runPageScrape(
+	ctx workflow.Context,
+	a *activities.Activities,
+	ids runIDs,
+	org string,
+	userID string,
+	ingest bool,
+	kind string,
+	url string,
+	crawl *activities.CrawlContext,
+	scrape json.RawMessage,
+) (activities.RunPageResult, error) {
 	var res activities.RunPageResult
 	err := workflow.ExecuteActivity(ctx, a.RunPage, activities.RunPageInput{
 		RunID:  ids.RunID,
@@ -221,6 +245,7 @@ func runPageWith(
 		Ingest: ingest,
 		Kind:   kind,
 		Crawl:  crawl,
+		Scrape: scrape,
 	}).Get(ctx, &res)
 	if err != nil {
 		cat := errs.CategoryUnknown
@@ -613,12 +638,21 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		return err
 	}
 
-	if err := emitEvent(ctx, a, ids, quarrycontracts.EvtRunStarted, map[string]any{
+	started := map[string]any{
 		"kind":      "crawl",
 		"seeds":     len(in.Seeds),
 		"max_depth": in.MaxDepth,
 		"max_pages": in.MaxPages,
-	}, in.RunID, string(quarrycontracts.EvtRunStarted)); err != nil {
+	}
+	// INNH-6: named only when asked for, so the payload of a plain crawl is unchanged.
+	if in.Sitemap == sitemapInclude || in.Sitemap == sitemapOnly {
+		started["sitemap"] = in.Sitemap
+	}
+	if len(in.ScrapeOptions) > 0 {
+		started["scrape_options"] = true
+	}
+	if err := emitEvent(ctx, a, ids, quarrycontracts.EvtRunStarted, started,
+		in.RunID, string(quarrycontracts.EvtRunStarted)); err != nil {
 		return err
 	}
 	if a.DurableFrontier {
@@ -637,6 +671,27 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		frontier = append(frontier, frontierEntry{URL: seed, Depth: 0})
 		visited[seed] = struct{}{}
 	}
+
+	// INNH-6a: the sitemap's URLs, queued one level below the seed. The in-memory frontier
+	// keeps them in workflow state, so the activity is asked for a bounded number.
+	sm := seedSitemap(ctx, in, a, scope, "")
+	if sm.failedHard() {
+		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, sitemapFailedEvent(sm),
+			in.RunID, string(quarrycontracts.EvtRunFailed))
+	}
+	if sm != nil && sm.result != nil {
+		for _, u := range sm.result.URLs {
+			if u == "" {
+				continue
+			}
+			if _, seen := visited[u]; seen {
+				continue
+			}
+			visited[u] = struct{}{}
+			frontier = append(frontier, frontierEntry{URL: u, Depth: sitemapSeedDepth})
+		}
+	}
+	follow := sm.followLinks()
 
 	var pagesVisited, pagesFailed, pagesBlocked, pagesBlockedRobots uint32
 	stopReason := ""
@@ -677,7 +732,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		if scope != nil {
 			crawl = scope.contextFor(cur.Depth)
 		}
-		res, err := runPageWith(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", cur.URL, crawl)
+		res, err := runPageScrape(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", cur.URL, crawl, in.ScrapeOptions)
 		if err != nil && scope != nil && errs.CategoryOf(err) == errs.CategoryBlocklist {
 			// The edge refused the page (scope or robots). It is counted as blocked.
 			pagesBlocked++
@@ -711,12 +766,17 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 			scope.absorb(res.Crawl)
 			ctrl.progress.Denied = scope.linksDenied
 		}
+		// INNH-6b: an edge that did not apply the scrape options ends the run.
+		if !scrapeAppliedBy(in, res) {
+			stopReason = edgeScrapeUnsupported
+			break
+		}
 		pagesVisited++
 		stats.recordPage(res)
 		ctrl.progress.Visited = pagesVisited
 
-		// enqueue child links within depth bound
-		if in.MaxDepth == 0 || cur.Depth+1 <= in.MaxDepth {
+		// enqueue child links within depth bound (`sitemap: only` follows none)
+		if follow && (in.MaxDepth == 0 || cur.Depth+1 <= in.MaxDepth) {
 			for _, link := range res.Links {
 				if link == "" {
 					continue
@@ -765,10 +825,17 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 			"pages_blocked": pagesBlocked,
 		}, in.RunID, string(quarrycontracts.EvtRunFailed))
 	}
+	if stopReason == edgeScrapeUnsupported {
+		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, scrapeFailedEvent(pagesVisited, pagesFailed, pagesBlocked),
+			in.RunID, string(quarrycontracts.EvtRunFailed))
+	}
 	if scope != nil {
 		for k, v := range scope.terminal(pagesBlocked, pagesBlockedRobots) {
 			completed[k] = v
 		}
+	}
+	if sm != nil {
+		completed["sitemap"] = sm.payload()
 	}
 	if stopReason != "" {
 		completed["reason"] = stopReason
@@ -814,6 +881,15 @@ func crawlJobDurableFrontier(
 		}
 	}
 
+	// INNH-6a: the sitemap's URLs go into the queue from the activity, one level below the
+	// seed, so none of them passes through the workflow history.
+	sm := seedSitemap(ctx, in, a, scope, queueName)
+	if sm.failedHard() {
+		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, sitemapFailedEvent(sm),
+			in.RunID, string(quarrycontracts.EvtRunFailed))
+	}
+	follow := sm.followLinks()
+
 	var pagesVisited, pagesFailed, pagesBlocked, pagesBlockedRobots uint32
 	stopReason := ""
 	stats := newJobStatistics(workflow.Now(ctx))
@@ -852,7 +928,7 @@ func crawlJobDurableFrontier(
 		if scope != nil {
 			crawl = scope.contextFor(depth)
 		}
-		res, pageErr := runPageWith(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", item.URL, crawl)
+		res, pageErr := runPageScrape(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", item.URL, crawl, in.ScrapeOptions)
 		if pageErr != nil && scope != nil && errs.CategoryOf(pageErr) == errs.CategoryBlocklist {
 			pagesBlocked++
 			if robotsRefused(pageErr) {
@@ -866,19 +942,26 @@ func crawlJobDurableFrontier(
 			}
 		} else if scope != nil && !appliedBy(res.Crawl) {
 			stopReason = edgeScopeUnsupported
+		} else if !scrapeAppliedBy(in, res) {
+			stopReason = edgeScrapeUnsupported
 		} else {
 			if scope != nil {
 				scope.absorb(res.Crawl)
 			}
 			pagesVisited++
 			stats.recordPage(res)
+			// `sitemap: only` follows no page link.
+			links := res.Links
+			if !follow {
+				links = nil
+			}
 			if scope != nil && (in.MaxDepth == 0 || depth+1 <= in.MaxDepth) {
 				// WS14.S3: the children of a page under scope go in one batch call.
-				if err := enqueueChildrenBatch(ctx, a, queueName, in.OrgID, in.RunID, depth+1, res.Links); err != nil {
+				if err := enqueueChildrenBatch(ctx, a, queueName, in.OrgID, in.RunID, depth+1, links); err != nil {
 					return err
 				}
 			} else if in.MaxDepth == 0 || depth+1 <= in.MaxDepth {
-				for _, link := range res.Links {
+				for _, link := range links {
 					if strings.TrimSpace(link) == "" {
 						continue
 					}
@@ -928,10 +1011,17 @@ func crawlJobDurableFrontier(
 			"pages_blocked": pagesBlocked,
 		}, in.RunID, string(quarrycontracts.EvtRunFailed))
 	}
+	if stopReason == edgeScrapeUnsupported {
+		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, scrapeFailedEvent(pagesVisited, pagesFailed, pagesBlocked),
+			in.RunID, string(quarrycontracts.EvtRunFailed))
+	}
 	if scope != nil {
 		for k, v := range scope.terminal(pagesBlocked, pagesBlockedRobots) {
 			completed[k] = v
 		}
+	}
+	if sm != nil {
+		completed["sitemap"] = sm.payload()
 	}
 	if stopReason != "" {
 		completed["reason"] = stopReason
@@ -946,8 +1036,7 @@ func durableFrontierQueueName(runID string) string {
 }
 
 func durableFrontierRequestID(runID, url string) string {
-	sum := sha256.Sum256([]byte(runID + "\n" + url))
-	return "frontier-" + hex.EncodeToString(sum[:])
+	return activities.FrontierRequestID(runID, url)
 }
 
 func frontierPayloadDepth(payload map[string]any) uint32 {

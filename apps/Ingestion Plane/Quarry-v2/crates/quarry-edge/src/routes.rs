@@ -117,6 +117,12 @@ pub fn router(state: AppState) -> Router {
         // (stamped by the orchestrator from the schedule memo, verified at
         // schedule-creation). The handler enforces the token itself.
         .route("/v1/internal/run_page", post(internal_run_page))
+        // INNH-6a: sitemap discovery for a crawl. Same runtime token and org binding as
+        // run_page; served only with QUARRY_EDGE__CRAWL_SITEMAP on (501 otherwise).
+        .route(
+            "/v1/internal/crawl/sitemap",
+            post(crate::crawl_sitemap::internal_sitemap),
+        )
         // Fire-time preflight of an executable scheduled job (WS15.S2). Runtime token
         // plus the schedule run binding; S2 always allows (S4 adds the checks).
         .route(
@@ -1186,6 +1192,24 @@ async fn crawl_handoff(
     .map_err(|refusal| crawl_request_refusal(&request_id, refusal))?;
     refuse_durable_job_under_zdr(&claims, req.zdr, &request_id, "crawl")?;
     refuse_while_draining(&request_id)?;
+    // INNH-6a: a sitemap is seeded through the crawl scope. A crawl that runs with the scope
+    // switch off is a legacy one, with no scope to check the sitemap's URLs against.
+    if req.sitemap != crate::crawl_request::SitemapMode::Skip
+        && matches!(
+            crate::crawl_policy::CrawlScopeSwitch::current(),
+            crate::crawl_policy::CrawlScopeSwitch::Off
+        )
+    {
+        return Err(crawl_request_refusal(
+            &request_id,
+            crate::crawl_request::Refusal::Invalid(vec![crate::crawl_request::RequestField {
+                path: "sitemap".to_owned(),
+                code: "unsupported_option",
+                message: "sitemap include and only need the crawl scope (QUARRY_EDGE__CRAWL_SCOPE_MODE observe or enforce)"
+                    .to_owned(),
+            }]),
+        ));
+    }
     // WS7.E: the seed is gated by the web policy before the handoff. A denial is a 403 and
     // the orchestrator is never called. The durable refusal above already decided ZDR, so
     // the decision is taken for a non-ZDR run.
@@ -1255,24 +1279,34 @@ async fn crawl_handoff(
     .with_request_scope(&req.scope);
     let origin = crate::handoff::run_origin_from_request(&claims, &headers);
     let idempotency_key = crate::handoff::idempotency_key_from_request(&headers);
+    let mut job_params = serde_json::json!({
+        "kind": "crawl",
+        "url": req.url,
+        "scope": scope.scope_value(),
+        "scope_mode": scope.scope_mode_label(),
+        "robots": scope.robots_label(),
+        "max_pages": limits.max_pages.effective,
+        "max_depth": limits.max_depth.effective,
+        "max_pages_requested": req.max_pages,
+        "max_depth_requested": req.max_depth,
+        "org_id": org_id,
+        "user_id": claims.user_id,
+        "ingest": req.ingest,
+    });
+    // INNH-6: stamped only when asked for, so a job without them is byte-identical to before.
+    if let Some(params) = job_params.as_object_mut() {
+        if req.sitemap != crate::crawl_request::SitemapMode::Skip {
+            params.insert("sitemap".to_owned(), serde_json::json!(req.sitemap.wire()));
+        }
+        if let Some(options) = req.scrape_options.as_ref() {
+            params.insert("scrape_options".to_owned(), options.to_value());
+        }
+    }
     let ack = crate::handoff::forward_job_signed(
         &state.control_base_url,
         &org_id,
         "crawl",
-        crate::handoff::with_admission(serde_json::json!({
-            "kind": "crawl",
-            "url": req.url,
-            "scope": scope.scope_value(),
-            "scope_mode": scope.scope_mode_label(),
-            "robots": scope.robots_label(),
-            "max_pages": limits.max_pages.effective,
-            "max_depth": limits.max_depth.effective,
-            "max_pages_requested": req.max_pages,
-            "max_depth_requested": req.max_depth,
-            "org_id": org_id,
-            "user_id": claims.user_id,
-            "ingest": req.ingest,
-        }), &org_limits),
+        crate::handoff::with_admission(job_params, &org_limits),
         &origin,
         idempotency_key.as_deref(),
         state.internal_signer.as_deref(),
@@ -1327,6 +1361,12 @@ async fn crawl_handoff(
             let mut effective =
                 scope.effective(limits.max_pages.effective, limits.max_depth.effective);
             if let Some(object) = effective.as_object_mut() {
+                if req.sitemap != crate::crawl_request::SitemapMode::Skip {
+                    object.insert("sitemap".to_owned(), serde_json::json!(req.sitemap.wire()));
+                }
+                if let Some(options) = req.scrape_options.as_ref() {
+                    object.insert("scrape_options".to_owned(), options.to_value());
+                }
                 object.insert(
                     "request_warnings".to_owned(),
                     serde_json::Value::Array(
@@ -1552,6 +1592,12 @@ pub struct InternalRunPage {
     /// Only a crawl page is metered (`quarry.crawl.page`).
     #[serde(default)]
     pub kind: Option<String>,
+    /// INNH-6b: the crawl's checked `scrape_options` (`crawl_scrape::CrawlScrapeOptions`).
+    /// Raw JSON, re-validated here. Absent (or null) leaves the page run and the response
+    /// exactly as they were. Honoured only with `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS` on; with
+    /// the flag off the field is ignored and the response lacks `scrape_applied`.
+    #[serde(default)]
+    pub scrape: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1610,6 +1656,11 @@ pub struct InternalRunPageResult {
     /// INNH-12: size in bytes of the stored markdown. Absent whenever the markdown id is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
+    /// INNH-6b: `true` when the request's `scrape` options were applied to this page. Absent
+    /// when the request carried none. An orchestrator that sent options and does not see this
+    /// ends the run (an edge that ignores the field would crawl with the default cleaning).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scrape_applied: Option<bool>,
 }
 
 impl InternalRunPageResult {
@@ -1652,6 +1703,7 @@ impl InternalRunPageResult {
                 .or(out.formats.raw.as_ref())
                 .map(|format| format.artifact_id.to_string()),
             bytes: out.formats.markdown.as_ref().map(|format| format.bytes),
+            scrape_applied: None,
         }
     }
 }
@@ -1687,6 +1739,15 @@ fn compile_crawl(
             ))
         }
     }
+}
+
+/// INNH-6b: mark whether the request's `scrape` options were applied to this page.
+fn with_scrape_applied(
+    mut result: InternalRunPageResult,
+    applied: Option<bool>,
+) -> InternalRunPageResult {
+    result.scrape_applied = applied;
+    result
 }
 
 /// WS14.S2: when the request carried `crawl`, replace the page's links with the
@@ -1857,6 +1918,47 @@ async fn internal_run_page(
     // WS14.S2: a malformed `crawl` is refused before anything is fetched.
     let crawl_scope = compile_crawl(req.crawl.clone(), &request_id)?;
 
+    // INNH-6b: the crawl's per-page options, re-checked here with the rules the handoff used.
+    // Off (the default), the field is ignored and the response says nothing of it, so an
+    // orchestrator that sent options sees they were not applied and ends the run.
+    let scrape_options = match req.scrape.as_ref().filter(|value| !value.is_null()) {
+        Some(raw) if crate::crawl_policy::CrawlFeatures::current().scrape_options => {
+            Some(
+                crate::crawl_scrape::CrawlScrapeOptions::from_stamped(raw).map_err(|errors| {
+                    let fields: Vec<serde_json::Value> = errors
+                        .iter()
+                        .map(|e| {
+                            serde_json::json!({
+                                "path": format!("scrape.{}", e.path),
+                                "code": e.code,
+                                "message": e.message,
+                            })
+                        })
+                        .collect();
+                    let err = QuarryError::new(ErrorCode::BadRequest, "the scrape options are invalid")
+                        .with_details(serde_json::json!({ "fields": fields }));
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(Envelope::<()>::err(&request_id, err)),
+                    )
+                })?,
+            )
+        }
+        Some(_) => {
+            tracing::warn!(
+                "run_page scrape options ignored: QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS is off"
+            );
+            None
+        }
+        None => None,
+    };
+    let scrape_applied = scrape_options.as_ref().map(|_| true);
+    // The page cache is keyed by the page's fingerprint alone: a page cleaned differently from
+    // the default must neither read it nor write it.
+    let scrape_cache_ok = scrape_options
+        .as_ref()
+        .map_or(true, crate::crawl_scrape::CrawlScrapeOptions::cache_admissible);
+
     // WS7.C: no JWT on this route. The caller is the orchestrator, an autonomous
     // principal, so the decision is the baseline and the invariants (no ask).
     let decision = crate::web_policy_edge::decide_for_principal(
@@ -1927,7 +2029,7 @@ async fn internal_run_page(
         None => quarry_core::ids::Id::new(),
     };
 
-    if !zdr.is_active() && should_read(&req.cache) {
+    if !zdr.is_active() && scrape_cache_ok && should_read(&req.cache) {
         if let (Some(prev), Some(cache)) = (req.prev_fingerprint.as_ref(), state.cache.as_ref()) {
             if let Some(cached) = cache.get(&org_id, prev).await {
                 // WS14.S4, D2-161: a cached page gets the robots.txt decision that a fetched
@@ -1941,7 +2043,10 @@ async fn internal_run_page(
                 }
                 meter_crawl_page(&state, req.kind.as_deref(), &req.url, req.user_id.as_deref(), &run_id, &org_id, zdr).await;
                 return Ok(Json(with_crawl(
-                    InternalRunPageResult::from_output(run_id.to_string(), &cached),
+                    with_scrape_applied(
+                        InternalRunPageResult::from_output(run_id.to_string(), &cached),
+                        scrape_applied,
+                    ),
                     &cached.url.final_url,
                     crawl_scope.as_ref(),
                     state.robots.as_deref(),
@@ -1951,9 +2056,37 @@ async fn internal_run_page(
     }
 
     let prev_fp = req.prev_fingerprint.clone();
-    match runner.run(&run_id, &url, prev_fp).await {
+    // INNH-6b: with options, the page is cleaned with them (the stored markdown and what an
+    // ingest sends on are the cleaned text) and bounded by `timeout_ms` when one was given.
+    let run_result = match scrape_options.as_ref() {
+        None => runner.run(&run_id, &url, prev_fp).await,
+        Some(options) => {
+            let inline_request = quarry_runtime::InlineRequest {
+                clean: options.clean_options(),
+                ..quarry_runtime::InlineRequest::default_for(zdr)
+            };
+            let run = runner.run_with_inline_request(&run_id, &url, prev_fp, &inline_request);
+            let finished = match options.timeout_ms {
+                Some(ms) => tokio::time::timeout(Duration::from_millis(ms), run)
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(QuarryError::new(
+                            ErrorCode::Timeout,
+                            "the page did not finish within scrape_options.timeout_ms",
+                        ))
+                    }),
+                None => run.await,
+            };
+            finished.map(|(output, _inline)| output)
+        }
+    };
+    match run_result {
         Ok(out) => {
-            if !zdr.is_active() && crate::web_policy_edge::is_default(&decision) && should_write(&req.cache) {
+            if !zdr.is_active()
+                && scrape_cache_ok
+                && crate::web_policy_edge::is_default(&decision)
+                && should_write(&req.cache)
+            {
                 if let Some(cache) = state.cache.as_ref() {
                     let ttl = effective_ttl(&req.cache, DEFAULT_TTL_SECS);
                     if let Err(e) = cache.put_with_ttl(&org_id, &out.fingerprint, &out, ttl).await {
@@ -1964,7 +2097,10 @@ async fn internal_run_page(
             }
             meter_crawl_page(&state, req.kind.as_deref(), &req.url, req.user_id.as_deref(), &run_id, &org_id, zdr).await;
             Ok(Json(with_crawl(
-                InternalRunPageResult::from_output(run_id.to_string(), &out),
+                with_scrape_applied(
+                    InternalRunPageResult::from_output(run_id.to_string(), &out),
+                    scrape_applied,
+                ),
                 &out.url.final_url,
                 crawl_scope.as_ref(),
                 state.robots.as_deref(),

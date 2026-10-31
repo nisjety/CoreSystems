@@ -83,6 +83,75 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/InternalErrorEnvelope'
+  /v1/internal/crawl/sitemap:
+    post:
+      operationId: internalCrawlSitemap
+      summary: Sitemap discovery for a crawl (orchestrator → edge)
+      description: >-
+        INNH-6a. Dark: served only when QUARRY_EDGE__CRAWL_SITEMAP is on, 501 otherwise. The
+        orchestrator calls it once per crawl whose job asked for `sitemap: include` or `only`. The
+        edge reads the seed origin's robots.txt `Sitemap:` lines (else /sitemap.xml) and the sitemap
+        files behind them (gzip accepted; an index is followed to 2 levels, at most 5 children per
+        index and 20 files in all, inside 30 seconds), every file through the guarded fetch path
+        (web policy, SSRF checks, public-address DNS guard) and only from the crawl's own hosts. Each
+        `<loc>` is canonicalised, de-duplicated and checked against the crawl scope (always as in
+        enforce mode) and, when QUARRY_EDGE__CRAWL_ROBOTS enforces, robots.txt. The answer is the
+        URLs the crawl may seed, at most max_urls, and counts. Nothing is stored. The runtime token
+        names the caller and X-Quarry-Run-Sig binds the org to the seed url, as on run_page.
+      tags:
+      - internal
+      security:
+      - runtimeToken: []
+      parameters:
+      - name: X-Quarry-Run-Sig
+        in: header
+        required: true
+        description: >-
+          HMAC over the body's raw org_id, a newline, and the raw url (the seed), keyed by the edge's
+          internal secret.
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalSitemapRequest'
+      responses:
+        '200':
+          description: The discovery result. A plain object, not an envelope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalSitemapResponse'
+        '400':
+          description: >-
+            BAD_REQUEST when org_id is empty, the url is not an absolute http(s) URL, crawl is missing
+            or malformed (details.fields names each rejected path), or the body declares zdr.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: UNAUTHORIZED when the runtime token or the run binding is wrong.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '403':
+          description: FORBIDDEN when the web policy refuses the seed URL.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '501':
+          description: >-
+            UNSUPPORTED when QUARRY_EDGE__CRAWL_SITEMAP is off, or when QUARRY_EDGE__INTERNAL_SECRET
+            or QUARRY_EDGE__RUNTIME_AUTH_TOKEN is not set on the edge.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
   /v1/internal/change/record:
     post:
       operationId: internalChangeRecord
@@ -664,6 +733,101 @@ components:
           type: string
           nullable: true
           description: The job kind the page was fetched for, crawl or batch, or absent. Only a crawl page is metered (quarry.crawl.page).
+        scrape:
+          type: object
+          description: >-
+            INNH-6b. The crawl's checked per-page scrape options, the canonical form the handoff
+            stamped on the job (formats, only_main_content, include_tags, exclude_tags,
+            remove_base64_images, extractor, timeout_ms; see CrawlRequest.scrape_options). The edge
+            re-checks them with the same rules (a bad value is a 400 with details.fields under
+            `scrape.`), cleans the page with them, bounds the run by timeout_ms, and neither reads
+            nor writes the page cache when the cleaning is not the default. Honoured only when
+            QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS is on; with the flag off the field is ignored and the
+            response has no scrape_applied. Absent leaves the request and the response as they were.
+          additionalProperties: true
+    InternalSitemapRequest:
+      description: The orchestrator's sitemap discovery request for one crawl.
+      type: object
+      required:
+      - url
+      - org_id
+      - crawl
+      properties:
+        url:
+          type: string
+          format: uri
+          description: The crawl's seed URL. Its origin's robots.txt and sitemaps are read.
+        org_id:
+          type: string
+          description: Required. The edge answers BAD_REQUEST when it is empty.
+        crawl:
+          $ref: '#/components/schemas/CrawlContext'
+        max_urls:
+          type: integer
+          minimum: 1
+          maximum: 100000
+          default: 1000
+          description: The most URLs to return, the crawl's page bound.
+        zdr:
+          type: boolean
+          description: Crawl jobs have no ZDR path; true is a 400.
+    InternalSitemapResponse:
+      description: What sitemap discovery found. Counts only besides the URLs.
+      type: object
+      required:
+      - urls
+      - discovered
+      - sitemaps_fetched
+      - nested_fetched
+      - skipped
+      - truncated
+      properties:
+        urls:
+          type: array
+          items:
+            type: string
+          description: Normalised URLs the crawl may seed, in sitemap order, at most max_urls.
+        discovered:
+          type: integer
+          minimum: 0
+          description: The `<loc>` entries read.
+        sitemaps_fetched:
+          type: integer
+          minimum: 0
+        nested_fetched:
+          type: integer
+          minimum: 0
+          description: Of sitemaps_fetched, the files reached through an index.
+        skipped:
+          type: object
+          properties:
+            out_of_scope:
+              type: integer
+              minimum: 0
+            robots_disallowed:
+              type: integer
+              minimum: 0
+            duplicate:
+              type: integer
+              minimum: 0
+            cap:
+              type: integer
+              minimum: 0
+              description: Allowed, but past max_urls.
+            invalid:
+              type: integer
+              minimum: 0
+            sitemaps_refused:
+              type: integer
+              minimum: 0
+              description: Sitemap files not fetched because they are on another host or refused by the web policy or the security checks.
+            sitemaps_unavailable:
+              type: integer
+              minimum: 0
+              description: Sitemap files that did not answer 2xx, timed out or could not be read.
+        truncated:
+          type: boolean
+          description: A bound (files, entries or time) stopped the discovery early.
     InternalPrivacyPolicy:
       description: The privacy posture of the page. Absent means the defaults (customer_private, zdr off).
       type: object
@@ -817,6 +981,13 @@ components:
             through GET /v1/artifacts/{id}). General, not change-specific: the change monitor keeps it
             on a baseline and the per-run results of a crawl read it. Absent when nothing was stored,
             always so under ZDR, and from a runtime that predates the field.
+        scrape_applied:
+          type: boolean
+          description: >-
+            INNH-6b. true when the request's scrape options were applied to this page. Absent when
+            the request carried none, or the edge predates the option or has the flag off. An
+            orchestrator that sent options and does not see it ends the run with
+            edge_scrape_options_unsupported.
     CrawlContext:
       description: >-
         WS14.S2. The crawl scope for one run_page call. Absent or null leaves the
