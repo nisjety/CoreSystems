@@ -1,0 +1,27 @@
+id: "17-do-run-follows-a-space-instruction"
+name: "A Do run in a project must follow the Space instruction an Ask turn follows"
+# WS18-S1. A Space's instruction is the Space layer of the authored-instruction
+# hierarchy (platform, org, Space, persona, mentioned agent). The BFF stamps it
+# onto a turn in a project as `space_instructions`; with
+# MODEL_GATEWAY_RUN_CONTEXT=instructions (or full) a Do run gets the same text,
+# composed by the same function, between the org and persona layers.
+#
+# This harness talks to model-gateway directly, not through the BFF, and its
+# request builder has no passthrough for `space_instructions`, so the Space
+# layer is never on its requests. The case therefore skips (does not fail)
+# until both the Space fixture and a harness passthrough exist: set
+# EVAL_CAPABILITIES=run-context-instructions,space-instruction-fixture once they do.
+# The composition itself is covered by the model-gateway e2e test
+# `agentic_dispatch_carries_the_space_layer_after_org_and_before_persona` and the
+# BFF test `space_instructions_are_stamped_on_a_plan_mode_turn_and_withheld_from_a_non_member`.
+profile: deployed_agent
+features: [usage, tools, citations, agentic]
+prompt: "In one sentence: what is HACCP?"
+checks:
+  contains: ["EVAL-SPACE-3"]
+loop:
+  max_tool_calls: 4
+  max_errors: 1
+requires: [run-context-instructions, space-instruction-fixture]
+tags: [run-context, instructions, space, agentic]
+timeout_s: 180.0

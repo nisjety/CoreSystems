@@ -209,6 +209,7 @@ impl SandboxManagerClient {
             space_id: request.space_id.to_owned(),
             capability_decision: request.capability_decision.to_owned(),
             capability_claims_json: request.capability_claims_json.to_owned(),
+            zdr: false,
         };
         let wire = Self::authorize(bearer, message)?;
         let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().acquire_lease(wire))

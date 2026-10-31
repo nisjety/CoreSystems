@@ -67,6 +67,11 @@ const NOT_A_CODE_TABLE: Record<string, string> = {
   STRIPPED_HEADERS: 'middleware.rs: header names removed from a proxied request',
   RENDERABLE_ARTIFACT_TYPES: 'upstream.rs: media types an artifact may be rendered as',
   SENSITIVE_FIELDS: 'zdr_log.rs: field names the log redaction recognises',
+  ADMIN_ROLES: 'domains/audit_compliance.rs: role names allowed to read the compliance surface',
+  EVENTS_QUERY: 'domains/audit_compliance.rs: query parameter names the audit events route forwards',
+  MANIFEST_QUERY: 'domains/audit_compliance.rs: query parameter names the audit manifest route forwards',
+  NO_QUERY: 'domains/audit_compliance.rs: an empty list of query parameters a route forwards',
+  VERIFY_BODY: 'domains/audit_compliance.rs: body field names the audit verify route forwards',
 }
 
 // The shapes a handler names its code in. A code reaches the SPA as

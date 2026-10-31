@@ -48,6 +48,10 @@ pub enum OrchestrationEventKind {
     /// A resumed continuation's independent verification was recorded
     /// (Verified Outcome Foundation, verevon-roadmap.md §3b).
     ApprovalContinuationVerified,
+    /// A run's loop parked at a round boundary and stays resumable (WS03 S8).
+    RunParked,
+    /// A parked run's loop resumed from its park fold (WS03 S8).
+    RunResumed,
 }
 
 /// Independent judgment on whether a claimed outcome actually happened
@@ -274,6 +278,24 @@ pub enum OrchestrationEvent {
         /// Timestamp.
         at: DateTime<Utc>,
     },
+    /// A run's loop saved a durable park fold at a round boundary and returned
+    /// without finalizing (WS03 S8). Ids only: the park reason is never carried
+    /// on the orchestration stream.
+    RunParked {
+        /// Run that parked.
+        run_id: String,
+        /// Timestamp.
+        at: DateTime<Utc>,
+    },
+    /// A parked run's loop resumed from its park fold (WS03 S8).
+    RunResumed {
+        /// Run that resumed.
+        run_id: String,
+        /// The segment the resumed loop runs as.
+        resumed_segment: u32,
+        /// Timestamp.
+        at: DateTime<Utc>,
+    },
 }
 
 impl OrchestrationEvent {
@@ -301,6 +323,8 @@ impl OrchestrationEvent {
             Self::ApprovalContinuationVerified { .. } => {
                 OrchestrationEventKind::ApprovalContinuationVerified
             }
+            Self::RunParked { .. } => OrchestrationEventKind::RunParked,
+            Self::RunResumed { .. } => OrchestrationEventKind::RunResumed,
         }
     }
 }
@@ -374,7 +398,9 @@ mod tests {
             OrchestrationEventKind::BrowserActionApprovalRequired,
             OrchestrationEventKind::BrowserActionDecided,
             OrchestrationEventKind::ApprovalContinuationVerified,
+            OrchestrationEventKind::RunParked,
+            OrchestrationEventKind::RunResumed,
         ];
-        assert_eq!(kinds.len(), 14);
+        assert_eq!(kinds.len(), 16);
     }
 }

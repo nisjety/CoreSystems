@@ -81,7 +81,22 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	if !f.Since.IsZero() {
 		from = &f.Since
 	}
+	// The miss reasons are advisory (model-gateway guesses them per replica),
+	// so a reader without them still answers with an empty breakdown.
+	misses := []ledger.CacheMissBucket{}
+	if missReader, ok := s.ledger.(ledger.CacheMissReader); ok {
+		misses, err = missReader.CacheMissAnalytics(r.Context(), f)
+		if errors.Is(err, ledger.ErrAnalyticsTooLarge) {
+			httpError(w, 422, err.Error())
+			return
+		}
+		if err != nil {
+			httpError(w, 503, "usage reporting is temporarily unavailable")
+			return
+		}
+	}
 	writeJSON(w, map[string]any{"data": map[string]any{
 		"buckets": rows, "scope": scope, "reporting_started_at": start, "from": from, "to": f.Until, "timezone": "UTC",
+		"cache_breakdown": map[string]any{"miss_reasons": misses, "advisory": true},
 	}})
 }

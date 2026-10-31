@@ -1,0 +1,22 @@
+{
+  "id": "one-off-under-cost-controls-is-not-reviewed",
+  "category": "one_off",
+  "description": "With the cost controls on, a one-off conversation with a single user turn is below the minimum, so it is never sent to the model.",
+  "cost": {"min_user_turns": 3, "max_transcript_chars": 60000, "max_per_user_per_day": 5, "max_per_org_per_day": 100, "budget": "memory"},
+  "controls": {"learning_allowed": true, "reason": "on"},
+  "conversation": [
+    {"role": "user", "content": "Kan du se på faktura 4417 og fortelle meg om beløpet stemmer med bestillingen?"},
+    {"role": "assistant", "content": "Beløpet stemmer med bestillingen bortsett fra en frakt på 240 kroner som ikke står på ordren."}
+  ],
+  "existing_skills": [],
+  "model_reply": "{\"skills\":[]}",
+  "model_stop_reason": "",
+  "run": {"event_type": "RUN_COMPLETED", "org_id": "org-1", "user_id": "user-1", "run_id": "run-1", "thread_id": "thread-1", "zdr": false},
+  "attempts": [{}],
+  "expect": {
+    "outcomes": ["too_few_turns"],
+    "model_calls": 0,
+    "transcript_reads": 1,
+    "proposal_count": 0
+  }
+}

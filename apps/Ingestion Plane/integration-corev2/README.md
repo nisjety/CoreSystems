@@ -443,7 +443,8 @@ at most 100; the agent read tool planned in F6 is to clamp to 25) and `pageToken
   counts the dropped rows). The next page is `nextPageToken` beside `value`: the
   `@odata.nextLink`, which must be passed back unchanged. A token is refused
   unless it is an https mail-list link on the configured Graph host under
-  `/v1.0/me/`. `mail.messages.get` also returns `toRecipients`, `ccRecipients`,
+  `/v1.0/me/`. A link that is refused gives `moreAvailable: true` and no token.
+  `mail.messages.get` also returns `toRecipients`, `ccRecipients`,
   `hasAttachments`, `conversationId`, `internetMessageId` and attachment
   metadata (`attachments`: id, name, contentType, size, isInline; never bytes).
 - Gmail: `query`, `from`, `since` and `until` become `q`, `folder` and `unread`

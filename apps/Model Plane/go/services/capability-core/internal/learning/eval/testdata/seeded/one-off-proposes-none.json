@@ -1,0 +1,22 @@
+{
+  "id": "one-off-proposes-none",
+  "category": "one_off",
+  "description": "A single question about one invoice is a one-off task. The model finds nothing reusable, so the review writes no proposal.",
+  "controls": {"learning_allowed": true, "reason": "on"},
+  "conversation": [
+    {"role": "user", "content": "Kan du se på faktura 4417 og fortelle meg om beløpet stemmer med bestillingen?"},
+    {"role": "assistant", "content": "Beløpet stemmer med bestillingen bortsett fra en frakt på 240 kroner som ikke står på ordren."}
+  ],
+  "existing_skills": [],
+  "model_reply": "{\"skills\":[]}",
+  "model_stop_reason": "",
+  "run": {"event_type": "RUN_COMPLETED", "org_id": "org-1", "user_id": "user-1", "run_id": "run-1", "thread_id": "thread-1", "zdr": false},
+  "attempts": [{}],
+  "expect": {
+    "outcomes": [""],
+    "model_calls": 1,
+    "transcript_reads": 1,
+    "proposal_count": 0
+  },
+  "live": {"min": 0, "max": 0}
+}

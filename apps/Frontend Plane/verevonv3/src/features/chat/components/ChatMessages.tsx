@@ -14,6 +14,7 @@ import {
   ChevronDown,
   ChevronLeft,
   Pin,
+  RotateCcw,
   ChevronRight,
   ChevronUp,
   Copy,
@@ -57,14 +58,18 @@ import {
   type PlanApprovalStatus,
   type ToolIntent,
 } from '@/shared/chat-nodes'
+import type { DockedNodes } from '@/shared/chat-nodes/types'
+// The barrel does not re-export it yet; one more line there when it next changes.
+import { nodeKey } from '@/shared/chat-nodes/derive'
 import type { AutonomyRung, ChatPlanStep, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
+import { isSafeLinkHref } from '../lib/safe-href'
 import { readChatThreadHistory } from '../lib/chat-thread-history'
 import { buildPromptSuggestions, type PromptSuggestion } from '../lib/prompt-suggestions'
 import { listConversations, type LiveTicket } from '@/shared/api/inbox-client'
 import { listNotifications, type Notification } from '@/shared/api/notifications-client'
 import { MIN_PLAN_JUSTIFICATION_CHARS } from '@/shared/api/chat-client'
 import { answerProcessingNote } from '@/shared/api/privacy-tier'
-import { correctMemory, deleteMemory, listMemories } from '@/shared/api/memory-client'
+import { correctMemory, deleteMemory, listMemories, rememberMemory } from '@/shared/api/memory-client'
 import { ApiError } from '@/shared/api/http'
 import {
   For,
@@ -104,9 +109,11 @@ import {
   hostname,
   parseInline,
   parseMarkdownBlocks,
+  parseMarkdownIncremental,
   prettyModel,
   renderBlockMath,
   truncateText,
+  type ParsedMarkdown,
 } from './chat-media-markdown'
 import { answerExportSize, EXPORT_BUTTON_MIN_CHARS, exportChatAnswer, type ExportFormat } from '../lib/chat-export'
 import {
@@ -128,9 +135,12 @@ import {
   TOOL_LABELS,
 } from './chat-types'
 import type { VersionBadge } from '@/features/chat/lib/chat-versions'
+import type { ServerVersionBadge } from '@/features/chat/lib/chat-versions-server'
 import { streamActivityLabel, type StreamActivity } from '@/features/chat/lib/stream-activity'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { translateApiError, useI18n } from '@/shared/i18n'
+import { approvalHeadline, approvalReason } from '@/shared/approvals/approval-copy'
+import { confirmStepUp } from '@/shared/approvals/step-up'
 import { createPlayingSpeechId, speechPlayer } from '@/features/voice/speech-playback'
 import { readAloudBlockedMessage, readAloudUnavailableMessage } from '@/features/voice/voice-mode-state'
 
@@ -191,6 +201,8 @@ export function MessageBlock(props: {
    * attest zero data retention.
    */
   temporaryChat?: boolean
+  /** Which of this turn's controls the composer dock holds; see `DockedNodes`. */
+  docked?: DockedNodes
 }) {
   // `<For>` invokes its mapper untracked in Solid 2. Read the store-backed
   // role through a memo so the conditional branch is established in a tracked
@@ -202,6 +214,14 @@ export function MessageBlock(props: {
     </Show>
   )
 }
+
+/**
+ * The per-token render path of a streaming answer is incremental: Markdown blocks
+ * and node rows keep their DOM from one token to the next. `VITE_CHAT_RENDER_LEGACY=true`
+ * restores the old path, which rebuilt every node row and every Markdown block per
+ * token, for one release. Exact string, as for `VITE_ALLOW_DEV_AUTH_BYPASS`.
+ */
+const chatRenderLegacy = () => import.meta.env.VITE_CHAT_RENDER_LEGACY === 'true'
 
 /**
  * The chat surface's node renderers.
@@ -279,26 +299,40 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
   approvals: {
     kind: 'approvals',
     render: (node, ctx) => (
-      <ApprovalRequests
-        approvals={node.approvals}
-        onDecide={ctx.onApprovalDecision}
-      />
+      <Show
+        when={ctx.docked?.approvals}
+        fallback={
+          <ApprovalRequests
+            approvals={node.approvals}
+            onDecide={ctx.onApprovalDecision}
+          />
+        }
+      >
+        <DockedPointer />
+      </Show>
     ),
   },
   'plan-approval': {
     kind: 'plan-approval',
     render: (node, ctx) => (
-      <PlanApprovalControl
-        planId={node.planId}
-        summary={node.summary}
-        steps={node.steps}
-        grantedRung={node.grantedRung}
-        rejected={node.rejected}
-        pending={node.pending}
-        error={node.error}
-        onApprove={ctx.onApprovePlan}
-        onReject={ctx.onRejectPlan}
-      />
+      <Show
+        when={ctx.docked?.plan}
+        fallback={
+          <PlanApprovalControl
+            planId={node.planId}
+            summary={node.summary}
+            steps={node.steps}
+            grantedRung={node.grantedRung}
+            rejected={node.rejected}
+            pending={node.pending}
+            error={node.error}
+            onApprove={ctx.onApprovePlan}
+            onReject={ctx.onRejectPlan}
+          />
+        }
+      >
+        <DockedPointer />
+      </Show>
     ),
   },
   'image-previews': {
@@ -334,6 +368,19 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
     ),
   },
 })
+
+/**
+ * What the transcript keeps of a control the composer dock holds: where to look,
+ * not a second copy of the control. Gone, and the full card back, once it is decided.
+ */
+function DockedPointer() {
+  const i18n = useI18n()
+  return (
+    <p class="verevon-chat-docked-pointer">
+      {i18n.tr('Venter på svar, se over skrivefeltet', 'Waiting for an answer, see above the composer')}
+    </p>
+  )
+}
 
 /**
  * The answer region: thinking indicator, error, or content.
@@ -393,6 +440,12 @@ export function AnswerRegion(props: {
   )
 }
 
+/**
+ * A provider's own retry-after wait is only worth a line when a person would
+ * have noticed it. Shorter waits are part of an ordinary answer.
+ */
+const PROVIDER_WAIT_NOTE_MS = 2_000
+
 export function AssistantMessage(props: {
   copied: boolean
   message: ChatTurn
@@ -423,19 +476,40 @@ export function AssistantMessage(props: {
   onViewAttachments?: (attachmentId: string) => void
   version?: VersionBadge | null
   onSelectVersion?: (target: number) => void
+  /**
+   * The server's version switcher for this turn (WS17 S9). Set only on a versioned thread, where a switch
+   * moves the thread's branch to the sibling the badge names. It replaces the client-only badge.
+   */
+  serverVersion?: ServerVersionBadge | null
+  onSwitchServerVersion?: (messageId: string) => void
+  /** How many turns a rewind to this turn would hide, when a rewind is offered (WS17 S9). */
+  rewindHiddenTurns?: number | null
+  /** Rewinds the thread to this turn, once the user has confirmed it. Nothing is deleted. */
+  onRewind?: () => void
   /** See `MessageBlock`'s doc — marks the article `data-latest`. */
   isLatest?: boolean
   /** Forwarded into `ConversationNodeContext` — see its own doc for why. */
   threadId?: string | null
   /** See `MessageBlock`'s doc: disables "Les høyt". */
   temporaryChat?: boolean
+  /** See `MessageBlock`'s doc. */
+  docked?: DockedNodes
 }) {
   const i18n = useI18n()
   const [reaction, setReaction] = createSignal<'up' | 'down' | null>(null)
+  const [confirmingRewind, setConfirmingRewind] = createSignal(false)
   // Where the answer was processed, from the gateway's own stamp on `usage`.
   // Undefined (nothing rendered) unless the server asserted a residency or a
   // retention claim; never worked out from the model name.
   const processingNote = createMemo(() => answerProcessingNote(i18n, props.message.servedBy))
+  // The longest single provider call's retry-after wait. Calls can run in
+  // parallel, so summing them would overstate the time the person sat through.
+  const providerWaitNote = createMemo(() => {
+    const waitMs = Math.max(0, ...(props.message.timing?.phases ?? []).map((phase) => phase.provider?.retryWaitMs ?? 0))
+    if (waitMs <= PROVIDER_WAIT_NOTE_MS) return undefined
+    const seconds = Math.round(waitMs / 1000)
+    return i18n.tr(`ventet ${seconds} s på leverandøren`, `waited ${seconds} s for the provider`)
+  })
 
   // "Les høyt" reads the reply through governed text-to-speech (Azure Speech
   // via Verevon's speech route) in the UI language's voice. The browser's own
@@ -449,6 +523,23 @@ export function AssistantMessage(props: {
   const [readAloudBlockedShown, setReadAloudBlockedShown] = createSignal(false)
   const readAloudUnavailable = () =>
     Boolean(props.temporaryChat) || props.message.streaming || !props.message.content.trim()
+  // "Husk dette" (memory.remember): a user action, never the model's. `paused`
+  // is its own outcome so a refused save is never shown as a failure of the
+  // network, nor as a save.
+  const [remembered, setRemembered] = createSignal<'idle' | 'saving' | 'saved' | 'paused' | 'failed'>('idle')
+  const canRemember = () =>
+    !props.temporaryChat && Boolean(props.threadId) && !props.message.streaming && Boolean(props.message.content.trim())
+  const rememberThis = async () => {
+    const threadId = props.threadId
+    if (!threadId || remembered() === 'saving') return
+    setRemembered('saving')
+    try {
+      await rememberMemory(threadId, props.message.content)
+      setRemembered('saved')
+    } catch (err) {
+      setRemembered(err instanceof ApiError && err.code === 'memory_not_enabled' ? 'paused' : 'failed')
+    }
+  }
   const toggleReadAloud = () => {
     if (player.playingId() === props.message.id) {
       player.stop()
@@ -543,6 +634,7 @@ export function AssistantMessage(props: {
       citations: props.message.citations,
       threadId: props.threadId ?? null,
       temporaryChat: props.temporaryChat,
+      docked: props.docked,
     }
     return nodes().map((node) => ({ node, context }))
   })
@@ -564,6 +656,10 @@ export function AssistantMessage(props: {
    * to stand on its own is exported as written.
    */
   const exportDocument = createMemo(() => {
+    // Nothing is exported from an answer still streaming in (`showExportButton`
+    // is false for it and the action row is hidden), and measuring it parses the
+    // whole message: once per token, on top of the Markdown's own tail parse.
+    if (props.message.streaming) return null
     if (answerExportSize(props.message.content) >= EXPORT_BUTTON_MIN_CHARS) return null
     const documents = (props.message.artifacts ?? []).filter(
       (artifact) => artifactRenderKind(artifact) === 'document' && artifact.content.trim(),
@@ -654,9 +750,11 @@ export function AssistantMessage(props: {
         {/*
           Rendered from the derived node list through the keyed registry. Adding
           a node kind means adding a renderer to CHAT_NODE_REGISTRY and a case to
-          `deriveConversationNodes` — not editing this component. `keyed` is off
-          deliberately: nodes are recreated each derivation, and keying on
-          identity would remount every node on every token during streaming.
+          `deriveConversationNodes` — not editing this component. Rows are keyed
+          by `nodeKey`, not by the node object: every derivation builds fresh
+          node objects, so keying on identity rebuilt every node on every token
+          during streaming. A row now keeps its DOM while its entry changes, and
+          `renderLive` is what lets the renderer see the new entry.
 
           Wrapped in its own div (no styling of its own — plain block, same
           layout as before) so "Lagre som PDF" has a stable DOM node to clone:
@@ -666,9 +764,15 @@ export function AssistantMessage(props: {
           could leak into a "clean" PDF).
         */}
         <div class="verevon-chat-message__content" ref={(el) => { contentRef = el }}>
-          <For each={nodeEntries()}>
-            {(entry) => CHAT_NODE_REGISTRY.render(entry.node, entry.context)}
-          </For>
+          {chatRenderLegacy() ? (
+            <For each={nodeEntries()}>
+              {(entry) => CHAT_NODE_REGISTRY.render(entry.node, entry.context)}
+            </For>
+          ) : (
+            <For each={nodeEntries()} keyed={(entry) => nodeKey(entry.node)}>
+              {(entry) => CHAT_NODE_REGISTRY.renderLive(entry)}
+            </For>
+          )}
         </div>
         <Show when={!waiting() && !errored()}>
           <div class="verevon-chat-message-actions">
@@ -696,6 +800,14 @@ export function AssistantMessage(props: {
             <MessageAction label={props.copied ? 'Copied' : 'Copy'} onClick={props.onCopy}>
               {props.copied ? <Check size={14} /> : <Copy size={14} />}
             </MessageAction>
+            <Show when={canRemember()}>
+              <MessageAction
+                label={remembered() === 'saved' ? i18n.tr('Husket', 'Remembered') : i18n.tr('Husk dette', 'Remember this')}
+                onClick={() => void rememberThis()}
+              >
+                {remembered() === 'saved' ? <Check size={14} /> : <Brain size={14} />}
+              </MessageAction>
+            </Show>
             {/*
               A dedicated, always-visible export button once the answer is
               long enough to be worth a document of its own (Copilot's own
@@ -729,6 +841,78 @@ export function AssistantMessage(props: {
             >
               <ThumbsDown size={14} />
             </MessageAction>
+            <Show when={props.serverVersion}>
+              {(badge) => (
+                <div class="verevon-chat-version-switcher" role="group" aria-label={i18n.tr('Svarversjon', 'Answer version')}>
+                  <button
+                    type="button"
+                    class="verevon-chat-version-switcher__arrow"
+                    disabled={badge().previousId === null}
+                    aria-label={i18n.tr('Forrige versjon', 'Previous version')}
+                    onClick={() => {
+                      const previous = badge().previousId
+                      if (previous) props.onSwitchServerVersion?.(previous)
+                    }}
+                  >
+                    <ChevronLeft size={14} />
+                  </button>
+                  <span class="verevon-chat-version-switcher__label">
+                    {badge().current}/{badge().total}
+                  </span>
+                  <button
+                    type="button"
+                    class="verevon-chat-version-switcher__arrow"
+                    disabled={badge().nextId === null}
+                    aria-label={i18n.tr('Neste versjon', 'Next version')}
+                    onClick={() => {
+                      const next = badge().nextId
+                      if (next) props.onSwitchServerVersion?.(next)
+                    }}
+                  >
+                    <ChevronRight size={14} />
+                  </button>
+                </div>
+              )}
+            </Show>
+            <Show when={props.rewindHiddenTurns && props.rewindHiddenTurns > 0 ? props.rewindHiddenTurns : undefined}>
+              {(hidden) => (
+                <>
+                  <MessageAction
+                    label={i18n.tr('Gå tilbake hit', 'Rewind to here')}
+                    onClick={() => setConfirmingRewind(true)}
+                  >
+                    <RotateCcw size={14} />
+                  </MessageAction>
+                  <Show when={confirmingRewind()}>
+                    <div
+                      class="verevon-chat-rewind-confirm"
+                      role="dialog"
+                      aria-modal="true"
+                      aria-label={i18n.tr('Gå tilbake hit', 'Rewind to here')}
+                    >
+                      <p>
+                        {i18n.tr(
+                          `${hidden()} svar og meldinger etter dette punktet skjules. Ingenting slettes: de ligger fortsatt i en egen gren.`,
+                          `${hidden()} later turns will be hidden. Nothing is deleted: they stay on their own branch.`,
+                        )}
+                      </p>
+                      <button type="button" onClick={() => setConfirmingRewind(false)}>
+                        {i18n.tr('Avbryt', 'Cancel')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setConfirmingRewind(false)
+                          props.onRewind?.()
+                        }}
+                      >
+                        {i18n.tr('Gå tilbake hit', 'Rewind to here')}
+                      </button>
+                    </div>
+                  </Show>
+                </>
+              )}
+            </Show>
             <Show when={props.version}>
               {(version) => (
                 <div class="verevon-chat-version-switcher" role="group" aria-label={i18n.tr('Svarversjon', 'Answer version')}>
@@ -839,9 +1023,29 @@ export function AssistantMessage(props: {
               </p>
             )}
           </Show>
+          <Show when={providerWaitNote()}>
+            {(text) => (
+              <p class="verevon-chat-processing-line" role="note">
+                {text()}
+              </p>
+            )}
+          </Show>
           <Show when={readAloudFailed()}>
             <p class="verevon-chat-feedback-reasons__note" role="alert">
               {readAloudUnavailableMessage(i18n.tr)}
+            </p>
+          </Show>
+          <Show when={remembered() === 'paused'}>
+            <p class="verevon-chat-feedback-reasons__note" role="status">
+              {i18n.tr(
+                'Minnet er pauset, av eller slått av av organisasjonen, så dette ble ikke lagret.',
+                'Memory is paused, off or turned off by your organization, so this was not saved.',
+              )}
+            </p>
+          </Show>
+          <Show when={remembered() === 'failed'}>
+            <p class="verevon-chat-feedback-reasons__note" role="alert">
+              {i18n.tr('Kunne ikke lagre minnet.', 'Could not save the memory.')}
             </p>
           </Show>
           <Show when={exportError()}>
@@ -1084,11 +1288,29 @@ function describeUserUrl(href: string): { domain: string; label: string } {
 }
 
 export function ChatMarkdown(props: { content: string; citations?: readonly Citation[] }) {
+  const legacy = chatRenderLegacy()
+  // A streamed answer only grows, so each parse resumes from the last one: the
+  // sealed blocks come back as the same objects and only the tail is read again.
+  // Plain closure state, not a signal: it is the memo's own previous value.
+  let parsed: ParsedMarkdown | undefined
+  const blocks = createMemo(() => {
+    if (legacy) return parseMarkdownBlocks(props.content)
+    parsed = parseMarkdownIncremental(parsed, props.content)
+    return parsed.blocks
+  })
   return (
     <div class="verevon-chat-markdown">
-      <For each={parseMarkdownBlocks(props.content)}>
-        {(block) => <MarkdownBlockView block={block} citations={props.citations} />}
-      </For>
+      {legacy ? (
+        <For each={blocks()}>
+          {(block) => <MarkdownBlockView block={block} citations={props.citations} />}
+        </For>
+      ) : (
+        // Rows by position: a sealed block is the same object, so its row is not
+        // touched; only the trailing rows receive a new block.
+        <For each={blocks()} keyed={false}>
+          {(block) => <MarkdownBlockView block={block()} citations={props.citations} />}
+        </For>
+      )}
     </div>
   )
 }
@@ -1217,15 +1439,16 @@ const copyOutcomeCache = new Map<string, { result: 'copied' | 'failed'; at: numb
  */
 function TranscriptCodeBlock(props: { block: Extract<MarkdownBlock, { kind: 'code' }> }) {
   const i18n = useI18n()
-  // `parseMarkdownBlocks` (see `ChatMarkdown`) reparses the whole message on
-  // every incoming token and hands back a brand-new object for every block —
-  // including ones whose own text has not changed — so `<For>` remounts this
-  // component the moment ANYTHING else in a still-streaming message changes,
-  // not only when this particular fence grows. A component-local timer would
-  // therefore have its confirmation wiped back to "idle" well before 1800ms
+  // Under `VITE_CHAT_RENDER_LEGACY` (see `ChatMarkdown`) every incoming token
+  // reparses the whole message into brand-new block objects, so `<For>` remounts
+  // this component the moment ANYTHING else in a still-streaming message
+  // changes, not only when this particular fence grows. A component-local timer
+  // would then have its confirmation wiped back to "idle" well before 1800ms
   // whenever the reply keeps generating after this block has already closed.
   // `copyOutcomeCache` above carries the outcome and its timestamp across
-  // that remount so the confirmation reads for the full window regardless.
+  // that remount so the confirmation reads for the full window regardless. The
+  // incremental path keeps a closed block's row, but a row can still be rebuilt
+  // when the answer is replaced, so the cache stays.
   const cachedOutcome = () => {
     const cached = copyOutcomeCache.get(props.block.text)
     if (!cached) return null
@@ -1641,10 +1864,10 @@ export function ReasoningPopover(props: { message: ChatTurn }) {
     || (props.message.toolCalls?.length ?? 0) > 0,
   ))
   const tabs = createMemo(() => [
-    { id: 'general', label: 'Oversikt' },
-    ...(props.message.reasoning ? [{ id: 'insight', label: 'Innsikt' }] : []),
-    ...((props.message.toolCalls?.length ?? 0) > 0 ? [{ id: 'tools', label: 'Verktøy' }] : []),
-    ...(props.message.grounding || (props.message.citations?.length ?? 0) > 0 ? [{ id: 'sources', label: 'Kilder' }] : []),
+    { id: 'general', label: i18n.tr('Oversikt', 'Overview') },
+    ...(props.message.reasoning ? [{ id: 'insight', label: i18n.tr('Innsikt', 'Insight') }] : []),
+    ...((props.message.toolCalls?.length ?? 0) > 0 ? [{ id: 'tools', label: i18n.tr('Verktøy', 'Tools') }] : []),
+    ...(props.message.grounding || (props.message.citations?.length ?? 0) > 0 ? [{ id: 'sources', label: i18n.tr('Kilder', 'Sources') }] : []),
   ])
 
   createEffect(
@@ -1713,7 +1936,9 @@ export function ReasoningPopover(props: { message: ChatTurn }) {
                     {(source) => <span>{source.title}</span>}
                   </For>
                   <For each={props.message.citations ?? []}>
-                    {(citation) => <a href={citation.url} target="_blank" rel="noopener noreferrer">{citation.title || citation.url}</a>}
+                    {(citation) => isSafeLinkHref(citation.url)
+                      ? <a href={citation.url} target="_blank" rel="noopener noreferrer">{citation.title || citation.url}</a>
+                      : <span class="verevon-chat-link-blocked" title={i18n.tr('Lenke blokkert: ukjent adresse', 'Link blocked: unsupported address')}>{citation.title || citation.url}</span>}
                   </For>
                 </div>
               </Match>
@@ -1891,6 +2116,60 @@ export function ApprovalRequests(props: {
   onDecide: (approvalId: string, decision: ApprovalDecision) => void
 }) {
   const i18n = useI18n()
+  // An approval whose cause asks for a fresh password confirmation before it is granted (build
+  // plan WS13 S5). Only the grant asks; a denial never does.
+  const [confirming, setConfirming] = createSignal<string | null>(null)
+  const [password, setPassword] = createSignal('')
+  const [confirmError, setConfirmError] = createSignal<string | null>(null)
+  const [confirmBusy, setConfirmBusy] = createSignal(false)
+
+  const cancelConfirmation = () => {
+    setConfirming(null)
+    setPassword('')
+    setConfirmError(null)
+  }
+
+  const approve = (approval: Approval) => {
+    if (approval.cause?.stepUpRequired) {
+      setConfirmError(null)
+      setConfirming(approval.id)
+      return
+    }
+    props.onDecide(approval.id, 'approve')
+  }
+
+  const confirmationFailure = (error: unknown): string => {
+    const code = error instanceof ApiError ? error.code : null
+    if (code === 'INVALID_PASSWORD') {
+      return i18n.tr('Passordet stemmer ikke.', 'That password is not correct.')
+    }
+    if (code === 'RATE_LIMITED') {
+      return i18n.tr('For mange forsøk. Prøv igjen senere.', 'Too many attempts. Try again later.')
+    }
+    if (code === 'STEP_UP_METHOD_UNAVAILABLE') {
+      return i18n.tr('Kontoen har ikke noe passord å bekrefte med.', 'This account has no password to confirm with.')
+    }
+    return i18n.tr('Bekreftelsen lyktes ikke. Prøv igjen.', 'The confirmation failed. Try again.')
+  }
+
+  const confirmAndApprove = async (approval: Approval) => {
+    const entered = password()
+    if (entered.length === 0 || confirmBusy()) return
+    setConfirmBusy(true)
+    setConfirmError(null)
+    try {
+      await confirmStepUp(entered)
+    } catch (error) {
+      setConfirmError(confirmationFailure(error))
+      return
+    } finally {
+      setConfirmBusy(false)
+      setPassword('')
+    }
+    cancelConfirmation()
+    props.onDecide(approval.id, 'approve')
+  }
+
   return (
     <div class="verevon-chat-approvals" role="group" aria-label={i18n.tr('Godkjenninger', 'Approvals')}>
       <For each={props.approvals}>
@@ -1898,32 +2177,77 @@ export function ApprovalRequests(props: {
           <div class="verevon-chat-approval">
             <div class="verevon-chat-approval__head">
               <span class="verevon-chat-approval__badge">{i18n.tr('Godkjenning', 'Approval')}</span>
-              <span class="verevon-chat-approval__kind">
-                {approval.kind ?? i18n.tr(
-                  'Agenten venter på godkjenning før neste steg',
-                  'The agent is waiting for approval before the next step',
-                )}
-              </span>
+              <span class="verevon-chat-approval__kind">{approvalHeadline(approval, i18n)}</span>
             </div>
-            <Show when={approval.detail}>
-              <p class="verevon-chat-approval__detail">{approval.detail}</p>
+            <Show when={approvalReason(approval, i18n)}>
+              {(reason) => <p class="verevon-chat-approval__detail">{reason()}</p>}
             </Show>
-            <div class="verevon-chat-approval__actions">
-              <button
-                type="button"
-                class="verevon-chat-approval__approve"
-                onClick={() => props.onDecide(approval.id, 'approve')}
+            <Show
+              when={confirming() === approval.id}
+              fallback={
+                <div class="verevon-chat-approval__actions">
+                  <button
+                    type="button"
+                    class="verevon-chat-approval__approve"
+                    onClick={() => approve(approval)}
+                  >
+                    {i18n.tr('Godkjenn', 'Approve')}
+                  </button>
+                  <button
+                    type="button"
+                    class="verevon-chat-approval__reject"
+                    onClick={() => props.onDecide(approval.id, 'reject')}
+                  >
+                    {i18n.tr('Avvis', 'Reject')}
+                  </button>
+                </div>
+              }
+            >
+              <form
+                class="verevon-chat-approval__confirm"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void confirmAndApprove(approval)
+                }}
               >
-                Godkjenn
-              </button>
-              <button
-                type="button"
-                class="verevon-chat-approval__reject"
-                onClick={() => props.onDecide(approval.id, 'reject')}
-              >
-                Avvis
-              </button>
-            </div>
+                <label class="verevon-chat-approval__confirm-label">
+                  {i18n.tr('Bekreft passordet ditt for å godkjenne', 'Confirm your password to approve')}
+                  <input
+                    type="password"
+                    autocomplete="current-password"
+                    required
+                    disabled={confirmBusy()}
+                    value={password()}
+                    onInput={(event) => setPassword(event.currentTarget.value)}
+                  />
+                </label>
+                <Show when={confirmError()}>
+                  {(message) => (
+                    <p class="verevon-chat-approval__error" role="alert">
+                      {message()}
+                    </p>
+                  )}
+                </Show>
+                <div class="verevon-chat-approval__actions">
+                  <button
+                    type="submit"
+                    class="verevon-chat-approval__approve"
+                    disabled={confirmBusy() || password().length === 0}
+                  >
+                    {confirmBusy()
+                      ? i18n.tr('Bekrefter…', 'Confirming…')
+                      : i18n.tr('Bekreft og godkjenn', 'Confirm and approve')}
+                  </button>
+                  <button
+                    type="button"
+                    class="verevon-chat-approval__reject"
+                    onClick={cancelConfirmation}
+                  >
+                    {i18n.tr('Avbryt', 'Cancel')}
+                  </button>
+                </div>
+              </form>
+            </Show>
           </div>
         )}
       </For>
@@ -2027,7 +2351,7 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
     Boolean(props.call.error) || props.call.status === 'error'
   const running = () => !props.call.status || props.call.status === 'running'
   const statusLabel = () =>
-    failed() ? 'feilet' : running() ? 'kjører ...' : 'fullført'
+    failed() ? i18n.tr('feilet', 'failed') : running() ? i18n.tr('kjører ...', 'running ...') : i18n.tr('fullført', 'completed')
   const args = () => formatToolArgs(props.call.args)
   const presentation = createMemo(() => toolPresentation(props.call))
 
@@ -2095,6 +2419,90 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
 }
 
 /**
+ * `VITE_CHAT_QUEUE_RETRACT=true` lets the person take back a mid-run message while the gateway
+ * still holds it. Off, the strip is the read-only tray it has always been. Exact string, as for
+ * `VITE_CHAT_RENDER_LEGACY`.
+ */
+const chatQueueRetract = () => import.meta.env.VITE_CHAT_QUEUE_RETRACT === 'true'
+
+/**
+ * Only a message the gateway accepted and has not delivered can be taken back, and the gateway
+ * answers a take-back by the client message id that send was made under.
+ */
+const canTakeBack = (entry: QueuedInput) =>
+  entry.state === 'pending' && entry.accepted === true && Boolean(entry.clientMessageId)
+
+/**
+ * Edit and Remove for one queued message. Each control appears only with its handler: the
+ * parent decides what a take-back does, and nothing here claims one the gateway has not answered.
+ */
+function QueuedInputControls(props: {
+  entry: QueuedInput
+  onEdit?: (entry: QueuedInput, text: string) => void
+  onRetract?: (entry: QueuedInput) => void
+}) {
+  const i18n = useI18n()
+  const [editing, setEditing] = createSignal(false)
+  const [draft, setDraft] = createSignal('')
+
+  const startEditing = () => {
+    setDraft(props.entry.content)
+    setEditing(true)
+  }
+
+  const submitEdit = () => {
+    const next = draft().trim()
+    if (!next || !props.onEdit) return
+    setEditing(false)
+    props.onEdit(props.entry, next)
+  }
+
+  return (
+    <Show
+      when={!editing()}
+      fallback={(
+        <div class="verevon-chat-edit-box">
+          <textarea
+            aria-label={i18n.tr('Rediger melding', 'Edit message')}
+            ref={(el) => queueMicrotask(() => {
+              el.focus()
+              el.setSelectionRange(el.value.length, el.value.length)
+            })}
+            value={draft()}
+            rows={Math.min(10, Math.max(2, draft().split('\n').length))}
+            onInput={(event) => setDraft(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault()
+                submitEdit()
+              }
+              if (event.key === 'Escape') setEditing(false)
+            }}
+          />
+          <div>
+            <button type="button" onClick={() => setEditing(false)}>{i18n.tr('Avbryt', 'Cancel')}</button>
+            <button type="button" disabled={!draft().trim()} onClick={submitEdit}>{i18n.tr('Send på nytt', 'Send again')}</button>
+          </div>
+        </div>
+      )}
+    >
+      <div class="verevon-chat-message-actions">
+        <Show when={props.onEdit}>
+          <MessageAction label={i18n.tr('Rediger', 'Edit')} onClick={startEditing}>
+            <Pencil size={14} />
+          </MessageAction>
+        </Show>
+        <Show when={props.onRetract}>
+          <MessageAction label={i18n.tr('Fjern', 'Remove')} onClick={() => props.onRetract?.(props.entry)}>
+            <X size={14} />
+          </MessageAction>
+        </Show>
+      </div>
+    </Show>
+  )
+}
+
+/**
  * Messages the user sent WHILE the agent was working.
  *
  * Rendered under the in-progress answer, where the newest thing the user did
@@ -2102,11 +2510,18 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
  * with the reason. Silence here is the bug this replaces — the send path used to
  * discard mid-run input with no trace at all.
  */
-export function QueuedInputStrip(props: { entries: QueuedInput[] }) {
+export function QueuedInputStrip(props: {
+  entries: QueuedInput[]
+  onEdit?: (entry: QueuedInput, text: string) => void
+  onRetract?: (entry: QueuedInput) => void
+}) {
   const i18n = useI18n()
   const label = (entry: QueuedInput) => {
     if (entry.state === 'delivered') return 'levert til agenten'
     if (entry.state === 'refused') return 'ikke levert'
+    // The run ended without taking it, so it went out again as an ordinary turn (same id: the
+    // transcript holds it once).
+    if (entry.state === 'resent') return i18n.tr('sendt på nytt som ny melding', 'resent as a new message')
     return 'venter'
   }
   return (
@@ -2124,6 +2539,9 @@ export function QueuedInputStrip(props: { entries: QueuedInput[] }) {
                   )}
                 </Show>
               </p>
+              <Show when={chatQueueRetract() && canTakeBack(entry) && (props.onEdit || props.onRetract)}>
+                <QueuedInputControls entry={entry} onEdit={props.onEdit} onRetract={props.onRetract} />
+              </Show>
             </li>
           )}
         </For>
@@ -2345,6 +2763,13 @@ export function PlanApprovalControl(props: {
         removed: row.removed,
       }))
 
+  // Inside an English sentence the rung name has to read as a phrase, so it is
+  // lower-cased there; the Norwegian names are lower-case already.
+  const grantedSentence = () => {
+    const label = rungLabel(props.grantedRung ?? 'read_only', i18n.tr)
+    return i18n.tr(`Godkjent: agenten kan nå ${label}.`, `Approved: the agent can now ${label.toLowerCase()}.`)
+  }
+
   const approveDisabled = () =>
     tooShort() ||
     props.pending ||
@@ -2357,7 +2782,7 @@ export function PlanApprovalControl(props: {
         <p class="verevon-chat-plan-granted">
           <Show
             when={props.rejected}
-            fallback={<>Godkjent: agenten kan nå {RUNG_LABEL[props.grantedRung ?? 'read_only']}.</>}
+            fallback={<>{grantedSentence()}</>}
           >
             {i18n.tr(
               'Planen ble avvist – ingenting ble utført.',
@@ -2369,8 +2794,10 @@ export function PlanApprovalControl(props: {
     >
       <section class="verevon-chat-plan" aria-label={i18n.tr('Godkjenn planen', 'Approve the plan')}>
         <p class="verevon-chat-plan__lead">
-          Dette var en plan – ingenting er utført. Velg hvor mye agenten får gjøre, og skriv
-          hvorfor.
+          {i18n.tr(
+            'Dette var en plan – ingenting er utført. Velg hvor mye agenten får gjøre, og skriv hvorfor.',
+            'This was a plan – nothing has been executed. Choose how much the agent may do, and say why.',
+          )}
         </p>
         <Show when={hasStructuredPlan()}>
           <Show when={props.summary}>
@@ -2449,7 +2876,7 @@ export function PlanApprovalControl(props: {
                 data-selected={rung() === option}
                 onClick={() => setRung(option)}
               >
-                {RUNG_LABEL[option]}
+                {rungLabel(option, i18n.tr)}
               </button>
             )}
           </For>
@@ -2469,7 +2896,10 @@ export function PlanApprovalControl(props: {
               with no reason given is indistinguishable from a broken one. */}
           <Show when={tooShort()}>
             <span class="verevon-chat-plan__hint">
-              Minst {MIN_PLAN_JUSTIFICATION_CHARS} tegn – en begrunnelse noen kan vurdere.
+              {i18n.tr(
+                `Minst ${MIN_PLAN_JUSTIFICATION_CHARS} tegn – en begrunnelse noen kan vurdere.`,
+                `At least ${MIN_PLAN_JUSTIFICATION_CHARS} characters – a reason someone can assess.`,
+              )}
             </span>
           </Show>
           <Show when={hasStructuredPlan() && remainingCount() === 0 && !tooShort()}>
@@ -2520,7 +2950,7 @@ export function PlanApprovalControl(props: {
               }
             }}
           >
-            {props.pending ? 'Godkjenner…' : 'Godkjenn'}
+            {props.pending ? i18n.tr('Godkjenner…', 'Approving…') : i18n.tr('Godkjenn', 'Approve')}
           </button>
         </div>
       </section>
@@ -2535,10 +2965,24 @@ export function PlanApprovalControl(props: {
  */
 const GRANTABLE_RUNGS: AutonomyRung[] = ['workspace_write', 'danger_full_access']
 
-const RUNG_LABEL: Record<AutonomyRung, string> = {
+// Exported for the composer's "Kjør plan" pill, which names the same rung in the
+// same words. That pill takes no translation yet, so it stays Norwegian until
+// ChatPage passes rungLabel instead.
+export const RUNG_LABEL: Record<AutonomyRung, string> = {
   read_only: 'bare undersøke',
   workspace_write: 'skrive i arbeidsområdet',
   danger_full_access: 'utføre alt, også utgående handlinger',
+}
+
+const RUNG_LABEL_EN: Record<AutonomyRung, string> = {
+  read_only: 'Read only',
+  workspace_write: 'Write in the workspace',
+  danger_full_access: 'Do anything, including outbound actions',
+}
+
+/** A rung's name in the reader's language, for the grant control and the granted sentence. */
+export function rungLabel(rung: AutonomyRung, tr: (noText: string, enText: string) => string): string {
+  return tr(RUNG_LABEL[rung], RUNG_LABEL_EN[rung])
 }
 
 export function ToolChips(props: { tools: ComposerToolId[] }) {
@@ -3726,10 +4170,15 @@ export function TaskStep(props: { isLast: boolean; step: AgentTaskStep }) {
                       fallback={<span><strong>{item.label}</strong><em>{item.value}</em></span>}
                     >
                       {(href) => (
-                        <a href={href()} target="_blank" rel="noopener noreferrer">
-                          <strong>{item.label}</strong>
-                          <em>{item.value}</em>
-                        </a>
+                        isSafeLinkHref(href())
+                          ? <a href={href()} target="_blank" rel="noopener noreferrer">
+                            <strong>{item.label}</strong>
+                            <em>{item.value}</em>
+                          </a>
+                          : <span class="verevon-chat-link-blocked" title={i18n.tr('Lenke blokkert: ukjent adresse', 'Link blocked: unsupported address')}>
+                            <strong>{item.label}</strong>
+                            <em>{item.value}</em>
+                          </span>
                       )}
                     </Show>
                   )}

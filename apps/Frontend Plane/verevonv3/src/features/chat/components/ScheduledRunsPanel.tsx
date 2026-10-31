@@ -1,11 +1,18 @@
-import { CalendarClock, Loader2, Trash2 } from '@/shared/icons'
+import { CalendarClock, ChevronDown, ChevronRight, Loader2, Trash2 } from '@/shared/icons'
 import { createMemo, createSignal, For, Show } from 'solid-js'
 
 import { createResource } from '@/shared/lib/create-resource-compat'
-import { deleteCronSchedule, updateCronSchedule, type CronSchedule } from '@/shared/api/cron-client'
+import {
+  deleteCronSchedule,
+  listScheduleFires,
+  updateCronSchedule,
+  type CronSchedule,
+} from '@/shared/api/cron-client'
 import { cronExprToLabel, listMySchedules } from '@/shared/api/schedule-from-chat'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { getSession } from '@/shared/session/session-store'
+import { chatThreadHref } from '../lib/chat-thread-deep-link'
+import { selectChatThread } from '../lib/chat-thread-history'
 
 /**
  * "Planlagte kjøringer" — list/pause/delete a schedule from chat (chat-wave2
@@ -15,14 +22,10 @@ import { getSession } from '@/shared/session/session-store'
  * through `ScheduleDialog`, which never sets `workflow_type` or
  * `workflow_input`.
  *
- * "Se resultater" (Phase B) is rendered disabled with a "Kommer snart" note
- * for every row: capability-core has no `GET /v1/cron/{id}/runs` endpoint and
- * `cron_fires` has no `thread_id` column yet (spec §2.3), so there is nothing
- * to link to today. The user-core/gateway read-DECISION fix this task also
- * ships (personal-Space owners can now obtain a read decision for their
- * schedule's result thread) is the other half of Phase B and is deliberately
- * a backend-only, unwired capability until that listing endpoint exists —
- * shipping the link before both halves are live would 403 on every click.
+ * "Se resultater" opens the last fires of a schedule, each linking to the
+ * scheduled thread that holds its answer. It stays disabled unless
+ * VITE_SCHEDULE_RESULTS is the literal "true", so a rollback restores the
+ * disabled button without a code change.
  */
 function formatWhen(value?: string | null, locale?: string): string {
   if (!value) return '—'
@@ -31,6 +34,105 @@ function formatWhen(value?: string | null, locale?: string): string {
   } catch {
     return value
   }
+}
+
+const scheduleResultsEnabled = () => import.meta.env.VITE_SCHEDULE_RESULTS === 'true'
+
+// Closed tokens from cron_fires and the run's outcome. A token outside this
+// list is shown as-is rather than guessed at.
+function fireTokenLabel(token: string, i18n: ReturnType<typeof useI18n>): string {
+  switch (token) {
+    case 'pending':
+      return i18n.tr('Venter', 'Pending')
+    case 'running':
+      return i18n.tr('Kjører', 'Running')
+    case 'completed':
+      return i18n.tr('Fullført', 'Completed')
+    case 'failed':
+      return i18n.tr('Feilet', 'Failed')
+    case 'unknown':
+      return i18n.tr('Ukjent', 'Unknown')
+    case 'unknown_outcome':
+      return i18n.tr('Ukjent utfall', 'Unknown outcome')
+    case 'needs_review':
+      return i18n.tr('Trenger gjennomgang', 'Needs review')
+    case 'paused_expired':
+      return i18n.tr('Utløpt', 'Expired')
+    case 'paused_failures':
+      return i18n.tr('Pauset etter feil', 'Paused after failures')
+    default:
+      return token
+  }
+}
+
+function ScheduleFires(props: { orgId: string; cronId: string }) {
+  const i18n = useI18n()
+  const [fires] = createResource(
+    () => [props.orgId, props.cronId] as const,
+    ([org, id]) => listScheduleFires(org, id),
+  )
+  const openTranscript = (event: MouseEvent, threadId: string) => {
+    if (event.button !== 0 || event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) return
+    event.preventDefault()
+    selectChatThread(threadId)
+  }
+  return (
+    <div class="verevon-scheduled-runs-panel__fires">
+      <Show
+        when={!fires.loading}
+        fallback={
+          <p role="status" aria-busy="true">
+            <Loader2 size={14} aria-hidden="true" /> {i18n.tr('Laster resultater…', 'Loading results…')}
+          </p>
+        }
+      >
+        <Show
+          when={!fires.error}
+          fallback={
+            <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
+              {i18n.tr('Kunne ikke laste resultatene.', 'Could not load the results.')}
+            </p>
+          }
+        >
+          <Show
+            when={(fires() ?? []).length > 0}
+            fallback={<p>{i18n.tr('Ingen kjøringer ennå.', 'No runs yet.')}</p>}
+          >
+            <ul>
+              <For each={fires()}>
+                {(fire) => (
+                  <li class="verevon-scheduled-runs-panel__fire">
+                    <time datetime={fire.fired_at}>{formatWhen(fire.fired_at, i18n.locale() === 'no' ? 'nb-NO' : 'en-US')}</time>
+                    <span class="verevon-scheduled-runs-panel__chip">{fireTokenLabel(fire.status, i18n)}</span>
+                    <Show when={fire.outcome}>
+                      {(outcome) => (
+                        <span class="verevon-scheduled-runs-panel__chip">
+                          {fireTokenLabel(outcome(), i18n)}
+                        </span>
+                      )}
+                    </Show>
+                    <span class="verevon-scheduled-runs-panel__chip">{i18n.tr('Plan', 'Schedule')}</span>
+                    <Show when={fire.withheld_effects > 0}>
+                      <span>
+                        {i18n.tr('Holdt tilbake', 'Withheld')}: {fire.withheld_effects}
+                      </span>
+                    </Show>
+                    <Show when={fire.thread_id}>
+                      {(threadId) => (
+                        <a link href={chatThreadHref(threadId())} onClick={(event) => openTranscript(event, threadId())}>
+                          {i18n.tr('Åpne samtalen', 'Open transcript')}
+                        </a>
+                      )}
+                    </Show>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </Show>
+        </Show>
+      </Show>
+    </div>
+  )
 }
 
 export function ScheduledRunsPanel() {
@@ -46,6 +148,7 @@ export function ScheduledRunsPanel() {
 
   const [busyId, setBusyId] = createSignal<string | null>(null)
   const [actionError, setActionError] = createSignal<string | null>(null)
+  const [openResultsId, setOpenResultsId] = createSignal<string | null>(null)
   const list = createMemo(() => schedules() ?? [])
 
   const handleToggle = async (schedule: CronSchedule) => {
@@ -118,46 +221,69 @@ export function ScheduledRunsPanel() {
         >
           <For each={list()}>
             {(schedule) => (
-              <div class="verevon-scheduled-runs-panel__row">
-                <div>
-                  <p>{schedule.name}</p>
-                  <span class="verevon-scheduled-runs-panel__row-meta">
-                    {cronExprToLabel(schedule.schedule_expr, i18n.locale() === 'no')} · {schedule.timezone}
-                    {' · '}
-                    {schedule.enabled
-                      ? i18n.tr('aktiv', 'active')
-                      : i18n.tr('pauset', 'paused')}
-                    {' · '}
-                    {i18n.tr('neste', 'next')}: {formatWhen(schedule.next_fire_at, i18n.locale() === 'no' ? 'nb-NO' : 'en-US')}
-                  </span>
+              <>
+                <div class="verevon-scheduled-runs-panel__row">
+                  <div>
+                    <p>{schedule.name}</p>
+                    <span class="verevon-scheduled-runs-panel__row-meta">
+                      {cronExprToLabel(schedule.schedule_expr, i18n.locale() === 'no')} · {schedule.timezone}
+                      {' · '}
+                      {schedule.enabled
+                        ? i18n.tr('aktiv', 'active')
+                        : i18n.tr('pauset', 'paused')}
+                      {' · '}
+                      {i18n.tr('neste', 'next')}: {formatWhen(schedule.next_fire_at, i18n.locale() === 'no' ? 'nb-NO' : 'en-US')}
+                    </span>
+                  </div>
+                  <div class="verevon-scheduled-runs-panel__actions">
+                    <Show
+                      when={scheduleResultsEnabled()}
+                      fallback={
+                        <button type="button" disabled title={i18n.tr('Kommer snart', 'Coming soon')} aria-disabled="true">
+                          {i18n.tr('Se resultater', 'See results')}
+                        </button>
+                      }
+                    >
+                      <button
+                        type="button"
+                        aria-expanded={openResultsId() === schedule.id ? 'true' : 'false'}
+                        aria-controls={`scheduled-fires-${schedule.id}`}
+                        onClick={() => {
+                          setOpenResultsId((current) => (current === schedule.id ? null : schedule.id))
+                        }}
+                      >
+                        {openResultsId() === schedule.id ? (
+                          <ChevronDown size={14} aria-hidden="true" />
+                        ) : (
+                          <ChevronRight size={14} aria-hidden="true" />
+                        )}{' '}
+                        {i18n.tr('Se resultater', 'See results')}
+                      </button>
+                    </Show>
+                    <button
+                      type="button"
+                      disabled={busyId() === schedule.id}
+                      onClick={() => void handleToggle(schedule)}
+                      aria-label={`${schedule.enabled ? i18n.tr('Pause', 'Pause') : i18n.tr('Aktiver', 'Resume')} ${schedule.name}`}
+                    >
+                      {schedule.enabled ? i18n.tr('Pause', 'Pause') : i18n.tr('Aktiver', 'Resume')}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busyId() === schedule.id}
+                      onClick={() => void handleDelete(schedule)}
+                      aria-label={`${i18n.tr('Slett', 'Delete')} ${schedule.name}`}
+                    >
+                      <Trash2 size={14} aria-hidden="true" />
+                    </button>
+                  </div>
                 </div>
-                <div class="verevon-scheduled-runs-panel__actions">
-                  <button
-                    type="button"
-                    disabled
-                    title={i18n.tr('Kommer snart', 'Coming soon')}
-                    aria-disabled="true"
-                  >
-                    {i18n.tr('Se resultater', 'See results')}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busyId() === schedule.id}
-                    onClick={() => void handleToggle(schedule)}
-                    aria-label={`${schedule.enabled ? i18n.tr('Pause', 'Pause') : i18n.tr('Aktiver', 'Resume')} ${schedule.name}`}
-                  >
-                    {schedule.enabled ? i18n.tr('Pause', 'Pause') : i18n.tr('Aktiver', 'Resume')}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busyId() === schedule.id}
-                    onClick={() => void handleDelete(schedule)}
-                    aria-label={`${i18n.tr('Slett', 'Delete')} ${schedule.name}`}
-                  >
-                    <Trash2 size={14} aria-hidden="true" />
-                  </button>
-                </div>
-              </div>
+                <Show when={scheduleResultsEnabled() && openResultsId() === schedule.id}>
+                  <div id={`scheduled-fires-${schedule.id}`}>
+                    <ScheduleFires orgId={orgId()} cronId={schedule.id} />
+                  </div>
+                </Show>
+              </>
             )}
           </For>
         </Show>

@@ -126,6 +126,21 @@ pub(crate) struct AppState {
     pub(crate) studio_store: crate::domains::studio::StudioStore,
     pub(crate) allow_dev_actor_headers: bool,
     pub(crate) allow_dev_auth_bypass: bool,
+    /// WS03 S8-A: whether `POST /api/v1/orchestration/runs/{run_id}/continue` forwards the PARK
+    /// form of its body, an exactly empty `approval_id` with a claim token, which resumes a run
+    /// the executor parked. Read once from `VEREVON_GATEWAY_CONTINUE_PARK_ENABLED` (exactly
+    /// `true`, default off) in `build_state`, never in a handler. Off, the route is byte for byte
+    /// what it was: a blank `approval_id` is the 400 `invalid_request`. Flip it together with
+    /// model-gateway's `EXECUTION_LOOP_PARKING_ENABLED`: on in front of a gateway with parking
+    /// off, the park form is answered 400 `continue_incomplete` (reported as `model_error`).
+    pub(crate) continue_park_form: bool,
+    /// WS10-S5: whether the org model-entitlement admin routes (`/api/v1/orgs/{id}/model-entitlement`
+    /// and its `explain`), the `org.set_model_entitlement` action's write and the ZDR switch
+    /// gate's `hidden_count` read are live. Read once from `MODEL_ENTITLEMENT_ADMIN_ENABLED`
+    /// (exactly `true`, default off) in `build_state`, never in a handler. Off, GET answers
+    /// `{"enabled": false}` so the SPA hides the section, every write and explain is a 404, and
+    /// the ZDR gate answers as it did before the policy existed.
+    pub(crate) model_entitlement_admin_enabled: bool,
     /// "Forward an email to create a task" inbound pipeline (chat-wave2
     /// mail-task spec, owner ruling 2026-09-28: Postmark inbound,
     /// self-forward only). Empty token = the whole `/internal/mail-task/ingest`
@@ -336,6 +351,8 @@ pub(crate) async fn build_state() -> Result<AppState> {
         ),
         allow_dev_actor_headers: dev_only_flag("ALLOW_DEV_ACTOR_HEADERS"),
         allow_dev_auth_bypass: dev_only_flag("ALLOW_DEV_AUTH_BYPASS"),
+        continue_park_form: continue_park_form_enabled(),
+        model_entitlement_admin_enabled: model_entitlement_admin_enabled(),
         mail_task_ingest_service_token: optional_env("MAIL_TASK_INGEST_SERVICE_TOKEN"),
         mail_task_nats_url: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_URL"),
         mail_task_nats_user: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_USER"),
@@ -503,6 +520,31 @@ fn dev_only_flag(key: &str) -> bool {
     enabled
 }
 
+/// `VEREVON_GATEWAY_CONTINUE_PARK_ENABLED`, read once by `build_state` (WS03 S8-A). Off unless it
+/// is exactly `true`.
+fn continue_park_form_enabled() -> bool {
+    continue_park_form_from(env::var("VEREVON_GATEWAY_CONTINUE_PARK_ENABLED").ok().as_deref())
+}
+
+/// Exactly the word `true`: not trimmed, not case-folded, and none of the other spellings
+/// `env_bool` accepts. Anything else, including an unset variable, is off.
+fn continue_park_form_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// `MODEL_ENTITLEMENT_ADMIN_ENABLED`, read once by `build_state` (WS10-S5). Off unless it is
+/// exactly `true`.
+fn model_entitlement_admin_enabled() -> bool {
+    model_entitlement_admin_from(env::var("MODEL_ENTITLEMENT_ADMIN_ENABLED").ok().as_deref())
+}
+
+/// Exactly the word `true`, for the same reason as `continue_park_form_from`: a policy editor
+/// that a stray `1` or `TRUE` switches on would let an operator set a policy that inference-core
+/// is not yet enforcing.
+fn model_entitlement_admin_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
 fn dev_flags_allowed(app_env: &str) -> bool {
     !matches!(app_env.to_ascii_lowercase().as_str(), "production" | "prod")
 }
@@ -615,7 +657,8 @@ fn canonical_public_origin(value: &str, production_like: bool) -> Result<String>
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_public_origin, dev_flags_allowed, service_token_is_secure, standard_http_client,
+        canonical_public_origin, continue_park_form_from, dev_flags_allowed,
+        model_entitlement_admin_from, service_token_is_secure, standard_http_client,
         validate_service_token_distinctness,
     };
 
@@ -751,6 +794,95 @@ mod tests {
         assert_eq!(browser_grant_mode(Some("disabled"), ""), Permissive);
         assert!(!Off.issues_grants());
         assert!(Permissive.issues_grants() && Strict.issues_grants());
+    }
+
+    /// WS03 S8-A: the park form of `/continue` is off unless the variable is exactly `true`.
+    /// Nothing is trimmed or case-folded, and the other truthy spellings `env_bool` accepts
+    /// (`1`, `yes`, `on`) do not turn it on.
+    #[test]
+    fn the_park_form_flag_is_on_only_for_the_exact_word_true() {
+        assert!(continue_park_form_from(Some("true")));
+        for value in [
+            None,
+            Some(""),
+            Some("false"),
+            Some("TRUE"),
+            Some("True"),
+            Some(" true"),
+            Some("true "),
+            Some("1"),
+            Some("yes"),
+            Some("on"),
+            Some("truee"),
+        ] {
+            assert!(!continue_park_form_from(value), "{value:?}");
+        }
+    }
+
+    /// WS10-S5: the model-entitlement admin switch is on only for the exact word `true`, and is
+    /// read once, in `build_state`; the orgs handlers see it only through `AppState`.
+    #[test]
+    fn the_model_entitlement_admin_flag_is_on_only_for_the_exact_word_true() {
+        assert!(model_entitlement_admin_from(Some("true")));
+        for value in [
+            None,
+            Some(""),
+            Some("false"),
+            Some("TRUE"),
+            Some("True"),
+            Some(" true"),
+            Some("true "),
+            Some("1"),
+            Some("yes"),
+            Some("on"),
+        ] {
+            assert!(!model_entitlement_admin_from(value), "{value:?}");
+        }
+        let config = include_str!("config.rs").replace("\r\n", "\n");
+        let production = config.split("#[cfg(test)]\nmod tests").next().unwrap_or(&config);
+        assert_eq!(production.matches("\"MODEL_ENTITLEMENT_ADMIN_ENABLED\"").count(), 1);
+        for module in [
+            include_str!("domains/orgs/model_entitlement.rs"),
+            include_str!("domains/orgs/settings.rs"),
+        ] {
+            let module = module.replace("\r\n", "\n");
+            let handlers = module.split("#[cfg(test)]\nmod tests").next().unwrap_or(&module);
+            assert!(!handlers.contains("MODEL_ENTITLEMENT_ADMIN_ENABLED"), "a handler reads the env");
+            assert!(!handlers.contains("env::var"), "a handler reads the env");
+        }
+    }
+
+    /// The flag is read once, in `build_state`, from this one variable: no handler reads the
+    /// environment (a per-call read is a process-wide global that parallel tests race on).
+    #[test]
+    fn the_park_form_flag_is_read_once_by_build_state_and_by_no_handler() {
+        // The source's own line endings do not matter here: fold them away first.
+        let config = include_str!("config.rs").replace("\r\n", "\n");
+        let production = config.split("#[cfg(test)]\nmod tests").next().unwrap_or(&config);
+        assert_eq!(production.matches("\"VEREVON_GATEWAY_CONTINUE_PARK_ENABLED\"").count(), 1);
+        assert_eq!(production.matches("continue_park_form: continue_park_form_enabled(),").count(), 1);
+        let orchestration = include_str!("domains/orchestration.rs").replace("\r\n", "\n");
+        let handlers = orchestration
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or(&orchestration);
+        assert!(!handlers.contains("VEREVON_GATEWAY_CONTINUE_PARK_ENABLED"), "a handler reads the env");
+        assert!(!handlers.contains("env::var"), "a handler reads the env");
+        // The compose file declares it once, default off.
+        let compose = include_str!("../../../docker-compose.yml").replace("\r\n", "\n");
+        assert_eq!(
+            compose
+                .matches(
+                    "VEREVON_GATEWAY_CONTINUE_PARK_ENABLED: ${VEREVON_GATEWAY_CONTINUE_PARK_ENABLED:-false}\n"
+                )
+                .count(),
+            1
+        );
+        assert_eq!(
+            compose.matches("\n      VEREVON_GATEWAY_CONTINUE_PARK_ENABLED:").count(),
+            1,
+            "declared exactly once"
+        );
     }
 }
 

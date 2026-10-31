@@ -17,7 +17,7 @@ import pprint
 import re  # noqa: F401
 import json
 
-from pydantic import BaseModel, ConfigDict, StrictStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 from typing import Any, ClassVar, Dict, List, Optional
 from typing import Optional, Set
 from typing_extensions import Self
@@ -29,13 +29,24 @@ class DecideApprovalBody(BaseModel):
     """ # noqa: E501
     decision: StrictStr
     reason: Optional[StrictStr] = ''
-    __properties: ClassVar[List[str]] = ["decision", "reason"]
+    scope: Optional[StrictStr] = Field(default='once', description="How far the decision reaches. Omitted means once. A standing scope is refused with 422 scope_not_enabled until grants exist.")
+    __properties: ClassVar[List[str]] = ["decision", "reason", "scope"]
 
     @field_validator('decision')
     def decision_validate_enum(cls, value):
         """Validates the enum"""
         if value not in set(['approve', 'reject']):
             raise ValueError("must be one of enum values ('approve', 'reject')")
+        return value
+
+    @field_validator('scope')
+    def scope_validate_enum(cls, value):
+        """Validates the enum"""
+        if value is None:
+            return value
+
+        if value not in set(['once']):
+            raise ValueError("must be one of enum values ('once')")
         return value
 
     model_config = ConfigDict(
@@ -90,7 +101,8 @@ class DecideApprovalBody(BaseModel):
 
         _obj = cls.model_validate({
             "decision": obj.get("decision"),
-            "reason": obj.get("reason") if obj.get("reason") is not None else ''
+            "reason": obj.get("reason") if obj.get("reason") is not None else '',
+            "scope": obj.get("scope") if obj.get("scope") is not None else 'once'
         })
         return _obj
 

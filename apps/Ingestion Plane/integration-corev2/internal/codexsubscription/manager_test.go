@@ -82,6 +82,51 @@ func TestManagerRejectsUnsupportedReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestManagerAdmitsMediumAndXHighOnlyWhenTheWideSwitchIsOn(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		wide     bool
+		effort   string
+		accepted bool
+	}{
+		{name: "medium is rejected while the switch is off", effort: "medium"},
+		{name: "xhigh is rejected while the switch is off", effort: "xhigh"},
+		{name: "medium is forwarded while the switch is on", wide: true, effort: "medium", accepted: true},
+		{name: "xhigh is forwarded while the switch is on", wide: true, effort: "xhigh", accepted: true},
+		{name: "high is forwarded while the switch is on", wide: true, effort: "high", accepted: true},
+		{name: "maximum is rejected while the switch is on", wide: true, effort: "maximum"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &fakeRunner{}
+			manager, err := NewManager(Config{Enabled: true, Home: t.TempDir(), WideReasoningEffort: tc.wide}, runner)
+			if err != nil {
+				t.Fatalf("NewManager: %v", err)
+			}
+			_, err = manager.Invoke(t.Context(), InvokeRequest{
+				ConnectionID:    "conn-1",
+				Model:           "gpt-5",
+				Messages:        []ChatMessage{{Role: "user", Content: "hello"}},
+				ReasoningEffort: tc.effort,
+			})
+			if !tc.accepted {
+				if !errors.Is(err, ErrInvalidRequest) {
+					t.Fatalf("Invoke error = %v, want ErrInvalidRequest", err)
+				}
+				if !tc.wide && err.Error() != "invalid subscription invocation request: reasoningEffort must be low or high" {
+					t.Fatalf("switch-off rejection = %q", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Invoke: %v", err)
+			}
+			if runner.invokeRequest.ReasoningEffort != tc.effort {
+				t.Fatalf("runner reasoning effort = %q, want %q", runner.invokeRequest.ReasoningEffort, tc.effort)
+			}
+		})
+	}
+}
+
 func TestManagerRejectsUnsupportedServiceTier(t *testing.T) {
 	manager, err := NewManager(Config{Enabled: true, Home: t.TempDir()}, &fakeRunner{})
 	if err != nil {

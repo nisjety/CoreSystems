@@ -19,6 +19,10 @@ export default defineSchema({
     settings: v.optional(v.object({
       maxTokens: v.optional(v.number()),
       defaultModel: v.optional(v.string()),
+      // Deprecated by ADR-0005: no Convex function reads this field. Model
+      // entitlement is org-core's policy, enforced by inference-core. The field
+      // stays so stored documents keep validating; removing it needs a data
+      // migration first.
       allowedModels: v.optional(v.array(v.string())),
     })),
     

@@ -207,6 +207,18 @@ services:
       ENVIRONMENT: production
       ALLOW_INSECURE_DEV_DEFAULTS: "0"
 
+  # WS06-S8: the SIEM exporter is built from the audit-core image context and,
+  # like audit-core, takes the release build metadata. ENVIRONMENT=production
+  # also makes the exporter refuse AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS=1.
+  audit-siem-exporter:
+    build:
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required}
+        BUILD_DATE: ${BUILD_DATE:?BUILD_DATE is required}
+    environment:
+      ENVIRONMENT: production
+      ALLOW_INSECURE_DEV_DEFAULTS: "0"
+
   lago-db:
     ports: !reset []
 

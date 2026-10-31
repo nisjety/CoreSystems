@@ -213,7 +213,7 @@ type CapabilityDetail struct {
 	Version string `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"`
 	// Description for agent context.
 	Description string `protobuf:"bytes,5,opt,name=description,proto3" json:"description,omitempty"`
-	// Risk flags: "safe", "read_only", "mutation", "dangerous".
+	// Risk level: "low", "medium", or "high"; capability-core rejects any other value.
 	RiskLevel string `protobuf:"bytes,6,opt,name=risk_level,json=riskLevel,proto3" json:"risk_level,omitempty"`
 	// Whether full definition must be loaded on demand (progressive disclosure).
 	LazyLoad bool `protobuf:"varint,7,opt,name=lazy_load,json=lazyLoad,proto3" json:"lazy_load,omitempty"`
@@ -243,7 +243,17 @@ type CapabilityDetail struct {
 	PrivacyTier PrivacyTier `protobuf:"varint,16,opt,name=privacy_tier,json=privacyTier,proto3,enum=model_plane.v1.PrivacyTier" json:"privacy_tier,omitempty"`
 	// model-kind only: declared residency label ("global", "eu", "norway").
 	// Empty means undeclared.
-	Residency     string `protobuf:"bytes,17,opt,name=residency,proto3" json:"residency,omitempty"`
+	Residency string `protobuf:"bytes,17,opt,name=residency,proto3" json:"residency,omitempty"`
+	// Declared side-effect class of the capability, the strictest class of the
+	// tools it carries: "read", "sandbox_compute", "context_write",
+	// "external_write", "destructive", "owner_effect" or "unclassified". The
+	// vocabulary is closed and "unclassified" is the strictest, so an empty or
+	// unrecognised value is reported as "unclassified", never as a weaker class.
+	// Read-only: no request field sets it.
+	SideEffectClass string `protobuf:"bytes,18,opt,name=side_effect_class,json=sideEffectClass,proto3" json:"side_effect_class,omitempty"`
+	// Approval floor the class implies: "none", "ask" or "durable_owner".
+	// "owner_effect" always carries "durable_owner".
+	ApprovalFloor string `protobuf:"bytes,19,opt,name=approval_floor,json=approvalFloor,proto3" json:"approval_floor,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -397,6 +407,20 @@ func (x *CapabilityDetail) GetResidency() string {
 	return ""
 }
 
+func (x *CapabilityDetail) GetSideEffectClass() string {
+	if x != nil {
+		return x.SideEffectClass
+	}
+	return ""
+}
+
+func (x *CapabilityDetail) GetApprovalFloor() string {
+	if x != nil {
+		return x.ApprovalFloor
+	}
+	return ""
+}
+
 // EvaluatePolicy — check whether a tool invocation is allowed.
 type EvaluatePolicyRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -415,7 +439,18 @@ type EvaluatePolicyRequest struct {
 	// "agent", "run", "thread", "workspace", and "user" are reserved but
 	// rejected until trusted identity/resource bindings are carried or resolved
 	// by this contract. Empty, reserved, and unknown values fail closed.
-	Scope         string `protobuf:"bytes,5,opt,name=scope,proto3" json:"scope,omitempty"`
+	Scope string `protobuf:"bytes,5,opt,name=scope,proto3" json:"scope,omitempty"`
+	// The person the run acts for. Asserted by the execution-core service
+	// principal, which is the trust boundary: capability-core accepts it only from
+	// that principal and binds it into the signed decision. Empty means the
+	// caller does not assert one.
+	UserId string `protobuf:"bytes,6,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// The tool being called, as the model named it. When present, the decision is
+	// made for this tool's registry binding (class, approval floor, review state)
+	// instead of the capability's ceiling, and the name is bound into the signed
+	// decision. An `mcp__` name resolves only from the registry and is denied when
+	// the registry does not hold it. Empty means a capability-level evaluation.
+	ToolName      string `protobuf:"bytes,7,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -485,6 +520,20 @@ func (x *EvaluatePolicyRequest) GetScope() string {
 	return ""
 }
 
+func (x *EvaluatePolicyRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *EvaluatePolicyRequest) GetToolName() string {
+	if x != nil {
+		return x.ToolName
+	}
+	return ""
+}
+
 type EvaluatePolicyResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Decision: "allow", "deny", "ask", "fallback".
@@ -504,8 +553,25 @@ type EvaluatePolicyResponse struct {
 	// binds capability id/version, tenant, run, agent, scope, decision, reason,
 	// and budget context; execution runtimes must verify it before dispatch.
 	DecisionEvidence string `protobuf:"bytes,6,opt,name=decision_evidence,json=decisionEvidence,proto3" json:"decision_evidence,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Declared side-effect class the decision was made for: the evaluated tool's
+	// class, or the capability's ceiling when no tool was named. Same vocabulary
+	// as CapabilityDetail.side_effect_class.
+	SideEffectClass string `protobuf:"bytes,7,opt,name=side_effect_class,json=sideEffectClass,proto3" json:"side_effect_class,omitempty"`
+	// Approval floor the decision was made under: "none", "ask" or
+	// "durable_owner". Always at least what the class implies.
+	ApprovalFloor string `protobuf:"bytes,8,opt,name=approval_floor,json=approvalFloor,proto3" json:"approval_floor,omitempty"`
+	// What produced the decision: "risk_level" (the capability's own risk),
+	// "approval_floor" (a class or floor raised it to ask), "tool_review" (the
+	// tool is not approved or is not in the registry), "capability_gate" (the
+	// capability is out of rollout, unavailable, out of scope or ungranted) or,
+	// only when TOOL_POLICY_ENFORCED is on, a stored per-tool policy:
+	// "tool_policy_never", "tool_policy_ask" or "tool_policy_allow".
+	PolicySource string `protobuf:"bytes,9,opt,name=policy_source,json=policySource,proto3" json:"policy_source,omitempty"`
+	// Pinned definition digest of the evaluated MCP tool, lower-case hex. Empty
+	// for a built-in tool and for a capability-level evaluation.
+	ToolDigest    string `protobuf:"bytes,10,opt,name=tool_digest,json=toolDigest,proto3" json:"tool_digest,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *EvaluatePolicyResponse) Reset() {
@@ -580,6 +646,267 @@ func (x *EvaluatePolicyResponse) GetDecisionEvidence() string {
 	return ""
 }
 
+func (x *EvaluatePolicyResponse) GetSideEffectClass() string {
+	if x != nil {
+		return x.SideEffectClass
+	}
+	return ""
+}
+
+func (x *EvaluatePolicyResponse) GetApprovalFloor() string {
+	if x != nil {
+		return x.ApprovalFloor
+	}
+	return ""
+}
+
+func (x *EvaluatePolicyResponse) GetPolicySource() string {
+	if x != nil {
+		return x.PolicySource
+	}
+	return ""
+}
+
+func (x *EvaluatePolicyResponse) GetToolDigest() string {
+	if x != nil {
+		return x.ToolDigest
+	}
+	return ""
+}
+
+// ResolveToolBindings — resolve the registry bindings of the named tools.
+type ResolveToolBindingsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Tenant context; must match the verified tenant.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Run the bindings are resolved for, for audit correlation.
+	RunId string `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// The person the run acts for; same trust rule as EvaluatePolicyRequest.user_id.
+	// A user caller may only name themselves.
+	UserId string `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// Tool names as the model sees them, at most 256 per request.
+	ToolNames     []string `protobuf:"bytes,4,rep,name=tool_names,json=toolNames,proto3" json:"tool_names,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveToolBindingsRequest) Reset() {
+	*x = ResolveToolBindingsRequest{}
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveToolBindingsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveToolBindingsRequest) ProtoMessage() {}
+
+func (x *ResolveToolBindingsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveToolBindingsRequest.ProtoReflect.Descriptor instead.
+func (*ResolveToolBindingsRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ResolveToolBindingsRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ResolveToolBindingsRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *ResolveToolBindingsRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *ResolveToolBindingsRequest) GetToolNames() []string {
+	if x != nil {
+		return x.ToolNames
+	}
+	return nil
+}
+
+// The bindings the registry holds for the requested names.
+type ResolveToolBindingsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// One entry per requested name the registry holds. A name that is missing
+	// here has no binding and must not be dispatched.
+	Bindings      []*ToolBinding `protobuf:"bytes,1,rep,name=bindings,proto3" json:"bindings,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveToolBindingsResponse) Reset() {
+	*x = ResolveToolBindingsResponse{}
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveToolBindingsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveToolBindingsResponse) ProtoMessage() {}
+
+func (x *ResolveToolBindingsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveToolBindingsResponse.ProtoReflect.Descriptor instead.
+func (*ResolveToolBindingsResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *ResolveToolBindingsResponse) GetBindings() []*ToolBinding {
+	if x != nil {
+		return x.Bindings
+	}
+	return nil
+}
+
+// ToolBinding is the registry's declaration of one tool: what governs it and
+// what it is allowed to be. It carries digests and classes, never a description
+// or a schema.
+type ToolBinding struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The name the binding was resolved for.
+	ToolName string `protobuf:"bytes,1,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
+	// Capability whose policy governs the tool.
+	CapabilityId string `protobuf:"bytes,2,opt,name=capability_id,json=capabilityId,proto3" json:"capability_id,omitempty"`
+	// Exact capability version; for an MCP tool it changes with the pinned digest.
+	CapabilityVersion string `protobuf:"bytes,3,opt,name=capability_version,json=capabilityVersion,proto3" json:"capability_version,omitempty"`
+	// Declared side-effect class of this tool.
+	SideEffectClass string `protobuf:"bytes,4,opt,name=side_effect_class,json=sideEffectClass,proto3" json:"side_effect_class,omitempty"`
+	// Approval floor of this tool, never below what its class implies.
+	ApprovalFloor string `protobuf:"bytes,5,opt,name=approval_floor,json=approvalFloor,proto3" json:"approval_floor,omitempty"`
+	// Pinned definition digest, lower-case hex; empty for a built-in tool.
+	ToolDigest string `protobuf:"bytes,6,opt,name=tool_digest,json=toolDigest,proto3" json:"tool_digest,omitempty"`
+	// MCP only: "approved", "pending" or "drifted"; empty for a built-in tool.
+	ReviewState string `protobuf:"bytes,7,opt,name=review_state,json=reviewState,proto3" json:"review_state,omitempty"`
+	// What the registry alone lets a call do today: "allow", "ask" or "deny". It
+	// does not include the per-call capability evaluation, which still applies.
+	EffectivePolicy string `protobuf:"bytes,8,opt,name=effective_policy,json=effectivePolicy,proto3" json:"effective_policy,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *ToolBinding) Reset() {
+	*x = ToolBinding{}
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolBinding) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolBinding) ProtoMessage() {}
+
+func (x *ToolBinding) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolBinding.ProtoReflect.Descriptor instead.
+func (*ToolBinding) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ToolBinding) GetToolName() string {
+	if x != nil {
+		return x.ToolName
+	}
+	return ""
+}
+
+func (x *ToolBinding) GetCapabilityId() string {
+	if x != nil {
+		return x.CapabilityId
+	}
+	return ""
+}
+
+func (x *ToolBinding) GetCapabilityVersion() string {
+	if x != nil {
+		return x.CapabilityVersion
+	}
+	return ""
+}
+
+func (x *ToolBinding) GetSideEffectClass() string {
+	if x != nil {
+		return x.SideEffectClass
+	}
+	return ""
+}
+
+func (x *ToolBinding) GetApprovalFloor() string {
+	if x != nil {
+		return x.ApprovalFloor
+	}
+	return ""
+}
+
+func (x *ToolBinding) GetToolDigest() string {
+	if x != nil {
+		return x.ToolDigest
+	}
+	return ""
+}
+
+func (x *ToolBinding) GetReviewState() string {
+	if x != nil {
+		return x.ReviewState
+	}
+	return ""
+}
+
+func (x *ToolBinding) GetEffectivePolicy() string {
+	if x != nil {
+		return x.EffectivePolicy
+	}
+	return ""
+}
+
 type ValidateSkillBundleRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Skill capability identifier.
@@ -590,7 +917,7 @@ type ValidateSkillBundleRequest struct {
 
 func (x *ValidateSkillBundleRequest) Reset() {
 	*x = ValidateSkillBundleRequest{}
-	mi := &file_model_plane_v1_capabilities_proto_msgTypes[6]
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -602,7 +929,7 @@ func (x *ValidateSkillBundleRequest) String() string {
 func (*ValidateSkillBundleRequest) ProtoMessage() {}
 
 func (x *ValidateSkillBundleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_capabilities_proto_msgTypes[6]
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -615,7 +942,7 @@ func (x *ValidateSkillBundleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidateSkillBundleRequest.ProtoReflect.Descriptor instead.
 func (*ValidateSkillBundleRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{6}
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ValidateSkillBundleRequest) GetSkillId() string {
@@ -636,7 +963,7 @@ type ValidateSkillBundleResponse struct {
 
 func (x *ValidateSkillBundleResponse) Reset() {
 	*x = ValidateSkillBundleResponse{}
-	mi := &file_model_plane_v1_capabilities_proto_msgTypes[7]
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -648,7 +975,7 @@ func (x *ValidateSkillBundleResponse) String() string {
 func (*ValidateSkillBundleResponse) ProtoMessage() {}
 
 func (x *ValidateSkillBundleResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_capabilities_proto_msgTypes[7]
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -661,7 +988,7 @@ func (x *ValidateSkillBundleResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidateSkillBundleResponse.ProtoReflect.Descriptor instead.
 func (*ValidateSkillBundleResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{7}
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ValidateSkillBundleResponse) GetValid() bool {
@@ -696,7 +1023,7 @@ type CheckSkillPromotionRequest struct {
 
 func (x *CheckSkillPromotionRequest) Reset() {
 	*x = CheckSkillPromotionRequest{}
-	mi := &file_model_plane_v1_capabilities_proto_msgTypes[8]
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -708,7 +1035,7 @@ func (x *CheckSkillPromotionRequest) String() string {
 func (*CheckSkillPromotionRequest) ProtoMessage() {}
 
 func (x *CheckSkillPromotionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_capabilities_proto_msgTypes[8]
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -721,7 +1048,7 @@ func (x *CheckSkillPromotionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckSkillPromotionRequest.ProtoReflect.Descriptor instead.
 func (*CheckSkillPromotionRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{8}
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *CheckSkillPromotionRequest) GetSkillId() string {
@@ -756,7 +1083,7 @@ type CheckSkillPromotionResponse struct {
 
 func (x *CheckSkillPromotionResponse) Reset() {
 	*x = CheckSkillPromotionResponse{}
-	mi := &file_model_plane_v1_capabilities_proto_msgTypes[9]
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -768,7 +1095,7 @@ func (x *CheckSkillPromotionResponse) String() string {
 func (*CheckSkillPromotionResponse) ProtoMessage() {}
 
 func (x *CheckSkillPromotionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_capabilities_proto_msgTypes[9]
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -781,7 +1108,7 @@ func (x *CheckSkillPromotionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckSkillPromotionResponse.ProtoReflect.Descriptor instead.
 func (*CheckSkillPromotionResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{9}
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *CheckSkillPromotionResponse) GetPassed() bool {
@@ -816,7 +1143,7 @@ type PromoteSkillRequest struct {
 
 func (x *PromoteSkillRequest) Reset() {
 	*x = PromoteSkillRequest{}
-	mi := &file_model_plane_v1_capabilities_proto_msgTypes[10]
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -828,7 +1155,7 @@ func (x *PromoteSkillRequest) String() string {
 func (*PromoteSkillRequest) ProtoMessage() {}
 
 func (x *PromoteSkillRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_capabilities_proto_msgTypes[10]
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -841,7 +1168,7 @@ func (x *PromoteSkillRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PromoteSkillRequest.ProtoReflect.Descriptor instead.
 func (*PromoteSkillRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{10}
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *PromoteSkillRequest) GetSkillId() string {
@@ -877,7 +1204,7 @@ type PromoteSkillResponse struct {
 
 func (x *PromoteSkillResponse) Reset() {
 	*x = PromoteSkillResponse{}
-	mi := &file_model_plane_v1_capabilities_proto_msgTypes[11]
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -889,7 +1216,7 @@ func (x *PromoteSkillResponse) String() string {
 func (*PromoteSkillResponse) ProtoMessage() {}
 
 func (x *PromoteSkillResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_capabilities_proto_msgTypes[11]
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -902,7 +1229,7 @@ func (x *PromoteSkillResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PromoteSkillResponse.ProtoReflect.Descriptor instead.
 func (*PromoteSkillResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{11}
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *PromoteSkillResponse) GetPromoted() bool {
@@ -933,6 +1260,458 @@ func (x *PromoteSkillResponse) GetCapability() *CapabilityDetail {
 	return nil
 }
 
+type ListSkillBundlesRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Empty lists every skill bundle of the caller's organization.
+	SkillIds      []string `protobuf:"bytes,1,rep,name=skill_ids,json=skillIds,proto3" json:"skill_ids,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSkillBundlesRequest) Reset() {
+	*x = ListSkillBundlesRequest{}
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSkillBundlesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSkillBundlesRequest) ProtoMessage() {}
+
+func (x *ListSkillBundlesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSkillBundlesRequest.ProtoReflect.Descriptor instead.
+func (*ListSkillBundlesRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ListSkillBundlesRequest) GetSkillIds() []string {
+	if x != nil {
+		return x.SkillIds
+	}
+	return nil
+}
+
+type ListSkillBundlesResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Bundles       []*SkillBundleSummary  `protobuf:"bytes,1,rep,name=bundles,proto3" json:"bundles,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSkillBundlesResponse) Reset() {
+	*x = ListSkillBundlesResponse{}
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSkillBundlesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSkillBundlesResponse) ProtoMessage() {}
+
+func (x *ListSkillBundlesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSkillBundlesResponse.ProtoReflect.Descriptor instead.
+func (*ListSkillBundlesResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *ListSkillBundlesResponse) GetBundles() []*SkillBundleSummary {
+	if x != nil {
+		return x.Bundles
+	}
+	return nil
+}
+
+type SkillBundleSummary struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	SkillId        string                 `protobuf:"bytes,1,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
+	ManifestSha256 string                 `protobuf:"bytes,2,opt,name=manifest_sha256,json=manifestSha256,proto3" json:"manifest_sha256,omitempty"`
+	FileCount      int32                  `protobuf:"varint,3,opt,name=file_count,json=fileCount,proto3" json:"file_count,omitempty"`
+	TotalBytes     int64                  `protobuf:"varint,4,opt,name=total_bytes,json=totalBytes,proto3" json:"total_bytes,omitempty"`
+	CreatedBy      string                 `protobuf:"bytes,5,opt,name=created_by,json=createdBy,proto3" json:"created_by,omitempty"`
+	// RFC3339 timestamp of the upload that holds this bundle.
+	CreatedAt     string `protobuf:"bytes,6,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SkillBundleSummary) Reset() {
+	*x = SkillBundleSummary{}
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SkillBundleSummary) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SkillBundleSummary) ProtoMessage() {}
+
+func (x *SkillBundleSummary) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SkillBundleSummary.ProtoReflect.Descriptor instead.
+func (*SkillBundleSummary) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *SkillBundleSummary) GetSkillId() string {
+	if x != nil {
+		return x.SkillId
+	}
+	return ""
+}
+
+func (x *SkillBundleSummary) GetManifestSha256() string {
+	if x != nil {
+		return x.ManifestSha256
+	}
+	return ""
+}
+
+func (x *SkillBundleSummary) GetFileCount() int32 {
+	if x != nil {
+		return x.FileCount
+	}
+	return 0
+}
+
+func (x *SkillBundleSummary) GetTotalBytes() int64 {
+	if x != nil {
+		return x.TotalBytes
+	}
+	return 0
+}
+
+func (x *SkillBundleSummary) GetCreatedBy() string {
+	if x != nil {
+		return x.CreatedBy
+	}
+	return ""
+}
+
+func (x *SkillBundleSummary) GetCreatedAt() string {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return ""
+}
+
+type GetSkillBundleManifestRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SkillId       string                 `protobuf:"bytes,1,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSkillBundleManifestRequest) Reset() {
+	*x = GetSkillBundleManifestRequest{}
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSkillBundleManifestRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSkillBundleManifestRequest) ProtoMessage() {}
+
+func (x *GetSkillBundleManifestRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSkillBundleManifestRequest.ProtoReflect.Descriptor instead.
+func (*GetSkillBundleManifestRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *GetSkillBundleManifestRequest) GetSkillId() string {
+	if x != nil {
+		return x.SkillId
+	}
+	return ""
+}
+
+type SkillBundleManifest struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	SkillId        string                 `protobuf:"bytes,1,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
+	ManifestSha256 string                 `protobuf:"bytes,2,opt,name=manifest_sha256,json=manifestSha256,proto3" json:"manifest_sha256,omitempty"`
+	Files          []*SkillBundleFile     `protobuf:"bytes,3,rep,name=files,proto3" json:"files,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *SkillBundleManifest) Reset() {
+	*x = SkillBundleManifest{}
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SkillBundleManifest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SkillBundleManifest) ProtoMessage() {}
+
+func (x *SkillBundleManifest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SkillBundleManifest.ProtoReflect.Descriptor instead.
+func (*SkillBundleManifest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *SkillBundleManifest) GetSkillId() string {
+	if x != nil {
+		return x.SkillId
+	}
+	return ""
+}
+
+func (x *SkillBundleManifest) GetManifestSha256() string {
+	if x != nil {
+		return x.ManifestSha256
+	}
+	return ""
+}
+
+func (x *SkillBundleManifest) GetFiles() []*SkillBundleFile {
+	if x != nil {
+		return x.Files
+	}
+	return nil
+}
+
+type SkillBundleFile struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Relative path inside the bundle, always with forward slashes.
+	Path       string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Sha256     string `protobuf:"bytes,2,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	SizeBytes  int64  `protobuf:"varint,3,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	Executable bool   `protobuf:"varint,4,opt,name=executable,proto3" json:"executable,omitempty"`
+	// True when the file is not UTF-8 text, so a reader returns metadata only.
+	Binary        bool `protobuf:"varint,5,opt,name=binary,proto3" json:"binary,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SkillBundleFile) Reset() {
+	*x = SkillBundleFile{}
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SkillBundleFile) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SkillBundleFile) ProtoMessage() {}
+
+func (x *SkillBundleFile) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SkillBundleFile.ProtoReflect.Descriptor instead.
+func (*SkillBundleFile) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *SkillBundleFile) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *SkillBundleFile) GetSha256() string {
+	if x != nil {
+		return x.Sha256
+	}
+	return ""
+}
+
+func (x *SkillBundleFile) GetSizeBytes() int64 {
+	if x != nil {
+		return x.SizeBytes
+	}
+	return 0
+}
+
+func (x *SkillBundleFile) GetExecutable() bool {
+	if x != nil {
+		return x.Executable
+	}
+	return false
+}
+
+func (x *SkillBundleFile) GetBinary() bool {
+	if x != nil {
+		return x.Binary
+	}
+	return false
+}
+
+type GetSkillBlobRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SkillId       string                 `protobuf:"bytes,1,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
+	Sha256        string                 `protobuf:"bytes,2,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSkillBlobRequest) Reset() {
+	*x = GetSkillBlobRequest{}
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSkillBlobRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSkillBlobRequest) ProtoMessage() {}
+
+func (x *GetSkillBlobRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSkillBlobRequest.ProtoReflect.Descriptor instead.
+func (*GetSkillBlobRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *GetSkillBlobRequest) GetSkillId() string {
+	if x != nil {
+		return x.SkillId
+	}
+	return ""
+}
+
+func (x *GetSkillBlobRequest) GetSha256() string {
+	if x != nil {
+		return x.Sha256
+	}
+	return ""
+}
+
+type GetSkillBlobResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Content       []byte                 `protobuf:"bytes,1,opt,name=content,proto3" json:"content,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSkillBlobResponse) Reset() {
+	*x = GetSkillBlobResponse{}
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSkillBlobResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSkillBlobResponse) ProtoMessage() {}
+
+func (x *GetSkillBlobResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSkillBlobResponse.ProtoReflect.Descriptor instead.
+func (*GetSkillBlobResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *GetSkillBlobResponse) GetContent() []byte {
+	if x != nil {
+		return x.Content
+	}
+	return nil
+}
+
 var File_model_plane_v1_capabilities_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_capabilities_proto_rawDesc = "" +
@@ -949,7 +1728,7 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"j\n" +
 	"\x14GetCapabilityRequest\x12#\n" +
 	"\rcapability_id\x18\x01 \x01(\tR\fcapabilityId\x12-\n" +
-	"\x12version_constraint\x18\x02 \x01(\tR\x11versionConstraint\"\xb9\x04\n" +
+	"\x12version_constraint\x18\x02 \x01(\tR\x11versionConstraint\"\x8c\x05\n" +
 	"\x10CapabilityDetail\x12#\n" +
 	"\rcapability_id\x18\x01 \x01(\tR\fcapabilityId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -971,13 +1750,17 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"cost_class\x18\x0e \x01(\tR\tcostClass\x12*\n" +
 	"\x11health_checked_at\x18\x0f \x01(\tR\x0fhealthCheckedAt\x12>\n" +
 	"\fprivacy_tier\x18\x10 \x01(\x0e2\x1b.model_plane.v1.PrivacyTierR\vprivacyTier\x12\x1c\n" +
-	"\tresidency\x18\x11 \x01(\tR\tresidency\"\x9b\x01\n" +
+	"\tresidency\x18\x11 \x01(\tR\tresidency\x12*\n" +
+	"\x11side_effect_class\x18\x12 \x01(\tR\x0fsideEffectClass\x12%\n" +
+	"\x0eapproval_floor\x18\x13 \x01(\tR\rapprovalFloor\"\xd1\x01\n" +
 	"\x15EvaluatePolicyRequest\x12#\n" +
 	"\rcapability_id\x18\x01 \x01(\tR\fcapabilityId\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x19\n" +
 	"\bagent_id\x18\x03 \x01(\tR\aagentId\x12\x15\n" +
 	"\x06org_id\x18\x04 \x01(\tR\x05orgId\x12\x14\n" +
-	"\x05scope\x18\x05 \x01(\tR\x05scope\"\xf0\x01\n" +
+	"\x05scope\x18\x05 \x01(\tR\x05scope\x12\x17\n" +
+	"\auser_id\x18\x06 \x01(\tR\x06userId\x12\x1b\n" +
+	"\ttool_name\x18\a \x01(\tR\btoolName\"\x89\x03\n" +
 	"\x16EvaluatePolicyResponse\x12\x1a\n" +
 	"\bdecision\x18\x01 \x01(\tR\bdecision\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\x12%\n" +
@@ -985,7 +1768,31 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"\vdecision_id\x18\x04 \x01(\tR\n" +
 	"decisionId\x12-\n" +
 	"\x12capability_version\x18\x05 \x01(\tR\x11capabilityVersion\x12+\n" +
-	"\x11decision_evidence\x18\x06 \x01(\tR\x10decisionEvidence\"7\n" +
+	"\x11decision_evidence\x18\x06 \x01(\tR\x10decisionEvidence\x12*\n" +
+	"\x11side_effect_class\x18\a \x01(\tR\x0fsideEffectClass\x12%\n" +
+	"\x0eapproval_floor\x18\b \x01(\tR\rapprovalFloor\x12#\n" +
+	"\rpolicy_source\x18\t \x01(\tR\fpolicySource\x12\x1f\n" +
+	"\vtool_digest\x18\n" +
+	" \x01(\tR\n" +
+	"toolDigest\"\x82\x01\n" +
+	"\x1aResolveToolBindingsRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x15\n" +
+	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x17\n" +
+	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x1d\n" +
+	"\n" +
+	"tool_names\x18\x04 \x03(\tR\ttoolNames\"V\n" +
+	"\x1bResolveToolBindingsResponse\x127\n" +
+	"\bbindings\x18\x01 \x03(\v2\x1b.model_plane.v1.ToolBindingR\bbindings\"\xc0\x02\n" +
+	"\vToolBinding\x12\x1b\n" +
+	"\ttool_name\x18\x01 \x01(\tR\btoolName\x12#\n" +
+	"\rcapability_id\x18\x02 \x01(\tR\fcapabilityId\x12-\n" +
+	"\x12capability_version\x18\x03 \x01(\tR\x11capabilityVersion\x12*\n" +
+	"\x11side_effect_class\x18\x04 \x01(\tR\x0fsideEffectClass\x12%\n" +
+	"\x0eapproval_floor\x18\x05 \x01(\tR\rapprovalFloor\x12\x1f\n" +
+	"\vtool_digest\x18\x06 \x01(\tR\n" +
+	"toolDigest\x12!\n" +
+	"\freview_state\x18\a \x01(\tR\vreviewState\x12)\n" +
+	"\x10effective_policy\x18\b \x01(\tR\x0feffectivePolicy\"7\n" +
 	"\x1aValidateSkillBundleRequest\x12\x19\n" +
 	"\bskill_id\x18\x01 \x01(\tR\askillId\"\x8d\x01\n" +
 	"\x1bValidateSkillBundleResponse\x12\x14\n" +
@@ -1014,14 +1821,53 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"\x06reason\x18\x03 \x01(\tR\x06reason\x12@\n" +
 	"\n" +
 	"capability\x18\x04 \x01(\v2 .model_plane.v1.CapabilityDetailR\n" +
-	"capability2\xec\x04\n" +
+	"capability\"6\n" +
+	"\x17ListSkillBundlesRequest\x12\x1b\n" +
+	"\tskill_ids\x18\x01 \x03(\tR\bskillIds\"X\n" +
+	"\x18ListSkillBundlesResponse\x12<\n" +
+	"\abundles\x18\x01 \x03(\v2\".model_plane.v1.SkillBundleSummaryR\abundles\"\xd6\x01\n" +
+	"\x12SkillBundleSummary\x12\x19\n" +
+	"\bskill_id\x18\x01 \x01(\tR\askillId\x12'\n" +
+	"\x0fmanifest_sha256\x18\x02 \x01(\tR\x0emanifestSha256\x12\x1d\n" +
+	"\n" +
+	"file_count\x18\x03 \x01(\x05R\tfileCount\x12\x1f\n" +
+	"\vtotal_bytes\x18\x04 \x01(\x03R\n" +
+	"totalBytes\x12\x1d\n" +
+	"\n" +
+	"created_by\x18\x05 \x01(\tR\tcreatedBy\x12\x1d\n" +
+	"\n" +
+	"created_at\x18\x06 \x01(\tR\tcreatedAt\":\n" +
+	"\x1dGetSkillBundleManifestRequest\x12\x19\n" +
+	"\bskill_id\x18\x01 \x01(\tR\askillId\"\x90\x01\n" +
+	"\x13SkillBundleManifest\x12\x19\n" +
+	"\bskill_id\x18\x01 \x01(\tR\askillId\x12'\n" +
+	"\x0fmanifest_sha256\x18\x02 \x01(\tR\x0emanifestSha256\x125\n" +
+	"\x05files\x18\x03 \x03(\v2\x1f.model_plane.v1.SkillBundleFileR\x05files\"\x94\x01\n" +
+	"\x0fSkillBundleFile\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x16\n" +
+	"\x06sha256\x18\x02 \x01(\tR\x06sha256\x12\x1d\n" +
+	"\n" +
+	"size_bytes\x18\x03 \x01(\x03R\tsizeBytes\x12\x1e\n" +
+	"\n" +
+	"executable\x18\x04 \x01(\bR\n" +
+	"executable\x12\x16\n" +
+	"\x06binary\x18\x05 \x01(\bR\x06binary\"H\n" +
+	"\x13GetSkillBlobRequest\x12\x19\n" +
+	"\bskill_id\x18\x01 \x01(\tR\askillId\x12\x16\n" +
+	"\x06sha256\x18\x02 \x01(\tR\x06sha256\"0\n" +
+	"\x14GetSkillBlobResponse\x12\x18\n" +
+	"\acontent\x18\x01 \x01(\fR\acontent2\x8c\b\n" +
 	"\x0eCapabilityCore\x12e\n" +
 	"\x10ListCapabilities\x12'.model_plane.v1.ListCapabilitiesRequest\x1a(.model_plane.v1.ListCapabilitiesResponse\x12W\n" +
 	"\rGetCapability\x12$.model_plane.v1.GetCapabilityRequest\x1a .model_plane.v1.CapabilityDetail\x12_\n" +
 	"\x0eEvaluatePolicy\x12%.model_plane.v1.EvaluatePolicyRequest\x1a&.model_plane.v1.EvaluatePolicyResponse\x12n\n" +
+	"\x13ResolveToolBindings\x12*.model_plane.v1.ResolveToolBindingsRequest\x1a+.model_plane.v1.ResolveToolBindingsResponse\x12n\n" +
 	"\x13ValidateSkillBundle\x12*.model_plane.v1.ValidateSkillBundleRequest\x1a+.model_plane.v1.ValidateSkillBundleResponse\x12n\n" +
 	"\x13CheckSkillPromotion\x12*.model_plane.v1.CheckSkillPromotionRequest\x1a+.model_plane.v1.CheckSkillPromotionResponse\x12Y\n" +
-	"\fPromoteSkill\x12#.model_plane.v1.PromoteSkillRequest\x1a$.model_plane.v1.PromoteSkillResponseB\xb9\x01\n" +
+	"\fPromoteSkill\x12#.model_plane.v1.PromoteSkillRequest\x1a$.model_plane.v1.PromoteSkillResponse\x12e\n" +
+	"\x10ListSkillBundles\x12'.model_plane.v1.ListSkillBundlesRequest\x1a(.model_plane.v1.ListSkillBundlesResponse\x12l\n" +
+	"\x16GetSkillBundleManifest\x12-.model_plane.v1.GetSkillBundleManifestRequest\x1a#.model_plane.v1.SkillBundleManifest\x12Y\n" +
+	"\fGetSkillBlob\x12#.model_plane.v1.GetSkillBlobRequest\x1a$.model_plane.v1.GetSkillBlobResponseB\xb9\x01\n" +
 	"\x12com.model_plane.v1B\x11CapabilitiesProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -1036,44 +1882,66 @@ func file_model_plane_v1_capabilities_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_capabilities_proto_rawDescData
 }
 
-var file_model_plane_v1_capabilities_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_model_plane_v1_capabilities_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_model_plane_v1_capabilities_proto_goTypes = []any{
-	(*ListCapabilitiesRequest)(nil),     // 0: model_plane.v1.ListCapabilitiesRequest
-	(*ListCapabilitiesResponse)(nil),    // 1: model_plane.v1.ListCapabilitiesResponse
-	(*GetCapabilityRequest)(nil),        // 2: model_plane.v1.GetCapabilityRequest
-	(*CapabilityDetail)(nil),            // 3: model_plane.v1.CapabilityDetail
-	(*EvaluatePolicyRequest)(nil),       // 4: model_plane.v1.EvaluatePolicyRequest
-	(*EvaluatePolicyResponse)(nil),      // 5: model_plane.v1.EvaluatePolicyResponse
-	(*ValidateSkillBundleRequest)(nil),  // 6: model_plane.v1.ValidateSkillBundleRequest
-	(*ValidateSkillBundleResponse)(nil), // 7: model_plane.v1.ValidateSkillBundleResponse
-	(*CheckSkillPromotionRequest)(nil),  // 8: model_plane.v1.CheckSkillPromotionRequest
-	(*CheckSkillPromotionResponse)(nil), // 9: model_plane.v1.CheckSkillPromotionResponse
-	(*PromoteSkillRequest)(nil),         // 10: model_plane.v1.PromoteSkillRequest
-	(*PromoteSkillResponse)(nil),        // 11: model_plane.v1.PromoteSkillResponse
-	(PrivacyTier)(0),                    // 12: model_plane.v1.PrivacyTier
+	(*ListCapabilitiesRequest)(nil),       // 0: model_plane.v1.ListCapabilitiesRequest
+	(*ListCapabilitiesResponse)(nil),      // 1: model_plane.v1.ListCapabilitiesResponse
+	(*GetCapabilityRequest)(nil),          // 2: model_plane.v1.GetCapabilityRequest
+	(*CapabilityDetail)(nil),              // 3: model_plane.v1.CapabilityDetail
+	(*EvaluatePolicyRequest)(nil),         // 4: model_plane.v1.EvaluatePolicyRequest
+	(*EvaluatePolicyResponse)(nil),        // 5: model_plane.v1.EvaluatePolicyResponse
+	(*ResolveToolBindingsRequest)(nil),    // 6: model_plane.v1.ResolveToolBindingsRequest
+	(*ResolveToolBindingsResponse)(nil),   // 7: model_plane.v1.ResolveToolBindingsResponse
+	(*ToolBinding)(nil),                   // 8: model_plane.v1.ToolBinding
+	(*ValidateSkillBundleRequest)(nil),    // 9: model_plane.v1.ValidateSkillBundleRequest
+	(*ValidateSkillBundleResponse)(nil),   // 10: model_plane.v1.ValidateSkillBundleResponse
+	(*CheckSkillPromotionRequest)(nil),    // 11: model_plane.v1.CheckSkillPromotionRequest
+	(*CheckSkillPromotionResponse)(nil),   // 12: model_plane.v1.CheckSkillPromotionResponse
+	(*PromoteSkillRequest)(nil),           // 13: model_plane.v1.PromoteSkillRequest
+	(*PromoteSkillResponse)(nil),          // 14: model_plane.v1.PromoteSkillResponse
+	(*ListSkillBundlesRequest)(nil),       // 15: model_plane.v1.ListSkillBundlesRequest
+	(*ListSkillBundlesResponse)(nil),      // 16: model_plane.v1.ListSkillBundlesResponse
+	(*SkillBundleSummary)(nil),            // 17: model_plane.v1.SkillBundleSummary
+	(*GetSkillBundleManifestRequest)(nil), // 18: model_plane.v1.GetSkillBundleManifestRequest
+	(*SkillBundleManifest)(nil),           // 19: model_plane.v1.SkillBundleManifest
+	(*SkillBundleFile)(nil),               // 20: model_plane.v1.SkillBundleFile
+	(*GetSkillBlobRequest)(nil),           // 21: model_plane.v1.GetSkillBlobRequest
+	(*GetSkillBlobResponse)(nil),          // 22: model_plane.v1.GetSkillBlobResponse
+	(PrivacyTier)(0),                      // 23: model_plane.v1.PrivacyTier
 }
 var file_model_plane_v1_capabilities_proto_depIdxs = []int32{
 	3,  // 0: model_plane.v1.ListCapabilitiesResponse.capabilities:type_name -> model_plane.v1.CapabilityDetail
-	12, // 1: model_plane.v1.CapabilityDetail.privacy_tier:type_name -> model_plane.v1.PrivacyTier
-	3,  // 2: model_plane.v1.ValidateSkillBundleResponse.capability:type_name -> model_plane.v1.CapabilityDetail
-	3,  // 3: model_plane.v1.PromoteSkillResponse.capability:type_name -> model_plane.v1.CapabilityDetail
-	0,  // 4: model_plane.v1.CapabilityCore.ListCapabilities:input_type -> model_plane.v1.ListCapabilitiesRequest
-	2,  // 5: model_plane.v1.CapabilityCore.GetCapability:input_type -> model_plane.v1.GetCapabilityRequest
-	4,  // 6: model_plane.v1.CapabilityCore.EvaluatePolicy:input_type -> model_plane.v1.EvaluatePolicyRequest
-	6,  // 7: model_plane.v1.CapabilityCore.ValidateSkillBundle:input_type -> model_plane.v1.ValidateSkillBundleRequest
-	8,  // 8: model_plane.v1.CapabilityCore.CheckSkillPromotion:input_type -> model_plane.v1.CheckSkillPromotionRequest
-	10, // 9: model_plane.v1.CapabilityCore.PromoteSkill:input_type -> model_plane.v1.PromoteSkillRequest
-	1,  // 10: model_plane.v1.CapabilityCore.ListCapabilities:output_type -> model_plane.v1.ListCapabilitiesResponse
-	3,  // 11: model_plane.v1.CapabilityCore.GetCapability:output_type -> model_plane.v1.CapabilityDetail
-	5,  // 12: model_plane.v1.CapabilityCore.EvaluatePolicy:output_type -> model_plane.v1.EvaluatePolicyResponse
-	7,  // 13: model_plane.v1.CapabilityCore.ValidateSkillBundle:output_type -> model_plane.v1.ValidateSkillBundleResponse
-	9,  // 14: model_plane.v1.CapabilityCore.CheckSkillPromotion:output_type -> model_plane.v1.CheckSkillPromotionResponse
-	11, // 15: model_plane.v1.CapabilityCore.PromoteSkill:output_type -> model_plane.v1.PromoteSkillResponse
-	10, // [10:16] is the sub-list for method output_type
-	4,  // [4:10] is the sub-list for method input_type
-	4,  // [4:4] is the sub-list for extension type_name
-	4,  // [4:4] is the sub-list for extension extendee
-	0,  // [0:4] is the sub-list for field type_name
+	23, // 1: model_plane.v1.CapabilityDetail.privacy_tier:type_name -> model_plane.v1.PrivacyTier
+	8,  // 2: model_plane.v1.ResolveToolBindingsResponse.bindings:type_name -> model_plane.v1.ToolBinding
+	3,  // 3: model_plane.v1.ValidateSkillBundleResponse.capability:type_name -> model_plane.v1.CapabilityDetail
+	3,  // 4: model_plane.v1.PromoteSkillResponse.capability:type_name -> model_plane.v1.CapabilityDetail
+	17, // 5: model_plane.v1.ListSkillBundlesResponse.bundles:type_name -> model_plane.v1.SkillBundleSummary
+	20, // 6: model_plane.v1.SkillBundleManifest.files:type_name -> model_plane.v1.SkillBundleFile
+	0,  // 7: model_plane.v1.CapabilityCore.ListCapabilities:input_type -> model_plane.v1.ListCapabilitiesRequest
+	2,  // 8: model_plane.v1.CapabilityCore.GetCapability:input_type -> model_plane.v1.GetCapabilityRequest
+	4,  // 9: model_plane.v1.CapabilityCore.EvaluatePolicy:input_type -> model_plane.v1.EvaluatePolicyRequest
+	6,  // 10: model_plane.v1.CapabilityCore.ResolveToolBindings:input_type -> model_plane.v1.ResolveToolBindingsRequest
+	9,  // 11: model_plane.v1.CapabilityCore.ValidateSkillBundle:input_type -> model_plane.v1.ValidateSkillBundleRequest
+	11, // 12: model_plane.v1.CapabilityCore.CheckSkillPromotion:input_type -> model_plane.v1.CheckSkillPromotionRequest
+	13, // 13: model_plane.v1.CapabilityCore.PromoteSkill:input_type -> model_plane.v1.PromoteSkillRequest
+	15, // 14: model_plane.v1.CapabilityCore.ListSkillBundles:input_type -> model_plane.v1.ListSkillBundlesRequest
+	18, // 15: model_plane.v1.CapabilityCore.GetSkillBundleManifest:input_type -> model_plane.v1.GetSkillBundleManifestRequest
+	21, // 16: model_plane.v1.CapabilityCore.GetSkillBlob:input_type -> model_plane.v1.GetSkillBlobRequest
+	1,  // 17: model_plane.v1.CapabilityCore.ListCapabilities:output_type -> model_plane.v1.ListCapabilitiesResponse
+	3,  // 18: model_plane.v1.CapabilityCore.GetCapability:output_type -> model_plane.v1.CapabilityDetail
+	5,  // 19: model_plane.v1.CapabilityCore.EvaluatePolicy:output_type -> model_plane.v1.EvaluatePolicyResponse
+	7,  // 20: model_plane.v1.CapabilityCore.ResolveToolBindings:output_type -> model_plane.v1.ResolveToolBindingsResponse
+	10, // 21: model_plane.v1.CapabilityCore.ValidateSkillBundle:output_type -> model_plane.v1.ValidateSkillBundleResponse
+	12, // 22: model_plane.v1.CapabilityCore.CheckSkillPromotion:output_type -> model_plane.v1.CheckSkillPromotionResponse
+	14, // 23: model_plane.v1.CapabilityCore.PromoteSkill:output_type -> model_plane.v1.PromoteSkillResponse
+	16, // 24: model_plane.v1.CapabilityCore.ListSkillBundles:output_type -> model_plane.v1.ListSkillBundlesResponse
+	19, // 25: model_plane.v1.CapabilityCore.GetSkillBundleManifest:output_type -> model_plane.v1.SkillBundleManifest
+	22, // 26: model_plane.v1.CapabilityCore.GetSkillBlob:output_type -> model_plane.v1.GetSkillBlobResponse
+	17, // [17:27] is the sub-list for method output_type
+	7,  // [7:17] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_capabilities_proto_init() }
@@ -1088,7 +1956,7 @@ func file_model_plane_v1_capabilities_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_capabilities_proto_rawDesc), len(file_model_plane_v1_capabilities_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -37,13 +37,16 @@ type Server struct {
 	mailTaskEffectPolicy       MailTaskEffectPolicyResolver
 	runActionAuthority         RunActionAuthorityResolver
 	scheduledStepAuthority     ScheduledStepAuthorityResolver
-	port                       string
-	httpClient                 *http.Client
-	orgService                 string
-	internalKey                string
-	authMembershipService      string
-	authMembershipToken        string
-	authInternalCredential     clients.AuthInternalClientCredential
+	// scheduleContractsEnabled is SCHEDULE_CONTRACT_ENABLED. Off by default: a
+	// create request carrying a stored-consent contract is refused.
+	scheduleContractsEnabled bool
+	port                     string
+	httpClient               *http.Client
+	orgService               string
+	internalKey              string
+	authMembershipService    string
+	authMembershipToken      string
+	authInternalCredential   clients.AuthInternalClientCredential
 	// publisher emits controlplane.acl.resource_grants.changed on
 	// grant/revoke so the Data Plane retrieval visibility cache evicts the
 	// affected (subject_id, org_id) immediately (TTL is the backstop). May be nil.
@@ -91,6 +94,12 @@ func (s *Server) SetRunActionAuthorityResolver(resolver RunActionAuthorityResolv
 // read. A nil resolver leaves scheduled-step issuance fail-closed.
 func (s *Server) SetScheduledStepAuthorityResolver(resolver ScheduledStepAuthorityResolver) {
 	s.scheduledStepAuthority = resolver
+}
+
+// SetScheduleContractsEnabled wires SCHEDULE_CONTRACT_ENABLED. It gates only the
+// stored-consent contract fields of a schedule create decision.
+func (s *Server) SetScheduleContractsEnabled(enabled bool) {
+	s.scheduleContractsEnabled = enabled
 }
 
 // NewServer creates a new HTTP server. aclRepo backs the per-user authz facade

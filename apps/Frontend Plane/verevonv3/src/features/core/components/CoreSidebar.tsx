@@ -15,7 +15,9 @@ import {
   PenLine,
   Pin,
   PinOff,
+  Inbox,
   Trash2,
+  Undo2,
   X,
 } from '@/shared/icons'
 import type { JSX } from '@solidjs/web'
@@ -68,15 +70,29 @@ import {
   type SidebarPanelItem,
   type SidebarSection,
 } from '@/features/core/lib/sidebar-navigation'
-import { clearChatThreads, deleteChatThread, listChatThreads, saveChatThreadSnapshot } from '@/shared/api/chat-client'
+import {
+  archiveChatThread,
+  clearChatThreads,
+  deleteChatThread,
+  listChatThreads,
+  listChatThreadsPage,
+  saveChatThreadSnapshot,
+  unarchiveChatThread,
+  type ChatThreadSession,
+} from '@/shared/api/chat-client'
+import { getModelEntitlement } from '@/shared/api/model-entitlement-client'
 import { useI18n, translateApiError } from '@/shared/i18n'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { cn } from '@/shared/lib/cn'
-import { shouldShowWorkspaceAdminNavigation } from '@/shared/session/access'
+import { hasWorkspaceAdminAccess, shouldShowWorkspaceAdminNavigation } from '@/shared/session/access'
 import { getSession } from '@/shared/session/session-store'
 import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
 import { FilledRailIcon } from './FilledRailIcon'
 import { ChatSidebarOrganizer } from './sidebar/ChatSidebarOrganizer'
 import { ChatWorkLinks } from './sidebar/ChatWorkLinks'
+
+/** How many chats the sidebar shows before "Load more" reveals the next batch. */
+const SIDEBAR_PAGE_SIZE = 50
 import { homeOverviewActionSchema, homeOverviewGroup, homeOverviewSidebarItems, parseHomeOverview } from '@/shared/actions/home-overview'
 
 export const SIDEBAR_MINIMIZED_WIDTH = 60
@@ -100,7 +116,20 @@ export function CoreSidebar(props: {
   const i18n = useI18n()
   const location = useLocation()
   const session = getSession()
-  const visibleSections = () => applyDemoModeNavGate(props.navigationSections ?? sidebarSections)
+  // The Model access tab follows the gateway's admin switch, read once for the whole sidebar. Only an
+  // organisation admin is asked (members get 403 from the BFF once the switch is on). The answer is kept
+  // with the organisation it was asked for, so an earlier answer cannot outlive a change of organisation,
+  // a cleared organisation, or the person ceasing to be an admin. An error or any mismatch means off.
+  const modelAccessOrgId = () => (hasWorkspaceAdminAccess(session) && session.activeOrg?.id ? session.activeOrg.id : undefined)
+  const [modelAccess] = createResource(
+    modelAccessOrgId,
+    async (orgId) => ({ orgId, state: await getModelEntitlement(orgId) }),
+  )
+  const modelAccessEnabled = () => {
+    const answer = modelAccess()
+    return !modelAccess.error && answer !== undefined && answer.orgId === modelAccessOrgId() && answer.state.enabled === true
+  }
+  const visibleSections = () => applyDemoModeNavGate(props.navigationSections ?? sidebarSections, { modelAccessEnabled: modelAccessEnabled() })
     .filter((section) => section.id !== 'settings' || shouldShowWorkspaceAdminNavigation(session))
     .map((section) => localizeSidebarSection(section, i18n))
   const activeSection = () => getSidebarSectionForPath(location.pathname, props.activeRoute, visibleSections())
@@ -184,6 +213,7 @@ export function CoreSidebar(props: {
               <div aria-hidden="true" class="core-sidebar__splitter" />
               <ExpandedSidebarPanel
                 activeSection={section}
+                modelAccessEnabled={modelAccessEnabled()}
                 pathname={`${location.pathname}${location.search}`}
                 onCollapse={() => props.onExpandedChange(false)}
               />
@@ -197,6 +227,7 @@ export function CoreSidebar(props: {
 
 function ExpandedSidebarPanel(props: {
   activeSection: SidebarSection
+  modelAccessEnabled: boolean
   pathname: string
   onCollapse: () => void
 }) {
@@ -267,7 +298,7 @@ function ExpandedSidebarPanel(props: {
         <AccountExpandedSidebarPanel onCollapse={props.onCollapse} />
       </Match>
       <Match when={panelKind() === 'settings'}>
-        <SettingsExpandedSidebarPanel onCollapse={props.onCollapse} />
+        <SettingsExpandedSidebarPanel onCollapse={props.onCollapse} modelAccessEnabled={props.modelAccessEnabled} />
       </Match>
     </Switch>
   )
@@ -335,6 +366,15 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
   // second rename cannot start while one is already in progress.
   const [renamingThreadId, setRenamingThreadId] = createSignal<string | null>(null)
   const [renameDraft, setRenameDraft] = createSignal('')
+  // How many of the loaded active chats are shown. The list is loaded whole
+  // (see refreshServerSessions), so Load more only widens the view.
+  const [shownCount, setShownCount] = createSignal(SIDEBAR_PAGE_SIZE)
+  // The archive view is a separate, server-paged listing: archived chats never
+  // enter the local history cache, which holds only the active list.
+  const [showArchived, setShowArchived] = createSignal(false)
+  const [archivedSessions, setArchivedSessions] = createSignal<ChatThreadSession[]>([])
+  const [archivedCursor, setArchivedCursor] = createSignal<string | null>(null)
+  const [archivedLoading, setArchivedLoading] = createSignal(false)
 
   const refreshLocalSessions = () => {
     setActiveThreadId(readActiveChatThreadId())
@@ -454,8 +494,10 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
   // Storage already orders pinned-first (see `sortByUpdatedAtDesc` in
   // chat-thread-history.ts); filtering preserves that relative order, so no
   // re-sort is needed here.
-  const pinnedSessions = createMemo(() => visibleSessions().filter((item) => item.pinned))
-  const unpinnedSessions = createMemo(() => visibleSessions().filter((item) => !item.pinned))
+  const shownSessions = createMemo(() => visibleSessions().slice(0, shownCount()))
+  const hasMoreSessions = () => visibleSessions().length > shownCount()
+  const pinnedSessions = createMemo(() => shownSessions().filter((item) => item.pinned))
+  const unpinnedSessions = createMemo(() => shownSessions().filter((item) => !item.pinned))
   // Pin is server-owned (see `ChatThreadSession.pinned` in chat-client.ts) so
   // it follows the user across devices -- DashboardComposer's history panel
   // already round-trips it via `saveChatThreadSnapshot`. The local flip via
@@ -535,6 +577,88 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
       setError(i18n.tr('Kunne ikke endre navn på samtalen.', 'Could not rename the conversation.'))
     })
   }
+
+  /**
+   * Hide one chat from the ordinary list. Removed from the local cache first
+   * and put back if the server refuses, the same optimistic shape as
+   * `deleteThread`; the transcript cache is restored too, so a thread that was
+   * never archived does not reload cold next time it is opened.
+   */
+  const archiveThread = async (threadId: string) => {
+    const current = sessions().find((item) => item.threadId === threadId)
+    const transcript = readChatThreadTranscript(threadId)
+    setSessions(removeChatThreadHistoryItem(threadId))
+    setError(null)
+    try {
+      await archiveChatThread(threadId)
+      if (showArchived()) void loadArchived()
+    } catch {
+      if (current) setSessions(upsertChatThreadHistory(current))
+      if (transcript) upsertChatThreadTranscript(transcript)
+      setError(i18n.tr('Kunne ikke arkivere samtalen.', 'Could not archive the conversation.'))
+    }
+  }
+
+  /** Put an archived chat back into the ordinary list. */
+  const restoreThread = async (threadId: string) => {
+    const current = archivedSessions().find((item) => item.threadId === threadId)
+    setArchivedSessions(archivedSessions().filter((item) => item.threadId !== threadId))
+    setError(null)
+    try {
+      await unarchiveChatThread(threadId)
+      await refreshServerSessions()
+    } catch {
+      if (current) setArchivedSessions([current, ...archivedSessions()])
+      setError(i18n.tr('Kunne ikke gjenopprette samtalen.', 'Could not restore the conversation.'))
+    }
+  }
+
+  /** One page of archived chats; `cursor` absent loads the first page. */
+  const loadArchived = async (cursor?: string) => {
+    setArchivedLoading(true)
+    setError(null)
+    try {
+      const page = await listChatThreadsPage({ archived: 'archived', ...(cursor ? { cursor } : {}) })
+      setArchivedSessions(cursor ? [...archivedSessions(), ...page.sessions] : page.sessions)
+      setArchivedCursor(page.nextCursor)
+    } catch (reason) {
+      setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke laste arkiverte samtaler.', en: 'Could not load archived conversations.' }))
+    } finally {
+      setArchivedLoading(false)
+    }
+  }
+
+  const toggleArchived = () => {
+    const next = !showArchived()
+    setShowArchived(next)
+    if (next) void loadArchived()
+  }
+
+  const archivedRow = (item: { threadId: string; title: string; updatedAt: string }) => (
+    <div class="core-chat-session-row">
+      <button
+        type="button"
+        class={['core-chat-session', { 'core-chat-session--active': item.threadId === activeThreadId() }]}
+        onClick={() => openThread(item.threadId)}
+        aria-current={item.threadId === activeThreadId() ? 'page' : undefined}
+        title={`${item.title} · ${formatChatUpdatedAt(item.updatedAt, i18n)}`}
+      >
+        <div class="core-chat-session__summary">
+          <span class="verevon-sidebar-row-strong" title={item.title}>{item.title}</span>
+        </div>
+        <em>{formatChatUpdatedAt(item.updatedAt, i18n)}</em>
+      </button>
+      <button
+        type="button"
+        class="core-chat-session__pin"
+        aria-label={i18n.tr(`Gjenopprett ${item.title}`, `Restore ${item.title}`)}
+        title={i18n.tr('Gjenopprett samtalen', 'Restore chat')}
+        onClick={() => void restoreThread(item.threadId)}
+      >
+        <Undo2 class="size-3.5" />
+      </button>
+    </div>
+  )
 
   /**
    * Permanently delete one thread (explicit confirmation happens in the row
@@ -692,6 +816,7 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
           onRenameStart={() => startRename(item)}
           onMoveToProject={onMoveToProject}
           onTogglePersona={() => togglePersona(item.threadId)}
+          onArchive={() => void archiveThread(item.threadId)}
           onDelete={() => void deleteThread(item.threadId)}
         />
       </Show>
@@ -717,8 +842,18 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
       <Show when={error() && (sessionCount() > 0 || chatAppearanceActive('organizer'))}>
         <p class="core-sidebar-empty verevon-sidebar-row-normal" role="alert">{error()}</p>
       </Show>
+      <button
+        type="button"
+        class="core-chat-sidebar__archive-toggle"
+        aria-pressed={showArchived() ? 'true' : 'false'}
+        onClick={toggleArchived}
+      >
+        <Inbox class="size-3.5" />
+        {showArchived() ? i18n.tr('Vis aktive samtaler', 'Show active chats') : i18n.tr('Vis arkiverte', 'Show archived')}
+      </button>
       <Show when={chatAppearanceActive('organizer')} fallback={
       <nav class="core-chat-sidebar__sessions" aria-label={i18n.tr('Chat-samtaler', 'Chat conversations')}>
+        <Show when={showArchived()} fallback={
         <Show when={!loading()} fallback={<div class="core-sidebar-empty verevon-sidebar-row-normal">{i18n.tr('Laster samtaler ...', 'Loading conversations ...')}</div>}>
           <Show
             when={sessionCount() > 0}
@@ -729,11 +864,33 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
               <For each={pinnedSessions()}>{(item) => sessionRow(item)}</For>
             </Show>
             <For each={unpinnedSessions()}>{(item) => sessionRow(item)}</For>
+            <Show when={hasMoreSessions()}>
+              <button type="button" class="core-chat-sidebar__load-more" onClick={() => setShownCount((count) => count + SIDEBAR_PAGE_SIZE)}>
+                {i18n.tr('Last flere samtaler', 'Load more chats')}
+              </button>
+            </Show>
+          </Show>
+        </Show>
+        }>
+          <Show when={archivedSessions().length > 0} fallback={<div class="core-sidebar-empty verevon-sidebar-row-normal">{archivedLoading() ? i18n.tr('Laster samtaler ...', 'Loading conversations ...') : i18n.tr('Ingen arkiverte samtaler.', 'No archived chats.')}</div>}>
+            <For each={archivedSessions()}>{(item) => archivedRow(item)}</For>
+            <Show when={archivedCursor() !== null}>
+              <button type="button" class="core-chat-sidebar__load-more" onClick={() => void loadArchived(archivedCursor() ?? undefined)}>
+                {i18n.tr('Last flere samtaler', 'Load more chats')}
+              </button>
+            </Show>
           </Show>
         </Show>
       </nav>
       }>
-        <ChatSidebarOrganizer sessions={visibleSessions()} loading={loading()} onNewChat={startNewChat} renderRow={sessionRow} />
+        <ChatSidebarOrganizer
+          sessions={showArchived() ? archivedSessions() : shownSessions()}
+          loading={showArchived() ? archivedLoading() : loading()}
+          onNewChat={startNewChat}
+          renderRow={showArchived() ? archivedRow : sessionRow}
+          hasMore={showArchived() ? archivedCursor() !== null : hasMoreSessions()}
+          onLoadMore={() => (showArchived() ? void loadArchived(archivedCursor() ?? undefined) : setShownCount((count) => count + SIDEBAR_PAGE_SIZE))}
+        />
       </Show>
 
       <button type="button" class="core-chat-sidebar__clear" onClick={clearHistory}>
@@ -765,6 +922,7 @@ function ChatSessionMenu(props: {
   onRenameStart: () => void
   onMoveToProject?: () => void
   onTogglePersona: () => void
+  onArchive: () => void
   onDelete: () => void
 }) {
   const i18n = useI18n()
@@ -864,6 +1022,21 @@ function ChatSessionMenu(props: {
               {props.item.personaEnabled === false
                 ? i18n.tr('Slå på persona for denne samtalen', 'Turn persona on for this thread')
                 : i18n.tr('Slå av persona for denne samtalen', 'Turn persona off for this thread')}
+            </button>
+          </li>
+          <li role="presentation">
+            <button
+              type="button"
+              role="menuitem"
+              class="core-chat-session__menu-item"
+              onClick={(event) => {
+                event.stopPropagation()
+                close(false)
+                props.onArchive()
+              }}
+            >
+              <Inbox class="size-3.5" />
+              {i18n.tr('Arkiver', 'Archive')}
             </button>
           </li>
           <li role="presentation">

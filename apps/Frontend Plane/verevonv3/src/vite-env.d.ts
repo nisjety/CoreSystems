@@ -9,6 +9,8 @@ interface ImportMetaEnv {
 	readonly VITE_BROWSER_OMNIBOX_SEARCH?: string;
 	/** "1" compiles in the product-scene runtime (src/demo). Never set in production. */
 	readonly VITE_SCENE_MODE?: string;
+	readonly VITE_PLAN_EXECUTE_ENABLED?: string;
+	readonly VITE_CHAT_VISION_AS_PARTS_ENABLED?: string;
 }
 
 interface ImportMeta {

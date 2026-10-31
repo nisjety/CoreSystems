@@ -2,6 +2,11 @@
 // copy directly. New dashboard-shell work should prefer useI18n().tr(no, en)
 // while older modules migrate incrementally.
 
+// Limits the refusal sentences quote; the numbers live in
+// features/chat/lib/attachment-policy.ts.
+type AttachmentLimits = { maxFileBytes: number; maxTotalBytes: number; maxImages: number }
+const megabytes = (bytes: number) => `${Math.round((bytes / 1_048_576) * 10) / 10} MB`
+
 export const en = {
   leads: {
     title: 'Leads',
@@ -36,5 +41,23 @@ export const en = {
       sted: 'Location',
       ansatte: 'Employees',
     },
+  },
+  attachments: {
+    refusal: {
+      unsupported_type: (name: string) =>
+        `"${name}" was not attached: this file type is not supported. Use an image (PNG, JPEG, WebP, GIF) or a PDF, DOCX, XLSX, PPTX, TXT, MD, CSV, JSON or HTML file.`,
+      too_large: (name: string, limits: AttachmentLimits) =>
+        `"${name}" was not attached: it is too large. The limit is ${megabytes(limits.maxFileBytes)} per file and ${megabytes(limits.maxTotalBytes)} in total.`,
+      route_unsupported: (name: string) =>
+        `"${name}" was not attached: the ChatGPT subscription does not accept images. Pick another model to use images.`,
+      do_images_unsupported: (name: string) =>
+        `"${name}" was not attached: Do cannot use images yet. Switch to Ask to analyze the image.`,
+      too_many_images: (name: string, limits: AttachmentLimits) =>
+        `"${name}" was not attached: only ${limits.maxImages} image can be analyzed per message.`,
+      zdr_refused: (name: string) =>
+        `"${name}" was not attached: a temporary chat does not accept images.`,
+    },
+    notSent:
+      'The image was not sent: the ChatGPT subscription does not accept images. Remove the image or pick another model. Nothing was sent.',
   },
 } as const

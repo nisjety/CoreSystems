@@ -137,12 +137,12 @@ const NOT_CONVERTED: Record<string, { sites: number; reason: string }> = {
   },
   'features/voice/VoiceModeDialog.tsx': { sites: 1, reason: UNREVIEWED },
   'shared/api/ag-ui-client.ts': {
-    sites: 2,
+    sites: 3,
     reason:
       'a connection failure on the agent stream becomes RUN_ERROR with code connection_error, which the controller treats as a lost transport; the text is unreviewed',
   },
   'shared/api/chat-client.ts': {
-    sites: 6,
+    sites: 8,
     reason:
       'the chat stream connection failure (code connection_error, pinned by chat-client.test) and the mid-run refusal message carry the ApiError text; unreviewed for what a person sees',
   },

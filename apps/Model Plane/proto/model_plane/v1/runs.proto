@@ -110,6 +110,11 @@ message ScheduledStepContext {
   string org_id = 3;
   string goal = 4;
   string status = 5;
+  // Stored-consent contract for this scheduled step (WS20 S5). Empty when the
+  // schedule has no contract; the digest and expiry are re-verified per step.
+  string contract_json = 6;
+  string contract_digest = 7;
+  string contract_expires_at = 8;
 }
 
 message ListRunsRequest {
@@ -263,6 +268,10 @@ message ResolveScheduledStepAuthorityResponse {
   uint32 step_index = 12;
   string idempotency_key = 13;
   string run_status = 14;
+  // Control-signed contract digest and expiry for this scheduled step (WS20 S5).
+  // Empty for a schedule without a contract.
+  string contract_digest = 15;
+  string contract_expires_at = 16;
 }
 
 // RunDetail — full run metadata.
@@ -310,4 +319,61 @@ message RunDetail {
 
   // Arbitrary metadata.
   google.protobuf.Struct metadata = 16;
+
+  // True when a continuation can claim this run's durable loop fold now: the
+  // loop is paused for an approval or parked, the fold store is on, and the run
+  // is persistent and not ended. A flag only; the fold never appears on this
+  // message. Owner: WS03 durable loop.
+  bool resumable = 17;
+
+  // Why the run is parked. Set only while resumable and parked; one closed
+  // token: credential_window, provider_exhausted, upstream_unavailable,
+  // crash_interrupted or reauth_required (mp_contracts::loop_fold::ParkReason).
+  // Owner: WS03 durable loop.
+  string park_reason = 18;
+}
+
+// --- Run context (build plan WS02 S4) ---
+//
+// What a Do/Plan/scheduled run was actually started with. The gateway composes
+// the run context (authored instructions, bounded prior turns, memory block)
+// and stamps this status on the run record so a reviewer can see, per part,
+// whether it was included. Counts and closed tokens only: never content.
+
+// How one part of a run's context was assembled.
+enum RunContextState {
+  // Not stated (an older gateway).
+  RUN_CONTEXT_STATE_UNSPECIFIED = 0;
+  // Included in full.
+  RUN_CONTEXT_STATE_INCLUDED = 1;
+  // Included, but cut to a cap; see `omitted`.
+  RUN_CONTEXT_STATE_TRUNCATED = 2;
+  // Nothing to include (no instructions authored, no prior turns, no memory).
+  RUN_CONTEXT_STATE_EMPTY = 3;
+  // Withheld by policy (zero data retention, memory paused or off, Space scope).
+  RUN_CONTEXT_STATE_SKIPPED_BY_POLICY = 4;
+  // Could not be assembled (the loader failed or timed out); the run proceeds without it.
+  RUN_CONTEXT_STATE_UNAVAILABLE = 5;
+}
+
+// The assembly outcome of one part of the run context.
+message RunContextPart {
+  // How the part was assembled.
+  RunContextState state = 1;
+  // Items included (the unit is part specific: messages for history).
+  uint32 included = 2;
+  // Items left out by a cap.
+  uint32 omitted = 3;
+  // A closed token (for example "zdr", "memory_off", "cap"); never content.
+  string reason = 4;
+}
+
+// How a run's context was assembled, per part. Counts and closed tokens only.
+message RunContextStatus {
+  // The composed authored instructions (platform, org, Space, persona).
+  RunContextPart instructions = 1;
+  // The bounded prior turns of the thread.
+  RunContextPart history = 2;
+  // The prefetched memory block.
+  RunContextPart memory = 3;
 }

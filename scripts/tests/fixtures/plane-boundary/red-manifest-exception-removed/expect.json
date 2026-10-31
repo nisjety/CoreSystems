@@ -1,0 +1,7 @@
+{
+  "exit": 1,
+  "contains": [
+    "apps/Control Plane/lib",
+    "points into Control Plane"
+  ]
+}

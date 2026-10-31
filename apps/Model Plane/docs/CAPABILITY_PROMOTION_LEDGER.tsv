@@ -1,8 +1,13 @@
 capability_id	state	source_revision	candidate_ref	live_evidence_ref	rollback_ref	expires_at	reviewer	notes
+cap.agent.lineage.read	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.agent.spawn	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.browser.open	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.command.sandbox	source_only	working-tree	-	-	-	-	-	Dev health was observed; candidate/live/rollback evidence is absent.
 cap.command.shell	source_only	working-tree	-	-	-	-	-	Dev health was observed as approval_required; candidate/live/rollback evidence is absent.
+cap.memory.index	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.memory.search	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.process.background	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.result.query	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.retrieval.query	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.self_owned.apache_tika	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.self_owned.apis_guru_openapi_directory	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
@@ -17,6 +22,7 @@ cap.self_owned.quarry_url_reputation_feeds	source_only	working-tree	-	-	-	-	-	No
 cap.self_owned.stirling_pdf	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.self_owned.tesseract_ocr	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.self_owned.wikimedia_wikidata_dumps	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.skill.summarize	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.tool.http	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.tool.information.read	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.tool.provider.execute	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.

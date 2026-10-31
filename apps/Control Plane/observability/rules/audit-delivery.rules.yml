@@ -1,0 +1,51 @@
+# Alert rules for the Model Plane's audit delivery (build plan WS01 S1).
+#
+# Why: governed agent actions were recorded in session-core but never reached
+# audit-core (postmortem 0002, apps/Model Plane/docs/postmortem). The outbox
+# publishes a gauge of rows that gave up (`terminal`) and of rows still waiting;
+# nothing alerted on them. These rules make that visible. There is no pager yet:
+# alerts show in the Prometheus UI until a routing target is chosen (decision D1).
+#
+# All series are content-free: bounded `subject_class` and `reason` labels only
+# (session-core audit_publisher.rs), so nothing here is a ZDR concern.
+groups:
+  - name: model-audit-delivery
+    rules:
+      - alert: ModelAuditOutboxTerminalRows
+        expr: max(mp_session_audit_outbox_terminal_by_subject) > 0
+        for: 5m
+        labels: { severity: critical, plane: model }
+        annotations:
+          summary: "Audit events gave up publishing (terminal rows in the session-core outbox)"
+          runbook: "apps/Model Plane/docs/runbooks/audit-delivery-alerts.md#terminal-rows"
+
+      - alert: ModelAuditOutboxTerminalIncreasing
+        expr: increase(mp_session_audit_outbox_terminal_total[10m]) > 0
+        labels: { severity: critical, plane: model }
+        annotations:
+          summary: "New audit events are turning terminal right now"
+          runbook: "apps/Model Plane/docs/runbooks/audit-delivery-alerts.md#terminal-rows"
+
+      - alert: ModelAuditOutboxGaugeAbsent
+        expr: absent(mp_session_audit_outbox_terminal_by_subject{subject_class="audit_tool_action"})
+        for: 10m
+        labels: { severity: warning, plane: model }
+        annotations:
+          summary: "The audit outbox gauge is not reported (reporter stopped or no scrape)"
+          runbook: "apps/Model Plane/docs/runbooks/audit-delivery-alerts.md#gauge-absent"
+
+      - alert: ModelAuditOutboxBacklog
+        # Proposed threshold: 15 minutes of oldest-pending age. Tune after the first week of data.
+        expr: max(mp_session_audit_outbox_oldest_pending_seconds) > 900
+        for: 10m
+        labels: { severity: warning, plane: model }
+        annotations:
+          summary: "The oldest unpublished audit event is older than 15 minutes"
+          runbook: "apps/Model Plane/docs/runbooks/audit-delivery-alerts.md#backlog"
+
+      - alert: ModelAuditTopologyFailure
+        expr: increase(mp_session_audit_outbox_publish_failures_total{reason=~"stream_not_found|permission_denied"}[5m]) > 0
+        labels: { severity: critical, plane: model }
+        annotations:
+          summary: "Audit publishing fails on broker topology (missing stream or no publish permission)"
+          runbook: "apps/Model Plane/docs/runbooks/audit-delivery-alerts.md#topology"

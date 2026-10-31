@@ -249,7 +249,7 @@ Key environment variables (defaults in `internal/config/config.go`):
 | `EXECUTION_CORE_ADDR` | `localhost:50052` | execution-core gRPC endpoint |
 | `CAPABILITY_CORE_ADDR` | `localhost:50053` | capability-core gRPC endpoint |
 | `SANDBOX_MANAGER_ADDR` | `localhost:50054` | sandbox-manager gRPC endpoint |
-| `BROWSER_BROKER_ADDR` | `localhost:50055` | browser-broker gRPC endpoint |
+| `BROWSER_BROKER_ADDR` | `browser-broker:9095` | browser-broker gRPC endpoint; the client is created at start-up, and no activity calls it yet (WS21 S4 adds the first `AcquireGrant` caller) |
 | `LETTA_BRIDGE_ADDR` | `localhost:50056` | letta-bridge gRPC endpoint |
 | `ORCHESTRATOR_GRPC_ADDR` | `:9080` | gRPC listener for both served services |
 | `ORCHESTRATOR_CORE_AUTH_AUDIENCES` | `orchestrator-core` | Comma-separated token audiences `StartWorkflow` accepts |

@@ -1,0 +1,1072 @@
+{
+  "contract": "model-gateway.sse-event-payloads",
+  "version": 1,
+  "generated_by": "model-gateway sse_events payload_contract tests (MP_UPDATE_GOLDEN=1)",
+  "events": {
+    "artifact": {
+      "family": "artifacts",
+      "variants": [
+        "Artifact"
+      ],
+      "keys": {
+        "content": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "kind": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "title": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "version": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "attachment": {
+      "family": "artifacts",
+      "variants": [
+        "Attachment"
+      ],
+      "keys": {
+        "id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "name": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "size": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "type": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "url": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "citation": {
+      "family": "citations",
+      "variants": [
+        "Citation"
+      ],
+      "keys": {
+        "claim_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "end": {
+          "types": [
+            "integer"
+          ],
+          "presence": "optional"
+        },
+        "id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "number": {
+          "types": [
+            "integer"
+          ],
+          "presence": "optional"
+        },
+        "origin": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "snippet": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "source_group_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "source_group_label": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "start": {
+          "types": [
+            "integer"
+          ],
+          "presence": "optional"
+        },
+        "title": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "url": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "compaction": {
+      "family": null,
+      "variants": [
+        "Compaction"
+      ],
+      "keys": {
+        "messages_compacted": {
+          "types": [
+            "integer"
+          ],
+          "presence": "optional"
+        },
+        "messages_kept": {
+          "types": [
+            "integer"
+          ],
+          "presence": "optional"
+        },
+        "outcome": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "pinned_kept": {
+          "types": [
+            "integer"
+          ],
+          "presence": "optional"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "scope": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "context_change": {
+      "family": null,
+      "variants": [
+        "ContextChange"
+      ],
+      "keys": {
+        "change": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "layer": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "messages_dropped": {
+          "types": [
+            "integer"
+          ],
+          "presence": "optional"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "skills_dropped": {
+          "types": [
+            "integer"
+          ],
+          "presence": "optional"
+        },
+        "skills_truncated": {
+          "types": [
+            "integer"
+          ],
+          "presence": "optional"
+        },
+        "state": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        }
+      }
+    },
+    "error": {
+      "family": null,
+      "variants": [
+        "Error",
+        "SubscriptionError",
+        "ZdrError"
+      ],
+      "keys": {
+        "action": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "code": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "feature": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "message": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "resets_at": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "retry_after_ms": {
+          "types": [
+            "integer"
+          ],
+          "presence": "optional"
+        },
+        "retry_at": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "retryable": {
+          "types": [
+            "boolean"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "follow_ups": {
+      "family": null,
+      "variants": [
+        "FollowUps"
+      ],
+      "keys": {
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "suggestions": {
+          "types": [
+            "array"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "grounding": {
+      "family": "citations",
+      "variants": [
+        "Grounding"
+      ],
+      "keys": {
+        "factCount": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "facts": {
+          "types": [
+            "array"
+          ],
+          "presence": "always"
+        },
+        "graph": {
+          "types": [
+            "object"
+          ],
+          "presence": "optional"
+        },
+        "lowConfidence": {
+          "types": [
+            "boolean"
+          ],
+          "presence": "always"
+        },
+        "mode": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "query": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "sourceCount": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "sources": {
+          "types": [
+            "array"
+          ],
+          "presence": "always"
+        },
+        "suggestedNextTools": {
+          "types": [
+            "array"
+          ],
+          "presence": "optional"
+        },
+        "traceId": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "zdrActionsApplied": {
+          "types": [
+            "array"
+          ],
+          "presence": "optional"
+        }
+      }
+    },
+    "memory_recall": {
+      "family": "memory",
+      "variants": [
+        "MemoryRecall"
+      ],
+      "keys": {
+        "count": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "latency_ms": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "memories": {
+          "types": [
+            "array"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "plan_proposed": {
+      "family": null,
+      "variants": [
+        "PlanProposed"
+      ],
+      "keys": {
+        "plan_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "steps": {
+          "types": [
+            "array"
+          ],
+          "presence": "always"
+        },
+        "summary": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "queued_input": {
+      "family": null,
+      "variants": [
+        "QueuedInput",
+        "QueuedInputReceipted"
+      ],
+      "keys": {
+        "ids": {
+          "types": [
+            "array"
+          ],
+          "presence": "optional"
+        },
+        "messages": {
+          "types": [
+            "array"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "reasoning_delta": {
+      "family": "reasoning",
+      "variants": [
+        "ReasoningDelta"
+      ],
+      "keys": {
+        "delta": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "result_receipt": {
+      "family": "usage",
+      "variants": [
+        "ResultReceipt"
+      ],
+      "keys": {
+        "receipt": {
+          "types": [
+            "object"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "retrieval_notice": {
+      "family": null,
+      "variants": [
+        "RetrievalNotice"
+      ],
+      "keys": {
+        "code": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "wording_key": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "retry_scheduled": {
+      "family": "steps",
+      "variants": [
+        "RetryScheduled"
+      ],
+      "keys": {
+        "attempt": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "max_attempts": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "reason": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "scope": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "tool": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "wait_ms": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "source_scope_applied": {
+      "family": "citations",
+      "variants": [
+        "SourceScopeApplied"
+      ],
+      "keys": {
+        "excluded_tools": {
+          "types": [
+            "array"
+          ],
+          "presence": "always"
+        },
+        "scope": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "step_update": {
+      "family": "steps",
+      "variants": [
+        "StepUpdate"
+      ],
+      "keys": {
+        "detail": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "status": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "title": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "stopped": {
+      "family": null,
+      "variants": [
+        "Stopped"
+      ],
+      "keys": {
+        "reason": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "title": {
+      "family": null,
+      "variants": [
+        "Title"
+      ],
+      "keys": {
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "title": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "tool_call": {
+      "family": "tools",
+      "variants": [
+        "ToolCall"
+      ],
+      "keys": {
+        "args": {
+          "types": [
+            "object"
+          ],
+          "presence": "always"
+        },
+        "id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "name": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "tool_result": {
+      "family": "tools",
+      "variants": [
+        "ToolResult"
+      ],
+      "keys": {
+        "error": {
+          "types": [
+            "null",
+            "string"
+          ],
+          "presence": "always"
+        },
+        "id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "output": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "status": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "turn_timing": {
+      "family": "usage",
+      "variants": [
+        "TurnTiming"
+      ],
+      "keys": {
+        "counts": {
+          "types": [
+            "object"
+          ],
+          "presence": "always"
+        },
+        "draft": {
+          "types": [
+            "object"
+          ],
+          "presence": "optional"
+        },
+        "marks": {
+          "types": [
+            "object"
+          ],
+          "presence": "always"
+        },
+        "orchestration_ms": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "outcome": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "phases": {
+          "types": [
+            "array"
+          ],
+          "presence": "always"
+        },
+        "phases_dropped": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "provider_ms": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "server_ms": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "tokens_reported": {
+          "types": [
+            "boolean"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "usage": {
+      "family": "usage",
+      "variants": [
+        "Usage"
+      ],
+      "keys": {
+        "cache_read_tokens": {
+          "types": [
+            "integer"
+          ],
+          "presence": "optional"
+        },
+        "cache_write_tokens": {
+          "types": [
+            "integer"
+          ],
+          "presence": "optional"
+        },
+        "calls": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "confidence": {
+          "types": [
+            "null",
+            "number"
+          ],
+          "presence": "always"
+        },
+        "cost_basis": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "cost_by_category": {
+          "types": [
+            "object"
+          ],
+          "presence": "optional"
+        },
+        "cost_usd": {
+          "types": [
+            "null",
+            "number"
+          ],
+          "presence": "always"
+        },
+        "input_tokens": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "latency_ms": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "output_tokens": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "privacy_tier": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "provider_used": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "residency": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "retention_class": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "retention_reason": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "unpriced_calls": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "usage_progress": {
+      "family": "usage",
+      "variants": [
+        "UsageProgress"
+      ],
+      "keys": {
+        "cache_read_tokens": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "cache_write_tokens": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "calls": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "ceiling_tokens": {
+          "types": [
+            "integer"
+          ],
+          "presence": "optional"
+        },
+        "ceiling_usd": {
+          "types": [
+            "number"
+          ],
+          "presence": "optional"
+        },
+        "cost_basis": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "cost_usd": {
+          "types": [
+            "null",
+            "number"
+          ],
+          "presence": "always"
+        },
+        "fraction": {
+          "types": [
+            "number"
+          ],
+          "presence": "optional"
+        },
+        "input_tokens": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "output_tokens": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "phase": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "unpriced_calls": {
+          "types": [
+            "integer"
+          ],
+          "presence": "optional"
+        },
+        "warning": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        }
+      }
+    },
+    "verification": {
+      "family": "citations",
+      "variants": [
+        "Verification"
+      ],
+      "keys": {
+        "kb_citations": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "verdict": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "web_allowed": {
+          "types": [
+            "boolean"
+          ],
+          "presence": "always"
+        },
+        "web_citations": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        }
+      }
+    }
+  }
+}

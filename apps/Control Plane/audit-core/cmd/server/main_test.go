@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -135,6 +137,25 @@ func TestRequiredProvisioningIsIndependentFromOptionalExtraPlanes(t *testing.T) 
 		if !strings.Contains(extra, requiredText) {
 			t.Fatalf("optional extra-plane provisioner is missing %q", requiredText)
 		}
+	}
+	// WS01-S4 (D1-115): the application bus owns the application audit stream and the two
+	// audit-core durables. Marked optional, a failed attempt was skipped with exit 0, so
+	// restart: on-failure never retried it and the topology never converged once the
+	// Application Plane came up. It must fail (and be retried) instead.
+	appStart := strings.Index(extra, `"name":"application"`)
+	if appStart < 0 {
+		t.Fatal("extra-plane provisioner has no application bus entry")
+	}
+	// The entry ends at the brace that closes the JSON object, not at the one closing the
+	// ${...} password interpolation inside it.
+	appEntry := extra[appStart:]
+	for _, closer := range []string{"},{", "}]"} {
+		if end := strings.Index(appEntry, closer); end >= 0 {
+			appEntry = appEntry[:end]
+		}
+	}
+	if strings.Contains(appEntry, `"optional"`) {
+		t.Fatalf("the application bus entry must not be optional: %s", appEntry)
 	}
 	for _, service := range []string{"auth-core", "user-core", "org-core", "billing-core", "session-core", "audit-core"} {
 		block, blockErr := composeServiceBlock(compose, service)
@@ -1867,6 +1888,252 @@ func TestLoadConfigParsesStableCredentialedExtraBuses(t *testing.T) {
 	}
 	if cfg.ServiceCredentials != serverTestCredentials {
 		t.Fatal("service credential registry was not retained")
+	}
+}
+
+func TestLoadConfigAuditChainSwitchIsStrictAndOffByDefault(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"": false, "0": false, "true": false, "TRUE": false, "yes": false, "on": false,
+		" 1": false, "1 ": false, "01": false, "1": true,
+	} {
+		setMinimumConfig(t)
+		t.Setenv("AUDIT_CHAIN_ENABLED", raw)
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("AUDIT_CHAIN_ENABLED=%q: %v", raw, err)
+		}
+		if cfg.ChainEnabled != want {
+			t.Errorf("AUDIT_CHAIN_ENABLED=%q: ChainEnabled=%v, want %v", raw, cfg.ChainEnabled, want)
+		}
+	}
+}
+
+// The chain switch must ship off: the compose block (once it carries the
+// variable) and the example env both default it to 0.
+func TestAuditChainSwitchShipsOff(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test path")
+	}
+	controlRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+	composeBytes, err := os.ReadFile(filepath.Join(controlRoot, "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := composeServiceBlock(string(composeBytes), "audit-core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(block, "AUDIT_CHAIN_ENABLED") && !strings.Contains(block, "${AUDIT_CHAIN_ENABLED:-0}") {
+		t.Fatal("audit-core compose must default AUDIT_CHAIN_ENABLED to 0")
+	}
+	example, err := os.ReadFile(filepath.Join(controlRoot, "audit-core", ".env.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`(?m)^AUDIT_CHAIN_ENABLED=0\r?$`).Match(example) {
+		t.Fatal("audit-core/.env.example must set AUDIT_CHAIN_ENABLED=0")
+	}
+}
+
+func TestLoadConfigAuditChainPruneSwitchesAreStrictAndOffByDefault(t *testing.T) {
+	_, priv := chainTestKey(t)
+	for _, tc := range []struct {
+		enabled, dryRun string
+		want            store.PruneMode
+	}{
+		{"", "", store.PruneOff},
+		{"0", "0", store.PruneOff},
+		{"true", "", store.PruneOff},
+		{"TRUE", "true", store.PruneOff},
+		{" 1", "yes", store.PruneOff},
+		{"1", "", store.PruneOn},
+		{"1", "0", store.PruneOn},
+		{"", "1", store.PruneDryRun},
+		// The dry run wins, so setting it can never delete.
+		{"1", "1", store.PruneDryRun},
+	} {
+		setMinimumConfig(t)
+		clearChainEnv(t)
+		t.Setenv("AUDIT_CHAIN_KEY_ID", "k1")
+		t.Setenv("AUDIT_CHAIN_PRIVATE_KEY_BASE64", priv)
+		t.Setenv("AUDIT_CHAIN_PRUNE_ENABLED", tc.enabled)
+		t.Setenv("AUDIT_CHAIN_PRUNE_DRYRUN", tc.dryRun)
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("enabled=%q dryrun=%q: %v", tc.enabled, tc.dryRun, err)
+		}
+		if cfg.PruneMode != tc.want {
+			t.Errorf("enabled=%q dryrun=%q: PruneMode=%v, want %v", tc.enabled, tc.dryRun, cfg.PruneMode, tc.want)
+		}
+	}
+}
+
+func TestLoadConfigReadsNoKeyMaterialWhileEverythingChainedIsOff(t *testing.T) {
+	setMinimumConfig(t)
+	clearChainEnv(t)
+	t.Setenv("ENVIRONMENT", "production")
+	t.Setenv("AUDIT_CHAIN_PRIVATE_KEY_BASE64", "not a key")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("an unused, undecodable key must not matter with the chain off: %v", err)
+	}
+	if cfg.KeyRing != nil || cfg.ChainEnabled || cfg.PruneMode != store.PruneOff {
+		t.Fatalf("defaults changed behaviour: ring=%v chain=%v prune=%v", cfg.KeyRing, cfg.ChainEnabled, cfg.PruneMode)
+	}
+}
+
+func TestLoadConfigChainKeyRules(t *testing.T) {
+	seed, priv := chainTestKey(t)
+	std := base64.StdEncoding.EncodeToString(seed)
+
+	for name, tc := range map[string]struct {
+		env     map[string]string
+		wantErr bool
+		canSign bool
+	}{
+		"production chain without a key fails boot": {
+			env:     map[string]string{"AUDIT_CHAIN_ENABLED": "1", "ENVIRONMENT": "production"},
+			wantErr: true,
+		},
+		"production chain with a key id only fails boot": {
+			env:     map[string]string{"AUDIT_CHAIN_ENABLED": "1", "ENVIRONMENT": "production", "AUDIT_CHAIN_KEY_ID": "k1"},
+			wantErr: true,
+		},
+		"production chain with a base64url key boots": {
+			env:     map[string]string{"AUDIT_CHAIN_ENABLED": "1", "ENVIRONMENT": "production", "AUDIT_CHAIN_KEY_ID": "k1", "AUDIT_CHAIN_PRIVATE_KEY_BASE64": priv},
+			canSign: true,
+		},
+		"production chain with a standard base64 key boots": {
+			env:     map[string]string{"AUDIT_CHAIN_ENABLED": "1", "ENVIRONMENT": "production", "AUDIT_CHAIN_KEY_ID": "k1", "AUDIT_CHAIN_PRIVATE_KEY_BASE64": std},
+			canSign: true,
+		},
+		"development chain without a key boots unsigned": {
+			env: map[string]string{"AUDIT_CHAIN_ENABLED": "1", "ENVIRONMENT": "development"},
+		},
+		"chain with an undecodable key fails boot": {
+			env:     map[string]string{"AUDIT_CHAIN_ENABLED": "1", "AUDIT_CHAIN_KEY_ID": "k1", "AUDIT_CHAIN_PRIVATE_KEY_BASE64": "%%%"},
+			wantErr: true,
+		},
+		"chain with a public key that does not match fails boot": {
+			env: map[string]string{
+				"AUDIT_CHAIN_ENABLED": "1", "AUDIT_CHAIN_KEY_ID": "k1", "AUDIT_CHAIN_PRIVATE_KEY_BASE64": priv,
+				"AUDIT_CHAIN_PUBLIC_KEY_BASE64": base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+			},
+			wantErr: true,
+		},
+		"pruning on without a key fails boot": {
+			env:     map[string]string{"AUDIT_CHAIN_PRUNE_ENABLED": "1"},
+			wantErr: true,
+		},
+		"pruning on with a key boots": {
+			env:     map[string]string{"AUDIT_CHAIN_PRUNE_ENABLED": "1", "AUDIT_CHAIN_KEY_ID": "k1", "AUDIT_CHAIN_PRIVATE_KEY_BASE64": priv},
+			canSign: true,
+		},
+		"dry run without a key boots": {
+			env: map[string]string{"AUDIT_CHAIN_PRUNE_DRYRUN": "1"},
+		},
+	} {
+		setMinimumConfig(t)
+		clearChainEnv(t)
+		for k, v := range tc.env {
+			t.Setenv(k, v)
+		}
+		cfg, err := loadConfig()
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("%s: boot accepted", name)
+			} else if strings.Contains(err.Error(), priv) || strings.Contains(err.Error(), std) {
+				t.Errorf("%s: the error repeats key material: %v", name, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if got := cfg.KeyRing.CanSign(); got != tc.canSign {
+			t.Errorf("%s: CanSign=%v, want %v", name, got, tc.canSign)
+		}
+	}
+}
+
+func TestLoadConfigAttestInterval(t *testing.T) {
+	for raw, want := range map[string]time.Duration{
+		"": 60 * time.Second, "30s": 30 * time.Second, "5m": 5 * time.Minute,
+		"0s": 60 * time.Second, "-1m": 60 * time.Second, "soon": 60 * time.Second, "500ms": 60 * time.Second,
+	} {
+		setMinimumConfig(t)
+		clearChainEnv(t)
+		t.Setenv("AUDIT_CHAIN_ATTEST_INTERVAL", raw)
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("AUDIT_CHAIN_ATTEST_INTERVAL=%q: %v", raw, err)
+		}
+		if cfg.AttestInterval != want {
+			t.Errorf("AUDIT_CHAIN_ATTEST_INTERVAL=%q: %v, want %v", raw, cfg.AttestInterval, want)
+		}
+	}
+}
+
+// Chained pruning must ship off, and the example env must not carry key
+// material: the keypair is generated by run-control-plane.sh.
+func TestAuditChainPruneSwitchesShipOffAndExampleCarriesNoKey(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test path")
+	}
+	controlRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+	composeBytes, err := os.ReadFile(filepath.Join(controlRoot, "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := composeServiceBlock(string(composeBytes), "audit-core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"AUDIT_CHAIN_PRUNE_ENABLED", "AUDIT_CHAIN_PRUNE_DRYRUN"} {
+		if strings.Contains(block, name) && !strings.Contains(block, "${"+name+":-0}") {
+			t.Fatalf("audit-core compose must default %s to 0", name)
+		}
+	}
+	example, err := os.ReadFile(filepath.Join(controlRoot, "audit-core", ".env.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{"AUDIT_CHAIN_PRUNE_ENABLED=0", "AUDIT_CHAIN_PRUNE_DRYRUN=0"} {
+		if !regexp.MustCompile(`(?m)^` + line + `\r?$`).Match(example) {
+			t.Fatalf("audit-core/.env.example must set %s", line)
+		}
+	}
+	for _, key := range []string{"AUDIT_CHAIN_KEY_ID", "AUDIT_CHAIN_PRIVATE_KEY_BASE64", "AUDIT_CHAIN_PUBLIC_KEY_BASE64"} {
+		if !regexp.MustCompile(`(?m)^` + key + `=\r?$`).Match(example) {
+			t.Fatalf("audit-core/.env.example must list %s with an empty value", key)
+		}
+	}
+}
+
+// chainTestKey returns a seed and its base64url (no padding) form, the
+// encoding run-control-plane.sh writes.
+func chainTestKey(t *testing.T) ([]byte, string) {
+	t.Helper()
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(i + 7)
+	}
+	return seed, base64.RawURLEncoding.EncodeToString(seed)
+}
+
+// clearChainEnv blanks every chain variable so a test starts from the defaults
+// whatever the host environment holds.
+func clearChainEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"AUDIT_CHAIN_ENABLED", "AUDIT_CHAIN_KEY_ID", "AUDIT_CHAIN_PRIVATE_KEY_BASE64",
+		"AUDIT_CHAIN_PUBLIC_KEY_BASE64", "AUDIT_CHAIN_VERIFY_KEYS", "AUDIT_CHAIN_ATTEST_INTERVAL",
+		"AUDIT_CHAIN_PRUNE_ENABLED", "AUDIT_CHAIN_PRUNE_DRYRUN", "ENVIRONMENT",
+	} {
+		t.Setenv(name, "")
 	}
 }
 

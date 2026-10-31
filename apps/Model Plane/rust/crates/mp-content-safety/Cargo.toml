@@ -1,0 +1,13 @@
+[package]
+name = "mp-content-safety"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+serde_json = { workspace = true }

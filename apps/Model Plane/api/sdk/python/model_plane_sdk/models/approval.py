@@ -17,8 +17,9 @@ import pprint
 import re  # noqa: F401
 import json
 
-from pydantic import BaseModel, ConfigDict, StrictStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 from typing import Any, ClassVar, Dict, List, Optional
+from model_plane_sdk.models.approval_cause import ApprovalCause
 from typing import Optional, Set
 from typing_extensions import Self
 from pydantic_core import to_jsonable_python
@@ -35,7 +36,8 @@ class Approval(BaseModel):
     requested_of: Optional[StrictStr] = None
     decided_by: Optional[StrictStr] = None
     decision_reason: Optional[StrictStr] = None
-    __properties: ClassVar[List[str]] = ["id", "run_id", "step_id", "kind", "state", "requested_of", "decided_by", "decision_reason"]
+    cause: Optional[ApprovalCause] = Field(default=None, description="Why the approval was asked for. Null when the creator stated no cause.")
+    __properties: ClassVar[List[str]] = ["id", "run_id", "step_id", "kind", "state", "requested_of", "decided_by", "decision_reason", "cause"]
 
     @field_validator('kind')
     def kind_validate_enum(cls, value):
@@ -96,6 +98,14 @@ class Approval(BaseModel):
             exclude=excluded_fields,
             exclude_none=True,
         )
+        # override the default output from pydantic by calling `to_dict()` of cause
+        if self.cause:
+            _dict['cause'] = self.cause.to_dict()
+        # set to None if cause (nullable) is None
+        # and model_fields_set contains the field
+        if self.cause is None and "cause" in self.model_fields_set:
+            _dict['cause'] = None
+
         return _dict
 
     @classmethod
@@ -115,7 +125,8 @@ class Approval(BaseModel):
             "state": obj.get("state"),
             "requested_of": obj.get("requested_of"),
             "decided_by": obj.get("decided_by"),
-            "decision_reason": obj.get("decision_reason")
+            "decision_reason": obj.get("decision_reason"),
+            "cause": ApprovalCause.from_dict(obj["cause"]) if obj.get("cause") is not None else None
         })
         return _obj
 

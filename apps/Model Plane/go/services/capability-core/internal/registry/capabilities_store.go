@@ -27,6 +27,18 @@ import (
 // See POL-1 in apps/QM_INSPIRED_IMPROVEMENT_PLAN_2026-08-13.md.
 var ErrRiskFloorViolation = errors.New("capability risk floor: capability:risk:override is required to lower a high-risk capability's risk_level")
 
+// ErrToolClassFloorViolation is returned by Upsert when a write would lower a
+// capability's side_effect_class or approval_floor without the caller holding
+// authz.RiskOverrideScope. The class vocabulary ends at `unclassified`, the
+// strictest class, so any class below the one a row (or a new row's default)
+// holds is a lowering.
+var ErrToolClassFloorViolation = errors.New("tool class floor: capability:risk:override is required to lower a capability's side_effect_class or approval_floor")
+
+// ErrMCPToolKindReserved is returned by Upsert for kind=mcp_tool. Those rows are
+// created only by tool observation (WS05-S2), which derives their class from
+// what the server declared; a generic catalog write must not choose one.
+var ErrMCPToolKindReserved = errors.New("capability kind mcp_tool is created only by tool observation")
+
 // CapabilityRow is the full mutable row for the capabilities table.
 type CapabilityRow struct {
 	ID                string
@@ -62,7 +74,27 @@ type CapabilityRow struct {
 	CreatedBy         string
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+	// SideEffectClass and ApprovalFloor are the capability's ceiling, the
+	// strictest of its tools (see models/tool_class.go). A read returns the
+	// stored pair. On Upsert both empty leaves the stored pair untouched; both
+	// set is a class write that lowers nothing unless the caller holds
+	// authz.RiskOverrideScope.
+	SideEffectClass string
+	ApprovalFloor   string
 }
+
+// capabilityColumns is the one column list every full-row read selects, in the
+// order scanCapabilityRow scans it. A column added to CapabilityRow is added
+// here and in the scan, and nowhere else.
+const capabilityColumns = `id, org_id, kind, name, version, description,
+		       risk_level, scope, lazy_load, enabled, idempotency_key,
+		       schema_input, schema_output, config_json, tags, enabled_for_scopes,
+		       success_rate, schema_fail_rate, p95_latency_ms, mean_cost_usd,
+		       approval_rate, incident_count, operator_rating, rollout_state,
+		       availability_state, availability_reason_code, availability_reason,
+		       execution_mode, cost_class, health_checked_at,
+		       created_by, created_at, updated_at,
+		       side_effect_class, approval_floor`
 
 // CapabilitiesStore provides CRUD access to the capabilities table.
 type CapabilitiesStore struct {
@@ -110,6 +142,17 @@ func (s *CapabilitiesStore) Upsert(ctx context.Context, r *CapabilityRow, hasRis
 	if err := s.enforceRiskFloor(ctx, r, hasRiskOverride); err != nil {
 		return err
 	}
+	writeClass, err := s.enforceClassFloor(ctx, r, hasRiskOverride)
+	if err != nil {
+		return err
+	}
+	// Without a class write a new row takes the defaults (the strictest class,
+	// no floor) and an existing row keeps its pair: ON CONFLICT below only
+	// copies the class columns when $23 is true.
+	sideEffectClass, approvalFloor := models.SideEffectUnclassified, models.ApprovalFloorNone
+	if writeClass {
+		sideEffectClass, approvalFloor = r.SideEffectClass, r.ApprovalFloor
+	}
 	if r.SchemaInput == nil {
 		r.SchemaInput = []byte("{}")
 	}
@@ -132,17 +175,19 @@ func (s *CapabilitiesStore) Upsert(ctx context.Context, r *CapabilityRow, hasRis
 		r.RolloutState = "stable"
 	}
 	now := time.Now().UTC()
-	_, err := s.pool.Exec(ctx, `
+	_, err = s.pool.Exec(ctx, `
 		INSERT INTO capabilities (
 			id, org_id, kind, name, version, description,
 			risk_level, scope, lazy_load, enabled, idempotency_key,
 			schema_input, schema_output, config_json, tags, enabled_for_scopes,
-			rollout_state, created_by, created_at, updated_at
+			rollout_state, created_by, created_at, updated_at,
+			side_effect_class, approval_floor
 		) VALUES (
 			$1,$2,$3,$4,$5,$6,
 			$7,$8,$9,$10,$11,
 			$12,$13,$14,$15,$16,
-			$17,$18,$19,$20
+			$17,$18,$19,$20,
+			$21,$22
 		)
 		ON CONFLICT (org_id, kind, name) WHERE deleted_at IS NULL DO UPDATE SET
 			version          = EXCLUDED.version,
@@ -157,6 +202,8 @@ func (s *CapabilitiesStore) Upsert(ctx context.Context, r *CapabilityRow, hasRis
 			tags             = EXCLUDED.tags,
 			enabled_for_scopes = EXCLUDED.enabled_for_scopes,
 			rollout_state    = EXCLUDED.rollout_state,
+			side_effect_class = CASE WHEN $23 THEN EXCLUDED.side_effect_class ELSE capabilities.side_effect_class END,
+			approval_floor    = CASE WHEN $23 THEN EXCLUDED.approval_floor ELSE capabilities.approval_floor END,
 			availability_state = CASE
 				WHEN (capabilities.version, capabilities.risk_level, capabilities.schema_input, capabilities.schema_output, capabilities.config_json)
 				  IS DISTINCT FROM (EXCLUDED.version, EXCLUDED.risk_level, EXCLUDED.schema_input, EXCLUDED.schema_output, EXCLUDED.config_json)
@@ -187,6 +234,7 @@ func (s *CapabilitiesStore) Upsert(ctx context.Context, r *CapabilityRow, hasRis
 		r.RiskLevel, r.Scope, r.LazyLoad, r.Enabled, r.IdempotencyKey,
 		r.SchemaInput, r.SchemaOutput, r.ConfigJSON, r.Tags, r.EnabledForScopes,
 		r.RolloutState, r.CreatedBy, now, now,
+		sideEffectClass, approvalFloor, writeClass,
 	)
 	return err
 }
@@ -238,17 +286,53 @@ func (s *CapabilitiesStore) enforceRiskFloor(ctx context.Context, r *CapabilityR
 	}
 }
 
+// enforceClassFloor validates the class write an Upsert carries and reports
+// whether it carries one. The pair is all or nothing: a class without a floor
+// (or the reverse) is refused rather than completed with a guess, because a
+// guessed floor is a guessed approval requirement.
+//
+// A write may only raise or keep what the row holds. The comparison is against
+// the row's stored pair, or against the defaults (`unclassified`, `none`) for a
+// row that does not exist yet, so setting any class on a new row is also a
+// lowering from `unclassified` and needs authz.RiskOverrideScope. kind=mcp_tool
+// is refused outright: those rows get their class from observation, never from
+// a generic write. As with enforceRiskFloor, the read and the write are two
+// round trips, so a precisely-timed concurrent raise could be overwritten by a
+// write that was checked against the older value; that residual is the same
+// one disclosed in docs/SECURITY.md for the risk floor.
+func (s *CapabilitiesStore) enforceClassFloor(ctx context.Context, r *CapabilityRow, hasRiskOverride bool) (bool, error) {
+	if r.Kind == models.KindMCPTool {
+		return false, ErrMCPToolKindReserved
+	}
+	if r.SideEffectClass == "" && r.ApprovalFloor == "" {
+		return false, nil
+	}
+	if err := models.ValidateClassAndFloor(r.SideEffectClass, r.ApprovalFloor); err != nil {
+		return false, err
+	}
+	if hasRiskOverride {
+		return true, nil
+	}
+
+	priorClass, priorFloor := models.SideEffectUnclassified, models.ApprovalFloorNone
+	err := s.pool.QueryRow(ctx, `
+		SELECT side_effect_class, approval_floor FROM capabilities
+		WHERE org_id = $1 AND kind = $2 AND name = $3 AND deleted_at IS NULL
+	`, r.OrgID, r.Kind, r.Name).Scan(&priorClass, &priorFloor)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf("capability class floor check for %s: %w", r.ID, err)
+	}
+	if models.SideEffectClassRank(r.SideEffectClass) < models.SideEffectClassRank(priorClass) ||
+		models.ApprovalFloorRank(r.ApprovalFloor) < models.ApprovalFloorRank(priorFloor) {
+		return false, fmt.Errorf("%w: %s holds %q/%q and a write of %q/%q would lower it",
+			ErrToolClassFloorViolation, r.ID, priorClass, priorFloor, r.SideEffectClass, r.ApprovalFloor)
+	}
+	return true, nil
+}
+
 // Get returns a single capability by ID.
 func (s *CapabilitiesStore) Get(ctx context.Context, id string) (*CapabilityRow, error) {
-	row := s.pool.QueryRow(ctx, `
-		SELECT id, org_id, kind, name, version, description,
-		       risk_level, scope, lazy_load, enabled, idempotency_key,
-		       schema_input, schema_output, config_json, tags, enabled_for_scopes,
-		       success_rate, schema_fail_rate, p95_latency_ms, mean_cost_usd,
-		       approval_rate, incident_count, operator_rating, rollout_state,
-		       availability_state, availability_reason_code, availability_reason,
-		       execution_mode, cost_class, health_checked_at,
-		       created_by, created_at, updated_at
+	row := s.pool.QueryRow(ctx, "SELECT "+capabilityColumns+`
 		FROM capabilities
 		WHERE id = $1 AND deleted_at IS NULL
 	`, id)
@@ -259,15 +343,7 @@ func (s *CapabilitiesStore) Get(ctx context.Context, id string) (*CapabilityRow,
 // read global catalog entries but may never use this method to read another
 // tenant's row.
 func (s *CapabilitiesStore) GetForOrg(ctx context.Context, id, orgID string) (*CapabilityRow, error) {
-	row := s.pool.QueryRow(ctx, `
-		SELECT id, org_id, kind, name, version, description,
-		       risk_level, scope, lazy_load, enabled, idempotency_key,
-		       schema_input, schema_output, config_json, tags, enabled_for_scopes,
-		       success_rate, schema_fail_rate, p95_latency_ms, mean_cost_usd,
-		       approval_rate, incident_count, operator_rating, rollout_state,
-		       availability_state, availability_reason_code, availability_reason,
-		       execution_mode, cost_class, health_checked_at,
-		       created_by, created_at, updated_at
+	row := s.pool.QueryRow(ctx, "SELECT "+capabilityColumns+`
 		FROM capabilities
 		WHERE id = $1 AND (org_id = $2 OR org_id = 'global') AND deleted_at IS NULL
 	`, id, orgID)
@@ -278,15 +354,7 @@ func (s *CapabilitiesStore) GetForOrg(ctx context.Context, id, orgID string) (*C
 // authorities use this exact lookup so a privileged attestation cannot be
 // redirected to a tenant-owned row with the same capability identifier.
 func (s *CapabilitiesStore) GetGlobal(ctx context.Context, id string) (*CapabilityRow, error) {
-	row := s.pool.QueryRow(ctx, `
-		SELECT id, org_id, kind, name, version, description,
-		       risk_level, scope, lazy_load, enabled, idempotency_key,
-		       schema_input, schema_output, config_json, tags, enabled_for_scopes,
-		       success_rate, schema_fail_rate, p95_latency_ms, mean_cost_usd,
-		       approval_rate, incident_count, operator_rating, rollout_state,
-		       availability_state, availability_reason_code, availability_reason,
-		       execution_mode, cost_class, health_checked_at,
-		       created_by, created_at, updated_at
+	row := s.pool.QueryRow(ctx, "SELECT "+capabilityColumns+`
 		FROM capabilities
 		WHERE id = $1 AND org_id = 'global' AND deleted_at IS NULL
 	`, id)
@@ -323,19 +391,12 @@ func (s *CapabilitiesStore) List(ctx context.Context, orgID, kind, rollout strin
 
 	// args[0]=limit, args[1]=offset
 	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
-		SELECT id, org_id, kind, name, version, description,
-		       risk_level, scope, lazy_load, enabled, idempotency_key,
-		       schema_input, schema_output, config_json, tags, enabled_for_scopes,
-		       success_rate, schema_fail_rate, p95_latency_ms, mean_cost_usd,
-		       approval_rate, incident_count, operator_rating, rollout_state,
-		       availability_state, availability_reason_code, availability_reason,
-		       execution_mode, cost_class, health_checked_at,
-		       created_by, created_at, updated_at
+		SELECT %s
 		FROM capabilities
 		WHERE %s
 		ORDER BY kind, name
 		LIMIT $1 OFFSET $2
-	`, where), args...)
+	`, capabilityColumns, where), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -636,17 +697,10 @@ func (s *CapabilitiesStore) RankedList(ctx context.Context, orgID, kind string, 
 	}
 
 	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
-		SELECT id, org_id, kind, name, version, description,
-		       risk_level, scope, lazy_load, enabled, idempotency_key,
-		       schema_input, schema_output, config_json, tags, enabled_for_scopes,
-		       success_rate, schema_fail_rate, p95_latency_ms, mean_cost_usd,
-		       approval_rate, incident_count, operator_rating, rollout_state,
-		       availability_state, availability_reason_code, availability_reason,
-		       execution_mode, cost_class, health_checked_at,
-		       created_by, created_at, updated_at
+		SELECT %s
 		FROM capabilities
 		WHERE %s
-	`, where), args...)
+	`, capabilityColumns, where), args...)
 	if err != nil {
 		return nil, fmt.Errorf("ranked list query: %w", err)
 	}
@@ -700,6 +754,7 @@ func scanCapabilityRow(row pgxScanner) (*CapabilityRow, error) {
 		&r.AvailabilityState, &r.ReasonCode, &r.Reason,
 		&r.ExecutionMode, &r.CostClass, &r.HealthCheckedAt,
 		&r.CreatedBy, &r.CreatedAt, &r.UpdatedAt,
+		&r.SideEffectClass, &r.ApprovalFloor,
 	)
 	if err != nil {
 		return nil, err

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -14,6 +16,10 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/learning"
 	"github.com/triodelab/model-plane/services/capability-core/internal/llmreviewer"
 	"github.com/triodelab/model-plane/services/capability-core/internal/skillsink"
+	"github.com/triodelab/model-plane/services/capability-core/internal/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -51,6 +57,59 @@ type reviewInferenceClient interface {
 	Infer(ctx context.Context, in *mpv1.InferRequest, opts ...grpc.CallOption) (*mpv1.InferResponse, error)
 }
 
+// memoryControlsReader is the MemoryService question the review asks before it
+// reads a conversation: may this user's runs be learned from? The generated
+// *mpv1.MemoryServiceClient satisfies it; tests inject a fake.
+type memoryControlsReader interface {
+	GetMemoryControls(ctx context.Context, in *mpv1.GetMemoryControlsRequest, opts ...grpc.CallOption) (*mpv1.GetMemoryControlsResponse, error)
+}
+
+// Option configures a review consumer.
+type Option func(*reviewOptions)
+
+type reviewOptions struct {
+	controls memoryControlsReader
+	cost     *CostControls
+}
+
+// WithMemoryControls makes the review ask Session Core whether the run's owner
+// allows learning before it reads their conversation. Without it the review
+// relies on Session Core's own gates (the run is not announced, and the skill
+// write is refused) and still pays for a review that write will refuse.
+func WithMemoryControls(client memoryControlsReader) Option {
+	return func(o *reviewOptions) { o.controls = client }
+}
+
+// WithCostControls bounds what each review may spend; see [CostControls]. Without
+// it a review runs exactly as it did before the controls existed.
+func WithCostControls(cost CostControls) Option {
+	return func(o *reviewOptions) { o.cost = &cost }
+}
+
+// CostControls bound what one learning review may spend. A review is a model
+// call over a whole conversation, so it is skipped before that call when the
+// conversation is too short or too long to be worth reading, or when the owner
+// or the organization has used up the day's reviews.
+type CostControls struct {
+	// MinUserTurns is the fewest user turns a conversation needs to be reviewed.
+	MinUserTurns int
+	// MaxTranscriptChars is the longest rendered transcript a review sends.
+	MaxTranscriptChars int
+	// MaxPerUserPerDay and MaxPerOrgPerDay cap the reviews started per UTC day.
+	MaxPerUserPerDay int
+	MaxPerOrgPerDay  int
+	// Budget counts the day's reviews. Nil means no counter store is wired, and
+	// every review is skipped: a cap that cannot be counted is not enforced.
+	Budget ReviewBudget
+}
+
+// ReviewBudget counts reviews by key. Incr adds one to key and returns the count
+// including it, and the key expires after ttl. Implementations must increment
+// atomically, so two replicas never both see a count under the cap.
+type ReviewBudget interface {
+	Incr(ctx context.Context, key string, ttl time.Duration) (int64, error)
+}
+
 // HandleRunCompleted decodes a run-lifecycle envelope and, if it is a
 // RUN_COMPLETED, runs one learning review end-to-end: fetch the transcript +
 // existing skills (session-core), review (inference-core), and persist the
@@ -77,8 +136,9 @@ func HandleRunCompleted(
 	sc reviewSessionClient,
 	ic reviewInferenceClient,
 	model string,
+	opts ...Option,
 ) (int, error) {
-	outcome, err := handleRunCompleted(ctx, data, sc, ic, model)
+	outcome, err := handleRunCompleted(ctx, data, sc, ic, model, opts...)
 	return outcome.Persisted, err
 }
 
@@ -87,7 +147,84 @@ const (
 	skipNotRunCompleted  learning.SkipReason = "not_run_completed"
 	skipRetentionPosture learning.SkipReason = "retention_posture"
 	skipProviderRefusal  learning.SkipReason = "provider_refusal"
+	// The owner's own memory state: paused or off.
+	skipMemoryState learning.SkipReason = "memory_state"
+	// The organization's policy: memory disabled, the learning review not
+	// opted in, or the policy unreadable.
+	skipOrgPolicy learning.SkipReason = "org_policy"
+	// The envelope names no owner, so a proposal would belong to no one.
+	skipOwnerUnknown learning.SkipReason = "owner_unknown"
+	// The cost controls: the conversation is too short or too long to review, or
+	// the day's caps are used up, or the caps cannot be counted.
+	skipTooFewTurns        learning.SkipReason = "too_few_turns"
+	skipTranscriptTooLarge learning.SkipReason = "transcript_too_large"
+	skipUserDailyCap       learning.SkipReason = "user_daily_cap"
+	skipOrgDailyCap        learning.SkipReason = "org_daily_cap"
+	skipBudgetUnavailable  learning.SkipReason = "budget_unavailable"
 )
+
+// reviewSkipped counts the reviews that did not reach the model, by skip reason.
+// The reason is a closed token; the run, the owner and the content never appear.
+var reviewSkipped, _ = otel.Meter(telemetry.MeterName).Int64Counter(
+	"learning_review_skipped_total",
+	metric.WithDescription("Learning reviews that did not reach the model, labelled by skip reason."),
+)
+
+// The cost controls' defaults, used when their switch is on and a bound is unset.
+const (
+	defaultMinUserTurns       = 3
+	defaultMaxTranscriptChars = 60000
+	defaultMaxPerUserPerDay   = 5
+	defaultMaxPerOrgPerDay    = 100
+	// reviewBudgetTTL outlives the UTC day its counts belong to, so no count
+	// expires while that day is still current.
+	reviewBudgetTTL = 48 * time.Hour
+)
+
+// Environment names of the cost controls. The switch reads only the literal
+// "true", and the bounds are read only when the switch is on.
+const (
+	learningReviewCostEnv     = "LEARNING_REVIEW_COST_CONTROLS"
+	learningReviewMinTurnsEnv = "LEARNING_REVIEW_MIN_USER_TURNS"
+	learningReviewMaxCharsEnv = "LEARNING_REVIEW_MAX_TRANSCRIPT_CHARS"
+	learningReviewUserCapEnv  = "LEARNING_REVIEW_MAX_PER_USER_PER_DAY"
+	learningReviewOrgCapEnv   = "LEARNING_REVIEW_MAX_PER_ORG_PER_DAY"
+)
+
+// logSkip records a review that did not reach the model: counted by its reason,
+// and logged against the run it concerns.
+func logSkip(ctx context.Context, runID string, reason learning.SkipReason, attrs ...any) {
+	reviewSkipped.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", string(reason))))
+	slog.Info("learning review skipped", append([]any{"run_id", runID, "reason", reason}, attrs...)...)
+}
+
+// learningSkip asks Session Core whether the run's owner allows learning, and
+// returns why not as a skip reason ("" when it does). An answer that cannot be
+// had is an error, not a yes: the delivery is retried.
+func learningSkip(ctx context.Context, controls memoryControlsReader, ref SessionRef) (learning.SkipReason, error) {
+	resp, err := controls.GetMemoryControls(ctx, &mpv1.GetMemoryControlsRequest{OrgId: ref.OrgID, UserId: ref.UserID})
+	if err != nil {
+		return "", fmt.Errorf("sessionreview: memory controls for run %s: %w", ref.RunID, err)
+	}
+	decision := resp.GetControls()
+	if decision == nil {
+		return "", fmt.Errorf("sessionreview: memory controls for run %s: empty response", ref.RunID)
+	}
+	if decision.GetLearningAllowed() {
+		return "", nil
+	}
+	switch decision.GetReason() {
+	case "user_paused", "user_off", "thread_off":
+		return skipMemoryState, nil
+	case "zdr":
+		return skipRetentionPosture, nil
+	default:
+		// org_disabled, policy_unavailable, and "on" with learning refused: the
+		// organization has not opted in. A reason this build does not know is
+		// refused as the organization's, the stricter of the two.
+		return skipOrgPolicy, nil
+	}
+}
 
 // handleRunCompleted is [HandleRunCompleted] returning the full outcome.
 func handleRunCompleted(
@@ -96,7 +233,12 @@ func handleRunCompleted(
 	sc reviewSessionClient,
 	ic reviewInferenceClient,
 	model string,
+	opts ...Option,
 ) (learning.ReviewOutcome, error) {
+	var options reviewOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
 	var env envelope.Envelope
 	if err := json.Unmarshal(data, &env); err != nil {
 		return learning.ReviewOutcome{}, fmt.Errorf("sessionreview: decode envelope: %w", err)
@@ -109,30 +251,165 @@ func handleRunCompleted(
 	}
 	// Retention gate — ahead of every session-core read, by construction.
 	if posture := parseRetentionPosture(data); !posture.AllowsDerivedPersistence() {
-		slog.Info("learning review skipped", "run_id", ref.RunID,
-			"reason", skipRetentionPosture, "posture", posture.String())
+		logSkip(ctx, ref.RunID, skipRetentionPosture, "posture", posture.String())
 		return learning.ReviewOutcome{Skipped: skipRetentionPosture}, nil
 	}
+	// Owner gate, also ahead of every read. A proposal belongs to the person
+	// whose conversation it came from, so a run with no owner is not reviewed,
+	// and neither is one whose owner (or organization) does not allow learning.
+	if ref.UserID == "" {
+		logSkip(ctx, ref.RunID, skipOwnerUnknown)
+		return learning.ReviewOutcome{Skipped: skipOwnerUnknown}, nil
+	}
+	if options.controls != nil {
+		skip, err := learningSkip(ctx, options.controls, ref)
+		if err != nil {
+			return learning.ReviewOutcome{}, err
+		}
+		if skip != "" {
+			logSkip(ctx, ref.RunID, skip)
+			return learning.ReviewOutcome{Skipped: skip}, nil
+		}
+	}
 	reviewer := llmreviewer.NewReviewer(ic, model, ref.OrgID)
-	sink := skillsink.NewSessionCoreSink(sc, ref.OrgID)
-	src := NewSessionCoreTranscriptSource(sc)
+	sink := skillsink.NewSessionCoreSink(sc, ref.OrgID, ref.UserID, ref.RunID, ref.ThreadID)
+	var src TranscriptSource = NewSessionCoreTranscriptSource(sc)
+	if options.cost != nil {
+		src = costGatedSource{inner: src, cost: *options.cost, now: time.Now}
+	}
 	outcome, err := OnRunCompleted(ctx, ref, src, reviewer, sink)
 	var responseError *llmreviewer.ResponseError
 	if errors.As(err, &responseError) && responseError.Kind == "refused" {
-		slog.Info("learning review skipped", "run_id", ref.RunID, "reason", skipProviderRefusal)
+		logSkip(ctx, ref.RunID, skipProviderRefusal)
 		return learning.ReviewOutcome{Skipped: skipProviderRefusal}, nil
 	}
 	switch {
 	case err != nil:
 		// Logged, with its delivery count, by whoever settles the message.
 	case outcome.Skipped != "":
-		slog.Info("learning review skipped", "run_id", ref.RunID, "reason", outcome.Skipped)
+		logSkip(ctx, ref.RunID, outcome.Skipped)
 	default:
 		slog.Info("learning review completed", "run_id", ref.RunID,
 			"candidates", outcome.Candidates, "selected", outcome.Selected,
 			"skills_persisted", outcome.Persisted)
 	}
 	return outcome, err
+}
+
+// ReviewRunCompleted is [HandleRunCompleted] returning the full outcome: why a
+// run was not reviewed, or what its review did. The replay harness reads the
+// outcome; the consumer settles on the error alone.
+func ReviewRunCompleted(
+	ctx context.Context,
+	data []byte,
+	sc reviewSessionClient,
+	ic reviewInferenceClient,
+	model string,
+	opts ...Option,
+) (learning.ReviewOutcome, error) {
+	return handleRunCompleted(ctx, data, sc, ic, model, opts...)
+}
+
+// costGatedSource reads a run's transcript through the cost controls. A review
+// reaches the model only when the conversation has enough user turns to learn
+// from, fits the transcript bound, and is inside the owner's and the
+// organization's daily caps. Every check runs on the transcript already read and
+// before the model is called, so a skipped review costs a read and no tokens.
+type costGatedSource struct {
+	inner TranscriptSource
+	cost  CostControls
+	now   func() time.Time
+}
+
+// Fetch implements [TranscriptSource].
+func (s costGatedSource) Fetch(ctx context.Context, ref SessionRef) (Transcript, error) {
+	transcript, err := s.inner.Fetch(ctx, ref)
+	if err != nil || transcript.Skip != "" {
+		return transcript, err
+	}
+	if len(transcript.Text) > s.cost.MaxTranscriptChars {
+		return Transcript{Skip: skipTranscriptTooLarge}, nil
+	}
+	if countUserTurns(transcript.Text) < s.cost.MinUserTurns {
+		return Transcript{Skip: skipTooFewTurns}, nil
+	}
+	if skip := s.reserve(ctx, ref); skip != "" {
+		return Transcript{Skip: skip}, nil
+	}
+	return transcript, nil
+}
+
+// reserve counts this review against the owner's and the organization's caps for
+// the UTC day, and reports the cap it breaks. A store that cannot count fails
+// closed: a cap that is not counted is not enforced.
+func (s costGatedSource) reserve(ctx context.Context, ref SessionRef) learning.SkipReason {
+	if s.cost.Budget == nil {
+		return skipBudgetUnavailable
+	}
+	day := s.now().UTC().Format("2006-01-02")
+	owner, err := s.cost.Budget.Incr(ctx, "learning-review:user:"+ref.OrgID+":"+ref.UserID+":"+day, reviewBudgetTTL)
+	if err != nil {
+		return skipBudgetUnavailable
+	}
+	if owner > int64(s.cost.MaxPerUserPerDay) {
+		return skipUserDailyCap
+	}
+	org, err := s.cost.Budget.Incr(ctx, "learning-review:org:"+ref.OrgID+":"+day, reviewBudgetTTL)
+	if err != nil {
+		return skipBudgetUnavailable
+	}
+	if org > int64(s.cost.MaxPerOrgPerDay) {
+		return skipOrgDailyCap
+	}
+	return ""
+}
+
+// countUserTurns counts the user turns of a rendered transcript. RenderTranscript
+// writes one "ROLE: content" block per turn, separated by a blank line, so a turn
+// starts after one. A blank line inside a message can only add a turn, which lets
+// a short conversation through to the caps but never holds back a long one.
+func countUserTurns(transcript string) int {
+	return strings.Count("\n\n"+transcript, "\n\nUSER: ")
+}
+
+// CostControlsFromLookup reads the cost controls through lookup (os.Getenv in
+// the service). They are off unless LEARNING_REVIEW_COST_CONTROLS is exactly
+// "true", and with them off a review runs as it did before they existed. When
+// they are on, an unset bound takes its default, and a malformed bound is an
+// error, so the caller does not start a consumer it cannot bound. The returned
+// controls carry no [ReviewBudget]: the Redis counter is not wired, so until a
+// store is installed every review is skipped as budget_unavailable.
+func CostControlsFromLookup(lookup func(string) string) (CostControls, bool, error) {
+	if lookup(learningReviewCostEnv) != "true" {
+		return CostControls{}, false, nil
+	}
+	cost := CostControls{
+		MinUserTurns:       defaultMinUserTurns,
+		MaxTranscriptChars: defaultMaxTranscriptChars,
+		MaxPerUserPerDay:   defaultMaxPerUserPerDay,
+		MaxPerOrgPerDay:    defaultMaxPerOrgPerDay,
+	}
+	bounds := []struct {
+		env   string
+		value *int
+	}{
+		{learningReviewMinTurnsEnv, &cost.MinUserTurns},
+		{learningReviewMaxCharsEnv, &cost.MaxTranscriptChars},
+		{learningReviewUserCapEnv, &cost.MaxPerUserPerDay},
+		{learningReviewOrgCapEnv, &cost.MaxPerOrgPerDay},
+	}
+	for _, bound := range bounds {
+		raw := lookup(bound.env)
+		if raw == "" {
+			continue
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			return CostControls{}, false, fmt.Errorf("sessionreview: %s must be a positive integer", bound.env)
+		}
+		*bound.value = n
+	}
+	return cost, true, nil
 }
 
 // Delay transient/schema failures rather than redelivering at once; the
@@ -317,6 +594,7 @@ func RunConsumer(
 	sc reviewSessionClient,
 	ic reviewInferenceClient,
 	model string,
+	opts ...Option,
 ) error {
 	// Read before binding so the very first delivery is already settled
 	// against the server's limits. The bind below performs this same lookup,
@@ -331,7 +609,7 @@ func RunConsumer(
 	}
 	sub, err := js.QueueSubscribe(RunCompletedSubject, SkillReviewDurable, func(msg *nats.Msg) {
 		settleReview(ctx, msg, msg.Subject, limits, func(reviewCtx context.Context) (learning.ReviewOutcome, error) {
-			return handleRunCompleted(reviewCtx, msg.Data, sc, ic, model)
+			return handleRunCompleted(reviewCtx, msg.Data, sc, ic, model, opts...)
 		})
 	}, nats.Bind(RunEventsStream, SkillReviewDurable), nats.ManualAck())
 	if err != nil {

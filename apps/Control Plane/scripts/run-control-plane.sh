@@ -204,6 +204,33 @@ if ! lookup_value CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64 >/dev/null 2>&1 \
   fi
 fi
 
+# Audit-chain signing keypair (Ed25519), WS06-S3. audit-core SIGNS head
+# attestations and retention checkpoints with the private half; the public half
+# is served so a verifier outside the database can check them. The private key
+# lives only in this persisted store and the audit-core environment, never in
+# the database, which is what makes a rewritten chain detectable. Same
+# derivation as the Space-decision pair above: a 32-byte seed and its 32-byte
+# public key, base64url without padding (audit-core's loader also accepts
+# standard base64). Both halves are minted together and never hand-edited; a
+# mismatched pair would make every checkpoint fail verification, so audit-core
+# refuses to boot on one.
+if ! lookup_value AUDIT_CHAIN_PRIVATE_KEY_BASE64 >/dev/null 2>&1 \
+  || ! lookup_value AUDIT_CHAIN_PUBLIC_KEY_BASE64 >/dev/null 2>&1; then
+  audit_chain_der=$(mktemp)
+  openssl genpkey -algorithm ed25519 -outform DER -out "$audit_chain_der" >/dev/null 2>&1
+  audit_chain_private=$(tail -c 32 "$audit_chain_der" | base64url_no_pad)
+  audit_chain_public=$(openssl pkey -inform DER -in "$audit_chain_der" -pubout -outform DER 2>/dev/null \
+    | tail -c 32 | base64url_no_pad)
+  rm -f "$audit_chain_der"
+  if [[ -n "$audit_chain_private" && -n "$audit_chain_public" ]]; then
+    persist_if_missing AUDIT_CHAIN_KEY_ID "audit-chain-$(openssl rand -hex 8)"
+    persist_if_missing AUDIT_CHAIN_PRIVATE_KEY_BASE64 "$audit_chain_private"
+    persist_if_missing AUDIT_CHAIN_PUBLIC_KEY_BASE64 "$audit_chain_public"
+  else
+    printf 'WARNING: could not generate the audit-chain Ed25519 keypair; audit-core cannot sign chain heads or checkpoints.\n' >&2
+  fi
+fi
+
 # AES-256-GCM key for Model Plane session-core's approval-continuation
 # descriptors. NOT the base64url form used above: continuation_crypto.rs decodes
 # with base64::STANDARD and then hard-requires exactly 32 bytes, so this is
@@ -215,6 +242,15 @@ fi
 # treats a missing key as "descriptor boundary unavailable", so the PAUSE
 # itself returns unavailable and an approval can never even be requested.
 persist_if_missing SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY "$(openssl rand -base64 32)"
+
+# AES-256-GCM key org-core uses to seal SIEM destination secrets (WS06-S7).
+# Padded standard base64 of 32 random bytes, like the key above; org-core also
+# accepts the other base64 spellings but hard-requires exactly 32 bytes. Without
+# it, or with ORG_SIEM_DESTINATIONS_ENABLED off, the destination routes stay off.
+# The key id travels with every sealed secret, so a later key can be introduced
+# under a new id without losing track of what the old one sealed.
+persist_if_missing ORG_CORE_SIEM_SEAL_KEY "$(openssl rand -base64 32)"
+persist_if_missing ORG_CORE_SIEM_SEAL_KEY_ID v1
 
 # Keep local database URLs internally consistent with the generated database
 # password. Existing non-empty service-local values always win.
@@ -421,6 +457,11 @@ required_credentials=(
   VISIBILITY_ORG_CORE_SERVICE_TOKEN
   AUDIT_APPLICATION_NATS_PASSWORD
   AUDIT_CONTROL_NATS_PASSWORD AUDIT_MODEL_NATS_PASSWORD AUTH_BILLING_CORE_SERVICE_TOKEN
+  # audit-core's org-core principal (scope org:siem:read:any only), which the
+  # SIEM exporter presents to read the enabled destinations (WS06-S7). Minted
+  # here because org-core validates it in ORG_CORE_SERVICE_CREDENTIALS and
+  # audit-core presents it.
+  AUDIT_ORG_CORE_SERVICE_TOKEN
   AUTH_NATS_PASSWORD AUTH_ORG_CORE_SERVICE_TOKEN AUTH_SHARED_NATS_PASSWORD
   AUTH_USER_CORE_GRPC_SERVICE_TOKEN BILLING_NATS_PASSWORD BILLING_ORG_CORE_SERVICE_TOKEN
   BILLING_SHARED_NATS_PASSWORD CONTROL_NATS_PROVISIONER_PASSWORD CONTROL_SHARED_BRIDGE_PASSWORD
@@ -457,6 +498,15 @@ required_credentials=(
   COST_BILLING_CORE_SERVICE_TOKEN
   INTEGRATION_AUDIT_CORE_SERVICE_TOKEN INTEGRATION_BILLING_CORE_SERVICE_TOKEN
   INTEGRATION_ORG_CORE_SERVICE_TOKEN MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN
+  # inference-core's org-core principal (scope org:model-entitlement:read:any
+  # only). Minted here because org-core validates it in
+  # ORG_CORE_SERVICE_CREDENTIALS and inference-core presents it.
+  INFERENCE_ORG_CORE_SERVICE_TOKEN
+  # browser-broker's org-core principal (scope org:browser-site:read:any only),
+  # which the broker presents to read a member's site decision at grant mint
+  # (WS21-S3). Minted here because org-core validates it in
+  # ORG_CORE_SERVICE_CREDENTIALS and the broker presents it.
+  BROWSER_BROKER_ORG_CORE_SERVICE_TOKEN
   MODEL_NATS_PROVISIONER_PASSWORD
   ORG_GROUP_GRANT_SERVICE_TOKEN
   ORG_NATS_PASSWORD ORG_SHARED_NATS_PASSWORD QUARRY_AUTH_INTERNAL_SERVICE_TOKEN

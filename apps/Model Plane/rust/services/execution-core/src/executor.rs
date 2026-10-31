@@ -31,7 +31,7 @@
 
 use crate::policy::MpSandboxPolicy;
 use crate::{sandbox, scrub};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Wall-clock ceiling for one sandboxed execution. Without it, a child that
@@ -255,14 +255,53 @@ pub async fn execute_sandboxed_in_dir(
     env: &[(String, String)],
     timeout: Duration,
 ) -> std::io::Result<ExecOutcome> {
+    execute_sandboxed_in_dir_with_ro_binds(policy, program, args, cwd, env, &[], timeout).await
+}
+
+/// [`execute_sandboxed_in_dir`] with read-only layers: each `(host, mount)` pair
+/// is bound read-only inside the sandbox, after the writable root, so a program
+/// can read the files but a write to them fails with `EROFS` from the kernel.
+///
+/// A read-only layer is only a promise while bubblewrap enforces it. On a host
+/// without a working sandbox the command would run as a plain child process that
+/// can open the staged files for writing, so staging is refused there, whatever
+/// the policy says ([`require_ro_binds_enforced`]).
+///
+/// # Errors
+/// As [`execute_sandboxed_in_dir`], plus `Unsupported` when `ro_binds` is
+/// non-empty and the command would not be wrapped.
+pub async fn execute_sandboxed_in_dir_with_ro_binds(
+    policy: &MpSandboxPolicy,
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    env: &[(String, String)],
+    ro_binds: &[(PathBuf, PathBuf)],
+    timeout: Duration,
+) -> std::io::Result<ExecOutcome> {
     let options = sandbox::LaunchOptions {
         cwd: Some(cwd),
         env: sandbox::SandboxEnv::Only(env),
-        ..sandbox::LaunchOptions::default()
+        extra_ro_binds: ro_binds,
     };
     let cmd = sandbox::wrap_command_with(policy, program, args, options);
     require_requested_isolation(policy, cmd.sandboxed, egress_proxy_configured())?;
+    require_ro_binds_enforced(!ro_binds.is_empty(), cmd.sandboxed)?;
     spawn_capture(&cmd, Some(cwd), Some(env), timeout).await
+}
+
+/// Staged inputs are read-only only inside bubblewrap. Refuses a command that
+/// asks for read-only layers but would run unwrapped (no bwrap on the host, or a
+/// policy that applies none), rather than hand the program writable copies and
+/// still call them read-only.
+fn require_ro_binds_enforced(has_ro_binds: bool, sandboxed: bool) -> std::io::Result<()> {
+    if has_ro_binds && !sandboxed {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "read-only attachment staging needs the OS sandbox, which is unavailable; refusing unsandboxed execution",
+        ));
+    }
+    Ok(())
 }
 
 /// Spawn and capture. `env: Some(pairs)` means the process starts from an EMPTY
@@ -314,6 +353,15 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn staging_is_refused_where_the_read_only_bind_is_not_enforced() {
+        let refused = require_ro_binds_enforced(true, false).expect_err("must refuse");
+        assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported);
+        assert!(require_ro_binds_enforced(true, true).is_ok());
+        // No staging, no new requirement: every existing caller is unaffected.
+        assert!(require_ro_binds_enforced(false, false).is_ok());
     }
 
     #[test]

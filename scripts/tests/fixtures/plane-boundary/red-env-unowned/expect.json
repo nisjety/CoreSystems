@@ -1,0 +1,7 @@
+{
+  "exit": 1,
+  "contains": [
+    "mystery-db",
+    "planes['Control Plane'].db_hosts"
+  ]
+}

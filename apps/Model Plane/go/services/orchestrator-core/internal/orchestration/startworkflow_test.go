@@ -449,6 +449,89 @@ func TestScheduledRunWorkflowRejectsUnknownInputFields(t *testing.T) {
 	assert.Empty(t, starter.starts)
 }
 
+// scheduledContractText is the approval contract as the template stores it: JSON text.
+func scheduledContractText(expiresAt time.Time, tools []any) string {
+	text, err := json.Marshal(map[string]any{
+		"v":          1,
+		"tools":      tools,
+		"expires_at": expiresAt.UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		panic(err)
+	}
+	return string(text)
+}
+
+func scheduledContractTemplate(expiresAt time.Time) map[string]any {
+	return map[string]any{
+		"title":  "Nightly queue review",
+		"policy": "execute",
+		"approval_contract": scheduledContractText(expiresAt, []any{
+			map[string]any{"tool": "queue_summary", "capability": "read", "class": "read"},
+		}),
+	}
+}
+
+func scheduledRunBuildRequest(t *testing.T, templateJSON, templateDigest string) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"thread_id": "thread-scheduled-1", "task_template_json": templateJSON,
+		"space_ref": "space-1", "subject_id": "user-1", "schedule_id": "schedule-1",
+		"fire_key": "2026-08-14T00:00:00Z", "template_digest": templateDigest,
+		"idempotency_key": "schedule-1:2026-08-14T00:00:00Z",
+	})
+	require.NoError(t, err)
+	return raw
+}
+
+func TestScheduledRunInputCarriesContractFromDigestBoundTemplate(t *testing.T) {
+	expiresAt := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	template := scheduledContractTemplate(expiresAt)
+	templateJSON, templateDigest := scheduledTemplateInput(t, template)
+	tenancy := Tenancy{OrgID: "org-a", RunID: "task_scheduled_1", RetentionAttested: true}
+
+	built, err := buildScheduledRunInput(scheduledRunBuildRequest(t, templateJSON, templateDigest), tenancy)
+	require.NoError(t, err)
+	input, ok := built.(workflows.ScheduledRunInput)
+	require.True(t, ok)
+	contractText, isText := template["approval_contract"].(string)
+	require.True(t, isText, "the contract is stored as JSON text")
+	assert.Equal(t, contractText, input.ContractJSON)
+	assert.Equal(t, fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(contractText))), input.ContractDigest)
+	assert.Equal(t, expiresAt.Format(time.RFC3339), input.ContractExpiresAt)
+
+	legacyJSON, legacyDigest := scheduledTemplateInput(t, map[string]any{"title": "Nightly queue review", "policy": "execute"})
+	built, err = buildScheduledRunInput(scheduledRunBuildRequest(t, legacyJSON, legacyDigest), tenancy)
+	require.NoError(t, err)
+	legacy := built.(workflows.ScheduledRunInput)
+	assert.Empty(t, legacy.ContractJSON)
+	assert.Empty(t, legacy.ContractDigest)
+	assert.Empty(t, legacy.ContractExpiresAt)
+}
+
+func TestScheduledRunContractForgeryAndExpiryAreRefused(t *testing.T) {
+	tenancy := Tenancy{OrgID: "org-a", RunID: "task_scheduled_1", RetentionAttested: true}
+	live := time.Now().UTC().Add(time.Hour)
+	_, honestDigest := scheduledTemplateInput(t, scheduledContractTemplate(live))
+
+	// A widened contract keeps the Control-bound digest of the honest template,
+	// so the body no longer matches what Control signed.
+	forged := scheduledContractTemplate(live.Add(90 * 24 * time.Hour))
+	forged["approval_contract"] = scheduledContractText(live.Add(90*24*time.Hour), []any{
+		map[string]any{"tool": "shell", "capability": "process_run", "class": "write"},
+	})
+	forgedJSON, err := json.Marshal(forged)
+	require.NoError(t, err)
+	if _, err := buildScheduledRunInput(scheduledRunBuildRequest(t, string(forgedJSON), honestDigest), tenancy); err == nil {
+		t.Fatal("a contract that does not match the Control-bound template digest reached the run input")
+	}
+
+	expiredJSON, expiredDigest := scheduledTemplateInput(t, scheduledContractTemplate(time.Now().UTC().Add(-time.Minute)))
+	if _, err := buildScheduledRunInput(scheduledRunBuildRequest(t, expiredJSON, expiredDigest), tenancy); err == nil {
+		t.Fatal("an expired contract reached the scheduled run input")
+	}
+}
+
 func TestScheduledRunInputRejectsDetachedTemplateAndForgedExecutionFields(t *testing.T) {
 	templateJSON, templateDigest := scheduledTemplateInput(t, map[string]any{
 		"workflow_input": map[string]any{"goal": "authorized scheduled work", "policy": "execute"},

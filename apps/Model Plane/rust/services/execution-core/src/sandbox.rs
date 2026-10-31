@@ -575,6 +575,48 @@ mod tests {
         );
     }
 
+    /// The attachments directory lives INSIDE the writable root, so its read-only
+    /// bind has to come after the root's writable bind or the root would win and
+    /// the directory would be writable.
+    #[test]
+    fn ro_inputs_are_bound_after_the_writable_root() {
+        let p = MpSandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("/tmp/verevon-code-1")],
+            network: MpNetworkPolicy::Disabled,
+        };
+        let inputs = PathBuf::from("/tmp/verevon-code-1/attachments");
+        let ro_inputs = [(inputs.clone(), inputs)];
+        let argv = build_bwrap_argv_with(
+            &p,
+            "python3",
+            &args(&["_verevon_main.py"]),
+            LaunchOptions {
+                extra_ro_binds: &ro_inputs,
+                ..LaunchOptions::default()
+            },
+        )
+        .expect("wrapped");
+        assert!(windowed(
+            &argv,
+            &[
+                "--ro-bind",
+                "/tmp/verevon-code-1/attachments",
+                "/tmp/verevon-code-1/attachments"
+            ]
+        ));
+        let writable = argv
+            .iter()
+            .position(|a| a == "--bind")
+            .expect("writable root bound");
+        let read_only_inputs = argv
+            .iter()
+            .position(|a| a == "/tmp/verevon-code-1/attachments")
+            .expect("inputs bound");
+        assert!(read_only_inputs > writable, "{argv:?}");
+        let separator = argv.iter().position(|a| a == "--").expect("command follows");
+        assert!(read_only_inputs < separator, "{argv:?}");
+    }
+
     #[test]
     fn extra_ro_binds_defaults_to_empty_and_changes_nothing() {
         let p = MpSandboxPolicy::WorkspaceWrite {

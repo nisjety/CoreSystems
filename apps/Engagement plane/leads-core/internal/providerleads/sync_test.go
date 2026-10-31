@@ -501,3 +501,22 @@ func TestResolveOwner(t *testing.T) {
 		})
 	}
 }
+
+func TestSyncGatewayFailure_AllOrgRunPublishesNoAuditEvent(t *testing.T) {
+	gateway := newMockGateway(t, nil)
+	gateway.server.Close() // force a transport-level failure on ListConnections
+	repo := newFakeRepo()
+	auditSink := &fakeAudit{}
+	syncer := NewSyncer(gateway.client(), repo)
+	syncer.SetAudit(auditSink)
+
+	_, err := syncer.Sync(context.Background(), "", "")
+	if err == nil {
+		t.Fatal("expected an error when the gateway is unreachable")
+	}
+	// The all-org run has no org to scope an audit event to, and audit-core
+	// refuses an event without org_id, so the failure is logged, not published.
+	if events := auditSink.all(); len(events) != 0 {
+		t.Fatalf("all-org run published %d audit events, want 0: %+v", len(events), events)
+	}
+}

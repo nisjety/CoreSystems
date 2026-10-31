@@ -69,7 +69,7 @@ func TestReplayedSessionCoreAuditEventIsStoredExactlyOnce(t *testing.T) {
 
 	const bus = "model"
 	cleanup := func() {
-		_, _ = pool.Exec(ctx, `DELETE FROM audit_events WHERE org_id = $1`, final.OrgID)
+		_ = execMaintenance(ctx, pool, `DELETE FROM audit_events WHERE org_id = $1`, final.OrgID)
 	}
 	cleanup()
 	t.Cleanup(cleanup)

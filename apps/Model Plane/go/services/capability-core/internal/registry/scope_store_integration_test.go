@@ -51,18 +51,20 @@ func setupRegistryDB(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 
-	for _, migration := range []string{
-		"0001_models.up.sql",
-		"0003_capabilities_registry.up.sql",
-		"0006_capability_availability_contract.up.sql",
-		"0007_tenant_scopes_and_risk_constraints.up.sql",
-	} {
-		sqlBytes, readErr := os.ReadFile(filepath.Join("..", "..", "migrations", migration))
+	// Every migration, in order, the way docker-entrypoint.sh applies them at
+	// boot: the store now writes columns later migrations add (the tool class
+	// pair, WS05-S1), so a hand-picked subset drifts out of step with it.
+	migrations, globErr := filepath.Glob(filepath.Join("..", "..", "migrations", "*.up.sql"))
+	if globErr != nil || len(migrations) == 0 {
+		t.Fatalf("list migrations: %v", globErr)
+	}
+	for _, migration := range migrations {
+		sqlBytes, readErr := os.ReadFile(migration)
 		if readErr != nil {
 			t.Fatalf("read migration %s: %v", migration, readErr)
 		}
 		if _, applyErr := pool.Exec(ctx, string(sqlBytes)); applyErr != nil {
-			t.Fatalf("apply migration %s: %v", migration, applyErr)
+			t.Fatalf("apply migration %s: %v", filepath.Base(migration), applyErr)
 		}
 	}
 	return pool

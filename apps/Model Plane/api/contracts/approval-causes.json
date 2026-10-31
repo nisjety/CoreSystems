@@ -1,0 +1,66 @@
+{
+  "contract": "mp-contracts.approval-causes",
+  "version": 1,
+  "unknown_degrades_to": "unclassified_gate",
+  "codes": [
+    {
+      "code": "owner_effect_reserved",
+      "raised_by": "execution-core permission gate: an owner-plane tool, a durable approval on every posture",
+      "scope_options": ["once"]
+    },
+    {
+      "code": "consent_to_disclose",
+      "raised_by": "execution-core permission gate: a read whose approval is about disclosure, on every posture",
+      "scope_options": ["once"]
+    },
+    {
+      "code": "risky_effect_under_ask",
+      "raised_by": "execution-core permission gate: a risky tool call held by the ask posture",
+      "scope_options": ["once"]
+    },
+    {
+      "code": "provider_write",
+      "raised_by": "execution-core: a provider write held by the ask posture, and the approval record a write needs under it",
+      "scope_options": ["once"]
+    },
+    {
+      "code": "capability_high_risk",
+      "raised_by": "execution-core: capability-core answered ask because the capability is high-risk",
+      "scope_options": ["once"]
+    },
+    {
+      "code": "capability_policy_ask",
+      "raised_by": "reserved for tool policy rules (WS05); nothing raises it yet",
+      "scope_options": ["once"]
+    },
+    {
+      "code": "hook_ask",
+      "raised_by": "execution-core: a pre-tool hook escalated the call to a person",
+      "scope_options": ["once"]
+    },
+    {
+      "code": "browser_action_risk",
+      "raised_by": "execution-core browser gate: an action the Model proposed, held by its risk category",
+      "scope_options": ["once"]
+    },
+    {
+      "code": "auto_posture_provider_write",
+      "raised_by": "execution-core: a provider write the auto (chat) posture records as approved on the person's behalf",
+      "scope_options": ["once"]
+    },
+    {
+      "code": "unclassified_gate",
+      "raised_by": "ExecuteStep, pause_for_approval, and every code outside this list; a request that states no cause stores none",
+      "scope_options": ["once"]
+    }
+  ],
+  "digest": {
+    "key_context": "model-plane approval call digest v1",
+    "known_answer": {
+      "run_id": "run_known_answer",
+      "tool": "delete_records",
+      "arguments": "{\"id\":\"r-1\",\"force\":true}",
+      "digest": "1c41cd45aca73c0be0b936017fce413efe99c1ca2da27770a8c10bcc42a887bc"
+    }
+  }
+}

@@ -2780,6 +2780,28 @@ h3 {
   font-weight: 700;
 }
 
+.core-chat-sidebar__archive-toggle,
+.core-chat-sidebar__load-more {
+  display: flex;
+  height: 36px;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 13px;
+  background: transparent;
+  margin-top: 6px;
+  color: var(--subtle);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.core-chat-sidebar__archive-toggle:hover,
+.core-chat-sidebar__load-more:hover {
+  background: var(--verevon-surface-soft);
+}
+
 .core-sidebar-dedicated-panel {
   display: flex;
   min-width: 0;
@@ -7928,6 +7950,14 @@ h3 {
 .verevon-ai-model-picker__menu button:disabled {
   cursor: not-allowed;
   opacity: 0.46;
+}
+
+/* The policy notice beside the trigger: a quiet line, styled here rather than inline. */
+.verevon-ai-model-picker__notice {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  opacity: 0.8;
 }
 
 .verevon-support-verevon-composer__model-picker,
@@ -28644,6 +28674,15 @@ body.verevon-chat-canvas-resizing * {
 /* More generous vertical rhythm between messages. */
 .verevon-chat-thread {
   gap: 34px;
+}
+
+/* Off-screen turns skip layout and paint until they scroll near the viewport
+   (WS09-S7). The rule is gated on data-chat-containment, which ChatPage sets only
+   for VITE_CHAT_CONTENT_CONTAINMENT=true. The latest assistant turn is never
+   contained, so the streaming answer and its action row always render. */
+.verevon-chat-thread[data-chat-containment="on"] > .verevon-chat-message:not([data-latest]) {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 480px;
 }
 
 /* Comfortable reading measure (~72ch) for assistant answers — a long answer now
@@ -49585,3 +49624,41 @@ so it
 }
 .anbud-card-reason{margin:0;font-size:13px;line-height:1.45;color:var(--foreground)}
 .anbud-new-tenders{display:flex;align-items:center;gap:12px;margin:0 0 12px;font-size:13px;color:var(--foreground)}
+/* Chat -- the trays docked above the composer.
+   An approval, a plan awaiting a grant and messages sent into a live run wait
+   here, where the person is looking, instead of inside the transcript. One tray
+   shows at a time; its height is capped so a long plan scrolls inside it rather
+   than pushing the composer off screen. Empty, it takes no space. */
+.verevon-chat-composer-trays {
+  max-height: 40vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin-bottom: 8px;
+}
+
+/* Empty, it takes no space but stays in the accessibility tree: a live region
+   that is display:none is not reliably announced when it fills. */
+.verevon-chat-composer-trays[data-empty] {
+  max-height: 0;
+  margin: 0;
+  overflow: hidden;
+}
+
+/* The cards carry their own top margin for the transcript; here they are the
+   first thing in the tray. */
+.verevon-chat-composer-trays > :first-child {
+  margin-top: 0;
+}
+
+.verevon-chat-composer-trays__more {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--verevon-text-muted);
+}
+
+/* What the transcript keeps of a docked control: one line saying where it went. */
+.verevon-chat-docked-pointer {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--verevon-text-muted);
+}

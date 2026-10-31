@@ -102,7 +102,8 @@ export default defineConfig({
       // This gateway coverage gate intentionally uses Node's native test runner
       // and is executed explicitly by `pnpm test` before the Vitest suite.
       'apps/gateway/scripts/**/*.test.mjs',
-      // Frontend Plane deploy-contract tests use node:test too (see `pnpm test`).
+      // node:test files run outside Vitest: the Frontend Plane deploy-contract tests
+      // (see `pnpm test`) and the bundle-budget gate (`node --test` in CI).
       'scripts/**/*.test.mjs',
       // `.claude/worktrees/**` holds nested full-repo checkouts (git worktrees for
       // other sessions), e.g. a copy of verevonv2 (React) — never collect their

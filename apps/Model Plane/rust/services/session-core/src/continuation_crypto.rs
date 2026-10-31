@@ -6,6 +6,10 @@
 //! deployment secret manager through `SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY`
 //! as base64-encoded 32-byte AES-256-GCM material. Missing or malformed key
 //! material fails closed whenever a descriptor is written or read.
+//!
+//! The same cipher seals the durable loop's fold (`loop_checkpoint.rs`). Each
+//! caller binds its ciphertext to its own AAD scope, so a ciphertext cannot be
+//! moved to another row, org, user or segment and still open.
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -53,8 +57,9 @@ impl DescriptorCipher {
         })
     }
 
-    fn aad(approval_id: &str, org_id: &str, user_id: &str) -> aead::Aad<Vec<u8>> {
-        aead::Aad::from(format!("approval:{approval_id}:org:{org_id}:user:{user_id}").into_bytes())
+    /// The AAD scope of an approval descriptor.
+    fn approval_aad(approval_id: &str, org_id: &str, user_id: &str) -> String {
+        format!("approval:{approval_id}:org:{org_id}:user:{user_id}")
     }
 
     pub(crate) fn encrypt(
@@ -64,17 +69,7 @@ impl DescriptorCipher {
         user_id: &str,
         plaintext: &str,
     ) -> Result<String> {
-        let mut nonce_bytes = [0_u8; NONCE_LEN];
-        rand::SecureRandom::fill(&self.random, &mut nonce_bytes)
-            .map_err(|_| anyhow::anyhow!("could not generate continuation descriptor nonce"))?;
-        let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes);
-        let mut payload = plaintext.as_bytes().to_vec();
-        self.key
-            .seal_in_place_append_tag(nonce, Self::aad(approval_id, org_id, user_id), &mut payload)
-            .map_err(|_| anyhow::anyhow!("could not encrypt continuation descriptor"))?;
-        let mut encoded = nonce_bytes.to_vec();
-        encoded.extend_from_slice(&payload);
-        Ok(format!("{PREFIX}{}", BASE64.encode(encoded)))
+        self.seal(&Self::approval_aad(approval_id, org_id, user_id), plaintext)
     }
 
     pub(crate) fn decrypt(
@@ -84,14 +79,42 @@ impl DescriptorCipher {
         user_id: &str,
         ciphertext: &str,
     ) -> Result<String> {
+        self.open(
+            &Self::approval_aad(approval_id, org_id, user_id),
+            ciphertext,
+        )
+    }
+
+    /// Seal `plaintext` under a caller-built AAD scope. The scope must name the
+    /// row the ciphertext belongs to, so opening it anywhere else fails.
+    pub(crate) fn seal(&self, aad: &str, plaintext: &str) -> Result<String> {
+        let mut nonce_bytes = [0_u8; NONCE_LEN];
+        rand::SecureRandom::fill(&self.random, &mut nonce_bytes)
+            .map_err(|_| anyhow::anyhow!("could not generate continuation nonce"))?;
+        let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes);
+        let mut payload = plaintext.as_bytes().to_vec();
+        self.key
+            .seal_in_place_append_tag(
+                nonce,
+                aead::Aad::from(aad.as_bytes().to_vec()),
+                &mut payload,
+            )
+            .map_err(|_| anyhow::anyhow!("could not encrypt continuation payload"))?;
+        let mut encoded = nonce_bytes.to_vec();
+        encoded.extend_from_slice(&payload);
+        Ok(format!("{PREFIX}{}", BASE64.encode(encoded)))
+    }
+
+    /// Open a ciphertext sealed under the same AAD scope.
+    pub(crate) fn open(&self, aad: &str, ciphertext: &str) -> Result<String> {
         let encoded = ciphertext
             .strip_prefix(PREFIX)
-            .context("unsupported continuation descriptor ciphertext version")?;
+            .context("unsupported continuation ciphertext version")?;
         let payload = BASE64
             .decode(encoded)
-            .context("continuation descriptor ciphertext is not valid base64")?;
+            .context("continuation ciphertext is not valid base64")?;
         if payload.len() <= NONCE_LEN + aead::MAX_TAG_LEN {
-            bail!("continuation descriptor ciphertext is too short");
+            bail!("continuation ciphertext is too short");
         }
         let mut nonce_bytes = [0_u8; NONCE_LEN];
         nonce_bytes.copy_from_slice(&payload[..NONCE_LEN]);
@@ -99,10 +122,9 @@ impl DescriptorCipher {
         let mut sealed = payload[NONCE_LEN..].to_vec();
         let plaintext = self
             .key
-            .open_in_place(nonce, Self::aad(approval_id, org_id, user_id), &mut sealed)
-            .map_err(|_| anyhow::anyhow!("continuation descriptor authentication failed"))?;
-        String::from_utf8(plaintext.to_vec())
-            .context("continuation descriptor plaintext is not valid UTF-8")
+            .open_in_place(nonce, aead::Aad::from(aad.as_bytes().to_vec()), &mut sealed)
+            .map_err(|_| anyhow::anyhow!("continuation authentication failed"))?;
+        String::from_utf8(plaintext.to_vec()).context("continuation plaintext is not valid UTF-8")
     }
 }
 
@@ -126,6 +148,27 @@ mod tests {
         );
         assert!(cipher
             .decrypt("appr-1", "org-2", "user-1", &encrypted)
+            .is_err());
+    }
+
+    #[test]
+    fn a_sealed_scope_opens_only_under_the_same_scope() {
+        let cipher = DescriptorCipher::from_key_bytes_for_test(&[7_u8; KEY_LEN]).unwrap();
+        let sealed = cipher
+            .seal("loopfold:run-1:org:org-1:user:user-1:seq:4", "fold")
+            .unwrap();
+        assert_eq!(
+            cipher
+                .open("loopfold:run-1:org:org-1:user:user-1:seq:4", &sealed)
+                .unwrap(),
+            "fold"
+        );
+        // Moving the fold to another seq, run or owner must not open it.
+        assert!(cipher
+            .open("loopfold:run-1:org:org-1:user:user-1:seq:5", &sealed)
+            .is_err());
+        assert!(cipher
+            .open("loopfold:run-2:org:org-1:user:user-1:seq:4", &sealed)
             .is_err());
     }
 

@@ -13,6 +13,7 @@
 //! session-core memory-dedup [plan] [--classifier on|off] [--out <file>] [--show-content]
 //! session-core memory-dedup apply --plan <file> [--dry-run]
 //! session-core memory-dedup rollback --plan-id <id> [--cluster <id>]
+//! session-core memory-dedup policy-audit
 //! ```
 //!
 //! It runs inside the service's own container (`docker exec ... session-core
@@ -72,6 +73,12 @@
 //! and deleted content is never recreated. Rollback writes its own ledger row.
 //! Only two columns ever change, so the ledger also supports a plain SQL
 //! rollback.
+//!
+//! # policy-audit
+//!
+//! Reports, per content-policy rule, which current rows the write policy would
+//! refuse today ([`crate::write_policy::audit_existing`]). Counts and row ids
+//! only, never content, and no row is changed or removed.
 
 use crate::dreaming::MemoryProvenance;
 use crate::memory_grounding::{ExistingMatch, GroundingAction, GroundingClassifier};
@@ -104,7 +111,8 @@ const PREVIEW_CHARS: usize = 100;
 const USAGE: &str = "\
 usage: session-core memory-dedup [plan] [--classifier on|off] [--out <file>] [--show-content]
        session-core memory-dedup apply --plan <file> [--dry-run]
-       session-core memory-dedup rollback --plan-id <id> [--cluster <id>]";
+       session-core memory-dedup rollback --plan-id <id> [--cluster <id>]
+       session-core memory-dedup policy-audit";
 
 const PLAN_NOTE: &str = "apply changes only clusters whose tier is \"auto\". Delete a cluster to \
 skip it, set a \"review\" cluster's tier to \"auto\" to approve it, and swap the survivor with an \
@@ -139,6 +147,10 @@ pub(crate) async fn run(args: &[String]) -> anyhow::Result<()> {
         Command::Rollback { plan_id, cluster } => {
             run_rollback(&pool, &plan_id, cluster.as_deref()).await
         }
+        Command::PolicyAudit => crate::write_policy::audit_existing(&pool)
+            .await
+            .map(|report| println!("{}", report.render()))
+            .map_err(Into::into),
         Command::Help => Ok(()),
     };
     pool.close().await;
@@ -162,6 +174,7 @@ enum Command {
         plan_id: String,
         cluster: Option<String>,
     },
+    PolicyAudit,
     Help,
 }
 
@@ -224,6 +237,10 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             let plan_id = plan_id.ok_or_else(|| "rollback needs --plan-id <id>".to_owned())?;
             Ok(Command::Rollback { plan_id, cluster })
         }
+        "policy-audit" => match flags.next() {
+            None => Ok(Command::PolicyAudit),
+            Some(other) => Err(format!("unknown policy-audit option {other}")),
+        },
         other => Err(format!("unknown memory-dedup mode {other}")),
     }
 }
@@ -1935,6 +1952,12 @@ mod tests {
             parse_args(&args(&["apply", "--help"])).unwrap(),
             Command::Help
         );
+    }
+
+    #[test]
+    fn policy_audit_takes_no_options() {
+        assert_eq!(parse_args(&args(&["policy-audit"])).unwrap(), Command::PolicyAudit);
+        assert!(parse_args(&args(&["policy-audit", "--out", "report.json"])).is_err());
     }
 
     // ---- partitioning ----

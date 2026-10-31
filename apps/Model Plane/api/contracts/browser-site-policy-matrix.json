@@ -1,0 +1,433 @@
+{
+  "contract": "browser-site-policy-matrix",
+  "version": 1,
+  "owner": "apps/Control Plane/org-core/internal/browsersites/resolve.go (Decide)",
+  "status": "pins org-core's site decision (WS21-S3, DEC-19); the broker client (WS21-S4) and the resolve route vendor this file and must agree with it",
+  "rules": {
+    "block": "block wins over every other input and cannot be overridden by a member",
+    "ceiling": "read or act admin rule for the host; with no rule, open mode allows act and any other mode allows none",
+    "choice": "a member's live choice applies within the ceiling; none refuses; a choice whose expires_at is not after now is absent",
+    "ask": "no live choice within the ceiling leaves the answer ask",
+    "sources": "org_block, org_cap, user_pref, default",
+    "exact_host": "a rule or choice applies to its exact canonical host only, never to a parent or child"
+  },
+  "rows": [
+    {
+      "id": "open_no_rule_asks_at_act_ceiling",
+      "mode": "open",
+      "rules": [],
+      "user": true,
+      "prefs": [],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "ask",
+        "cap": "act",
+        "source": "default"
+      }
+    },
+    {
+      "id": "open_block_denies",
+      "mode": "open",
+      "rules": [
+        {
+          "host": "shop.example.com",
+          "rule": "block"
+        }
+      ],
+      "user": true,
+      "prefs": [],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "deny",
+        "cap": "none",
+        "source": "org_block"
+      }
+    },
+    {
+      "id": "block_beats_live_act_choice",
+      "mode": "open",
+      "rules": [
+        {
+          "host": "shop.example.com",
+          "rule": "block"
+        }
+      ],
+      "user": true,
+      "prefs": [
+        {
+          "host": "shop.example.com",
+          "level": "act",
+          "expires_at": "2026-11-30T00:00:00Z"
+        }
+      ],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "deny",
+        "cap": "none",
+        "source": "org_block"
+      }
+    },
+    {
+      "id": "open_act_choice_applies",
+      "mode": "open",
+      "rules": [],
+      "user": true,
+      "prefs": [
+        {
+          "host": "shop.example.com",
+          "level": "act",
+          "expires_at": "2026-11-30T00:00:00Z"
+        }
+      ],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "act",
+        "cap": "act",
+        "source": "user_pref"
+      }
+    },
+    {
+      "id": "open_read_choice_applies",
+      "mode": "open",
+      "rules": [],
+      "user": true,
+      "prefs": [
+        {
+          "host": "shop.example.com",
+          "level": "read",
+          "expires_at": "2026-11-30T00:00:00Z"
+        }
+      ],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "read",
+        "cap": "act",
+        "source": "user_pref"
+      }
+    },
+    {
+      "id": "none_choice_refuses",
+      "mode": "open",
+      "rules": [],
+      "user": true,
+      "prefs": [
+        {
+          "host": "shop.example.com",
+          "level": "none",
+          "expires_at": "2026-11-30T00:00:00Z"
+        }
+      ],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "deny",
+        "cap": "act",
+        "source": "user_pref"
+      }
+    },
+    {
+      "id": "expired_choice_ignored",
+      "mode": "open",
+      "rules": [],
+      "user": true,
+      "prefs": [
+        {
+          "host": "shop.example.com",
+          "level": "act",
+          "expires_at": "2026-10-01T00:00:00Z"
+        }
+      ],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "ask",
+        "cap": "act",
+        "source": "default"
+      }
+    },
+    {
+      "id": "choice_expiring_exactly_now_ignored",
+      "mode": "open",
+      "rules": [],
+      "user": true,
+      "prefs": [
+        {
+          "host": "shop.example.com",
+          "level": "act",
+          "expires_at": "2026-10-24T12:00:00Z"
+        }
+      ],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "ask",
+        "cap": "act",
+        "source": "default"
+      }
+    },
+    {
+      "id": "read_ceiling_clamps_act_choice",
+      "mode": "open",
+      "rules": [
+        {
+          "host": "shop.example.com",
+          "rule": "read"
+        }
+      ],
+      "user": true,
+      "prefs": [
+        {
+          "host": "shop.example.com",
+          "level": "act",
+          "expires_at": "2026-11-30T00:00:00Z"
+        }
+      ],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "read",
+        "cap": "read",
+        "source": "org_cap"
+      }
+    },
+    {
+      "id": "read_ceiling_keeps_read_choice",
+      "mode": "open",
+      "rules": [
+        {
+          "host": "shop.example.com",
+          "rule": "read"
+        }
+      ],
+      "user": true,
+      "prefs": [
+        {
+          "host": "shop.example.com",
+          "level": "read",
+          "expires_at": "2026-11-30T00:00:00Z"
+        }
+      ],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "read",
+        "cap": "read",
+        "source": "user_pref"
+      }
+    },
+    {
+      "id": "read_ceiling_no_choice_asks",
+      "mode": "open",
+      "rules": [
+        {
+          "host": "shop.example.com",
+          "rule": "read"
+        }
+      ],
+      "user": true,
+      "prefs": [],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "ask",
+        "cap": "read",
+        "source": "default"
+      }
+    },
+    {
+      "id": "act_rule_no_choice_asks",
+      "mode": "open",
+      "rules": [
+        {
+          "host": "shop.example.com",
+          "rule": "act"
+        }
+      ],
+      "user": true,
+      "prefs": [],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "ask",
+        "cap": "act",
+        "source": "default"
+      }
+    },
+    {
+      "id": "allowlist_unlisted_denies",
+      "mode": "allowlist",
+      "rules": [],
+      "user": true,
+      "prefs": [],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "deny",
+        "cap": "none",
+        "source": "org_cap"
+      }
+    },
+    {
+      "id": "allowlist_unlisted_choice_cannot_widen",
+      "mode": "allowlist",
+      "rules": [],
+      "user": true,
+      "prefs": [
+        {
+          "host": "shop.example.com",
+          "level": "act",
+          "expires_at": "2026-11-30T00:00:00Z"
+        }
+      ],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "deny",
+        "cap": "none",
+        "source": "org_cap"
+      }
+    },
+    {
+      "id": "allowlist_listed_act_asks",
+      "mode": "allowlist",
+      "rules": [
+        {
+          "host": "shop.example.com",
+          "rule": "act"
+        }
+      ],
+      "user": true,
+      "prefs": [],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "ask",
+        "cap": "act",
+        "source": "default"
+      }
+    },
+    {
+      "id": "allowlist_listed_act_choice_applies",
+      "mode": "allowlist",
+      "rules": [
+        {
+          "host": "shop.example.com",
+          "rule": "act"
+        }
+      ],
+      "user": true,
+      "prefs": [
+        {
+          "host": "shop.example.com",
+          "level": "act",
+          "expires_at": "2026-11-30T00:00:00Z"
+        }
+      ],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "act",
+        "cap": "act",
+        "source": "user_pref"
+      }
+    },
+    {
+      "id": "service_call_ignores_choices",
+      "mode": "open",
+      "rules": [],
+      "user": false,
+      "prefs": [
+        {
+          "host": "shop.example.com",
+          "level": "act",
+          "expires_at": "2026-11-30T00:00:00Z"
+        }
+      ],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "ask",
+        "cap": "act",
+        "source": "default"
+      }
+    },
+    {
+      "id": "unknown_mode_narrows",
+      "mode": "weird",
+      "rules": [],
+      "user": true,
+      "prefs": [],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "deny",
+        "cap": "none",
+        "source": "org_cap"
+      }
+    },
+    {
+      "id": "choice_for_other_host_ignored",
+      "mode": "open",
+      "rules": [],
+      "user": true,
+      "prefs": [
+        {
+          "host": "other.example.com",
+          "level": "act",
+          "expires_at": "2026-11-30T00:00:00Z"
+        }
+      ],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "ask",
+        "cap": "act",
+        "source": "default"
+      }
+    },
+    {
+      "id": "unknown_level_denies",
+      "mode": "open",
+      "rules": [],
+      "user": true,
+      "prefs": [
+        {
+          "host": "shop.example.com",
+          "level": "maybe",
+          "expires_at": "2026-11-30T00:00:00Z"
+        }
+      ],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "shop.example.com",
+      "expect": {
+        "effective": "deny",
+        "cap": "act",
+        "source": "user_pref"
+      }
+    },
+    {
+      "id": "block_on_subdomain_does_not_cover_parent",
+      "mode": "open",
+      "rules": [
+        {
+          "host": "shop.example.com",
+          "rule": "block"
+        }
+      ],
+      "user": true,
+      "prefs": [],
+      "now": "2026-10-24T12:00:00Z",
+      "host": "example.com",
+      "expect": {
+        "effective": "ask",
+        "cap": "act",
+        "source": "default"
+      }
+    }
+  ]
+}

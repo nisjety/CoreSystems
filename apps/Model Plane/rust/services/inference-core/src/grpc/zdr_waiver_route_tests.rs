@@ -451,6 +451,53 @@ async fn a_waived_turn_reaches_only_the_connection_it_binds() {
     assert_eq!(stack.azure_calls().await, 0);
 }
 
+/// An image never rides a waived turn: the bound route is the subscription, which reads no
+/// images, so the turn is refused with the vision kind before the broker is asked, and never
+/// answered from its text alone. Unary and streaming alike.
+#[tokio::test]
+async fn a_waived_turn_with_image_parts_is_refused_before_the_broker() {
+    let stack = Stack::new().await;
+    let token = user_token(
+        "user-a",
+        false,
+        &json!({"org_zdr": true, "zdr_waiver": waiver("conn-a")}),
+    );
+    let with_image = |text: &str| {
+        let mut request = chat("conn-a", SUBSCRIPTION, false, text);
+        request.image_parts = vec![pb::InferImagePart {
+            message_index: 0,
+            data: vec![1, 2, 3].into(),
+            mime_type: "image/png".to_owned(),
+        }];
+        request
+    };
+    let kind = |status: &Status| {
+        status
+            .metadata()
+            .get("x-mp-provider-error")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+
+    let status = stack
+        .service
+        .infer(bearer(&token, with_image("image unary")))
+        .await
+        .expect_err("a waived turn with an image is refused");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{}", status.message());
+    assert_eq!(kind(&status).as_deref(), Some("vision_unsupported"));
+
+    let status = stack
+        .service
+        .infer_stream(bearer(&token, with_image("image stream")))
+        .await
+        .expect_err("a waived streaming turn with an image is refused");
+    assert_eq!(kind(&status).as_deref(), Some("vision_unsupported"));
+
+    assert_eq!(stack.broker_calls().await, 0);
+    assert_eq!(stack.azure_calls().await, 0);
+}
+
 /// A waived caller reaches no modality: each is refused before a provider is named, so the speech
 /// provider, the Azure resource and the broker see nothing.
 #[tokio::test]

@@ -2,6 +2,7 @@ package workflows
 
 import (
 	"fmt"
+	"time"
 
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
@@ -90,6 +91,78 @@ func executeStepLoop(ctx workflow.Context, in activities.StepLoopInput) (activit
 	}, nil
 }
 
+// scheduledStepIntent is the Control-bound intent of one scheduled turn: only the immutable,
+// template-bound identifiers and the contract digest, never a user-bound request.
+func scheduledStepIntent(in ScheduledRunInput, i int) activities.ScheduledStepExecutionIntent {
+	return activities.ScheduledStepExecutionIntent{
+		OrgID:             in.OrgID,
+		SpaceRef:          in.SpaceRef,
+		SubjectID:         in.SubjectID,
+		RunID:             in.RunID,
+		ThreadID:          in.ThreadID,
+		ScheduleID:        in.ScheduleID,
+		FireKey:           in.FireKey,
+		TemplateDigest:    in.TemplateDigest,
+		StepID:            fmt.Sprintf("%s:step:%d", in.RunID, i),
+		StepIndex:         uint32(i),
+		PolicyDigest:      in.PolicyDigest,
+		IdempotencyKey:    fmt.Sprintf("%s:step:%d", in.IdempotencyKey, i),
+		ContractDigest:    in.ContractDigest,
+		ContractExpiresAt: in.ContractExpiresAt,
+	}
+}
+
+// scheduledAgentStepTimeout bounds one agent-lane step: execution-core's 240 s wall clock plus the
+// time to record the receipt (WS20 S6).
+const scheduledAgentStepTimeout = 6 * time.Minute
+
+// executeScheduledAgentStep runs a fire under a stored-consent contract as one bounded agent-loop
+// step, not the single-inference loop (WS20 S6). The step is never retried: an unknown outcome stops
+// the run for reconciliation, as the single-inference loop does.
+func executeScheduledAgentStep(ctx workflow.Context, in ScheduledRunInput) (activities.StepLoopOutput, error) {
+	agentCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: scheduledAgentStepTimeout,
+		HeartbeatTimeout:    time.Minute,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
+	})
+	var step activities.StepResult
+	if err := workflow.ExecuteActivity(agentCtx, "ExecuteScheduledStepActivity", scheduledStepIntent(in, 0)).Get(ctx, &step); err != nil {
+		return activities.StepLoopOutput{Completed: false}, err
+	}
+	if step.UnknownOutcome {
+		return activities.StepLoopOutput{Steps: []activities.StepResult{step}, Completed: false}, temporal.NewNonRetryableApplicationError(
+			"scheduled-step provider outcome is unknown; reconcile its durable receipt before retrying",
+			"ScheduledStepUnknownOutcome",
+			nil,
+		)
+	}
+	return activities.StepLoopOutput{
+		Steps:     []activities.StepResult{step},
+		Completed: step.Completed,
+		Summary:   fmt.Sprintf("executed one scheduled agent step for run %s", in.RunID),
+	}, nil
+}
+
+// scheduledAgentOutcomeSummary names how an agent-lane run ended: failed when the step did not
+// complete (a refused contract, an incomplete run), needs_review when an effect was withheld for
+// the owner, completed otherwise. It carries counts only, never content (WS20 S6).
+func scheduledAgentOutcomeSummary(runID string, out activities.StepLoopOutput) string {
+	rounds, withheld := 0, 0
+	for _, step := range out.Steps {
+		rounds += step.RoundsExecuted
+		withheld += step.WithheldEffects
+	}
+	completed := len(out.Steps) > 0 && out.Steps[len(out.Steps)-1].Completed
+	outcome := "completed"
+	switch {
+	case !completed:
+		outcome = "failed"
+	case withheld > 0:
+		outcome = "needs_review"
+	}
+	return fmt.Sprintf("scheduled run %s outcome %s: %d rounds, %d withheld effects", runID, outcome, rounds, withheld)
+}
+
 // executeScheduledStepLoop is the schedule-only driver. It never constructs a
 // user-bound ExecuteStep request; each turn carries only the immutable,
 // template-bound identifiers needed by Control, Session Core, and the
@@ -97,21 +170,7 @@ func executeStepLoop(ctx workflow.Context, in activities.StepLoopInput) (activit
 func executeScheduledStepLoop(ctx workflow.Context, in ScheduledRunInput) (activities.StepLoopOutput, error) {
 	var steps []activities.StepResult
 	for i := range defaultMaxTurns {
-		stepIndex := uint32(i)
-		intent := activities.ScheduledStepExecutionIntent{
-			OrgID:          in.OrgID,
-			SpaceRef:       in.SpaceRef,
-			SubjectID:      in.SubjectID,
-			RunID:          in.RunID,
-			ThreadID:       in.ThreadID,
-			ScheduleID:     in.ScheduleID,
-			FireKey:        in.FireKey,
-			TemplateDigest: in.TemplateDigest,
-			StepID:         fmt.Sprintf("%s:step:%d", in.RunID, i),
-			StepIndex:      stepIndex,
-			PolicyDigest:   in.PolicyDigest,
-			IdempotencyKey: fmt.Sprintf("%s:step:%d", in.IdempotencyKey, i),
-		}
+		intent := scheduledStepIntent(in, i)
 		var step activities.StepResult
 		if err := workflow.ExecuteActivity(ctx, "ExecuteScheduledStepActivity", intent).Get(ctx, &step); err != nil {
 			return activities.StepLoopOutput{Steps: steps, Completed: false}, err

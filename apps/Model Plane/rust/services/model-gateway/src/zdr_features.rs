@@ -101,6 +101,7 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     // `web_only` is refused. `auto` and `knowledge_only` are honored: grounding
     // then reads org knowledge only, and no web source was asked for.
     ("retrieval_scope", refused_feature("web_search")),
+    ("connector_scope", refused_feature("connector_read")),
     (
         "regenerated",
         Treatment::Inert("a learning signal, and learning does not run on a ZDR turn"),
@@ -110,6 +111,9 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
         "edited_resubmit",
         Treatment::Inert("a learning signal, and learning does not run on a ZDR turn"),
     ),
+    // A version move names a durable message of the thread, and a ZDR turn writes none (WS17 S9).
+    ("regenerate_of_message_id", refused_feature("message_versions")),
+    ("edit_of_message_id", refused_feature("message_versions")),
     ("max_cost_usd", refused_feature("spend_cap")),
     // The answer is capped at the caller's `max_tokens` (the lower of the two).
     ("max_tokens", Treatment::Honored),
@@ -128,6 +132,9 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     ("attachments", refused_feature("attachments")),
     ("generate_image", refused_feature("image_generation")),
     ("plan_mode", refused_feature("plan_mode")),
+    // An execute turn runs an executing loop under a plan grant. A ZDR turn keeps no
+    // plan and no grant, so it is refused through the `agentic` feature it rides on.
+    ("execute_granted", refused_feature("agentic")),
     // A client's own tool definitions. Those the composer derives from its
     // actions are declared here too, so an action is refused the same way.
     ("tools", refused_feature("client_tools")),
@@ -167,8 +174,9 @@ pub const FEATURE_TREATMENTS: &[(&str, Treatment)] = &[
         Treatment::Inert("memory is neither read nor written on a ZDR turn"),
     ),
     // One usage frame when the request asks for it: the counts, the serving
-    // provider, its residency and tier, and the retention class. No cost is
-    // stated and no content is carried.
+    // provider, its residency and tier, and the retention class. The cost and the
+    // cache counts are stated only behind `MODEL_GATEWAY_ZDR_STREAM_COST` (WS27-S5),
+    // computed for that frame and stored nowhere (DEF-Z-06b). No content is carried.
     ("usage", Treatment::Honored),
     (
         "reasoning",
@@ -217,9 +225,12 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         skill_ids: _,
         deep_research: _,
         retrieval_scope: _,
+        connector_scope: _,
         regenerated: _,
         pinned_message_ids: _,
         edited_resubmit: _,
+        regenerate_of_message_id: _,
+        edit_of_message_id: _,
         max_cost_usd: _,
         max_tokens: _,
         profile: _,
@@ -230,6 +241,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         attachments: _,
         generate_image: _,
         plan_mode: _,
+        execute_granted: _,
         tools: _,
         org_name: _,
         user_name: _,
@@ -255,9 +267,12 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "skill_ids",
         "deep_research",
         "retrieval_scope",
+        "connector_scope",
         "regenerated",
         "pinned_message_ids",
         "edited_resubmit",
+        "regenerate_of_message_id",
+        "edit_of_message_id",
         "max_cost_usd",
         "max_tokens",
         "profile",
@@ -268,6 +283,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "attachments",
         "generate_image",
         "plan_mode",
+        "execute_granted",
         "tools",
         "org_name",
         "user_name",
@@ -305,6 +321,14 @@ pub fn refusal(request: &InvokeRequest) -> Option<Refusal> {
     if request.features.iter().any(|value| value == "agentic") {
         return feature("agentic");
     }
+    if request.execute_granted {
+        return feature("agentic");
+    }
+    if request.regenerate_of_message_id.as_deref().is_some_and(|id| !id.trim().is_empty())
+        || request.edit_of_message_id.as_deref().is_some_and(|id| !id.trim().is_empty())
+    {
+        return feature("message_versions");
+    }
     if request.plan_mode {
         return feature("plan_mode");
     }
@@ -316,6 +340,9 @@ pub fn refusal(request: &InvokeRequest) -> Option<Refusal> {
             == crate::normalize::RetrievalScope::WebOnly
     {
         return feature("web_search");
+    }
+    if request.connector_scope.as_ref().is_some_and(|ids| !ids.is_empty()) {
+        return feature("connector_read");
     }
     if !request.tools.is_empty() {
         return feature("client_tools");

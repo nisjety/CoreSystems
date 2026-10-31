@@ -7,6 +7,7 @@ import (
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/process"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/snapshot"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/threadworkspace"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/workspace"
 )
 
@@ -36,6 +37,17 @@ type LeaseStore interface {
 	// lease already marked DESTROYED, since merging a run's overlay is
 	// deliberately never tied to (or blocked by) the lease's own release.
 	GetAny(ctx context.Context, id, orgID, ownerID, backendID string) (*lease.Lease, error)
+	// AcquireThread is the idempotent get-or-create behind AcquireLease for a
+	// thread scope (WS22-S1): the same user and thread get the same live lease.
+	AcquireThread(ctx context.Context, threadID, orgID, ownerID, backendID string, ttl time.Duration) (*lease.Lease, error)
+}
+
+// ThreadWorkspaceStore is the narrow surface Server calls on the per-thread
+// workspace (WS22-S1, DEC-23). threadworkspace.Store is the durable one, and
+// MemoryThreadWorkspaceStore serves this package's tests.
+type ThreadWorkspaceStore interface {
+	Get(ctx context.Context, orgID, ownerID, threadID string) (threadworkspace.Snapshot, error)
+	Apply(ctx context.Context, orgID, ownerID, threadID string, changes []threadworkspace.Change, deletions []threadworkspace.Deletion, limits threadworkspace.Limits) (threadworkspace.Result, error)
 }
 
 // SnapshotStore is the narrow surface Server actually calls.

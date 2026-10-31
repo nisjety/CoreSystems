@@ -1,0 +1,24 @@
+{
+  "id": "counter-failing-fails-closed",
+  "category": "cost_controls",
+  "description": "The counter store is wired but unreachable. A count that cannot be read is treated as the cap being reached, so the review is skipped before the model is called.",
+  "cost": {"min_user_turns": 1, "max_transcript_chars": 60000, "max_per_user_per_day": 5, "max_per_org_per_day": 100, "budget": "failing"},
+  "controls": {"learning_allowed": true, "reason": "on"},
+  "conversation": [
+    {"role": "user", "content": "Lag ukerapporten for prosjekt Nord: timer per person, avvik og neste steg."},
+    {"role": "assistant", "content": "Ukerapporten for Nord er laget etter oppsettet med timer, avvik og neste steg."},
+    {"role": "user", "content": "Samme oppsett for prosjekt Sør, takk."},
+    {"role": "assistant", "content": "Ukerapporten for Sør er laget etter samme oppsett."}
+  ],
+  "existing_skills": [],
+  "model_reply": "{\"skills\":[{\"name\":\"Ukerapport fra timelister\",\"description\":\"Lager ukerapport\",\"content\":\"Hent timer og avvik.\",\"trigger_keywords\":[\"ukerapport\"],\"confidence\":0.9,\"reason\":\"Gjentatt oppsett.\"}]}",
+  "model_stop_reason": "",
+  "run": {"event_type": "RUN_COMPLETED", "org_id": "org-1", "user_id": "user-1", "run_id": "run-1", "thread_id": "thread-1", "zdr": false},
+  "attempts": [{}],
+  "expect": {
+    "outcomes": ["budget_unavailable"],
+    "model_calls": 0,
+    "transcript_reads": 1,
+    "proposal_count": 0
+  }
+}

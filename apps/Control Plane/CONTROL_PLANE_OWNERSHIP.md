@@ -338,6 +338,7 @@ const usersTable = defineTable({
 | User Sessions              | auth-core          | Not synced        | Control Plane    |
 | Organization Membership    | auth-core          | Read-only         | Control Plane    |
 | Org zero-retention intent and plan entitlement | org-core (stores); auth-core (resolves and signs) | Not synced | Control Plane |
+| Model entitlements: which models a member may use for chat (ADR-0005; designed, not built) | org-core (stores, resolves, explains); inference-core enforces by pull | Not synced | Control Plane |
 | Connection ZDR capability and acknowledgement ledger (designed, not built) | integration-corev2 (Ingestion Plane); auth-core only reads | Not synced | integration-corev2 |
 | Per-run ZDR waiver claim (designed, not built) | auth-core (the only issuer) | Not synced | Control Plane |
 | **Conversations**          | **Convex**         | **Read-write**    | **Convex**       |
@@ -358,6 +359,12 @@ Whether an organisation's content may be retained (zero data retention, ZDR) is 
 - Readers outside the Control Plane still compute the posture their own way: the gateway BFF from the intent alone, conversation-core from the raw flag. Moving them onto the one read model is ZDR task Z-03 and is not built.
 
 **Designed, not built.** A user's own connection can lower ZDR for one run through a signed, acknowledged, connection-bound waiver (matrix rule 17). auth-core would be its only issuer, through a service-attested decision endpoint behind the kill switch `ZDR_WAIVER_ENABLED` (default off), a connection-bound `zdr_waiver` claim on the tokens of that one turn (header `x-retention-decision`) and a content-free audit event per decision. The record of what a connection can do and of who acknowledged what is owned by integration-corev2, not by the Control Plane (table above). auth-core reads it as the session user, an edge recorded as E2 in [`../../docs/CROSS_PLANE_CONTRACT_MATRIX.md`](../../docs/CROSS_PLANE_CONTRACT_MATRIX.md). Nothing in this design writes the organisation's setting, and an unreachable source means the decision is refused and ZDR stays on.
+
+**Designed, not built (model entitlements, ADR-0005).**
+
+- org-core stores each organisation's chat model policy per organisation and per role, with append-only revisions and history, and answers inference-core alone (`GET /internal/orgs/:orgId/model-entitlement`, scope `org:model-entitlement:read:any`, a principal of its own).
+- inference-core enforces the answer, caches it for 30 s and fails closed past its stale bound (`model_entitlement_unavailable`). model-gateway asks through `GetModelAccess` and decides nothing.
+- Metadata holds model ids and actor ids only, never content. The BFF refuses a write that would leave a ZDR organisation with no attested model (`model_policy_leaves_no_zdr_model`).
 
 ---
 

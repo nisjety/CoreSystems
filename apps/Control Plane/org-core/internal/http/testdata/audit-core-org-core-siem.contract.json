@@ -1,0 +1,114 @@
+{
+  "contract": "audit-core siem-exporter -> org-core siem destinations",
+  "version": 1,
+  "tokenPlaceholder": "<ORG_CORE_SERVICE_TOKEN>",
+  "exchanges": [
+    {
+      "name": "all enabled destinations",
+      "request": {
+        "method": "GET",
+        "path": "/internal/orgs/siem-destinations",
+        "headers": {
+          "accept": "application/json",
+          "x-service-id": "audit-core",
+          "x-service-token": "<ORG_CORE_SERVICE_TOKEN>"
+        }
+      },
+      "expectUpdatedSince": "",
+      "response": {
+        "status": 200,
+        "cacheControl": "no-store",
+        "body": {
+          "data": [
+            {
+              "id": "6f1c2b3a-0d4e-4f5a-8b6c-7d8e9f0a1b2c",
+              "org_id": "org-contract-fixture",
+              "kind": "ndjson_webhook",
+              "url": "https://siem.example.com/audit/ingest",
+              "secret": "contract-fixture-webhook-key-0001",
+              "event_filter": {},
+              "revision": 1,
+              "updated_at": "2026-10-23T09:00:00Z"
+            },
+            {
+              "id": "0a9b8c7d-6e5f-4a3b-9c2d-1e0f9a8b7c6d",
+              "org_id": "org-contract-fixture",
+              "kind": "splunk_hec",
+              "url": "https://hec.example.com:8088/services/collector/event",
+              "secret": "contract-fixture-hec-token-0002",
+              "event_filter": {
+                "events": ["tool.call", "org_siem_destination_changed"],
+                "planes": ["control", "model"]
+              },
+              "revision": 3,
+              "updated_at": "2026-10-23T09:15:00Z"
+            }
+          ],
+          "meta": {
+            "count": 2
+          }
+        }
+      }
+    },
+    {
+      "name": "destinations changed since a cursor",
+      "request": {
+        "method": "GET",
+        "path": "/internal/orgs/siem-destinations?updated_since=2026-10-23T09%3A10%3A00Z",
+        "headers": {
+          "accept": "application/json",
+          "x-service-id": "audit-core",
+          "x-service-token": "<ORG_CORE_SERVICE_TOKEN>"
+        }
+      },
+      "expectUpdatedSince": "2026-10-23T09:10:00Z",
+      "response": {
+        "status": 200,
+        "cacheControl": "no-store",
+        "body": {
+          "data": [
+            {
+              "id": "0a9b8c7d-6e5f-4a3b-9c2d-1e0f9a8b7c6d",
+              "org_id": "org-contract-fixture",
+              "kind": "splunk_hec",
+              "url": "https://hec.example.com:8088/services/collector/event",
+              "secret": "contract-fixture-hec-token-0002",
+              "event_filter": {
+                "events": ["tool.call", "org_siem_destination_changed"],
+                "planes": ["control", "model"]
+              },
+              "revision": 3,
+              "updated_at": "2026-10-23T09:15:00Z"
+            }
+          ],
+          "meta": {
+            "count": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "no destinations",
+      "request": {
+        "method": "GET",
+        "path": "/internal/orgs/siem-destinations?updated_since=2026-10-24T00%3A00%3A00Z",
+        "headers": {
+          "accept": "application/json",
+          "x-service-id": "audit-core",
+          "x-service-token": "<ORG_CORE_SERVICE_TOKEN>"
+        }
+      },
+      "expectUpdatedSince": "2026-10-24T00:00:00Z",
+      "response": {
+        "status": 200,
+        "cacheControl": "no-store",
+        "body": {
+          "data": [],
+          "meta": {
+            "count": 0
+          }
+        }
+      }
+    }
+  ]
+}

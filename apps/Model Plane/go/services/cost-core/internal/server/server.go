@@ -119,6 +119,9 @@ type budgetCheckRequest struct {
 	UserID     string  `json:"user_id"`
 	MaxCostUSD float64 `json:"max_cost_usd"`
 	MaxTokens  int64   `json:"max_tokens"`
+	// Since starts the window the caps are checked against (RFC 3339). Zero
+	// keeps the lifetime totals.
+	Since time.Time `json:"since,omitempty"`
 }
 
 // budgetCheckResponse is the JSON shape returned by the budget-check endpoint.
@@ -588,11 +591,17 @@ func (s *Server) handleBudgetCheck(w http.ResponseWriter, r *http.Request) {
 	// "__org__" sentinel is gone: it never matched stored rows (entries carry the
 	// real user_id), so the org budget always read $0 and the posture never left
 	// Healthy — the downgrade could not fire even with a fed ledger.
+	// A windowed check (since set) counts only the spend from that instant, so
+	// a capped org is admitted again when its period resets. Without since the
+	// totals stay lifetime, as before.
 	var usage *ledger.Usage
 	var usageErr error
-	if req.UserID == "" {
+	switch {
+	case !req.Since.IsZero():
+		usage, usageErr = s.ledger.Aggregate(r.Context(), ledger.AggregateFilter{OrgID: req.OrgID, UserID: req.UserID, Since: req.Since})
+	case req.UserID == "":
 		usage, usageErr = s.ledger.Aggregate(r.Context(), ledger.AggregateFilter{OrgID: req.OrgID})
-	} else {
+	default:
 		usage, usageErr = s.ledger.GetUsage(r.Context(), req.OrgID, req.UserID)
 	}
 

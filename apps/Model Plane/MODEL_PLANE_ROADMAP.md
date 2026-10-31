@@ -415,7 +415,14 @@ readiness:
 5. **SRE:** user-journey SLOs, error budgets, paging, capacity/latency/cost
    dashboards, runbooks, game days, load and regression floors.
 6. **Enterprise audit:** tamper-evident retention, export/SIEM, legal hold,
-   tenant access review, policy-governed retention and deletion.
+   tenant access review, policy-governed retention and deletion. Status: the
+   Control Plane audit-core source has a per-org hash chain, signed head
+   attestations and checkpoints, a verifier, an owner/admin compliance read
+   and a SIEM exporter, inert or behind default-off switches (WS06 S0-S8).
+   Model Plane has no code change for them. Activation, an external witness
+   and the honest limits are operator decisions: see
+   `apps/Control Plane/docs/AUDIT_CHAIN_RUNBOOK.md`. Legal hold, erasure
+   checkpoints and a tenant access review are not built.
 7. **Secrets and keys:** managed secret references, envelope/per-tenant
    encryption where required, automated rotation, break-glass, inventory, and
    compromise response.

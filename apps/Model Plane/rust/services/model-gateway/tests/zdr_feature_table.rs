@@ -134,6 +134,16 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             with("retrieval_scope", json!("auto")),
             None,
         ),
+        (
+            "connector_scope",
+            with("connector_scope", json!(["conn-1"])),
+            refused("connector_read"),
+        ),
+        (
+            "connector_scope",
+            with("connector_scope", json!([])),
+            None,
+        ),
         ("regenerated", with("regenerated", json!(true)), None),
         (
             "pinned_message_ids",
@@ -149,6 +159,21 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             "edited_resubmit",
             with("edited_resubmit", json!(true)),
             None,
+        ),
+        (
+            "regenerate_of_message_id",
+            with("regenerate_of_message_id", json!("m-1")),
+            refused("message_versions"),
+        ),
+        (
+            "regenerate_of_message_id",
+            with("regenerate_of_message_id", json!("  ")),
+            None,
+        ),
+        (
+            "edit_of_message_id",
+            with("edit_of_message_id", json!("m-2")),
+            refused("message_versions"),
         ),
         (
             "max_cost_usd",
@@ -198,6 +223,24 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             ),
             refused("attachments"),
         ),
+        // The attachment contract never sees a ZDR turn: an inline image and a named
+        // file are refused with the same catalogue code, before any size or kind check.
+        (
+            "attachments",
+            with(
+                "attachments",
+                json!([{"kind": "image", "mime_type": "image/png", "data_base64": "aGk="}]),
+            ),
+            refused("attachments"),
+        ),
+        (
+            "attachments",
+            with(
+                "attachments",
+                json!([{"kind": "file", "name": "sales.csv", "data_base64": "aGk="}]),
+            ),
+            refused("attachments"),
+        ),
         (
             "generate_image",
             with("generate_image", json!(true)),
@@ -208,6 +251,20 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             with("plan_mode", json!(true)),
             refused("plan_mode"),
         ),
+        // An execute turn runs an executing loop under a plan grant: no plan or grant
+        // exists on a ZDR turn, so it is refused through the `agentic` key, on its own
+        // (the request carries no `agentic` feature here) and with it.
+        (
+            "execute_granted",
+            with("execute_granted", json!(true)),
+            refused("agentic"),
+        ),
+        (
+            "execute_granted",
+            with("executeGranted", json!(true)),
+            refused("agentic"),
+        ),
+        ("execute_granted", with("execute_granted", json!(false)), None),
         (
             "tools",
             with(
@@ -363,4 +420,58 @@ fn the_zdr_stream_asks_the_classifier_and_no_longer_keeps_its_own_list() {
         !sse.contains("ZDR currently supports plain chat and read-only grounding only"),
         "the four-feature refusal with no feature name is still in sse.rs"
     );
+}
+
+/// A ZDR turn states its one call's cost in its own frame and publishes no ledger row. The
+/// per-call rows of WS27 S2 belong to the ordinary path: the ZDR branch returns before the
+/// tool loop starts, and the frame writer of a ZDR answer has no publisher to write to.
+#[test]
+fn usage_envelopes_are_not_published_for_a_zdr_turn() {
+    let sse = include_str!("../src/sse.rs");
+    let zdr_return = sse
+        .find("return zdr_direct_stream(")
+        .expect("the ZDR branch hands the turn to zdr_direct_stream");
+    let first_rounds = sse
+        .find("run_tool_rounds_for_model_with_attachments(")
+        .expect("the ordinary path runs the tool rounds");
+    assert!(
+        zdr_return < first_rounds,
+        "a ZDR turn returns before the tool loop can make a call"
+    );
+    for signature in ["async fn zdr_direct_stream(", "fn zdr_answer_stream(", "async fn direct_infer_turn("] {
+        let body = function_body(sse, signature);
+        assert!(!body.contains("publish("), "{signature} publishes nothing");
+        assert!(!body.contains("turn_call_rows"), "{signature} builds no ledger row");
+    }
+}
+
+#[test]
+fn usage_progress_is_not_streamed_for_a_zdr_turn() {
+    let sse = include_str!("../src/sse.rs");
+    let zdr_return = sse
+        .find("return zdr_direct_stream(")
+        .expect("the ZDR branch hands the turn to zdr_direct_stream");
+    let sink = sse
+        .find(".with_usage_progress(")
+        .expect("the ordinary path builds its sink with the usage-progress switch");
+    assert!(
+        zdr_return < sink,
+        "a ZDR turn returns before its sink can stream usage progress"
+    );
+    for signature in ["async fn zdr_direct_stream(", "fn zdr_answer_stream(", "async fn direct_infer_turn("] {
+        let body = function_body(sse, signature);
+        assert!(!body.contains("UsageProgress"), "{signature} streams no usage progress");
+        assert!(!body.contains("stream_call_usage"), "{signature} prices no call for progress");
+    }
+}
+
+/// The source of the function whose signature starts with `signature`, up to its closing brace.
+fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    let start = source
+        .find(signature)
+        .unwrap_or_else(|| panic!("{signature} is in sse.rs"));
+    let end = source[start..]
+        .find("\n}\n")
+        .map_or(source.len(), |offset| start + offset);
+    &source[start..end]
 }

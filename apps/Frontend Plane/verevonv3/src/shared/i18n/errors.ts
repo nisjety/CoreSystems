@@ -14,7 +14,12 @@
 // needs no entry; everything else falls back to the caller's own sentence.
 // The zero-retention refusals of the Model Plane catalogue are the exception:
 // their words live with the catalogue (shared/api/zdr-refusals.ts), so this seam
-// renders them from there.
+// renders them from there. The model-entitlement refusals do the same
+// (shared/api/model-entitlement-refusals.ts).
+
+import { isModelEntitlementCode, modelEntitlementPresentation } from '@/shared/api/model-entitlement-refusals'
+import { en as enStrings } from './en'
+import { no as noStrings } from './no'
 
 import { isZdrRefusalCode, zdrRefusalPresentation } from '@/shared/api/zdr-refusals'
 
@@ -330,6 +335,30 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Adressen ser ikke ut som en offentlig nettside. Sjekk lenken og prøv igjen.',
     en: 'The address does not look like a public web page. Check the link and try again.',
   },
+  invalid_allowed_domains: {
+    no: 'Listen over tillatte nettsteder er ikke gyldig. Sjekk domenene og prøv igjen.',
+    en: 'The list of allowed sites is not valid. Check the domains and try again.',
+  },
+  browser_grant_invalid: {
+    no: 'Nettlesertilgangen for denne kjøringen er ikke gyldig. Start kjøringen på nytt.',
+    en: 'The browser access for this run is not valid. Start the run again.',
+  },
+  invalid_destination_id: {
+    no: 'Mottakeren er ikke gyldig. Sjekk valget og prøv igjen.',
+    en: 'The destination is not valid. Check the choice and try again.',
+  },
+  invalid_skill_decision: {
+    no: 'Avgjørelsen kunne ikke leses. Velg godta eller avvis og prøv igjen.',
+    en: 'The decision could not be read. Choose accept or reject and try again.',
+  },
+  scope_not_enabled: {
+    no: 'Bare en avgjørelse for dette ene kallet er tilgjengelig.',
+    en: 'Only a decision for this one call is available.',
+  },
+  body_too_large: {
+    no: 'Policyen er for stor. Kort den ned og prøv igjen.',
+    en: 'The policy is too large. Shorten it and try again.',
+  },
   invalid_crawl_request: {
     no: 'Gjennomgangen kunne ikke startes med disse innstillingene. Sjekk adressen og innstillingene, og prøv igjen.',
     en: 'The crawl could not be started with these settings. Check the address and the settings, and try again.',
@@ -373,6 +402,10 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   plan_upgrade_required: { no: 'Oppgrader planen din for å fortsette.', en: 'Upgrade your plan to continue.' },
   entitlement_required: { no: 'Denne funksjonen er ikke inkludert i planen din.', en: 'This feature is not included in your plan.' },
 
+  // A local refusal, thrown by the chat client before anything is sent: the
+  // ChatGPT-subscription route carries no images (shared/api/chat-client.ts).
+  attachments_not_sent: { no: noStrings.attachments.notSent, en: enStrings.attachments.notSent },
+
   // The org Zero Data Retention switch (gateway `orgs/settings.rs`), refused
   // when no AI provider has a recorded zero-retention attestation, or when that
   // cannot be checked. The same two codes come back from the settings page and
@@ -382,6 +415,29 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   zdr_no_attested_provider: {
     no: 'Zero Data Retention kan ikke slås på ennå: ingen AI-leverandør har en registrert nullbevaringsgodkjenning. Fortsett uten, og slå det på i innstillingene når en leverandør er godkjent.',
     en: 'Zero Data Retention cannot be turned on yet: no AI provider has a recorded zero-retention attestation. Carry on without it, and turn it on in the settings once a provider is attested.',
+  },
+  // The org model-access policy (gateway `orgs/model_entitlement.rs`, org-core
+  // `modelentitlement`): the refusals of an admin save. A member's refusal to use a
+  // model is a catalogue code, rendered below from its own module.
+  revision_conflict: {
+    no: 'Modelltilgangen ble endret av noen andre. Last inn på nytt og gjør endringen igjen.',
+    en: 'Model access was changed by someone else. Reload and make the change again.',
+  },
+  invalid_model_policy: {
+    no: 'Modelltilgangen er ikke gyldig. Sjekk modell-ID-ene, effektnivået og personvernnivået.',
+    en: 'The model access policy is not valid. Check the model ids, the effort level and the privacy tier.',
+  },
+  model_policy_leaves_no_zdr_model: {
+    no: 'Denne modelltilgangen ville latt en rolle stå uten modell med nullbevaringsgodkjenning, og Zero Data Retention er på. Tillat minst én godkjent modell.',
+    en: 'This model access would leave a role with no zero-retention attested model while Zero Data Retention is on. Allow at least one attested model.',
+  },
+  model_policy_guard_unavailable: {
+    no: 'Kunne ikke kontrollere modelltilgangen mot Zero Data Retention akkurat nå, så ingenting ble lagret. Prøv igjen om litt.',
+    en: 'Model access could not be checked against Zero Data Retention right now, so nothing was saved. Try again shortly.',
+  },
+  zdr_models_not_entitled: {
+    no: 'Zero Data Retention kan ikke slås på: modelltilgangen tillater ingen modell med nullbevaringsgodkjenning. Endre modelltilgangen først.',
+    en: 'Zero Data Retention cannot be turned on: the model access allows no zero-retention attested model. Change the model access first.',
   },
   zdr_gate_unavailable: {
     no: 'Kunne ikke kontrollere hvilke leverandører som har registrert ZDR-godkjenning, så Zero Data Retention kan ikke slås på akkurat nå. Prøv igjen om litt, eller fortsett uten og slå det på senere.',
@@ -1033,6 +1089,18 @@ function describe(
   // the SPA wrote itself (LocalizedError) still wins.
   if (code && isZdrRefusalCode(code) && !(err instanceof LocalizedError)) {
     const shown = zdrRefusalPresentation(code, typeof like?.feature === 'string' ? like.feature : null, tr)
+    return {
+      code,
+      kind,
+      message: shown.next === null ? shown.message : `${shown.message} ${shown.next}`,
+      resumable: like?.resumable === true,
+      retryAfterSeconds,
+    }
+  }
+  // A model-entitlement refusal of the Model Plane catalogue: its own words and
+  // the next step. The reason and model refine it only where a caller has them.
+  if (code && isModelEntitlementCode(code) && !(err instanceof LocalizedError)) {
+    const shown = modelEntitlementPresentation(code, tr)
     return {
       code,
       kind,

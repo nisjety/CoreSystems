@@ -238,3 +238,185 @@ fn the_safety_tagged_rows_are_present_and_decided_as_tagged() {
         }
     }
 }
+
+/// Whether one bearer, by itself, is a persistent credential, written from the matrix's own rule
+/// and not from the gateway's code: it is not ZDR, its org is not ZDR (an absent org claim is an
+/// ordinary service token), and it carries no waiver.
+fn bearer_is_persistent(bearer: &Value) -> bool {
+    bearer["zdr"] == false && bearer["org_zdr"] != true && bearer["waiver"].is_null()
+}
+
+/// `POST /v1/orchestration/runs/{run_id}/continue` states no route: the request names no provider,
+/// no connection and no ZDR flag, so the gateway decides it with `Route::plain(false)` from the
+/// caller's single bearer. This is that decision, over every bearer of every enforcement row.
+///
+/// A continuation consumes an approval and resumes stored work, and a waived turn is persistent for
+/// its connection's inference only. So the route is served to a persistent bearer and to nothing
+/// else: a ZDR bearer is not served, a waived bearer (whose `zdr` claim is FALSE, so a check written
+/// as "not ZDR" would serve it) is not served, and a bearer the resolver refuses is not served.
+#[test]
+fn a_continue_is_served_to_a_persistent_bearer_on_every_row_and_to_nothing_else() {
+    let matrix = matrix();
+    let rows = matrix["enforcement_rows"]
+        .as_array()
+        .expect("rows are an array");
+    let (mut served, mut waived_refused, mut zdr_refused) = (0_usize, 0_usize, 0_usize);
+    for row in rows {
+        let id = row["id"].as_str().unwrap_or("?");
+        let bearers = row["inputs"]["bearers"]
+            .as_array()
+            .expect("bearers are an array");
+        let continue_serves = |bearer: &Value| {
+            matches!(
+                model_gateway::zdr_posture::decide_for(
+                    &bearer_claims(bearer),
+                    &Route::plain(false)
+                ),
+                Ok(TurnPosture::Persistent)
+            )
+        };
+        for bearer in bearers {
+            let serves = continue_serves(bearer);
+            assert_eq!(
+                serves,
+                bearer_is_persistent(bearer),
+                "{id}: /continue must serve a bearer exactly when it is persistent (bearer {bearer})"
+            );
+            if serves {
+                served += 1;
+            } else if !bearer["waiver"].is_null() {
+                // The trap the matrix exists to catch: a waived bearer whose zdr claim is false
+                // is "not ZDR" and still must not be served.
+                if bearer["zdr"] == false {
+                    waived_refused += 1;
+                }
+            } else if bearer["zdr"] == true {
+                zdr_refused += 1;
+            }
+        }
+        // The matrix's own words for the same turn, where /continue and the row name the same thing:
+        // one bearer, and a row that does not ask for ZDR itself (a continuation cannot).
+        if bearers.len() == 1 && row["inputs"]["route"]["explicit_zdr"] != true {
+            let serves = continue_serves(&bearers[0]);
+            match row["expect"]["decision"].as_str() {
+                Some("persistent") => assert!(serves, "{id}: the matrix says persistent"),
+                Some("zdr" | "waived") => assert!(!serves, "{id}: the matrix says zdr or waived"),
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        served >= 3,
+        "the matrix has persistent bearers to serve: {served}"
+    );
+    assert!(
+        waived_refused >= 2,
+        "the matrix has waived bearers with zdr false to refuse: {waived_refused}"
+    );
+    assert!(
+        zdr_refused >= 3,
+        "the matrix has ZDR bearers to refuse: {zdr_refused}"
+    );
+}
+
+/// The handler's own answer to that decision is private to `sse.rs` (`continue_turn_is_persistent`,
+/// `continue_persistent_gate`, `continue_preflight`; their behaviour is pinned by the unit tests
+/// beside them). What this file can hold is that the private function IS the decision above and
+/// that the handler passes it on, so the table cannot drift from the route.
+#[test]
+fn the_continue_handler_decides_its_turn_with_the_plain_route_and_serves_persistent_only() {
+    let source = include_str!("../src/sse.rs").replace("\r\n", "\n");
+    let code: String = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let decision = code
+        .split("fn continue_turn_is_persistent(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("sse.rs defines continue_turn_is_persistent");
+    assert!(
+        decision.contains("decide_for(claims, &crate::zdr_posture::Route::plain(false))"),
+        "the /continue decision is decide_for over the plain route, as this file models it: {decision}"
+    );
+    assert!(
+        decision.contains("TurnPosture::Persistent"),
+        "and it serves the persistent posture"
+    );
+    for widened in ["Waived", "Zdr", "is_waived", "zdr()", "|"] {
+        assert!(
+            !decision.contains(widened),
+            "continue_turn_is_persistent must serve Persistent and nothing else, but it mentions `{widened}`: {decision}"
+        );
+    }
+    let handler = code
+        .split("pub(crate) async fn continue_run(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n#[cfg(test)]").next())
+        .expect("sse.rs defines continue_run");
+    assert!(
+        handler.contains("continue_persistent_gate("),
+        "continue_run refuses a non-persistent turn before any work"
+    );
+    let preflight = handler
+        .split("continue_preflight(")
+        .nth(1)
+        .and_then(|rest| rest.split(").map_err").next())
+        .expect("continue_run calls continue_preflight");
+    assert!(
+        preflight.contains("continue_turn_is_persistent(&claims)"),
+        "continue_run hands the same decision to the preflight: {preflight}"
+    );
+}
+
+/// The ZDR stream may state a cost (WS27-S5) and must publish nothing for it. The cost is priced
+/// only behind the cost switch, and the functions that build a ZDR answer's stream call no
+/// publisher and build no usage envelope, so no ledger row can follow from a ZDR turn. Read from
+/// the source, as the continue handler's guard is, because the stream builders are private to
+/// `sse.rs`.
+#[test]
+fn zdr_stream_prices_only_behind_its_switch_and_publishes_nothing() {
+    let source = include_str!("../src/sse.rs").replace("\r\n", "\n");
+    let code: String = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body_of = |signature: &str| -> String {
+        code.split(signature)
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap_or_else(|| panic!("sse.rs defines `{signature}`"))
+            .to_owned()
+    };
+    let direct = body_of("async fn zdr_direct_stream(");
+    let (before_switch, after_switch) = direct
+        .split_once("if zdr_stream_cost_enabled() {")
+        .expect("zdr_direct_stream reads the cost switch");
+    assert!(
+        !before_switch.contains("zdr_stated_cost("),
+        "no price is read before the cost switch: {direct}"
+    );
+    assert!(
+        after_switch.contains("zdr_stated_cost("),
+        "the price is read behind the cost switch: {direct}"
+    );
+    for (name, body) in [
+        ("zdr_direct_stream", direct),
+        ("zdr_stated_cost", body_of("async fn zdr_stated_cost(")),
+        ("zdr_answer_stream", body_of("fn zdr_answer_stream(")),
+    ] {
+        for publishing in [
+            ".publish(",
+            "usage_subject",
+            "build_usage_envelope",
+            "Envelope {",
+        ] {
+            assert!(
+                !body.contains(publishing),
+                "{name} must publish nothing, but it mentions `{publishing}`"
+            );
+        }
+    }
+}

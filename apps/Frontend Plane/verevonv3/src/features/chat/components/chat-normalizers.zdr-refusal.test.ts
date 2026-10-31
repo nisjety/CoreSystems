@@ -55,6 +55,15 @@ describe('streamFailurePresentation for a zero-retention refusal', () => {
     )
   })
 
+  it('names an unknown feature, or none, as the unnamed fallback', () => {
+    const unknown = streamFailurePresentation('zdr_feature_not_supported', SERVER_TEXT, en, { feature: 'hologram_export' })
+    const missing = streamFailurePresentation('zdr_feature_not_supported', SERVER_TEXT, en)
+    expect(unknown.message).toContain('zero data retention yet: this feature.')
+    expect(unknown.message).not.toContain('hologram')
+    expect(missing.message).toBe(unknown.message)
+    expect(missing.action).toBe('none')
+  })
+
   it('gives a zero-retention code the SPA does not know the generic text, with no action', () => {
     const shown = streamFailurePresentation('zdr_from_a_newer_server', SERVER_TEXT, en)
     expect(shown).toMatchObject({ action: 'none', unsaved: true, unavailable: false })

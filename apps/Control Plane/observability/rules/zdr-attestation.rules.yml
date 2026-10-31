@@ -1,0 +1,48 @@
+# Alert rules for the ZDR attestation review-by date (build plan WS01 decision D1).
+#
+# Why: inference-core publishes, per provider surface, the review-by date of its
+# Zero Data Retention attestation as mp_inference_zdr_attestation_review_by_timestamp_seconds
+# (Unix seconds at the start of that UTC day; absent for a surface that makes no
+# ZDR claim). The attestation stops granting ZDR after that day. Before this change,
+# nothing read the gauge and Prometheus did not scrape inference-core, so a lapse
+# showed only in logs. These rules make the countdown visible and fire on a lapse.
+# There is no pager yet: alerts show in the Prometheus UI until a routing target is
+# chosen (decision D1). No rule uses `for:`, because the thresholds move with time() alone.
+#
+# All series are content-free: the only label is the fixed `surface` name, never
+# caller, org or message data, so nothing here is a ZDR concern.
+#
+# The three windows are disjoint, so a surface is reported by at most one alert:
+#   ZdrAttestationReviewDue       3 to 14 days before the review-by day        (warning)
+#   ZdrAttestationReviewImminent  under 3 days before it, until the day ends   (critical)
+#   ZdrAttestationLapsed          after the review-by day has ended            (critical)
+# Runbook: apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md#attestation-lapse-alerts
+groups:
+  - name: model-zdr-attestation
+    rules:
+      - alert: ZdrAttestationReviewDue
+        expr: |
+          (min by (surface) (mp_inference_zdr_attestation_review_by_timestamp_seconds) - time()) < 14 * 86400
+          and
+          (min by (surface) (mp_inference_zdr_attestation_review_by_timestamp_seconds) - time()) >= 3 * 86400
+        labels: { severity: warning, plane: model }
+        annotations:
+          summary: "A ZDR attestation needs renewal within 14 days"
+          runbook: "apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md#attestation-lapse-alerts"
+
+      - alert: ZdrAttestationReviewImminent
+        expr: |
+          (min by (surface) (mp_inference_zdr_attestation_review_by_timestamp_seconds) - time()) < 3 * 86400
+          and
+          (time() - min by (surface) (mp_inference_zdr_attestation_review_by_timestamp_seconds)) <= 86400
+        labels: { severity: critical, plane: model }
+        annotations:
+          summary: "A ZDR attestation review-by day is within 3 days; ZDR stops for its surface after that day"
+          runbook: "apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md#attestation-lapse-alerts"
+
+      - alert: ZdrAttestationLapsed
+        expr: time() - min by (surface) (mp_inference_zdr_attestation_review_by_timestamp_seconds) > 86400
+        labels: { severity: critical, plane: model }
+        annotations:
+          summary: "A ZDR attestation has lapsed; ZDR is no longer granted for its surface"
+          runbook: "apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md#attestation-lapse-alerts"

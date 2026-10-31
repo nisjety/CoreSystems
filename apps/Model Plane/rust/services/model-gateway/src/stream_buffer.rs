@@ -447,6 +447,29 @@ impl RedisStreamBuffer {
             .await;
     }
 
+    /// One best-effort key with a TTL, under the same breaker as the frames.
+    async fn kv_set(&self, key: &str, value: &str, ttl_secs: u64) {
+        self.breaker
+            .run("kv_set", || {
+                let mut conn = self.conn.clone();
+                let (key, value) = (key.to_owned(), value.to_owned());
+                async move { conn.set_ex::<_, _, ()>(key, value, ttl_secs).await }
+            })
+            .await;
+    }
+
+    /// `None` for a missing key, a failed read and an open breaker alike.
+    async fn kv_get(&self, key: &str) -> Option<String> {
+        self.breaker
+            .run("kv_get", || {
+                let mut conn = self.conn.clone();
+                let key = key.to_owned();
+                async move { conn.get::<_, Option<String>>(key).await }
+            })
+            .await
+            .flatten()
+    }
+
     async fn replay_after(&self, request_id: &str, after_seq: Option<u64>) -> Replay {
         let list_key = Self::list_key(request_id);
         let done_key = Self::done_key(request_id);
@@ -597,6 +620,23 @@ impl StreamBufferStore {
         match self {
             Self::Memory(m) => m.end(request_id, end),
             Self::Redis(r) => r.end(request_id, end).await,
+        }
+    }
+
+    /// Best-effort write of one small key to the shared store (the turn record,
+    /// `chat_turn_registry`). The in-memory backend has nothing shared to write
+    /// to, so it does nothing: the caller's own process map is already the
+    /// record there.
+    pub(crate) async fn kv_set(&self, key: &str, value: &str, ttl_secs: u64) {
+        if let Self::Redis(r) = self {
+            r.kv_set(key, value, ttl_secs).await;
+        }
+    }
+
+    pub(crate) async fn kv_get(&self, key: &str) -> Option<String> {
+        match self {
+            Self::Memory(_) => None,
+            Self::Redis(r) => r.kv_get(key).await,
         }
     }
 

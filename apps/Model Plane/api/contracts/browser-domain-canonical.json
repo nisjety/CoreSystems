@@ -1,0 +1,506 @@
+{
+  "contract": "browser-domain-canonical",
+  "version": 1,
+  "owner": "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go NormalizeAllowedDomains",
+  "status": "pins the browser-broker's current normalizer; consumers in WS21 S4, S5a and S10 must match it",
+  "rules": {
+    "min_entries": 1,
+    "max_entries": 32,
+    "max_host_octets": 253,
+    "max_label_octets": 63,
+    "preprocess": "trim surrounding whitespace, then fold ASCII and Unicode letters to lower case",
+    "charset": "a-z, 0-9 and hyphen only, in every dot-separated label",
+    "label_edges": "a label may not start or end with a hyphen and may not be empty",
+    "dot_shape": "at least one dot; no leading or trailing dot",
+    "address_literals": "IPv4 and IPv6 literals are rejected",
+    "all_or_nothing": "one invalid entry rejects the whole list",
+    "dedupe": "after preprocessing; the entry cap counts raw entries",
+    "order": "bytewise ascending",
+    "error": "invalid_domain_policy"
+  },
+  "vectors": [
+    {
+      "id": "lowercase_single",
+      "input": [
+        "example.com"
+      ],
+      "expect": "accept",
+      "output": [
+        "example.com"
+      ]
+    },
+    {
+      "id": "uppercase_folded",
+      "input": [
+        "Example.COM"
+      ],
+      "expect": "accept",
+      "output": [
+        "example.com"
+      ]
+    },
+    {
+      "id": "surrounding_whitespace_trimmed",
+      "input": [
+        "\t  example.com \n"
+      ],
+      "expect": "accept",
+      "output": [
+        "example.com"
+      ]
+    },
+    {
+      "id": "duplicates_collapse_after_trim_and_fold",
+      "input": [
+        "Example.com",
+        " example.com ",
+        "EXAMPLE.COM"
+      ],
+      "expect": "accept",
+      "output": [
+        "example.com"
+      ]
+    },
+    {
+      "id": "unsorted_input_sorted_bytewise",
+      "input": [
+        "zeta.example.com",
+        "alpha.example.org",
+        "mid.example.net"
+      ],
+      "expect": "accept",
+      "output": [
+        "alpha.example.org",
+        "mid.example.net",
+        "zeta.example.com"
+      ]
+    },
+    {
+      "id": "hyphen_inside_label",
+      "input": [
+        "my-shop.example.co.uk"
+      ],
+      "expect": "accept",
+      "output": [
+        "my-shop.example.co.uk"
+      ]
+    },
+    {
+      "id": "digit_bearing_label",
+      "input": [
+        "api2.example.com"
+      ],
+      "expect": "accept",
+      "output": [
+        "api2.example.com"
+      ]
+    },
+    {
+      "id": "punycode_idn_label_accepted",
+      "input": [
+        "xn--bcher-kva.example"
+      ],
+      "expect": "accept",
+      "output": [
+        "xn--bcher-kva.example"
+      ],
+      "note": "the ASCII (punycode) form is the only accepted IDN spelling"
+    },
+    {
+      "id": "label_of_63_octets",
+      "input": [
+        "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff.example.com"
+      ],
+      "expect": "accept",
+      "output": [
+        "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff.example.com"
+      ]
+    },
+    {
+      "id": "host_of_253_octets",
+      "input": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.ddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.com"
+      ],
+      "expect": "accept",
+      "output": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.ddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.com"
+      ]
+    },
+    {
+      "id": "thirty_two_entries",
+      "input": [
+        "site00.example.com",
+        "site01.example.com",
+        "site02.example.com",
+        "site03.example.com",
+        "site04.example.com",
+        "site05.example.com",
+        "site06.example.com",
+        "site07.example.com",
+        "site08.example.com",
+        "site09.example.com",
+        "site10.example.com",
+        "site11.example.com",
+        "site12.example.com",
+        "site13.example.com",
+        "site14.example.com",
+        "site15.example.com",
+        "site16.example.com",
+        "site17.example.com",
+        "site18.example.com",
+        "site19.example.com",
+        "site20.example.com",
+        "site21.example.com",
+        "site22.example.com",
+        "site23.example.com",
+        "site24.example.com",
+        "site25.example.com",
+        "site26.example.com",
+        "site27.example.com",
+        "site28.example.com",
+        "site29.example.com",
+        "site30.example.com",
+        "site31.example.com"
+      ],
+      "expect": "accept",
+      "output": [
+        "site00.example.com",
+        "site01.example.com",
+        "site02.example.com",
+        "site03.example.com",
+        "site04.example.com",
+        "site05.example.com",
+        "site06.example.com",
+        "site07.example.com",
+        "site08.example.com",
+        "site09.example.com",
+        "site10.example.com",
+        "site11.example.com",
+        "site12.example.com",
+        "site13.example.com",
+        "site14.example.com",
+        "site15.example.com",
+        "site16.example.com",
+        "site17.example.com",
+        "site18.example.com",
+        "site19.example.com",
+        "site20.example.com",
+        "site21.example.com",
+        "site22.example.com",
+        "site23.example.com",
+        "site24.example.com",
+        "site25.example.com",
+        "site26.example.com",
+        "site27.example.com",
+        "site28.example.com",
+        "site29.example.com",
+        "site30.example.com",
+        "site31.example.com"
+      ]
+    },
+    {
+      "id": "empty_list",
+      "input": [],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "thirty_three_entries",
+      "input": [
+        "site00.example.com",
+        "site01.example.com",
+        "site02.example.com",
+        "site03.example.com",
+        "site04.example.com",
+        "site05.example.com",
+        "site06.example.com",
+        "site07.example.com",
+        "site08.example.com",
+        "site09.example.com",
+        "site10.example.com",
+        "site11.example.com",
+        "site12.example.com",
+        "site13.example.com",
+        "site14.example.com",
+        "site15.example.com",
+        "site16.example.com",
+        "site17.example.com",
+        "site18.example.com",
+        "site19.example.com",
+        "site20.example.com",
+        "site21.example.com",
+        "site22.example.com",
+        "site23.example.com",
+        "site24.example.com",
+        "site25.example.com",
+        "site26.example.com",
+        "site27.example.com",
+        "site28.example.com",
+        "site29.example.com",
+        "site30.example.com",
+        "site31.example.com",
+        "site32.example.com"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "thirty_three_copies_of_one_host",
+      "input": [
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com",
+        "example.com"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy",
+      "note": "the cap counts raw entries, duplicates included; pinned as current behaviour"
+    },
+    {
+      "id": "one_bad_entry_rejects_the_whole_list",
+      "input": [
+        "example.com",
+        "*.example.org"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "empty_string",
+      "input": [
+        ""
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "whitespace_only",
+      "input": [
+        "   "
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "wildcard_prefix",
+      "input": [
+        "*.example.com"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "wildcard_inside_label",
+      "input": [
+        "ex*ample.com"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "ipv4_literal",
+      "input": [
+        "192.168.0.1"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "ipv4_loopback",
+      "input": [
+        "127.0.0.1"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "ipv6_literal",
+      "input": [
+        "2001:db8::1"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "ipv6_bracketed",
+      "input": [
+        "[2001:db8::1]"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "trailing_dot_fqdn",
+      "input": [
+        "example.com."
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "leading_dot",
+      "input": [
+        ".example.com"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "explicit_port",
+      "input": [
+        "example.com:443"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "url_with_scheme",
+      "input": [
+        "https://example.com"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "path_suffix",
+      "input": [
+        "example.com/login"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "query_suffix",
+      "input": [
+        "example.com?x=1"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "userinfo_prefix",
+      "input": [
+        "user@example.com"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "percent_encoded",
+      "input": [
+        "exa%6Dple.com"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "internal_space",
+      "input": [
+        "exa mple.com"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "unicode_idn_unicode_form",
+      "input": [
+        "b\u00fccher.example"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "underscore_label",
+      "input": [
+        "my_shop.example.com"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "single_label_localhost",
+      "input": [
+        "localhost"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "single_label_internal",
+      "input": [
+        "intranet"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "empty_label",
+      "input": [
+        "example..com"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "label_leading_hyphen",
+      "input": [
+        "-shop.example.com"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "label_trailing_hyphen",
+      "input": [
+        "shop-.example.com"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "label_of_64_octets",
+      "input": [
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.example.com"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    },
+    {
+      "id": "host_of_254_octets",
+      "input": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.dddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.com"
+      ],
+      "expect": "reject",
+      "error": "invalid_domain_policy"
+    }
+  ]
+}

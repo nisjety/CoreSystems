@@ -13,6 +13,14 @@
  */
 
 import { mapValues } from '../runtime';
+import type { ApprovalCause } from './ApprovalCause';
+import {
+    ApprovalCauseFromJSON,
+    ApprovalCauseFromJSONTyped,
+    ApprovalCauseToJSON,
+    ApprovalCauseToJSONTyped,
+} from './ApprovalCause';
+
 /**
  * 
  * @export
@@ -67,6 +75,12 @@ export interface Approval {
      * @memberof Approval
      */
     decisionReason?: string;
+    /**
+     * Why the approval was asked for. Null when the creator stated no cause.
+     * @type {ApprovalCause}
+     * @memberof Approval
+     */
+    cause?: ApprovalCause | null;
 }
 
 
@@ -120,6 +134,7 @@ export function ApprovalFromJSONTyped(json: any, ignoreDiscriminator: boolean): 
         'requestedOf': json['requested_of'] == null ? undefined : json['requested_of'],
         'decidedBy': json['decided_by'] == null ? undefined : json['decided_by'],
         'decisionReason': json['decision_reason'] == null ? undefined : json['decision_reason'],
+        'cause': json['cause'] == null ? undefined : ApprovalCauseFromJSON(json['cause']),
     };
 }
 
@@ -142,6 +157,7 @@ export function ApprovalToJSONTyped(value?: Approval | null, ignoreDiscriminator
         'requested_of': value['requestedOf'],
         'decided_by': value['decidedBy'],
         'decision_reason': value['decisionReason'],
+        'cause': ApprovalCauseToJSON(value['cause']),
     };
 }
 

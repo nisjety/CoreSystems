@@ -115,6 +115,44 @@ describeIfPolicy('principal policy delegated-identity rows', () => {
     ).toThrow(/not authorized/i);
   });
 
+  it('grants integration:write to model-execution on ingestion alone, beside its read and shipping scopes, and mints it there only', () => {
+    // The attested provider-write path (WS23-S8) needs this credential to reach integration-corev2.
+    // The attestation is what authorizes one write; this scope only lets the presenting service
+    // carry it, so it stays one named scope on one audience.
+    expect(holdersOfScope('integration:write')).toEqual([
+      'conversation-core',
+      'model-execution',
+    ]);
+    expect(policy?.['model-execution']?.scopesByAudience).toEqual({
+      ingestion: ['integration:read', 'integration:write', 'shipping:read'],
+    });
+    const registry = registryWithTestCredentials();
+    expect(
+      authorizePlaneServicePrincipal(registry, {
+        ...mintRequest('model-execution', 'ingestion', 'integration:write'),
+        reason: 'execution-core integration:write',
+      }),
+    ).toMatchObject({
+      serviceId: 'model-execution',
+      orgId: 'org-a',
+      scopes: ['integration:write'],
+      zdr: true,
+    });
+    for (const audience of [
+      'session-core',
+      'model-gateway',
+      'quarry',
+      'data-plane',
+    ]) {
+      expect(() =>
+        authorizePlaneServicePrincipal(registry, {
+          ...mintRequest('model-execution', audience, 'integration:write'),
+          reason: 'execution-core integration:write',
+        }),
+      ).toThrow(/not authorized/i);
+    }
+  });
+
   it('gives the mail-task bridge principal persistent session-core retention, or every prepare call fails closed', () => {
     // session-core refuses a zero-retention caller for a non-:read scope, and
     // Auth Core defaults an unconfigured audience to zdr. The row exists since

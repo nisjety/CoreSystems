@@ -116,6 +116,7 @@ func main() {
 			MaxConcurrency:              cfg.CodexSubscriptionMaxConcurrency,
 			MaxConcurrencyPerConnection: cfg.CodexSubscriptionMaxConcurrencyPerConnection,
 			QueueTimeout:                cfg.CodexSubscriptionQueueTimeout,
+			WideReasoningEffort:         cfg.CodexSubscriptionWideReasoningEffort,
 		}, runner)
 		if err != nil {
 			logger.Fatal().Err(err).Msg("initialize Codex subscription broker")

@@ -31,6 +31,7 @@ import {
 import {
   BrowserChrome,
 } from '@/features/dashboard/home/BrowserChrome'
+import { approvalKindLabel } from '@/shared/approvals/approval-copy'
 import { listRunEventReplay, streamRunEvents } from '@/shared/api/run-console-client'
 import { controlBrowserAiRun, type BrowserAiRunControlAction } from '@/shared/api/browser-run-client'
 import type {
@@ -57,9 +58,12 @@ import {
   type ChatRunWatchState,
 } from '@/features/chat/lib/chat-run-watch'
 import { useI18n, translateApiError } from '@/shared/i18n'
+import { isSafeLinkHref } from '../lib/safe-href'
 import { RunNotifyButton } from './RunNotifyButton'
 
+// The run stores its error as this Norwegian text; the reader's language is chosen where it is shown.
 const RUN_STREAM_ERROR = 'Kunne ikke lese hendelsesstrømmen for denne kjøringen.'
+const RUN_STREAM_ERROR_EN = 'The event stream for this run could not be read.'
 
 /** A run that cannot emit more work. Used when opening a chat on an older
  * completed turn: the run-event endpoint is a live tail when no cursor is
@@ -87,9 +91,9 @@ function screenshotNoteIcon(state: Exclude<ChatRunScreenshotState, 'ready'>) {
   return <CameraOff size={13} />
 }
 
-function stepLabel(step: ChatRunBrowserStep): string {
+function stepLabel(step: ChatRunBrowserStep, untitled: string): string {
   const host = chatRunHostname(step.url)
-  const action = step.actionType ?? 'steg'
+  const action = step.actionType ?? untitled
   return host ? `${action} · ${host}` : action
 }
 
@@ -119,8 +123,8 @@ function ChatRunEvidenceFallback(props: {
       <Show when={props.error}>
         {(message) => (
           <div class="verevon-chat-run-fallback__error" role="alert">
-            <p><CircleAlert size={14} /> {message()}</p>
-            <button type="button" onClick={props.onReconnect}>Koble til igjen</button>
+            <p><CircleAlert size={14} /> {message() === RUN_STREAM_ERROR ? i18n.tr(RUN_STREAM_ERROR, RUN_STREAM_ERROR_EN) : message()}</p>
+            <button type="button" onClick={props.onReconnect}>{i18n.tr('Koble til igjen', 'Reconnect')}</button>
           </div>
         )}
       </Show>
@@ -165,7 +169,9 @@ function ChatRunEvidenceFallback(props: {
                   <div>
                     <dt>URL</dt>
                     <dd>
-                      <a href={url()} target="_blank" rel="noopener noreferrer">{url()}</a>
+                      {isSafeLinkHref(url())
+                        ? <a href={url()} target="_blank" rel="noopener noreferrer">{url()}</a>
+                        : <span class="verevon-chat-link-blocked" title={i18n.tr('Lenke blokkert: ukjent adresse', 'Link blocked: unsupported address')}>{url()}</span>}
                     </dd>
                   </div>
                 )}
@@ -331,11 +337,11 @@ export function ChatLiveRunPanel(props: {
         onApproval: (event) => {
           update(runId, (state) => appendActivity(state, {
             at: event.at ?? new Date().toISOString(),
-            detail: event.approvalKind ?? '',
+            detail: event.approvalKind ? approvalKindLabel(event.approvalKind, i18n) : '',
             id: `approval-${event.approvalId ?? state.activity.length}`,
             kind: 'approval',
             status: event.to,
-            title: 'Godkjenning',
+            title: i18n.tr('Godkjenning', 'Approval'),
           }))
           refreshApprovals(event.runId)
         },
@@ -463,10 +469,11 @@ export function ChatLiveRunPanel(props: {
   })
   const statusLabel = () => {
     const current = watch()
-    if (!current) return 'Kobler til …'
-    if (current.error) return 'Avbrutt'
-    if (!current.live) return 'Fullført'
-    return latestBrowserStep(current) ? `Steg ${latestBrowserStep(current)?.step}` : 'Kjører'
+    if (!current) return i18n.tr('Kobler til …', 'Connecting…')
+    if (current.error) return i18n.tr('Avbrutt', 'Interrupted')
+    if (!current.live) return i18n.tr('Fullført', 'Completed')
+    const step = latestBrowserStep(current)
+    return step ? i18n.tr(`Steg ${step.step}`, `Step ${step.step}`) : i18n.tr('Kjører', 'Running')
   }
   const shotState = (step: ChatRunBrowserStep) => screenshotStateFor(step, { live: live(), zdr: zdr() })
   const expanded = () => {
@@ -610,7 +617,7 @@ export function ChatLiveRunPanel(props: {
                           type="button"
                           class={['verevon-chat-run-shot', { 'verevon-chat-run-shot--active': expandedStep() === step.step }]}
                           aria-pressed={expandedStep() === step.step ? 'true' : 'false'}
-                          title={i18n.tr(`Steg ${step.step} · ${stepLabel(step)}`, `Step ${step.step} - ${stepLabel(step)}`)}
+                          title={i18n.tr(`Steg ${step.step} · ${stepLabel(step, 'steg')}`, `Step ${step.step} - ${stepLabel(step, 'step')}`)}
                           onClick={() => setExpandedStep((current) => (current === step.step ? null : step.step))}
                         >
                           <span class="verevon-chat-run-shot__frame">
@@ -634,7 +641,7 @@ export function ChatLiveRunPanel(props: {
                             </Show>
                           </span>
                           <span class="verevon-chat-run-shot__label">
-                            <em>#{step.step}</em> {stepLabel(step)}
+                            <em>#{step.step}</em> {stepLabel(step, i18n.tr('steg', 'step'))}
                           </span>
                         </button>
                       )}
@@ -664,11 +671,13 @@ export function ChatLiveRunPanel(props: {
                           )}
                         </Show>
                         <figcaption class="verevon-chat-run-shot-expanded__meta">
-                          <strong>Steg {step().step} · {step().actionType ?? 'steg'}</strong>
+                          <strong>{i18n.tr('Steg', 'Step')} {step().step} · {step().actionType ?? i18n.tr('steg', 'step')}</strong>
                           <Show when={step().pageTitle}>{(title) => <span>{title()}</span>}</Show>
                           <Show when={step().url}>
                             {(url) => (
-                              <a href={url()} target="_blank" rel="noopener noreferrer">{url()}</a>
+                              isSafeLinkHref(url())
+                                ? <a href={url()} target="_blank" rel="noopener noreferrer">{url()}</a>
+                                : <span class="verevon-chat-link-blocked" title={i18n.tr('Lenke blokkert: ukjent adresse', 'Link blocked: unsupported address')}>{url()}</span>
                             )}
                           </Show>
                           <Show when={step().reason}>{(reason) => <p>{reason()}</p>}</Show>

@@ -20,6 +20,7 @@
 // run of `sample-exports.mts`, and Node's ESM resolver — unlike Vite's —
 // requires the extension on a relative specifier.
 import type { MarkdownBlock } from '../../components/chat-types'
+import { isSafeLinkHref } from '../safe-href.ts'
 import type { ExportLocale } from './types.ts'
 
 export type InlineRun = {
@@ -102,22 +103,14 @@ const MARKDOWN_LINK_PATTERN = /^\[([^\]]+)\]\(([^)]+)\)$/
 const BARE_URL_PATTERN = /^https?:\/\//
 
 /**
- * Schemes an exported document is allowed to turn into a real, clickable
- * hyperlink. A bare URL (`BARE_URL_PATTERN`, above) already only ever matches
- * `http(s)://`, but a `[text](url)` markdown link's `url` half is whatever
- * the model wrote — `javascript:`, `data:`, `file:` and friends all parse as
- * valid link targets there. Word (and, via `docx.ts`, its `TargetMode`
- * `"External"` relationships) would happily launch any of those on a click,
- * so a link whose scheme isn't in this allowlist is kept as plain, inert
- * text instead of becoming a run with an `href` — the same bar the export
- * spec sets for every hyperlink it writes.
+ * Whether `url` is safe to become a real hyperlink target in an exported
+ * document. A `[text](url)` markdown link's `url` half is whatever the model
+ * wrote, and Word (via `docx.ts`'s `TargetMode="External"` relationships) would
+ * launch any scheme it is handed on a click, so the export shares the chat's
+ * link allowlist — one rule for every place a model-authored target can
+ * become clickable.
  */
-const SAFE_HREF_PATTERN = /^(?:https?:|mailto:)/i
-
-/** Whether `url` is safe to become a real hyperlink target in an exported document — see `SAFE_HREF_PATTERN`. */
-export function isSafeExportHref(url: string): boolean {
-  return SAFE_HREF_PATTERN.test(url.trim())
-}
+export const isSafeExportHref = isSafeLinkHref
 
 /**
  * Splits trailing sentence punctuation off a bare URL, same as `parseInline`

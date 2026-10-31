@@ -22,6 +22,7 @@ const (
 	OrchestrationCoreService_ListPlans_FullMethodName                         = "/model_plane.v1.OrchestrationCoreService/ListPlans"
 	OrchestrationCoreService_GetPlan_FullMethodName                           = "/model_plane.v1.OrchestrationCoreService/GetPlan"
 	OrchestrationCoreService_TransitionPlan_FullMethodName                    = "/model_plane.v1.OrchestrationCoreService/TransitionPlan"
+	OrchestrationCoreService_ProposePlan_FullMethodName                       = "/model_plane.v1.OrchestrationCoreService/ProposePlan"
 	OrchestrationCoreService_ListTodos_FullMethodName                         = "/model_plane.v1.OrchestrationCoreService/ListTodos"
 	OrchestrationCoreService_GetTodo_FullMethodName                           = "/model_plane.v1.OrchestrationCoreService/GetTodo"
 	OrchestrationCoreService_TransitionTodo_FullMethodName                    = "/model_plane.v1.OrchestrationCoreService/TransitionTodo"
@@ -30,11 +31,15 @@ const (
 	OrchestrationCoreService_ListPendingApprovals_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/ListPendingApprovals"
 	OrchestrationCoreService_GetApproval_FullMethodName                       = "/model_plane.v1.OrchestrationCoreService/GetApproval"
 	OrchestrationCoreService_DecideApproval_FullMethodName                    = "/model_plane.v1.OrchestrationCoreService/DecideApproval"
+	OrchestrationCoreService_ConsumeApproval_FullMethodName                   = "/model_plane.v1.OrchestrationCoreService/ConsumeApproval"
 	OrchestrationCoreService_ClaimApprovalDeliveries_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/ClaimApprovalDeliveries"
 	OrchestrationCoreService_GetApprovalContinuation_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/GetApprovalContinuation"
 	OrchestrationCoreService_RecordApprovalContinuationStarted_FullMethodName = "/model_plane.v1.OrchestrationCoreService/RecordApprovalContinuationStarted"
 	OrchestrationCoreService_RecordApprovalContinuationOutcome_FullMethodName = "/model_plane.v1.OrchestrationCoreService/RecordApprovalContinuationOutcome"
 	OrchestrationCoreService_AcknowledgeApprovalDelivery_FullMethodName       = "/model_plane.v1.OrchestrationCoreService/AcknowledgeApprovalDelivery"
+	OrchestrationCoreService_CreateRunQuestion_FullMethodName                 = "/model_plane.v1.OrchestrationCoreService/CreateRunQuestion"
+	OrchestrationCoreService_ListRunQuestions_FullMethodName                  = "/model_plane.v1.OrchestrationCoreService/ListRunQuestions"
+	OrchestrationCoreService_AnswerRunQuestion_FullMethodName                 = "/model_plane.v1.OrchestrationCoreService/AnswerRunQuestion"
 	OrchestrationCoreService_GetSubagentLineage_FullMethodName                = "/model_plane.v1.OrchestrationCoreService/GetSubagentLineage"
 	OrchestrationCoreService_AttachSubagent_FullMethodName                    = "/model_plane.v1.OrchestrationCoreService/AttachSubagent"
 	OrchestrationCoreService_GetRunProofBundle_FullMethodName                 = "/model_plane.v1.OrchestrationCoreService/GetRunProofBundle"
@@ -58,6 +63,13 @@ type OrchestrationCoreServiceClient interface {
 	GetPlan(ctx context.Context, in *GetPlanRequest, opts ...grpc.CallOption) (*GetPlanResponse, error)
 	// Transition a plan to a new state. Rejects illegal transitions.
 	TransitionPlan(ctx context.Context, in *TransitionPlanRequest, opts ...grpc.CallOption) (*TransitionPlanResponse, error)
+	// Create a plan directly in PROPOSED state with real steps, supplied by the
+	// model via the `plan.propose` control tool during a plan-mode run
+	// (chat-wave2-specs plan-gate §2.1-2.2). Unlike the zero-step `draft` plan
+	// session-core auto-creates at run start for the retrospective execution
+	// log (`create_plan`), this is the plan a user actually reviews and edits
+	// before granting an autonomy rung.
+	ProposePlan(ctx context.Context, in *ProposePlanRequest, opts ...grpc.CallOption) (*ProposePlanResponse, error)
 	// List todos for a thread (and optionally scoped to a run).
 	ListTodos(ctx context.Context, in *ListTodosRequest, opts ...grpc.CallOption) (*ListTodosResponse, error)
 	// Fetch a single todo by id.
@@ -83,6 +95,11 @@ type OrchestrationCoreServiceClient interface {
 	GetApproval(ctx context.Context, in *GetApprovalRequest, opts ...grpc.CallOption) (*GetApprovalResponse, error)
 	// Record a decision (granted, denied, or timed_out) on an approval.
 	DecideApproval(ctx context.Context, in *DecideApprovalRequest, opts ...grpc.CallOption) (*DecideApprovalResponse, error)
+	// Consume a granted loop-mode approval exactly once (build plan WS03 S2). The
+	// durable Do loop that paused for the approval calls this when it re-enters, so
+	// a granted approval is executed by the loop once and never also by the cold
+	// delivery worker. Caller-scoped (user bearer), not service-only.
+	ConsumeApproval(ctx context.Context, in *ConsumeApprovalRequest, opts ...grpc.CallOption) (*ConsumeApprovalResponse, error)
 	// Claim due durable approval deliveries for an authenticated internal
 	// worker. Claims are tenant-scoped, leased, and opaque; the caller identity
 	// is derived from its verified service credential, never from this request.
@@ -102,6 +119,17 @@ type OrchestrationCoreServiceClient interface {
 	// delivered outcome until Execution Core can present a durable, authenticated
 	// continuation receipt proving that the paused work actually restarted.
 	AcknowledgeApprovalDelivery(ctx context.Context, in *AcknowledgeApprovalDeliveryRequest, opts ...grpc.CallOption) (*AcknowledgeApprovalDeliveryResponse, error)
+	// Ask the run's owner a question (build plan WS14 S3). A question is a pause
+	// kind with its own store, never an approval: an answer is information, not an
+	// authority grant, so it lives in `run_questions` and never reads as a grant.
+	// Refused for a zero-retention or waived run, and for a ZDR or waived caller.
+	CreateRunQuestion(ctx context.Context, in *CreateRunQuestionRequest, opts ...grpc.CallOption) (*CreateRunQuestionResponse, error)
+	// List the caller's own questions for a run. Owner-only; an overdue
+	// question is reported EXPIRED.
+	ListRunQuestions(ctx context.Context, in *ListRunQuestionsRequest, opts ...grpc.CallOption) (*ListRunQuestionsResponse, error)
+	// Answer (or skip) a requested question once. An identical retry is an
+	// idempotent replay; a different second answer is refused.
+	AnswerRunQuestion(ctx context.Context, in *AnswerRunQuestionRequest, opts ...grpc.CallOption) (*AnswerRunQuestionResponse, error)
 	// Fetch the subagent lineage for a thread.
 	GetSubagentLineage(ctx context.Context, in *GetSubagentLineageRequest, opts ...grpc.CallOption) (*GetSubagentLineageResponse, error)
 	// Attach a subagent lineage edge (parent_run_id -> child_run_id).
@@ -158,6 +186,16 @@ func (c *orchestrationCoreServiceClient) TransitionPlan(ctx context.Context, in 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(TransitionPlanResponse)
 	err := c.cc.Invoke(ctx, OrchestrationCoreService_TransitionPlan_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) ProposePlan(ctx context.Context, in *ProposePlanRequest, opts ...grpc.CallOption) (*ProposePlanResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProposePlanResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_ProposePlan_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -244,6 +282,16 @@ func (c *orchestrationCoreServiceClient) DecideApproval(ctx context.Context, in 
 	return out, nil
 }
 
+func (c *orchestrationCoreServiceClient) ConsumeApproval(ctx context.Context, in *ConsumeApprovalRequest, opts ...grpc.CallOption) (*ConsumeApprovalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConsumeApprovalResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_ConsumeApproval_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *orchestrationCoreServiceClient) ClaimApprovalDeliveries(ctx context.Context, in *ClaimApprovalDeliveriesRequest, opts ...grpc.CallOption) (*ClaimApprovalDeliveriesResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ClaimApprovalDeliveriesResponse)
@@ -288,6 +336,36 @@ func (c *orchestrationCoreServiceClient) AcknowledgeApprovalDelivery(ctx context
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AcknowledgeApprovalDeliveryResponse)
 	err := c.cc.Invoke(ctx, OrchestrationCoreService_AcknowledgeApprovalDelivery_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) CreateRunQuestion(ctx context.Context, in *CreateRunQuestionRequest, opts ...grpc.CallOption) (*CreateRunQuestionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateRunQuestionResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_CreateRunQuestion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) ListRunQuestions(ctx context.Context, in *ListRunQuestionsRequest, opts ...grpc.CallOption) (*ListRunQuestionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListRunQuestionsResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_ListRunQuestions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) AnswerRunQuestion(ctx context.Context, in *AnswerRunQuestionRequest, opts ...grpc.CallOption) (*AnswerRunQuestionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AnswerRunQuestionResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_AnswerRunQuestion_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -378,6 +456,13 @@ type OrchestrationCoreServiceServer interface {
 	GetPlan(context.Context, *GetPlanRequest) (*GetPlanResponse, error)
 	// Transition a plan to a new state. Rejects illegal transitions.
 	TransitionPlan(context.Context, *TransitionPlanRequest) (*TransitionPlanResponse, error)
+	// Create a plan directly in PROPOSED state with real steps, supplied by the
+	// model via the `plan.propose` control tool during a plan-mode run
+	// (chat-wave2-specs plan-gate §2.1-2.2). Unlike the zero-step `draft` plan
+	// session-core auto-creates at run start for the retrospective execution
+	// log (`create_plan`), this is the plan a user actually reviews and edits
+	// before granting an autonomy rung.
+	ProposePlan(context.Context, *ProposePlanRequest) (*ProposePlanResponse, error)
 	// List todos for a thread (and optionally scoped to a run).
 	ListTodos(context.Context, *ListTodosRequest) (*ListTodosResponse, error)
 	// Fetch a single todo by id.
@@ -403,6 +488,11 @@ type OrchestrationCoreServiceServer interface {
 	GetApproval(context.Context, *GetApprovalRequest) (*GetApprovalResponse, error)
 	// Record a decision (granted, denied, or timed_out) on an approval.
 	DecideApproval(context.Context, *DecideApprovalRequest) (*DecideApprovalResponse, error)
+	// Consume a granted loop-mode approval exactly once (build plan WS03 S2). The
+	// durable Do loop that paused for the approval calls this when it re-enters, so
+	// a granted approval is executed by the loop once and never also by the cold
+	// delivery worker. Caller-scoped (user bearer), not service-only.
+	ConsumeApproval(context.Context, *ConsumeApprovalRequest) (*ConsumeApprovalResponse, error)
 	// Claim due durable approval deliveries for an authenticated internal
 	// worker. Claims are tenant-scoped, leased, and opaque; the caller identity
 	// is derived from its verified service credential, never from this request.
@@ -422,6 +512,17 @@ type OrchestrationCoreServiceServer interface {
 	// delivered outcome until Execution Core can present a durable, authenticated
 	// continuation receipt proving that the paused work actually restarted.
 	AcknowledgeApprovalDelivery(context.Context, *AcknowledgeApprovalDeliveryRequest) (*AcknowledgeApprovalDeliveryResponse, error)
+	// Ask the run's owner a question (build plan WS14 S3). A question is a pause
+	// kind with its own store, never an approval: an answer is information, not an
+	// authority grant, so it lives in `run_questions` and never reads as a grant.
+	// Refused for a zero-retention or waived run, and for a ZDR or waived caller.
+	CreateRunQuestion(context.Context, *CreateRunQuestionRequest) (*CreateRunQuestionResponse, error)
+	// List the caller's own questions for a run. Owner-only; an overdue
+	// question is reported EXPIRED.
+	ListRunQuestions(context.Context, *ListRunQuestionsRequest) (*ListRunQuestionsResponse, error)
+	// Answer (or skip) a requested question once. An identical retry is an
+	// idempotent replay; a different second answer is refused.
+	AnswerRunQuestion(context.Context, *AnswerRunQuestionRequest) (*AnswerRunQuestionResponse, error)
 	// Fetch the subagent lineage for a thread.
 	GetSubagentLineage(context.Context, *GetSubagentLineageRequest) (*GetSubagentLineageResponse, error)
 	// Attach a subagent lineage edge (parent_run_id -> child_run_id).
@@ -463,6 +564,9 @@ func (UnimplementedOrchestrationCoreServiceServer) GetPlan(context.Context, *Get
 func (UnimplementedOrchestrationCoreServiceServer) TransitionPlan(context.Context, *TransitionPlanRequest) (*TransitionPlanResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method TransitionPlan not implemented")
 }
+func (UnimplementedOrchestrationCoreServiceServer) ProposePlan(context.Context, *ProposePlanRequest) (*ProposePlanResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProposePlan not implemented")
+}
 func (UnimplementedOrchestrationCoreServiceServer) ListTodos(context.Context, *ListTodosRequest) (*ListTodosResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListTodos not implemented")
 }
@@ -487,6 +591,9 @@ func (UnimplementedOrchestrationCoreServiceServer) GetApproval(context.Context, 
 func (UnimplementedOrchestrationCoreServiceServer) DecideApproval(context.Context, *DecideApprovalRequest) (*DecideApprovalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DecideApproval not implemented")
 }
+func (UnimplementedOrchestrationCoreServiceServer) ConsumeApproval(context.Context, *ConsumeApprovalRequest) (*ConsumeApprovalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ConsumeApproval not implemented")
+}
 func (UnimplementedOrchestrationCoreServiceServer) ClaimApprovalDeliveries(context.Context, *ClaimApprovalDeliveriesRequest) (*ClaimApprovalDeliveriesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ClaimApprovalDeliveries not implemented")
 }
@@ -501,6 +608,15 @@ func (UnimplementedOrchestrationCoreServiceServer) RecordApprovalContinuationOut
 }
 func (UnimplementedOrchestrationCoreServiceServer) AcknowledgeApprovalDelivery(context.Context, *AcknowledgeApprovalDeliveryRequest) (*AcknowledgeApprovalDeliveryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AcknowledgeApprovalDelivery not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) CreateRunQuestion(context.Context, *CreateRunQuestionRequest) (*CreateRunQuestionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateRunQuestion not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) ListRunQuestions(context.Context, *ListRunQuestionsRequest) (*ListRunQuestionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListRunQuestions not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) AnswerRunQuestion(context.Context, *AnswerRunQuestionRequest) (*AnswerRunQuestionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AnswerRunQuestion not implemented")
 }
 func (UnimplementedOrchestrationCoreServiceServer) GetSubagentLineage(context.Context, *GetSubagentLineageRequest) (*GetSubagentLineageResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSubagentLineage not implemented")
@@ -592,6 +708,24 @@ func _OrchestrationCoreService_TransitionPlan_Handler(srv interface{}, ctx conte
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(OrchestrationCoreServiceServer).TransitionPlan(ctx, req.(*TransitionPlanRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_ProposePlan_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProposePlanRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).ProposePlan(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_ProposePlan_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).ProposePlan(ctx, req.(*ProposePlanRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -740,6 +874,24 @@ func _OrchestrationCoreService_DecideApproval_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _OrchestrationCoreService_ConsumeApproval_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConsumeApprovalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).ConsumeApproval(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_ConsumeApproval_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).ConsumeApproval(ctx, req.(*ConsumeApprovalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _OrchestrationCoreService_ClaimApprovalDeliveries_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ClaimApprovalDeliveriesRequest)
 	if err := dec(in); err != nil {
@@ -826,6 +978,60 @@ func _OrchestrationCoreService_AcknowledgeApprovalDelivery_Handler(srv interface
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(OrchestrationCoreServiceServer).AcknowledgeApprovalDelivery(ctx, req.(*AcknowledgeApprovalDeliveryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_CreateRunQuestion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateRunQuestionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).CreateRunQuestion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_CreateRunQuestion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).CreateRunQuestion(ctx, req.(*CreateRunQuestionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_ListRunQuestions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListRunQuestionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).ListRunQuestions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_ListRunQuestions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).ListRunQuestions(ctx, req.(*ListRunQuestionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_AnswerRunQuestion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AnswerRunQuestionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).AnswerRunQuestion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_AnswerRunQuestion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).AnswerRunQuestion(ctx, req.(*AnswerRunQuestionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -951,6 +1157,10 @@ var OrchestrationCoreService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _OrchestrationCoreService_TransitionPlan_Handler,
 		},
 		{
+			MethodName: "ProposePlan",
+			Handler:    _OrchestrationCoreService_ProposePlan_Handler,
+		},
+		{
 			MethodName: "ListTodos",
 			Handler:    _OrchestrationCoreService_ListTodos_Handler,
 		},
@@ -983,6 +1193,10 @@ var OrchestrationCoreService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _OrchestrationCoreService_DecideApproval_Handler,
 		},
 		{
+			MethodName: "ConsumeApproval",
+			Handler:    _OrchestrationCoreService_ConsumeApproval_Handler,
+		},
+		{
 			MethodName: "ClaimApprovalDeliveries",
 			Handler:    _OrchestrationCoreService_ClaimApprovalDeliveries_Handler,
 		},
@@ -1001,6 +1215,18 @@ var OrchestrationCoreService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AcknowledgeApprovalDelivery",
 			Handler:    _OrchestrationCoreService_AcknowledgeApprovalDelivery_Handler,
+		},
+		{
+			MethodName: "CreateRunQuestion",
+			Handler:    _OrchestrationCoreService_CreateRunQuestion_Handler,
+		},
+		{
+			MethodName: "ListRunQuestions",
+			Handler:    _OrchestrationCoreService_ListRunQuestions_Handler,
+		},
+		{
+			MethodName: "AnswerRunQuestion",
+			Handler:    _OrchestrationCoreService_AnswerRunQuestion_Handler,
 		},
 		{
 			MethodName: "GetSubagentLineage",

@@ -10,12 +10,13 @@ import (
 )
 
 const (
-	scheduledRunAction            = "model.schedule.run"
-	scheduledRunAudience          = "model-plane-capability-core"
-	scheduledRunSchema            = "sha256:space-scheduled-run-v1"
-	scheduledRunExecutionAction   = "model.schedule.execute"
-	scheduledRunExecutionAudience = "model-plane-session-core"
-	scheduledRunExecutionSchema   = "sha256:space-scheduled-run-execute-v1"
+	scheduledRunAction                  = "model.schedule.run"
+	scheduledRunAudience                = "model-plane-capability-core"
+	scheduledRunSchema                  = "sha256:space-scheduled-run-v1"
+	scheduledRunExecutionAction         = "model.schedule.execute"
+	scheduledRunExecutionAudience       = "model-plane-session-core"
+	scheduledRunExecutionSchema         = "sha256:space-scheduled-run-execute-v1"
+	scheduledRunExecutionContractSchema = "sha256:space-scheduled-run-execute-v2"
 )
 
 // ScheduledRunIntent is the immutable, non-secret owner effect Capability Core
@@ -29,6 +30,10 @@ type ScheduledRunIntent struct {
 	TaskID         string
 	TemplateDigest string
 	IdempotencyKey string
+	// ContractDigest and ContractExpiresAt are set only for a run under a
+	// stored-consent contract; zero values keep the legacy binding.
+	ContractDigest    string
+	ContractExpiresAt time.Time
 }
 
 func (i ScheduledRunIntent) SystemThreadKey() string {
@@ -54,7 +59,15 @@ func (i ScheduledRunIntent) Validate() error {
 	return nil
 }
 
-func scheduledRunPayloadDigest(action, schema string, evidence PersonalThreadDecisionEvidence, intent ScheduledRunIntent, threadID string) string {
+func (i ScheduledRunIntent) hasContract() bool {
+	return hasScheduledContract(i.ContractDigest, i.ContractExpiresAt)
+}
+
+func (i ScheduledRunIntent) validateContract(now time.Time) error {
+	return validateScheduledContract(i.ContractDigest, i.ContractExpiresAt, now)
+}
+
+func scheduledRunPayloadDigest(action, schema string, evidence PersonalThreadDecisionEvidence, intent ScheduledRunIntent, threadID string, bindContract bool) string {
 	hash := sha256.New()
 	hash.Write([]byte(action + "\x00v1\x00"))
 	for _, field := range []struct{ name, value string }{
@@ -81,6 +94,9 @@ func scheduledRunPayloadDigest(action, schema string, evidence PersonalThreadDec
 		digestRevision{"recipient_audience_revision", evidence.Membership.Revisions.RecipientAudience},
 		digestRevision{"entitlement_revision", evidence.Membership.Revisions.Entitlement},
 	)
+	if bindContract {
+		writeScheduledContractBinding(hash, intent.ContractDigest, intent.ContractExpiresAt)
+	}
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
 }
 
@@ -89,7 +105,7 @@ func scheduledRunPayloadDigest(action, schema string, evidence PersonalThreadDec
 func IssueScheduledRunDecision(evidence PersonalThreadDecisionEvidence, intent ScheduledRunIntent, decisionRef, nonce string, now time.Time) (Decision, error) {
 	return issueScheduledRunDecision(
 		evidence, intent, decisionRef, nonce, now,
-		scheduledRunAction, scheduledRunAudience, scheduledRunSchema, "schedule:run", "",
+		scheduledRunAction, scheduledRunAudience, scheduledRunSchema, "schedule:run", "", false,
 	)
 }
 
@@ -101,9 +117,13 @@ func IssueScheduledRunExecutionDecision(evidence PersonalThreadDecisionEvidence,
 	if strings.TrimSpace(threadID) == "" {
 		return Decision{}, fmt.Errorf("scheduled run execution thread is required")
 	}
+	schema := scheduledRunExecutionSchema
+	if intent.hasContract() {
+		schema = scheduledRunExecutionContractSchema
+	}
 	return issueScheduledRunDecision(
 		evidence, intent, decisionRef, nonce, now,
-		scheduledRunExecutionAction, scheduledRunExecutionAudience, scheduledRunExecutionSchema, "schedule:execute", strings.TrimSpace(threadID),
+		scheduledRunExecutionAction, scheduledRunExecutionAudience, schema, "schedule:execute", strings.TrimSpace(threadID), intent.hasContract(),
 	)
 }
 
@@ -113,6 +133,7 @@ func issueScheduledRunDecision(
 	decisionRef, nonce string,
 	now time.Time,
 	action, audience, schema, permission, threadID string,
+	bindContract bool,
 ) (Decision, error) {
 	if err := evidence.validatePersonalAuthority(); err != nil {
 		return Decision{}, err
@@ -135,9 +156,21 @@ func issueScheduledRunDecision(
 	if strings.TrimSpace(decisionRef) == "" || strings.TrimSpace(nonce) == "" || now.IsZero() {
 		return Decision{}, fmt.Errorf("scheduled run decision fields are required")
 	}
-	return newEvidenceDecision(
+	// A preparation decision is checked against the contract's expiry but is
+	// never bound to it: the contract reaches Session Core only at execution.
+	if err := intent.validateContract(now); err != nil {
+		return Decision{}, err
+	}
+	bind := bindContract && intent.hasContract()
+	decision := newEvidenceDecision(
 		evidence, decisionRef, audience, action, schema,
-		scheduledRunPayloadDigest(action, schema, evidence, intent, threadID), intent.IdempotencyKey, nonce,
+		scheduledRunPayloadDigest(action, schema, evidence, intent, threadID, bind), intent.IdempotencyKey, nonce,
 		[]string{permission}, false, now,
-	), nil
+	)
+	if bind {
+		expiresAt := intent.ContractExpiresAt.UTC()
+		decision.ContractDigest = intent.ContractDigest
+		decision.ContractExpiresAt = &expiresAt
+	}
+	return decision, nil
 }

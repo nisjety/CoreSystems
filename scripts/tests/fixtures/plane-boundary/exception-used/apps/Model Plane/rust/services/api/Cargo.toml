@@ -1,0 +1,2 @@
+[dependencies]
+cp-lib = { path = "../../../../Control Plane/rust/cp-lib" }

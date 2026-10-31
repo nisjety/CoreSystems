@@ -85,6 +85,155 @@ func TestTenantScopeAndRiskMigrationQuarantinesMalformedLegacyScopes(t *testing.
 	}
 }
 
+// 0018 seed, against a real database: cap.workspace.read is one low-risk row for the four
+// read-only workspace tools, it starts unattested, and its tools are seeded read/none, so the
+// ceiling the registry derives for it is read/none as well.
+func TestWorkspaceReadCapabilityMigrationSeedsAnUnattestedReadRow(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv(migrationTestDatabaseURLEnv))
+	if dsn == "" {
+		t.Skipf("set %s to an isolated PostgreSQL test database", migrationTestDatabaseURLEnv)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to migration test database: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
+
+	schemaName := "capability_migration_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	schemaIdentifier := pgx.Identifier{schemaName}.Sanitize()
+	if _, err := conn.Exec(ctx, "CREATE SCHEMA "+schemaIdentifier); err != nil {
+		t.Fatalf("create isolated schema: %v", err)
+	}
+	t.Cleanup(func() {
+		dropCtx, dropCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer dropCancel()
+		_, _ = conn.Exec(dropCtx, "DROP SCHEMA IF EXISTS "+schemaIdentifier+" CASCADE")
+	})
+	if _, err := conn.Exec(ctx, "SET search_path TO "+schemaIdentifier); err != nil {
+		t.Fatalf("select isolated schema: %v", err)
+	}
+
+	// Every migration up to and including 0018, in the order the boot applies them, so the row
+	// is judged against the tables it lands in rather than against hand-built ones.
+	paths, err := filepath.Glob(filepath.Join("..", "..", "migrations", "*.up.sql"))
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("list migrations: %v", err)
+	}
+	for _, path := range paths {
+		name := filepath.Base(path)
+		if name > "0018_workspace_read_capability.up.sql" {
+			break
+		}
+		applyMigrationFile(t, ctx, conn, name)
+	}
+
+	var riskLevel, availabilityState, reasonCode, sideEffectClass, approvalFloor string
+	var healthNotChecked bool
+	if err := conn.QueryRow(ctx, `
+		SELECT risk_level, availability_state, availability_reason_code, side_effect_class,
+		       approval_floor, health_checked_at IS NULL
+		FROM capabilities
+		WHERE id = 'cap.workspace.read' AND org_id = 'global'
+	`).Scan(&riskLevel, &availabilityState, &reasonCode, &sideEffectClass, &approvalFloor, &healthNotChecked); err != nil {
+		t.Fatalf("read cap.workspace.read: %v", err)
+	}
+	if riskLevel != "low" || availabilityState != "unavailable" || reasonCode != "health_not_attested" ||
+		!healthNotChecked || sideEffectClass != "read" || approvalFloor != "none" {
+		t.Fatalf("cap.workspace.read risk=%s state=%s reason=%s class=%s floor=%s unattested=%t; want low, unavailable, health_not_attested, read, none, unattested",
+			riskLevel, availabilityState, reasonCode, sideEffectClass, approvalFloor, healthNotChecked)
+	}
+
+	var seeded int
+	if err := conn.QueryRow(ctx, `
+		SELECT count(*) FROM capability_tools
+		WHERE org_id = 'global' AND capability_id = 'cap.workspace.read'
+		  AND source = 'seed' AND side_effect_class = 'read' AND approval_floor = 'none'
+	`).Scan(&seeded); err != nil {
+		t.Fatalf("count seeded workspace tools: %v", err)
+	}
+	if seeded != 4 {
+		t.Fatalf("seeded %d workspace tools, want the four read tools", seeded)
+	}
+}
+
+// 0019 seed, against a real database: cap.workspace.write is one low-risk row for the two write
+// tools, it starts unattested, and its tools are seeded context_write/none, so the ceiling the
+// registry derives for it is context_write/none as well.
+func TestWorkspaceWriteCapabilityMigrationSeedsAnUnattestedContextWriteRow(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv(migrationTestDatabaseURLEnv))
+	if dsn == "" {
+		t.Skipf("set %s to an isolated PostgreSQL test database", migrationTestDatabaseURLEnv)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to migration test database: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
+
+	schemaName := "capability_migration_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	schemaIdentifier := pgx.Identifier{schemaName}.Sanitize()
+	if _, err := conn.Exec(ctx, "CREATE SCHEMA "+schemaIdentifier); err != nil {
+		t.Fatalf("create isolated schema: %v", err)
+	}
+	t.Cleanup(func() {
+		dropCtx, dropCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer dropCancel()
+		_, _ = conn.Exec(dropCtx, "DROP SCHEMA IF EXISTS "+schemaIdentifier+" CASCADE")
+	})
+	if _, err := conn.Exec(ctx, "SET search_path TO "+schemaIdentifier); err != nil {
+		t.Fatalf("select isolated schema: %v", err)
+	}
+
+	// Every migration up to and including 0019, in the order the boot applies them.
+	paths, err := filepath.Glob(filepath.Join("..", "..", "migrations", "*.up.sql"))
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("list migrations: %v", err)
+	}
+	for _, path := range paths {
+		name := filepath.Base(path)
+		if name > "0019_workspace_write_capability.up.sql" {
+			break
+		}
+		applyMigrationFile(t, ctx, conn, name)
+	}
+
+	var riskLevel, availabilityState, reasonCode, sideEffectClass, approvalFloor string
+	var healthNotChecked bool
+	if err := conn.QueryRow(ctx, `
+		SELECT risk_level, availability_state, availability_reason_code, side_effect_class,
+		       approval_floor, health_checked_at IS NULL
+		FROM capabilities
+		WHERE id = 'cap.workspace.write' AND org_id = 'global'
+	`).Scan(&riskLevel, &availabilityState, &reasonCode, &sideEffectClass, &approvalFloor, &healthNotChecked); err != nil {
+		t.Fatalf("read cap.workspace.write: %v", err)
+	}
+	if riskLevel != "low" || availabilityState != "unavailable" || reasonCode != "health_not_attested" ||
+		!healthNotChecked || sideEffectClass != "context_write" || approvalFloor != "none" {
+		t.Fatalf("cap.workspace.write risk=%s state=%s reason=%s class=%s floor=%s unattested=%t; want low, unavailable, health_not_attested, context_write, none, unattested",
+			riskLevel, availabilityState, reasonCode, sideEffectClass, approvalFloor, healthNotChecked)
+	}
+
+	var seeded int
+	if err := conn.QueryRow(ctx, `
+		SELECT count(*) FROM capability_tools
+		WHERE org_id = 'global' AND capability_id = 'cap.workspace.write'
+		  AND source = 'seed' AND side_effect_class = 'context_write' AND approval_floor = 'none'
+	`).Scan(&seeded); err != nil {
+		t.Fatalf("count seeded workspace write tools: %v", err)
+	}
+	if seeded != 2 {
+		t.Fatalf("seeded %d workspace write tools, want the two write tools", seeded)
+	}
+}
+
 func applyMigrationFile(t *testing.T, ctx context.Context, conn *pgx.Conn, name string) {
 	t.Helper()
 	contents, err := os.ReadFile(filepath.Join("..", "..", "migrations", name))

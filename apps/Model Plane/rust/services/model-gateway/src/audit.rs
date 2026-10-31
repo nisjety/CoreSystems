@@ -18,6 +18,8 @@ pub fn tool_data_category(tool: &str) -> &'static str {
         "knowledge_search" | "knowledge_list_documents" | "recall_memory" | "reattach_context" => {
             "customer_private"
         }
+        // A connected account's records are the user's own personal data.
+        "list_provider_actions" | "read_provider_action" | "execute_provider_action" => "personal",
         _ => "unclassified",
     }
 }
@@ -38,6 +40,17 @@ mod tests {
     /// default is `unclassified`, so a builtin that reads private data and is
     /// simply absent from the table lands there quietly — the ledger then
     /// understates the access, and nothing fails.
+    #[test]
+    fn connected_account_tools_are_audited_as_personal() {
+        for tool in [
+            "list_provider_actions",
+            "read_provider_action",
+            "execute_provider_action",
+        ] {
+            assert_eq!(tool_data_category(tool), "personal", "{tool}");
+        }
+    }
+
     #[test]
     fn reads_of_the_users_own_content_are_never_unclassified() {
         for tool in [

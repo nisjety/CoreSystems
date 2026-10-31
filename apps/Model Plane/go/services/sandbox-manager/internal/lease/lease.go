@@ -47,6 +47,10 @@ var (
 	// ErrLeaseNotActivated signals a snapshot attempt against a Space-scoped
 	// lease still in SCRATCH — nothing durable exists yet by definition.
 	ErrLeaseNotActivated = errors.New("lease has not been activated")
+	// ErrThreadLeaseOwnerRequired refuses a thread lease with no user to own it.
+	// A thread workspace belongs to one user, so a service principal, which has
+	// no owner, cannot hold one (WS22-S1).
+	ErrThreadLeaseOwnerRequired = errors.New("thread lease requires a user owner")
 )
 
 // Lease is an issued sandbox reservation.
@@ -178,6 +182,38 @@ func (s *Store) Create(ctx context.Context, scopeID, scopeType, orgID, ownerID, 
 // participates in the WHERE clause only when non-empty, matching the
 // original in-memory semantics (a service-principal caller passes "" and
 // may see any owner's lease within its org).
+// AcquireThread returns the one live thread-scoped lease this user holds on
+// threadID, creating it when there is none. It is idempotent across retries
+// and replicas: the partial unique index leases_thread_live_uq (migration 0006)
+// turns a second insert into an update that only slides expires_at forward, so
+// the lease id stays the same from turn to turn.
+//
+// A thread lease never names a Space. Its row carries no space_id, no
+// capability decision and no processes permission, so every Space path that
+// reads those columns treats it as a non-Space lease.
+func (s *Store) AcquireThread(ctx context.Context, threadID, orgID, ownerID, backendID string, ttl time.Duration) (*Lease, error) {
+	if ownerID == "" {
+		return nil, ErrThreadLeaseOwnerRequired
+	}
+	id, err := s.newID()
+	if err != nil {
+		return nil, err
+	}
+	now := s.nowFn()
+	row := s.pool.QueryRow(ctx, `
+		INSERT INTO leases (id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, recipient_audience_revision, state, expires_at, created_at)
+		VALUES ($1, $2, 'thread', $3, $4, $5, '', $6, false, 0, $7, $8, $9)
+		ON CONFLICT (org_id, owner_id, scope_id) WHERE scope_type = 'thread' AND state <> 4
+		DO UPDATE SET expires_at = GREATEST(leases.expires_at, EXCLUDED.expires_at)
+		RETURNING id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, recipient_audience_revision, state, expires_at, created_at
+	`, id, threadID, orgID, ownerID, "sandbox://"+id, backendID, int32(mpv1.SandboxLifecycleState_SCRATCH), now.Add(ttl), now)
+	l, err := scanLease(row)
+	if err != nil {
+		return nil, fmt.Errorf("acquire thread lease: %w", err)
+	}
+	return l, nil
+}
+
 func (s *Store) lookup(ctx context.Context, id, orgID, ownerID, backendID string) (*Lease, error) {
 	row := s.pool.QueryRow(ctx, `
 		SELECT id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, recipient_audience_revision, state, expires_at, created_at

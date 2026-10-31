@@ -835,8 +835,16 @@ mod tests {
             ("http_routes.rs", "update_todo_status"),
             ("http_routes.rs", "decide_approval"),
             ("http_routes.rs", "resume_run"),
+            // `/continue` consumes a granted approval and starts a segment of a stored
+            // run (build plan WS03 S3): the same continuation gate, then a stricter
+            // persistent-only check of its own in `continue_preflight`.
+            ("sse.rs", "continue_run"),
             ("http_routes.rs", "cancel_run"),
             ("http_routes.rs", "ingest_feedback"),
+            // Question answers are stored user content (WS14-S3); the list route is
+            // gated too, since a waived run never owns a question.
+            ("http_routes.rs", "list_run_questions"),
+            ("http_routes.rs", "answer_run_question"),
         ];
         let mut missing = Vec::new();
         for (file, function) in DURABLE_MUTATIONS {
@@ -853,6 +861,20 @@ mod tests {
                 }
                 Some(_) => {}
             }
+        }
+        // `continuation_gate` lets a waiver through (a cold approval's decision must
+        // still work), but `/continue` resumes stored state and a waived run keeps
+        // none. Its handler therefore also calls the persistent-only helper, whose
+        // behaviour the handler-boundary tests in `sse.rs` pin with a waived token:
+        // a handler that stopped calling it would pass every one of those tests.
+        match function_body("sse.rs", "continue_run") {
+            None => missing.push("sse.rs::continue_run is not found".to_owned()),
+            Some(body) if !body.contains("continue_persistent_gate(") => missing.push(
+                "sse.rs::continue_run does not call continue_persistent_gate, so a waived \
+                 token is not refused before any work"
+                    .to_owned(),
+            ),
+            Some(_) => {}
         }
         assert!(missing.is_empty(), "{}", missing.join("\n"));
     }
@@ -920,7 +942,7 @@ mod tests {
             ),
             (
                 "tool_loop.rs",
-                "run_tool_rounds_for_model",
+                "run_tool_rounds_for_model_with_attachments",
                 "the turn's route (provider hint and connection)",
             ),
             (
@@ -1078,13 +1100,14 @@ mod tests {
                 "ai_speech_voices",
                 "voice catalogue read: no user content",
             ),
-            // A derived content-safety pass over tool payloads. It runs only on a persistent turn:
+            // The derived content-safety and prompt-injection passes over tool payloads (both classify
+            // functions, WS26-S1 shadow and WS26-S6 inline). They run only on a persistent turn:
             // `dispatch_tool_with_cost` passes `zdr || data_plane_mode.is_some()` to
             // `assess_external_payload`, so a ZDR or waived turn sends nothing to a processor here.
             (
                 "semantic_screening.rs",
                 "classify",
-                "derived content-safety pass, skipped on a non-persistent turn (assess_external_payload)",
+                "derived content-safety and prompt-injection passes, skipped on a non-persistent turn (assess_external_payload)",
             ),
         ];
         const INFERENCE_CALLS: &[&str] = &[

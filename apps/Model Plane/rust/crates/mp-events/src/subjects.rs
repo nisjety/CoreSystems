@@ -75,6 +75,36 @@ pub fn run_event_subject(run_id: &str) -> String {
     format!("{PREFIX}.run.{run_id}.event")
 }
 
+/// Wildcard for every run-control subject (the ACL grant and the subscriber
+/// pattern of a gateway that can own a live stream): `mp.v1.runctl.>`
+pub const RUNCTL_WILDCARD: &str = "mp.v1.runctl.>";
+
+/// Subject of one run-control operation addressed to the replica that owns the
+/// live chat stream `request_id`: `mp.v1.runctl.req.{request_id}.{op}`.
+///
+/// The ids are NATS subject tokens, so the caller validates them first; a `.`,
+/// `*`, `>` or whitespace in an id would change which subject is addressed.
+#[must_use]
+pub fn runctl_request_subject(request_id: &str, op: &str) -> String {
+    format!("{PREFIX}.runctl.req.{request_id}.{op}")
+}
+
+/// What the owner of the stream `request_id` subscribes to, covering every
+/// operation addressed to it: `mp.v1.runctl.req.{request_id}.*`
+#[must_use]
+pub fn runctl_request_wildcard(request_id: &str) -> String {
+    format!("{PREFIX}.runctl.req.{request_id}.*")
+}
+
+/// Subject of a durable cancel of the run `run_id`, fanned out to whichever
+/// replica is producing it: `mp.v1.runctl.run.{run_id}.cancel`.
+///
+/// Same token rule as [`runctl_request_subject`].
+#[must_use]
+pub fn runctl_run_cancel_subject(run_id: &str) -> String {
+    format!("{PREFIX}.runctl.run.{run_id}.cancel")
+}
+
 /// Subject for session commands: `mp.v1.session.{session_key}.command`
 #[must_use]
 pub fn session_command_subject(session_key: &str) -> String {
@@ -387,6 +417,28 @@ mod tests {
     fn run_event_subject_format() {
         let subject = run_event_subject("01HXYZ");
         assert_eq!(subject, "mp.v1.run.01HXYZ.event");
+    }
+
+    #[test]
+    fn runctl_subjects_sit_under_the_one_acl_wildcard() {
+        assert_eq!(
+            runctl_request_subject("req-1", "cancel"),
+            "mp.v1.runctl.req.req-1.cancel"
+        );
+        assert_eq!(runctl_request_wildcard("req-1"), "mp.v1.runctl.req.req-1.*");
+        assert_eq!(
+            runctl_run_cancel_subject("run_9"),
+            "mp.v1.runctl.run.run_9.cancel"
+        );
+        let grant: Vec<_> = RUNCTL_WILDCARD.split('.').collect();
+        assert_eq!(grant, ["mp", "v1", "runctl", ">"]);
+        for subject in [
+            runctl_request_subject("req-1", "queue"),
+            runctl_request_wildcard("req-1"),
+            runctl_run_cancel_subject("run_9"),
+        ] {
+            assert!(subject.starts_with("mp.v1.runctl."));
+        }
     }
 
     #[test]

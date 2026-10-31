@@ -10,6 +10,16 @@ use crate::http_routes::InvokeRequest;
 /// Maximum allowed content size in bytes (100 KB).
 const MAX_CONTENT_BYTES: usize = 100 * 1024;
 
+/// A turn that moves the branch of a message already in its thread (WS17 S9). Each variant names the
+/// message the user acted on; the gateway resolves the rest from the thread.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VersionTurn {
+    /// Regenerate the answer `message_id`: its question stays, and the answer is produced again beside it.
+    Regenerate { message_id: String },
+    /// Edit the user turn `message_id`: the edited text is appended beside it.
+    Edit { message_id: String },
+}
+
 /// Normalized request after validation.
 #[derive(Debug)]
 pub struct NormalizedRequest {
@@ -90,6 +100,29 @@ fn load_allowed_models() -> Option<Vec<String>> {
             .filter(|s| !s.is_empty())
             .collect()
     })
+}
+
+/// The typed refusal for a model the operator's deployment allowlist
+/// (`ALLOWED_MODELS`) leaves out: a 403 whose body is the model-entitlement
+/// catalogue's `model_not_entitled` with reason `deployment_allowlist`, not the
+/// untyped 400 it used to be. `None` when no allowlist is set, the list is
+/// empty, the model is unspecified (inference-core resolves it to a provider
+/// default downstream, so there is nothing to check yet) or the model is on the
+/// list. The body names the model id and the reason, never the list itself.
+fn deployment_allowlist_refusal(
+    allowed: Option<&[String]>,
+    model: &str,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let allowed = allowed?;
+    if model.is_empty() || allowed.is_empty() || allowed.iter().any(|entry| entry == model) {
+        return None;
+    }
+    let refusal = mp_contracts::model_entitlement::Refusal::not_entitled(
+        model,
+        mp_contracts::model_entitlement::Reason::DeploymentAllowlist,
+    );
+    let status = StatusCode::from_u16(refusal.http_status()).unwrap_or(StatusCode::FORBIDDEN);
+    Some((status, Json(refusal.json_body())))
 }
 
 /// Load the default model from `DEFAULT_MODEL` env var. Shared with the SSE
@@ -187,6 +220,46 @@ impl AgenticSubscriptionPolicy {
     }
 }
 
+/// The branch move a request asks for (WS17 S9), or `None` for an ordinary send. A blank id is absent.
+/// A request naming both a regenerate and an edit, or a move with no thread to move in, is malformed. An
+/// agentic turn cannot move a branch: its run is an agent loop, not a plain answer.
+pub fn version_turn(
+    req: &InvokeRequest,
+) -> Result<Option<VersionTurn>, (StatusCode, Json<serde_json::Value>)> {
+    let present = |raw: Option<&str>| {
+        raw.map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    };
+    let turn = match (
+        present(req.regenerate_of_message_id.as_deref()),
+        present(req.edit_of_message_id.as_deref()),
+    ) {
+        (None, None) => return Ok(None),
+        (Some(message_id), None) => VersionTurn::Regenerate { message_id },
+        (None, Some(message_id)) => VersionTurn::Edit { message_id },
+        (Some(_), Some(_)) => {
+            return Err(refusal(
+                "a turn is a regenerate or an edit, not both",
+                Some("version_turn_invalid"),
+            ));
+        }
+    };
+    if present(req.thread_id.as_deref()).is_none() {
+        return Err(refusal(
+            "a regenerate or an edit names the thread it moves",
+            Some("version_turn_invalid"),
+        ));
+    }
+    if req.execute_granted || req.features.iter().any(|feature| feature == "agentic") {
+        return Err(refusal(
+            "a Do turn cannot move a message's branch",
+            Some("feature_not_supported"),
+        ));
+    }
+    Ok(Some(turn))
+}
+
 /// Normalize and validate an incoming invoke request.
 ///
 /// Returns a `NormalizedRequest` on success, or an error response tuple on failure.
@@ -244,6 +317,19 @@ fn normalize_with(
                     MAX_CONTENT_BYTES,
                     content.len()
                 )
+            })),
+        ));
+    }
+
+    // A branch move is validated on every path. The streaming endpoint does not make one yet, so a stream
+    // turn that asks for one is refused, rather than landing as an ordinary send that repeats the question.
+    let version_turn_requested = version_turn(req)?.is_some();
+    if stream_policy.is_some() && version_turn_requested {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({
+                "error": "a regenerate or an edit is not served on the streaming endpoint yet",
+                "code": "history_versions_unavailable",
             })),
         ));
     }
@@ -370,18 +456,8 @@ fn normalize_with(
     // Validate model against allowlist — but skip when the model is unspecified
     // (empty): inference-core resolves it to a provider default downstream, so
     // there is nothing to validate against the allowlist yet.
-    if let Some(allowed) = load_allowed_models() {
-        if !model.is_empty() && !allowed.is_empty() && !allowed.contains(&model) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": format!(
-                        "model '{}' is not in the allowed list: {:?}",
-                        model, allowed
-                    )
-                })),
-            ));
-        }
+    if let Some(refusal) = deployment_allowlist_refusal(load_allowed_models().as_deref(), &model) {
+        return Err(refusal);
     }
 
     if let Some(max_cost) = req.max_cost_usd {
@@ -443,12 +519,59 @@ fn normalize_with(
 mod tests {
     use super::*;
 
+    fn listed(models: &[&str]) -> Vec<String> {
+        models.iter().map(|model| (*model).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_model_off_the_deployment_allowlist_is_a_typed_403_naming_the_model_and_the_reason() {
+        let allowed = listed(&["a"]);
+        let (status, Json(body)) =
+            deployment_allowlist_refusal(Some(&allowed), "b").expect("b is not on the list");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "model_not_entitled");
+        assert_eq!(body["error"]["retryable"], false);
+        assert_eq!(body["error"]["action"], "choose_another_model");
+        assert_eq!(body["error"]["details"]["model"], "b");
+        assert_eq!(body["error"]["details"]["reason"], "deployment_allowlist");
+        // The list itself is the operator's, not the caller's.
+        assert!(!body.to_string().contains("\"a\""));
+        assert_eq!(
+            mp_contracts::model_entitlement::Refusal::from_body(&body)
+                .and_then(|refusal| refusal.reason()),
+            Some(mp_contracts::model_entitlement::Reason::DeploymentAllowlist)
+        );
+    }
+
+    #[test]
+    fn the_deployment_allowlist_refuses_nothing_it_did_not_refuse_before() {
+        let allowed = listed(&["a", "b"]);
+        assert!(
+            deployment_allowlist_refusal(None, "z").is_none(),
+            "no list set"
+        );
+        assert!(
+            deployment_allowlist_refusal(Some(&[]), "z").is_none(),
+            "an empty list"
+        );
+        assert!(
+            deployment_allowlist_refusal(Some(&allowed), "").is_none(),
+            "no model named"
+        );
+        assert!(
+            deployment_allowlist_refusal(Some(&allowed), "b").is_none(),
+            "a listed model"
+        );
+    }
+
     fn make_request(content: &str, model: Option<&str>) -> InvokeRequest {
         InvokeRequest {
             effort: None,
             pinned_message_ids: Vec::new(),
             regenerated: false,
             edited_resubmit: false,
+            regenerate_of_message_id: None,
+            edit_of_message_id: None,
             content: content.to_owned(),
             model: model.map(str::to_owned),
             provider: None,
@@ -464,6 +587,7 @@ mod tests {
             skill_ids: Vec::new(),
             deep_research: false,
             retrieval_scope: None,
+            connector_scope: None,
             max_cost_usd: None,
             max_tokens: None,
             profile: None,
@@ -473,6 +597,7 @@ mod tests {
             attachments: Vec::new(),
             generate_image: false,
             plan_mode: false,
+            execute_granted: false,
             tools: Vec::new(),
             org_name: None,
             user_name: None,
@@ -516,9 +641,9 @@ mod tests {
 
     #[test]
     fn explicit_model_is_preserved() {
-        let req = make_request("hello", Some("claude-sonnet-4-20250514"));
+        let req = make_request("hello", Some("claude-sonnet-5-5"));
         let result = normalize(&req).expect("should succeed");
-        assert_eq!(result.model, "claude-sonnet-4-20250514");
+        assert_eq!(result.model, "claude-sonnet-5-5");
     }
 
     #[test]
@@ -866,5 +991,72 @@ mod tests {
         assert!(RetrievalScope::Auto.is_auto());
         assert!(!RetrievalScope::KnowledgeOnly.is_auto());
         assert!(!RetrievalScope::WebOnly.is_auto());
+    }
+
+    fn version_request(regenerate: Option<&str>, edit: Option<&str>) -> InvokeRequest {
+        let mut req = make_request("question", Some("m"));
+        req.thread_id = Some("thread-1".to_owned());
+        req.regenerate_of_message_id = regenerate.map(str::to_owned);
+        req.edit_of_message_id = edit.map(str::to_owned);
+        req
+    }
+
+    #[test]
+    fn a_regenerate_or_an_edit_names_its_turn_and_a_blank_id_is_no_turn() {
+        let regenerate = version_turn(&version_request(Some(" answer-1 "), None))
+            .expect("a regenerate of an answer is valid");
+        assert_eq!(
+            regenerate,
+            Some(VersionTurn::Regenerate {
+                message_id: "answer-1".to_owned()
+            })
+        );
+        let edit = version_turn(&version_request(None, Some("turn-2"))).expect("an edit is valid");
+        assert_eq!(
+            edit,
+            Some(VersionTurn::Edit {
+                message_id: "turn-2".to_owned()
+            })
+        );
+        let blank = version_turn(&version_request(Some("  "), None)).expect("a blank id is absent");
+        assert_eq!(blank, None);
+    }
+
+    #[test]
+    fn a_turn_naming_both_a_regenerate_and_an_edit_is_malformed() {
+        let body = error_body(normalize(&version_request(Some("a"), Some("b"))));
+        assert_eq!(body["code"], "version_turn_invalid");
+    }
+
+    #[test]
+    fn a_version_turn_without_its_thread_is_malformed() {
+        let mut req = version_request(Some("answer-1"), None);
+        req.thread_id = None;
+        let body = error_body(normalize(&req));
+        assert_eq!(body["code"], "version_turn_invalid");
+    }
+
+    #[test]
+    fn a_do_turn_cannot_regenerate_or_edit() {
+        let mut agentic = version_request(Some("answer-1"), None);
+        agentic.features = vec!["agentic".to_owned()];
+        assert_eq!(error_body(normalize(&agentic))["code"], "feature_not_supported");
+
+        let mut granted = version_request(None, Some("turn-2"));
+        granted.execute_granted = true;
+        assert_eq!(error_body(normalize(&granted))["code"], "feature_not_supported");
+    }
+
+    #[test]
+    fn the_streaming_endpoint_refuses_a_version_turn_until_it_moves_branches() {
+        let (status, Json(body)) = normalize_stream(
+            &version_request(Some("answer-1"), None),
+            AgenticSubscriptionPolicy::OFF,
+        )
+        .expect_err("a stream turn that moves a branch is refused");
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(body["code"], "history_versions_unavailable");
+
+        assert!(normalize_stream(&make_request("hi", Some("m")), AgenticSubscriptionPolicy::OFF).is_ok());
     }
 }

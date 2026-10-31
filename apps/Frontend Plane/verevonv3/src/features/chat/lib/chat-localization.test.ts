@@ -13,9 +13,10 @@
  * produces a name a person reads or hears (`aria-label`, `title`,
  * `placeholder`, `alt`) must route its text through `i18n.tr(no, en)`.
  *
- * A test rather than an ESLint rule for the same reason as
- * `chat-route-ownership.test.ts`: `pnpm lint` cannot run against the pinned
- * TypeScript 7, and an unenforceable rule is worse than none.
+ * This stays a test alongside the selectors in eslint.ui-gates.config.js
+ * because it reads the whole attribute value, including braced template and
+ * call forms (for example `title={label("Lukk")}`) that the selectors cannot
+ * match. The two overlap on plain literal attributes.
  */
 
 import { describe, expect, it } from 'vitest'

@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   modelGatewayScopesForRole,
   planeScopesForRole,
@@ -102,6 +104,39 @@ describe('plane user scope contract', () => {
     );
   });
 
+  // The capability-core memory proxy asks Session Core for the user's memory
+  // decision with this one narrow scope, not the broad memory:read. The policy
+  // file is the system under test (see the principal policy contract spec): it
+  // is absent from the Docker build context, so the pin runs where it exists.
+  const principalsPath = join(
+    __dirname,
+    '../../../config/plane-service-principals.json',
+  );
+  (existsSync(principalsPath) ? it : it.skip)(
+    'grants session:memory-controls:read to capability-core for session-core only',
+    () => {
+      const registry = JSON.parse(
+        readFileSync(principalsPath, 'utf8'),
+      ) as Record<
+        string,
+        { scopes: string[]; scopesByAudience: Record<string, string[]> }
+      >;
+      const scope = 'session:memory-controls:read';
+      expect(
+        registry['capability-core'].scopesByAudience['session-core'],
+      ).toContain(scope);
+      for (const [principal, entry] of Object.entries(registry)) {
+        const holders = Object.entries(entry.scopesByAudience ?? {})
+          .filter(([, scopes]) => scopes.includes(scope))
+          .map(([audience]) => audience);
+        expect({ principal, holders }).toEqual({
+          principal,
+          holders: principal === 'capability-core' ? ['session-core'] : [],
+        });
+      }
+    },
+  );
+
   // Scopes that exist for ONE service principal each (Control Plane principal
   // bundle, plan W0-4; config/plane-service-principals.json holds each in one
   // row): the web rerank of quarry-edge, the usage forwarder of data-orchestrator
@@ -110,7 +145,12 @@ describe('plane user scope contract', () => {
   // an interactive caller reaching one of these routes with its own token is an
   // authority nobody granted.
   it('never derives a service-only scope for any role on any audience', () => {
-    const serviceOnly = ['data:rerank', 'cost:write', 'retention:zdr-decide'];
+    const serviceOnly = [
+      'data:rerank',
+      'cost:write',
+      'retention:zdr-decide',
+      'session:memory-controls:read',
+    ];
     const audiences = [
       'data-plane',
       'quarry',

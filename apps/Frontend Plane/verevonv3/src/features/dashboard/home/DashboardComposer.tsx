@@ -1,4 +1,15 @@
+import { registerReloadGuard } from "@/app/chunk-recovery";
 import { chatAppearanceActive } from "@/features/chat/lib/chat-appearance-preview";
+import {
+	ATTACHMENT_ACCEPT,
+	ATTACHMENT_MAX_IMAGES,
+	attachmentRefusalMessage,
+	doAttachmentsEnabled,
+	evaluateAttachments,
+	isImageAttachment,
+	visionAsPartsEnabled,
+	type AttachmentPolicyContext,
+} from "@/features/chat/lib/attachment-policy";
 import { useNavigate } from "@solidjs/router";
 import {
 	AlignCenter,
@@ -98,18 +109,28 @@ import { ChatWorkPeriodPicker } from "@/features/chat/components/ChatWorkPeriodP
 import type { ChatWorkPeriod } from "@/shared/actions/chat-work-period";
 import { prepareChatAttachments } from "@/features/chat/lib/prepare-chat-attachments";
 import {
+	effortLevelWithin,
+	enforcedMaxEffort,
 	extractChatDocument,
+	getAttachmentPolicy,
+	getModelEntitlementMeta,
 	groupChatModels,
+	catalogueAdvertisesConnectorScope,
 	hasZeroRetentionModel,
 	isExpensiveModel,
 	listChatThreads,
 	listModels,
+	modelEffortLevels,
 	modelSupportsAgentic,
+	modelSupportsVision,
 	saveChatThreadSnapshot,
+	selectionIsStale,
 	verevonModeById,
 	VEREVON_BALANCE_MODE_ID,
 	VEREVON_MODES,
 	type ChatThreadSession,
+	type EffortLevel,
+	type EffortProfile,
 	type ModelGroup,
 	type ModelInfo,
 } from "@/shared/api/chat-client";
@@ -121,6 +142,14 @@ import {
 	type ConnectorContentOperation,
 	type ConnectorPickerTab,
 } from "@/shared/api/integrations-client";
+import {
+	CONNECTOR_SCOPE_LIMIT,
+	connectorScopeBlock,
+	normalizeConnectorScope,
+	toggleConnectorScope,
+	type ConnectorScopeBlock,
+} from "@/shared/actions/chat-connector-scope";
+import { zdrRefusalPresentation } from "@/shared/api/zdr-refusals";
 import {
 	listChatGptSubscriptions,
 	OPENAI_CODEX_SUBSCRIPTION_PROVIDER,
@@ -137,6 +166,7 @@ import { LocalizedError, translateApiError, useI18n } from "@/shared/i18n";
 import { ApiError } from "@/shared/api/http";
 import { cn } from "@/shared/lib/cn";
 import { getSession } from "@/shared/session/session-store";
+import { getOrganizationZdr } from "@/shared/api/organization-client";
 import {
 	lastKnownAiModelPrivacyTier,
 	readAiModelSelection,
@@ -151,7 +181,17 @@ import {
 	waitForCatalogue,
 } from "./submit-privacy-tier";
 
-type ResponseMode = "auto" | "quick" | "deep";
+// "max" is the Maksimal level: offered only while the selected model's catalogue
+// entry lists `xhigh`, and sent as that canonical level, never as a profile.
+type ResponseMode = "auto" | "quick" | "deep" | "max";
+
+// The canonical level each response mode sends as `effort` (see `composerWireFields`);
+// Auto sends none, so no ceiling can lower it.
+const RESPONSE_MODE_EFFORT: Partial<Record<ResponseMode, EffortLevel>> = {
+	quick: "low",
+	deep: "high",
+	max: "xhigh",
+};
 
 type ResponseModeOption = {
 	announcement: {
@@ -325,6 +365,11 @@ export type DashboardComposerSubmitPayload = {
      * left its default.
      */
     retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope;
+    /**
+     * The connected accounts this turn may read (WS23 S6). Omitted when none were picked, so a turn
+     * without connected apps is unchanged on the wire.
+     */
+    connectorScope?: string[];
 	actions: ComposerActiveAction[];
 	attachments: DashboardComposerAttachment[];
 	model?: string;
@@ -354,14 +399,15 @@ export type DashboardComposerSubmitPayload = {
 	minPrivacyTier?: PrivacyTier;
 	/**
 	 * Reasoning effort from the response-mode selector: "Raskt svar" → 'quick',
-	 * "Dyp research" → 'deep'; Auto carries nothing. Maps to the wire's
+	 * "Dyp research" → 'deep', "Maksimal" → 'xhigh' (only for a model whose
+	 * catalogue entry lists it); Auto carries nothing. Maps to the wire's
 	 * `effort` field, which model-gateway turns into a real thinking budget
 	 * (quick=1024, deep=4096 tokens). This selector existed and rode the
 	 * payload as `responseMode` with ZERO downstream readers — the dial's read
 	 * path was fully built (gateway → provider → reasoning_delta → the Innsikt
 	 * popover) while no product surface ever wrote it.
 	 */
-	effort?: "quick" | "deep";
+	effort?: Exclude<EffortProfile, "standard"> | EffortLevel;
 };
 
 type PanelPosition = {
@@ -392,6 +438,12 @@ const responseModes: ResponseModeOption[] = [
 		id: "deep",
 		label: { no: "Dyp research", en: "Deep research" },
 		announcement: { no: "Dyp research-modus", en: "Deep research mode" },
+		icon: Lightbulb,
+	},
+	{
+		id: "max",
+		label: { no: "Maksimal", en: "Maximum" },
+		announcement: { no: "Maksimal innsats", en: "Maximum effort" },
 		icon: Lightbulb,
 	},
 ];
@@ -851,6 +903,11 @@ export function DashboardComposer(props: {
     onRetrievalScopeChange?: (value: import('@/shared/actions/chat-source-scope').RetrievalScope) => void;
 	workPeriod?: ChatWorkPeriod;
 	onWorkPeriodChange?: (value: ChatWorkPeriod) => void;
+    /**
+     * The conversation is bound to a Space. Connected apps are refused in Space rooms (DEC-06),
+     * so the context panel says why instead of offering chips (WS23 S6).
+     */
+    spaceScoped?: boolean;
 	/** Calm, conversation-first presentation used by the dedicated chat page. */
 	appearance?: "chat" | "default";
 	/** Compact Home dock; only changes the input's initial presentation. */
@@ -863,6 +920,15 @@ export function DashboardComposer(props: {
 	onMessageChange: (value: string) => void;
 	onPlanModeChange?: (value: boolean) => void;
 	planMode?: boolean;
+	/**
+	 * A plan the person approved is waiting to run (WS14 S2a). Present only
+	 * then: the chat appearance shows a third "Kjør plan" pill beside Ask and Do.
+	 * `rungLabel` says what the agent may now do; `selected` is whether the next
+	 * send runs the plan. The pill is disabled, with its reason, on a route or in
+	 * a mode that cannot run it.
+	 */
+	approvedPlan?: { rungLabel: string; selected: boolean };
+	onApprovedPlanSelect?: () => void;
 	onStop?: () => void;
 	onLaunchStart?: () => void;
 	onSubmit?: (
@@ -945,7 +1011,8 @@ export function DashboardComposer(props: {
 	// switch to "Kun samtalen" — mirrors the `temporaryChat()` reset pattern
 	// used elsewhere in this file.
 	createEffect(() => conversationOnly(), (restricted) => { if (restricted) setInternalRetrievalScope('auto'); });
-	const browseWeb = () => !subscriptionBacked() && (props.browseWeb ?? internalBrowseWeb());
+	const browseWeb = () =>
+		!subscriptionBacked() && !zeroRetentionTurn() && (props.browseWeb ?? internalBrowseWeb());
 	const setBrowseWeb = (next: boolean | ((current: boolean) => boolean)) => {
 		const value = typeof next === "function" ? next(browseWeb()) : next;
 		if (props.browseWeb === undefined) setInternalBrowseWeb(value);
@@ -970,6 +1037,10 @@ export function DashboardComposer(props: {
 	const [knowledgeImporting, setKnowledgeImporting] = createSignal(false);
 	const [knowledgeImportNotice, setKnowledgeImportNotice] = createSignal<string | null>(null);
 	const [handoffPending, setHandoffPending] = createSignal(false);
+	// A stale-build reload (chunk-recovery) would lose what the page holds only in
+	// memory: unsent attachments, and a submission whose handoff has not finished.
+	// While either is held the page shows its notice instead of reloading.
+	onCleanup(registerReloadGuard(() => files().length > 0 || handoffPending()));
 	const [submitError, setSubmitError] = createSignal<string | null>(null);
 	const [historyPanelPosition, setHistoryPanelPosition] =
 		createSignal<PanelPosition>({ bottom: 0, right: 0, maxHeight: 400 });
@@ -1091,6 +1162,30 @@ export function DashboardComposer(props: {
 	const subscriptionConnectionPending = createMemo(() =>
 		subscriptionBacked() && (!activeOrgId() || subscriptionConnections.loading || subscriptionConnections() === undefined),
 	);
+	// Zero data retention refuses web search: model-gateway answers
+	// `zdr_feature_not_supported` (feature `web_search`) before any model call.
+	// Søk is on by default, so without this every ordinary turn of an org with
+	// ZDR on, and every Temporary chat turn, is refused (D1-815). The org's
+	// stored ZDR intent is read, the signal `AiModelPicker` uses too. A failed
+	// read leaves Søk as the user set it: the gateway's refusal stays the guard.
+	// The user's own Søk preference is not overwritten, only not sent.
+	const [orgZeroRetention] = createResource(
+		activeOrgId,
+		async (orgId) => {
+			try {
+				return await getOrganizationZdr(orgId);
+			} catch {
+				return false;
+			}
+		},
+	);
+	const zeroRetentionTurn = () =>
+		Boolean(props.temporaryChatLocked || props.temporaryChat) || orgZeroRetention() === true;
+	const zeroRetentionWebTitle = () =>
+		i18n.tr(
+			"Nettsøk er ikke tilgjengelig med nullagring ennå",
+			"Web search is not available with zero data retention yet",
+		);
 	// Chat-capable models grouped by family/provider. Non-chat modalities
 	// (image/video/embeddings/transcribe) are filtered out by `groupChatModels`.
 	const chatModelGroups = createMemo<ModelGroup[]>(() =>
@@ -1129,6 +1224,42 @@ export function DashboardComposer(props: {
 				model.provider === selectedModelProvider(),
 		);
 	});
+	// Maksimal is a catalogue fact, not a UI constant: only a model whose
+	// `effort_levels` lists `xhigh` offers it. The pick is kept in
+	// `responseMode` (so switching back to such a model restores it) but never
+	// acted on for a model that lacks the level: the select, the payload and the
+	// receipt all read `effectiveResponseMode`, which falls back to Deep.
+	// The organisation's policy can lower that ceiling further: inference-core
+	// clamps a request above `max_effort`, so a level the policy forbids is not
+	// offered and a pick made before the policy changed falls to the strongest
+	// level still allowed. Read after the catalogue answers, which is what sets it.
+	const entitlementMeta = createMemo(() => {
+		models();
+		return getModelEntitlementMeta();
+	});
+	const effortCeiling = createMemo(() => enforcedMaxEffort(entitlementMeta()));
+	const responseModeAllowed = (mode: ResponseMode): boolean => {
+		const level = RESPONSE_MODE_EFFORT[mode];
+		return level === undefined || effortLevelWithin(level, effortCeiling());
+	};
+	const maxEffortAvailable = createMemo(
+		() =>
+			modelEffortLevels(selectedCatalogModel()).includes("xhigh") &&
+			responseModeAllowed("max"),
+	);
+	const effectiveResponseMode = createMemo<ResponseMode>(() => {
+		const asked = responseMode();
+		if (asked === "max" && !maxEffortAvailable()) {
+			return responseModeAllowed("deep") ? "deep" : responseModeAllowed("quick") ? "quick" : "auto";
+		}
+		if (asked === "deep" && !responseModeAllowed("deep")) {
+			return responseModeAllowed("quick") ? "quick" : "auto";
+		}
+		return asked === "quick" && !responseModeAllowed("quick") ? "auto" : asked;
+	});
+	// Only the policy's ceiling: a model that lacks `xhigh` also lowers Maksimal,
+	// but that is not the organisation's doing.
+	const effortCappedNotice = createMemo(() => !responseModeAllowed(responseMode()));
 	// Do (plan mode on execution-core's agentic loop) on the ChatGPT subscription
 	// depends on the SERVER, not on the provider name: inference-core adds the
 	// `agentic` capability to the subscription models only while
@@ -1145,6 +1276,31 @@ export function DashboardComposer(props: {
 	const planModeAvailable = createMemo(
 		() => !subscriptionBacked() || subscriptionAgentic(),
 	);
+	// Connected apps for this turn (WS23 S6). The chip row exists only where the catalogue says the
+	// reads can run, and it says why it is off on a turn that cannot take them. The picks are consent
+	// for one turn: they are cleared once that turn is sent, and whenever a block applies.
+	const [connectorScope, setConnectorScope] = createSignal<string[]>([]);
+	const connectorScopeAdvertised = createMemo(() => catalogueAdvertisesConnectorScope(models() ?? []));
+	const connectorScopeBlockReason = createMemo(() => connectorScopeBlock({
+		zeroRetention: zeroRetentionTurn(),
+		spaceScoped: Boolean(props.spaceScoped),
+		conversationOnly: conversationOnly(),
+		subscriptionBacked: subscriptionBacked(),
+		retrievalScope: retrievalScope(),
+	}));
+	const [connectorTabs] = createResource(
+		() => (connectorScopeAdvertised() && connectorScopeBlockReason() === null ? activeOrgId() : false),
+		async (orgId) => {
+			try {
+				return await listConnectorPickerTabs(orgId);
+			} catch {
+				return [] as ConnectorPickerTab[];
+			}
+		},
+	);
+	createEffect(() => connectorScopeBlockReason(), (reason) => {
+		if (reason) setConnectorScope([]);
+	});
 	const selectedModelLabel = () => {
 		const id = selectedModel();
 		// Empty id → backend treats it as Verevon Balance (resilient fallback).
@@ -1173,6 +1329,7 @@ export function DashboardComposer(props: {
 		createSignal(false);
 	const selectModel = (id: string, provider?: string) => {
 		setStaleSubscriptionNotice(false);
+		setPolicyResetModel(null);
 		setSubmitError(null);
 		setSelectedModel(id);
 		setSelectedModelProvider(provider);
@@ -1192,6 +1349,30 @@ export function DashboardComposer(props: {
 		});
 		setModelOpen(false);
 	};
+	// The model the organisation's policy took from this person, by name, until
+	// they choose again. A selection is local state (and remembered in the browser),
+	// so a policy change leaves a stale one behind; sending it would be refused.
+	const [policyResetModel, setPolicyResetModel] = createSignal<string | null>(null);
+	createEffect(
+		() => ({
+			catalogue: models() ?? [],
+			meta: entitlementMeta(),
+			model: selectedModel(),
+			provider: selectedModelProvider(),
+		}),
+		(state) => {
+			if (!selectionIsStale({ model: state.model, provider: state.provider }, state.catalogue, state.meta)) {
+				return;
+			}
+			const label = selectedModelLabel();
+			const preferred = state.meta?.defaultModel
+				? flatChatModels().find((model) => model.id === state.meta?.defaultModel)
+				: undefined;
+			if (preferred) selectModel(preferred.id, preferred.provider);
+			else selectModel(VEREVON_BALANCE_MODE_ID);
+			setPolicyResetModel(label);
+		},
+	);
 	// Keep that last-known tier current: every time the catalogue lists the
 	// selected model, store what it says now. This also gives a selection
 	// saved before the tier was stored (or by another picker) its tier.
@@ -1332,6 +1513,40 @@ export function DashboardComposer(props: {
 	const temporaryChat = createMemo(
 		() => props.temporaryChatLocked || (props.temporaryChat ?? false),
 	);
+	// WS14 S2a, the "Kjør plan" pill. Why the turn that runs the approved plan
+	// cannot be sent from here, or undefined when it can. Each reason mirrors a
+	// condition the controller and the gateway enforce again at send time, so the
+	// pill never offers a turn that would go out as something else. A blocked pill
+	// is disabled, says why, and is never drawn as selected.
+	const executeBlockedReason = createMemo((): string | undefined => {
+		if (subscriptionBacked()) {
+			return i18n.tr(
+				"Kjøring av godkjent plan er ikke tilgjengelig for ChatGPT-abonnementet ennå",
+				"Running an approved plan is not available for the ChatGPT subscription yet",
+			);
+		}
+		if (temporaryChat()) {
+			return i18n.tr(
+				"Ikke tilgjengelig i en midlertidig samtale",
+				"Not available in a temporary chat",
+			);
+		}
+		if (conversationOnly()) {
+			return i18n.tr(
+				"Ikke tilgjengelig når bare samtalen er kilden",
+				"Not available when only the conversation is the source",
+			);
+		}
+		if (retrievalScope() !== "auto") {
+			return i18n.tr(
+				"Ikke tilgjengelig med kildefilter (kun nett eller kun kunnskap)",
+				"Not available with a source filter (web only or knowledge only)",
+			);
+		}
+		return undefined;
+	});
+	const executeSelected = () =>
+		Boolean(props.approvedPlan?.selected) && executeBlockedReason() === undefined;
 	// Locked (already inside a temporary thread) still wins: that control is
 	// disabled because the choice is settled, not because it is unavailable.
 	const temporaryChatUnavailable = createMemo(
@@ -1696,6 +1911,38 @@ export function DashboardComposer(props: {
 		},
 	);
 
+	// What the send path can deliver for the turn as it is configured right
+	// now (see attachment-policy.ts). Read at pick time and again at submit,
+	// because the route, Do and Temporary chat can change after a file is added.
+	const attachmentPolicyContext = (): AttachmentPolicyContext => ({
+		subscriptionBacked: subscriptionBacked(),
+		planMode: planMode(),
+		doAttachments: doAttachmentsEnabled(),
+		zdr: temporaryChat(),
+		currentImageCount: files().filter(isImageAttachment).length,
+		currentTotalBytes: files().reduce((total, file) => total + file.size, 0),
+		// With images riding as parts, or on a Do turn that carries attachments, the
+		// picked model is the reader, so the picker declares what it can read;
+		// otherwise the diversion serves any model.
+		imageParts: visionAsPartsEnabled() || (planMode() && doAttachmentsEnabled())
+			? {
+					modelReadsImages: modelSupportsVision(
+						selectedCatalogModel(),
+						getAttachmentPolicy(),
+						{
+							verevonMode:
+								!selectedModel() ||
+								verevonModeById(selectedModel()) !== undefined,
+						},
+					),
+					visionModelName: flatChatModels().find((model) =>
+						modelSupportsVision(model, undefined),
+					)?.name,
+					maxImages: getAttachmentPolicy()?.maxImages ?? ATTACHMENT_MAX_IMAGES,
+				}
+			: undefined,
+	});
+
 	const addFiles = (nextFiles: FileList | File[]) => {
 		const incoming = Array.from(nextFiles);
 		if (pendingFilePosition !== null && incoming[0]) {
@@ -1713,7 +1960,14 @@ export function DashboardComposer(props: {
 			return;
 		}
 
-		const created = Array.from(nextFiles).map((file, index) => ({
+		const { accepted, refused } = evaluateAttachments(incoming, attachmentPolicyContext());
+		if (refused.length > 0) {
+			setSubmitError(
+				refused.map((entry) => attachmentRefusalMessage(entry, i18n.tr)).join(" "),
+			);
+		}
+
+		const created = accepted.map((file, index) => ({
 			id: `${file.name}-${file.size}-${file.lastModified}-${Date.now()}-${index}`,
 			name: file.name,
 			size: file.size,
@@ -2444,6 +2698,18 @@ export function DashboardComposer(props: {
 			setSubmitError(message);
 			return { ok: false, message };
 		}
+		// A file added before the route, Do or Temporary chat changed can no
+		// longer be delivered: say so now, with the draft kept, instead of
+		// letting the send path drop or refuse it.
+		const { refused: refusedFiles } = evaluateAttachments(
+			initialSnapshot.files.filter((file) => file.source === undefined),
+			{ ...attachmentPolicyContext(), currentImageCount: 0, currentTotalBytes: 0 },
+		);
+		if (refusedFiles.length > 0) {
+			const message = `${refusedFiles.map((entry) => attachmentRefusalMessage(entry, i18n.tr)).join(" ")} ${i18n.tr("Fjern filen og send på nytt. Utkastet er beholdt.", "Remove the file and send again. Your draft has been kept.")}`;
+			setSubmitError(message);
+			return { ok: false, message };
+		}
 		// Everything the payload is built from is read here, before the tier
 		// lookup below may wait on the catalogue.
 		const payloadInput = {
@@ -2454,7 +2720,7 @@ export function DashboardComposer(props: {
 			imageMode: imageMode() || commandBuiltin === "image",
 			model: selectedModel(),
 			provider: subscriptionRoute?.provider,
-			responseMode: responseMode(),
+			responseMode: effectiveResponseMode(),
 			subscriptionConnectionId: subscriptionRoute?.connectionId,
 			text: initialSnapshot.submittedText,
 			tone: settings().tone,
@@ -2464,6 +2730,9 @@ export function DashboardComposer(props: {
 		const submittedSourceScope = sourceScope();
 		const submittedConversationOnly = conversationOnly();
 		const submittedRetrievalScope = retrievalScope();
+		const submittedConnectorScope = connectorScopeBlockReason() === null && connectorScopeAdvertised()
+			? normalizeConnectorScope(connectorScope())
+			: [];
 
 		// Pending from here, so the composer is inert (and a second Enter is
 		// refused) while the tier lookup waits.
@@ -2482,6 +2751,8 @@ export function DashboardComposer(props: {
 			if (!submittedConversationOnly && submittedRetrievalScope !== 'auto') {
 				payload.retrievalScope = submittedRetrievalScope;
 			}
+			// Omitted when nothing was picked, like `retrievalScope` above.
+			if (submittedConnectorScope.length > 0) payload.connectorScope = submittedConnectorScope;
 			if (submittedConversationOnly) {
 				payload.tools = [];
 				payload.actions = [];
@@ -2489,6 +2760,8 @@ export function DashboardComposer(props: {
 			if (payload.attachments.length > 0) payload.attachments = await prepareChatAttachments(payload.attachments);
 			if (props.onSubmit) await props.onSubmit(payload);
 			else await writePendingChatLaunch(payload);
+			// The picks were consent for this turn, so they go with it. A failed send keeps them for a retry.
+			if (submittedConnectorScope.length > 0) setConnectorScope([]);
 		} catch (error) {
 			const message = error instanceof PendingChatLaunchError
 				? error.reason === 'unreadable'
@@ -2512,7 +2785,7 @@ export function DashboardComposer(props: {
 					files: initialSnapshot.files,
 					model: selectedModelLabel(),
 					now: initialSnapshot.now,
-					responseMode: responseMode(),
+					responseMode: effectiveResponseMode(),
 				}),
 				...current,
 			].slice(0, 6),
@@ -2645,6 +2918,37 @@ export function DashboardComposer(props: {
 			<Show when={subscriptionConnectionPending()}>
 				<div class="dashboard-composer-stale-model-notice" role="status" style={COMPOSER_NOTICE_STYLE}>
 					<span>{i18n.tr("Kontrollerer ChatGPT-abonnementet …", "Checking your ChatGPT subscription …")}</span>
+				</div>
+			</Show>
+			<Show when={policyResetModel()}>
+				{(modelName) => (
+					<div
+						class="dashboard-composer-stale-model-notice"
+						role="status"
+						style={COMPOSER_NOTICE_STYLE}
+					>
+						<Zap class="size-3.5" />
+						<span>
+							{i18n.tr(
+								`Organisasjonen din tillater ikke lenger ${modelName()}. Modellen er byttet, så velg en annen hvis du vil.`,
+								`Your organisation no longer allows ${modelName()}. The model was changed; choose another if you like.`,
+							)}
+						</span>
+					</div>
+				)}
+			</Show>
+			<Show when={effortCappedNotice()}>
+				<div
+					class="dashboard-composer-stale-model-notice"
+					role="status"
+					style={COMPOSER_NOTICE_STYLE}
+				>
+					<span>
+						{i18n.tr(
+							"Organisasjonen din begrenser svarinnsatsen, så denne meldingen sendes med lavere innsats.",
+							"Your organisation limits response effort, so this message is sent with a lower effort.",
+						)}
+					</span>
 				</div>
 			</Show>
 			<Show when={staleSubscriptionNotice() && !subscriptionConnectionPending()}>
@@ -2964,6 +3268,42 @@ export function DashboardComposer(props: {
 										</select>
 									</label>
 								</Show>
+								<Show when={connectorScopeAdvertised()}>
+									<div class="grid gap-2 text-sm" role="group" aria-label={i18n.tr("Tilkoblede apper", "Connected apps")}>
+										<span>{i18n.tr("Tilkoblede apper for denne meldingen", "Connected apps for this message")}</span>
+										<Show
+											when={connectorScopeBlockReason()}
+											fallback={(
+												<Show
+													when={(connectorTabs() ?? []).length > 0}
+													fallback={<p>{i18n.tr("Ingen tilkoblede apper ennå. Koble til under Koblinger.", "No connected apps yet. Connect one under Connectors.")}</p>}
+												>
+													<div class="flex flex-wrap gap-2">
+														<For each={connectorTabs() ?? []}>
+															{(tab) => {
+																const selected = () => connectorScope().includes(tab.connectionId);
+																return (
+																	<button
+																		type="button"
+																		aria-pressed={selected() ? "true" : "false"}
+																		disabled={props.submitting || (!selected() && connectorScope().length >= CONNECTOR_SCOPE_LIMIT)}
+																		onClick={() => setConnectorScope((current) => toggleConnectorScope(current, tab.connectionId))}
+																		class={cn("rounded-full border px-3 py-1 text-left", selected() ? "border-current bg-current/10 font-medium" : "border-current/20")}
+																	>
+																		<span class="text-xs opacity-70">{tab.providerKey === "microsoft" ? "Microsoft" : "Google"}</span>{" "}
+																		<strong class="font-medium">{tab.label}</strong>
+																	</button>
+																);
+															}}
+														</For>
+													</div>
+												</Show>
+											)}
+										>
+											{(reason) => <p role="note">{connectorScopeBlockText(reason(), i18n)}</p>}
+										</Show>
+									</div>
+								</Show>
 								<Show when={conversationOnly()}>
 									<p>{i18n.tr("Bare tekst og vedlegg i denne samtalen brukes. Minner, organisasjonskunnskap, nettkilder og tilkoblede tjenester er av. Samtalen lagres, men brukes ikke til nye minner eller læring.", "Only this conversation and its attachments are used. Memory, workspace knowledge, web sources and connected services are off. The conversation is saved, but does not create memories or learned skills.")}</p>
 								</Show>
@@ -3030,16 +3370,16 @@ export function DashboardComposer(props: {
 							<div class="dashboard-composer-intent-segment" role="group" aria-label={i18n.tr("Arbeidsmodus", "Work mode")}>
 								<button
 									type="button"
-									aria-pressed={!planMode() ? "true" : "false"}
-									class={{ "is-active": !planMode() }}
+									aria-pressed={!planMode() && !executeSelected() ? "true" : "false"}
+									class={{ "is-active": !planMode() && !executeSelected() }}
 									onClick={() => props.onPlanModeChange?.(false)}
 								>
 									{i18n.tr("Spør", "Ask")}
 								</button>
 								<button
 									type="button"
-									aria-pressed={planMode() ? "true" : "false"}
-									class={{ "is-active": planMode() }}
+									aria-pressed={planMode() && !executeSelected() ? "true" : "false"}
+									class={{ "is-active": planMode() && !executeSelected() }}
 									disabled={!planModeAvailable() || conversationOnly()}
 									title={!planModeAvailable() ? subscriptionDoDisabledTitle() : undefined}
 									onClick={() => props.onPlanModeChange?.(true)}
@@ -3047,6 +3387,31 @@ export function DashboardComposer(props: {
 								>
 									{i18n.tr("Utfør", "Do")}
 								</button>
+								<Show when={props.approvedPlan}>
+									{(approved) => (
+										<button
+											type="button"
+											aria-pressed={executeSelected() ? "true" : "false"}
+											class={{ "is-active": executeSelected() }}
+											disabled={executeBlockedReason() !== undefined}
+											title={
+												executeBlockedReason() ??
+												i18n.tr(
+													`Kjør den godkjente planen — agenten kan nå ${approved().rungLabel}`,
+													`Run the approved plan (${approved().rungLabel})`,
+												)
+											}
+											onClick={() => props.onApprovedPlanSelect?.()}
+											style={
+												executeBlockedReason() === undefined
+													? undefined
+													: { opacity: 0.5, cursor: "not-allowed" }
+											}
+										>
+											{i18n.tr("Kjør plan", "Run plan")}
+										</button>
+									)}
+								</Show>
 							</div>
 						</Show>
 					</Show>
@@ -3113,7 +3478,7 @@ export function DashboardComposer(props: {
 						fileInputRef = element;
 					}}
 					type="file"
-					accept="image/*,.pdf,.docx,.xlsx,.pptx,.txt,.md,.markdown,.csv,.json,.html,.htm"
+					accept={ATTACHMENT_ACCEPT}
 					multiple
 					class="sr-only"
 					aria-label={i18n.tr("Legg til filer", "Add files")}
@@ -3471,23 +3836,33 @@ export function DashboardComposer(props: {
 								aria-label={
 									subscriptionBacked()
 										? `${i18n.tr("Søk på nett", "Browse web")} — ${subscriptionDisabledTitle()}`
-										: retrievalScope() === 'web_only'
-											? `${i18n.tr("Søk på nett", "Browse web")} — ${webOnlyForcedTitle()}`
-											: i18n.tr("Søk på nett", "Browse web")
+										: zeroRetentionTurn()
+											? `${i18n.tr("Søk på nett", "Browse web")} — ${zeroRetentionWebTitle()}`
+											: retrievalScope() === 'web_only'
+												? `${i18n.tr("Søk på nett", "Browse web")} — ${webOnlyForcedTitle()}`
+												: i18n.tr("Søk på nett", "Browse web")
 								}
 								title={
 									subscriptionBacked()
 										? subscriptionDisabledTitle()
-										: retrievalScope() === 'web_only'
-											? webOnlyForcedTitle()
-											: i18n.tr("Søk på nett", "Browse web")
+										: zeroRetentionTurn()
+											? zeroRetentionWebTitle()
+											: retrievalScope() === 'web_only'
+												? webOnlyForcedTitle()
+												: i18n.tr("Søk på nett", "Browse web")
 								}
-								disabled={subscriptionBacked() || conversationOnly() || retrievalScope() === 'web_only'}
+								disabled={subscriptionBacked() || zeroRetentionTurn() || conversationOnly() || retrievalScope() === 'web_only'}
 								onClick={() =>
 									setBrowseWeb((current) => !current)
 								}
 								class={composerWebButtonClass(browseWeb() || retrievalScope() === 'web_only')}
-								style={retrievalScope() === 'web_only' ? { opacity: 0.85, cursor: "not-allowed" } : subscriptionDisabledStyle()}
+								style={
+									retrievalScope() === 'web_only'
+										? { opacity: 0.85, cursor: "not-allowed" }
+										: zeroRetentionTurn()
+											? { opacity: 0.5, cursor: "not-allowed" }
+											: subscriptionDisabledStyle()
+								}
 							>
 								<Globe2 class="size-4" />
 								{i18n.tr("Søk", "Search")}
@@ -3532,10 +3907,10 @@ export function DashboardComposer(props: {
 								when={props.appearance === "chat"}
 								fallback={
 									<div class="dashboard-composer-response-group">
-										<For each={responseModes}>
+										<For each={responseModes.filter((mode) => mode.id !== "max" && responseModeAllowed(mode.id))}>
 											{(mode) => (
 												<ComposerIconButton
-													active={responseMode() === mode.id}
+													active={effectiveResponseMode() === mode.id}
 													label={i18n.tr(mode.label.no, mode.label.en)}
 													onClick={() => handleResponseMode(mode.id)}
 													variant="toolbar"
@@ -3552,12 +3927,19 @@ export function DashboardComposer(props: {
 									<span class="sr-only">{i18n.tr("Svarinnsats", "Response effort")}</span>
 									<select
 										aria-label={i18n.tr("Svarinnsats", "Response effort")}
-										value={responseMode()}
+										value={effectiveResponseMode()}
 										onChange={(event) => handleResponseMode(event.currentTarget.value as ResponseMode)}
 									>
-										<option value="quick">{i18n.tr("Rask", "Quick")}</option>
+										<Show when={responseModeAllowed("quick")}>
+											<option value="quick">{i18n.tr("Rask", "Quick")}</option>
+										</Show>
 										<option value="auto">{i18n.tr("Standard", "Standard")}</option>
-										<option value="deep">{i18n.tr("Grundig", "Deep")}</option>
+										<Show when={responseModeAllowed("deep")}>
+											<option value="deep">{i18n.tr("Grundig", "Deep")}</option>
+										</Show>
+										<Show when={maxEffortAvailable()}>
+											<option value="max">{i18n.tr("Maksimal", "Maximum")}</option>
+										</Show>
 									</select>
 								</label>
 							</Show>
@@ -3838,7 +4220,9 @@ function createComposerSubmitPayload(input: {
 			? { effort: "quick" as const }
 			: input.responseMode === "deep"
 				? { effort: "deep" as const }
-				: {}),
+				: input.responseMode === "max"
+					? { effort: "xhigh" as const }
+					: {}),
 		// Presence-only for the same reason as effort: "balanced" is the
 		// gateway's no-directive default, so sending it would be a no-op key on
 		// every ordinary turn.
@@ -3871,6 +4255,26 @@ function createComposerTurn(input: {
 	};
 }
 
+// The reader's words for a connected-app block (WS23 S6). The zero-retention line is the copy the
+// gateway's own refusal produces for the same feature, so the composer and a refused request agree.
+function connectorScopeBlockText(reason: ConnectorScopeBlock, i18n: ReturnType<typeof useI18n>): string {
+	const tr = (no: string, en: string) => i18n.tr(no, en);
+	switch (reason) {
+		case "zero_retention":
+			return zdrRefusalPresentation("zdr_feature_not_supported", "connector_read", tr).message;
+		case "space":
+			return tr("Tilkoblede apper er ikke tilgjengelige i Space-rom ennå.", "Connected apps are not available in Space rooms yet.");
+		case "conversation_only":
+			return tr("Bare samtalen er valgt, så tilkoblede apper er av.", "Conversation only is selected, so connected apps are off.");
+		case "subscription":
+			return tr("Tilkoblede apper er ikke tilgjengelige med ChatGPT-abonnementet.", "Connected apps are not available with the ChatGPT subscription.");
+		case "web_only":
+			return tr("Tilkoblede apper er av når kildefilteret er kun nett.", "Connected apps are off when the source filter is web only.");
+		case "knowledge_only":
+			return tr("Tilkoblede apper er av når kildefilteret er kun organisasjon.", "Connected apps are off when the source filter is organization only.");
+	}
+}
+
 function detectTrigger(text: string, position: number): TriggerContext | null {
 	const before = text.slice(0, position);
 	// `@` mentions are intentionally not handled in the global composer:
@@ -3878,6 +4282,8 @@ function detectTrigger(text: string, position: number): TriggerContext | null {
 	// Space rooms own governed agent mentions, so silently searching the
 	// knowledge endpoint and labelling those results as people would be a
 	// misleading invocation control.
+	// Connected apps are picked from the context panel's chip row, not typed. An `@` trigger for them
+	// (WS23 D6) waits until the Space session agrees, because `@` already names Space agents (DEC-26).
 
 	const slashMatch = SLASH_TRIGGER_PATTERN.exec(before);
 	if (slashMatch) {

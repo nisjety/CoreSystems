@@ -21,6 +21,7 @@ const (
 	controlScheduledStepAction              = "model.schedule.step"
 	controlScheduledStepAudience            = "model-plane-execution-core"
 	controlScheduledStepSchema              = "sha256:space-scheduled-step-v1"
+	controlScheduledStepContractSchema      = "sha256:space-scheduled-step-v2"
 	controlScheduledStepExecutorPrincipal   = "orchestrator-core"
 	maxControlScheduledStepDecisionResponse = 64 << 10
 )
@@ -41,6 +42,13 @@ type ScheduledStepExecutionIntent struct {
 	StepIndex      uint32
 	PolicyDigest   string
 	IdempotencyKey string
+	// Set only for a step under a stored-consent contract (WS20 S5).
+	ContractDigest    string
+	ContractExpiresAt string
+}
+
+func (i ScheduledStepExecutionIntent) hasContract() bool {
+	return i.ContractDigest != "" || i.ContractExpiresAt != ""
 }
 
 func (i ScheduledStepExecutionIntent) validate() error {
@@ -63,7 +71,7 @@ func (i ScheduledStepExecutionIntent) validate() error {
 			return fmt.Errorf("scheduled step %s is invalid", label)
 		}
 	}
-	return nil
+	return validateScheduledContractBinding(i.ContractDigest, i.ContractExpiresAt)
 }
 
 type ScheduledStepDecisionAuthorizer interface {
@@ -99,13 +107,18 @@ func (a *ControlScheduledStepAuthorizer) AuthorizeScheduledStep(ctx context.Cont
 	if err := intent.validate(); err != nil {
 		return "", err
 	}
-	body, err := json.Marshal(map[string]any{"intent": map[string]any{
+	bodyIntent := map[string]any{
 		"org_id": intent.OrgID, "space_ref": intent.SpaceRef, "subject_id": intent.SubjectID,
 		"run_id": intent.RunID, "thread_id": intent.ThreadID, "schedule_id": intent.ScheduleID,
 		"fire_key": intent.FireKey, "template_digest": intent.TemplateDigest,
 		"step_id": intent.StepID, "step_index": intent.StepIndex,
 		"policy_digest": intent.PolicyDigest, "idempotency_key": intent.IdempotencyKey,
-	}})
+	}
+	if intent.hasContract() {
+		bodyIntent["contract_digest"] = intent.ContractDigest
+		bodyIntent["contract_expires_at"] = intent.ContractExpiresAt
+	}
+	body, err := json.Marshal(map[string]any{"intent": bodyIntent})
 	if err != nil {
 		return "", fmt.Errorf("encode scheduled-step intent: %w", err)
 	}
@@ -139,29 +152,31 @@ func (a *ControlScheduledStepAuthorizer) AuthorizeScheduledStep(ctx context.Cont
 }
 
 type scheduledStepDecision struct {
-	DecisionRef               string    `json:"decision_ref"`
-	OrgID                     string    `json:"org_id"`
-	SpaceRef                  string    `json:"space_ref"`
-	SubjectID                 string    `json:"subject_id"`
-	ServiceAudience           string    `json:"service_audience"`
-	ActionID                  string    `json:"action_id"`
-	ActionSchemaHash          string    `json:"action_schema_hash"`
-	PayloadDigest             string    `json:"payload_digest"`
-	IdempotencyKey            string    `json:"idempotency_key"`
-	RecipientAudienceRef      string    `json:"recipient_audience_ref"`
-	RecipientAudienceHash     string    `json:"recipient_audience_hash"`
-	PrivacyPolicyRef          string    `json:"privacy_policy_ref"`
-	ResourceAuthorizationRef  string    `json:"resource_authorization_ref"`
-	AuthorityRevision         int64     `json:"authority_revision"`
-	MembershipRevision        int64     `json:"membership_revision"`
-	PrivacyRevision           int64     `json:"privacy_revision"`
-	RecipientAudienceRevision int64     `json:"recipient_audience_revision"`
-	EntitlementRevision       int64     `json:"entitlement_revision"`
-	Permissions               []string  `json:"permissions"`
-	ZeroDataRetention         bool      `json:"zero_data_retention"`
-	Nonce                     string    `json:"nonce"`
-	IssuedAt                  time.Time `json:"issued_at"`
-	ExpiresAt                 time.Time `json:"expires_at"`
+	DecisionRef               string     `json:"decision_ref"`
+	OrgID                     string     `json:"org_id"`
+	SpaceRef                  string     `json:"space_ref"`
+	SubjectID                 string     `json:"subject_id"`
+	ServiceAudience           string     `json:"service_audience"`
+	ActionID                  string     `json:"action_id"`
+	ActionSchemaHash          string     `json:"action_schema_hash"`
+	PayloadDigest             string     `json:"payload_digest"`
+	IdempotencyKey            string     `json:"idempotency_key"`
+	RecipientAudienceRef      string     `json:"recipient_audience_ref"`
+	RecipientAudienceHash     string     `json:"recipient_audience_hash"`
+	PrivacyPolicyRef          string     `json:"privacy_policy_ref"`
+	ResourceAuthorizationRef  string     `json:"resource_authorization_ref"`
+	AuthorityRevision         int64      `json:"authority_revision"`
+	MembershipRevision        int64      `json:"membership_revision"`
+	PrivacyRevision           int64      `json:"privacy_revision"`
+	RecipientAudienceRevision int64      `json:"recipient_audience_revision"`
+	EntitlementRevision       int64      `json:"entitlement_revision"`
+	Permissions               []string   `json:"permissions"`
+	ZeroDataRetention         bool       `json:"zero_data_retention"`
+	ContractDigest            string     `json:"contract_digest,omitempty"`
+	ContractExpiresAt         *time.Time `json:"contract_expires_at,omitempty"`
+	Nonce                     string     `json:"nonce"`
+	IssuedAt                  time.Time  `json:"issued_at"`
+	ExpiresAt                 time.Time  `json:"expires_at"`
 }
 
 func (a *ControlScheduledStepAuthorizer) verify(token string, intent ScheduledStepExecutionIntent, now time.Time) error {
@@ -185,10 +200,15 @@ func (a *ControlScheduledStepAuthorizer) verify(token string, intent ScheduledSt
 	if err := json.Unmarshal(payload, &decision); err != nil {
 		return fmt.Errorf("invalid Control scheduled-step decision claims")
 	}
+	schema := controlScheduledStepSchema
+	if intent.hasContract() {
+		schema = controlScheduledStepContractSchema
+	}
 	if decision.OrgID != intent.OrgID || decision.SpaceRef != intent.SpaceRef || decision.SubjectID != intent.SubjectID ||
 		decision.ServiceAudience != controlScheduledStepAudience || decision.ActionID != controlScheduledStepAction ||
-		decision.ActionSchemaHash != controlScheduledStepSchema || decision.IdempotencyKey != intent.IdempotencyKey ||
-		decision.PayloadDigest != scheduledStepPayloadDigest(decision, intent) || decision.ZeroDataRetention ||
+		decision.ActionSchemaHash != schema || decision.IdempotencyKey != intent.IdempotencyKey ||
+		decision.PayloadDigest != scheduledStepPayloadDigest(decision, intent, schema) || decision.ZeroDataRetention ||
+		!scheduledContractMatches(intent.ContractDigest, intent.ContractExpiresAt, decision.ContractDigest, decision.ContractExpiresAt, now) ||
 		strings.TrimSpace(decision.DecisionRef) == "" || strings.TrimSpace(decision.Nonce) == "" ||
 		!hasScheduledStepPermission(decision.Permissions) || !now.Before(decision.ExpiresAt) || decision.IssuedAt.After(now.Add(time.Minute)) {
 		return fmt.Errorf("Control decision does not authorize this scheduled step")
@@ -196,7 +216,7 @@ func (a *ControlScheduledStepAuthorizer) verify(token string, intent ScheduledSt
 	return nil
 }
 
-func scheduledStepPayloadDigest(decision scheduledStepDecision, intent ScheduledStepExecutionIntent) string {
+func scheduledStepPayloadDigest(decision scheduledStepDecision, intent ScheduledStepExecutionIntent, schema string) string {
 	hash := sha256.New()
 	hash.Write([]byte(controlScheduledStepAction + "\x00v1\x00"))
 	for _, field := range []struct{ name, value string }{
@@ -206,7 +226,7 @@ func scheduledStepPayloadDigest(decision scheduledStepDecision, intent Scheduled
 		{"policy_digest", intent.PolicyDigest}, {"idempotency_key", intent.IdempotencyKey},
 		{"recipient_audience_ref", decision.RecipientAudienceRef}, {"recipient_audience_hash", decision.RecipientAudienceHash},
 		{"privacy_policy_ref", decision.PrivacyPolicyRef}, {"resource_authorization_ref", decision.ResourceAuthorizationRef},
-		{"action_schema_hash", controlScheduledStepSchema},
+		{"action_schema_hash", schema},
 	} {
 		hash.Write([]byte(field.name))
 		hash.Write([]byte{0})
@@ -228,6 +248,9 @@ func scheduledStepPayloadDigest(decision scheduledStepDecision, intent Scheduled
 		var encoded [8]byte
 		binary.BigEndian.PutUint64(encoded[:], uint64(revision.value))
 		hash.Write(encoded[:])
+	}
+	if intent.hasContract() && decision.ContractExpiresAt != nil {
+		writeScheduledContractDigest(hash, decision.ContractDigest, *decision.ContractExpiresAt)
 	}
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
 }

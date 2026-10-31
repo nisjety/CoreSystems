@@ -146,3 +146,32 @@ describe('formatUsageSummary cost basis', () => {
     expect(formatUsageSummary({ costUsd: 0.0031 })).toBe('$0.0031')
   })
 })
+
+describe('savedAnswerForTrailingTurn on a partial window (WS09 S9)', () => {
+  const local = [
+    turn({ id: 'u1', content: 'First question' }),
+    turn({ id: 'a1', role: 'assistant', content: 'First answer' }),
+    turn({ id: 'u2', content: 'Write the plan' }),
+    turn({ id: 'a2', role: 'assistant', content: 'Partial', status: 'stopped' }),
+  ]
+  // The newest four messages: only the trailing question and its saved answer.
+  const tail = [
+    turn({ id: 's3', content: 'Write the plan' }),
+    turn({ id: 's4', role: 'assistant', content: 'The saved plan.' }),
+  ]
+
+  it('adopts the saved answer after the trailing question, without counting the older questions', () => {
+    expect(savedAnswerForTrailingTurn(local, 'a2', tail, { partial: true })?.content).toBe('The saved plan.')
+    // The whole-thread rule still refuses the same tail: two questions locally, one in the window.
+    expect(savedAnswerForTrailingTurn(local, 'a2', tail)).toBeNull()
+  })
+
+  it('still refuses when the window does not end with the trailing question', () => {
+    const otherQuestion = [
+      turn({ id: 's3', content: 'Something else' }),
+      turn({ id: 's4', role: 'assistant', content: 'An answer to it.' }),
+    ]
+    expect(savedAnswerForTrailingTurn(local, 'a2', otherQuestion, { partial: true })).toBeNull()
+    expect(savedAnswerForTrailingTurn(local, 'a2', [turn({ id: 's4', role: 'assistant', content: 'Alone.' })], { partial: true })).toBeNull()
+  })
+})

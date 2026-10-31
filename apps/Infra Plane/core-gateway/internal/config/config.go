@@ -229,8 +229,10 @@ func setDefaults() {
 	// Whitelist defaults
 	viper.SetDefault("whitelist.traefikconfigpath", "/app/configs/traefik-dynamic.yml")
 
-	// Database defaults
-	viper.SetDefault("database.postgresurl", "postgres://coresystem:password@postgres:5432/coresystem?sslmode=disable")
+	// Database: no DSN default, since a default would put a credential in source.
+	// The empty default keeps the key visible to Unmarshal, which skips env-only
+	// keys under AutomaticEnv, so DATABASE_POSTGRESURL still sets the URL.
+	viper.SetDefault("database.postgresurl", "")
 
 	// Logging defaults
 	viper.SetDefault("logging.level", "info")

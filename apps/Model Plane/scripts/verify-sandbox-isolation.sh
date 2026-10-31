@@ -52,6 +52,15 @@ out=\$(bwrap $BASE --bind /work /work --unshare-net -- sh -c "echo ok > /work/f 
 [ "\$out" = "ok" ] || { echo "FAIL: workspace-write bound root rejected a write (got '\$out')"; exit 1; }
 echo "ok: WorkspaceWrite bound root accepts writes"
 
+# LibreOffice (the render layer) runs under the same argv as the code it renders:
+# its profile is written under the bound root and nothing outside it.
+out=\$(bwrap $BASE --bind /work /work --unshare-net -- sh -c "mkdir -p /work/lo-profile && echo ok > /work/lo-profile/x && cat /work/lo-profile/x")
+[ "\$out" = "ok" ] || { echo "FAIL: converter profile under the bound root was not writable (got '\$out')"; exit 1; }
+if bwrap $BASE --bind /work /work --unshare-net -- sh -c "echo x > /usr/lo-profile-escape" 2>/dev/null; then
+  echo "FAIL: the converter's argv wrote outside the bound root"; exit 1
+fi
+echo "ok: converter profile is writable only under the bound root"
+
 echo "PASS — bwrap argv from sandbox.rs isolates correctly on Linux."
 SCRIPT
 

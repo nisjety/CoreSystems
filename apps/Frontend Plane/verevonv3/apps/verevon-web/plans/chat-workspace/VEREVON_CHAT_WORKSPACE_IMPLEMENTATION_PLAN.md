@@ -842,6 +842,55 @@ belongs in the chat-workspace e2e suite (`tests/e2e/chat-workspace.spec.ts`)
 once that suite can authenticate. Until then point 11 is *partly* evidenced,
 not met, and this section is the target it will be judged against.
 
+### 21.5 Measured baseline, structural and browser (WS09 S1, 2026-10-21)
+
+21.4 left paint and frame cost unmeasured. WS09 S1 measures in two layers: exact
+structural counts in jsdom, which run in `pnpm test`, and browser timings from
+`tests/e2e/chat-transcript-performance.spec.ts`, which need the dev stack.
+
+**Structural counts (measured).** `ChatMessages.render-budget.test.tsx` and
+`use-chat-controller.stream-churn.test.ts`; an 84-token answer of 19 blocks for
+the renderer, 160 deltas for the controller. Counts, not times, so they hold on
+any machine. Each assertion carries an "S2 target" or "S3 target" note, and the
+slice that reaches the target flips that one line.
+
+| Measurement | Today | Target |
+|---|---|---|
+| Sealed-block mounts over the stream (blocks a token cannot change) | 803: every block but the last, on every token | 0 |
+| `AnswerRegion` mounts over the stream | 84: one per token | 1 |
+| Parser calls per token | 1 through `ChatMarkdown`, 2 through `AssistantMessage`; each reads the whole message | 1, over the unsealed tail |
+| Characters parsed over the stream | 123,240 through `ChatMarkdown`, 246,480 through `AssistantMessage` (quadratic in the answer) | a small multiple of the answer |
+| Solid 2 rc `<For>` with new item objects | default (reference-keyed) rebuilds every row; `keyed={false}` and `keyed={fn}` keep every row | pinned, the fact S2 builds on |
+| Transcript-key `setItem` per delta | 1 to each of localStorage and sessionStorage: 160 + 160 writes, 727,860 bytes for a final value of 7,979 bytes | at most 1 per second, 1 per terminal |
+| Server snapshots while streaming | 0: the effect passes `persistServer: false`, so the saved copy is written at submit and at the terminal event only | unchanged |
+| Trace rows per delta | 1 (160 for 160) | first `message.delta` of the turn only |
+| `taskSteps` array replaced per delta | 160 of 160, with an unchanged "Compose response" step copied each time | once per turn |
+
+**Browser baseline (not yet measured).** The spec's four scenarios (cold open of
+a 200-turn thread, a 20-paragraph answer at 40 frames/s into it, the same into
+an empty thread, request accounting) answer the chat endpoints inside the page,
+so only sign-in and the SPA come from the stack. Run it three times on the
+second dev server, then copy the means and the coefficient of variation here
+and into `tests/e2e/chat-perf-budget.json`; until then that file's `status` is
+`unmeasured` and `PERF_ENFORCE=1` refuses to pass on a null budget.
+
+    LOCAL_E2E_BASE_URL=http://localhost:5174 pnpm exec playwright test --project=chat tests/e2e/chat-transcript-performance.spec.ts --repeat-each=3
+
+| Scenario | Metrics | Result |
+|---|---|---|
+| A cold open, 200 turns | time to all turns mounted, DOM nodes, heap, long tasks | pending |
+| B stream into the 200-turn thread | p95 and max frame gap, long tasks, transcript `setItem` count and bytes, DOM churn | pending |
+| C stream into an empty thread | the same, as the control B is read against | pending |
+| D request accounting | requests, duplicate GETs, sequential waves | pending |
+
+**Found while measuring.** The first send of a new temporary (ZDR) thread writes
+the user's message to the local transcript key in both storages. `sendContent`
+marks the thread temporary (a signal write) and then, with no flush between,
+calls `writeThreadSnapshot`, whose `isTemporaryThread` guard still reads the
+unmarked set. Every later write in that stream is correctly refused. The case is
+pinned as an expected failure in `use-chat-controller.stream-churn.test.ts`
+(`it.fails`), which turns red, as an unexpected pass, when the write is fixed.
+
 ## 22. Verification against the definition of finished (2026-09-17)
 
 Re-checked against the code and the running stack. No code was changed in this

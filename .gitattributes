@@ -54,3 +54,10 @@ Dockerfile text eol=lf
 # session-core migration 0032 was applied to existing databases with CRLF line
 # endings; sqlx checksums the raw bytes, so this one file keeps them unconverted.
 "apps/Model Plane/rust/services/session-core/migrations/0032_space_membership_revocations.sql" -text
+
+# The SSE payload golden (WS12 S7) and its vendored SPA copy are hashed byte for byte like every
+# other contract golden, and so are the pins beside them (the sync script compares copies byte for
+# byte). The *.json rule above already pins LF; naming the contracts directories keeps that true if
+# the general rule is ever narrowed.
+apps/**/contracts/*.json text eol=lf
+apps/**/contracts/*.sha256 text eol=lf

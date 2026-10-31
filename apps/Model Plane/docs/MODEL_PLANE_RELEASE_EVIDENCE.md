@@ -1044,9 +1044,9 @@ capability availability or promote a release.
 
 | Claim | Source | Test/integration | Candidate | Rollback | Current disposition |
 | --- | --- | --- | --- | --- | --- |
-| Release artifact v3 captures immutable inputs and partitions secrets | present | `release-contract-test.sh`, `release-runtime-partition-test.sh`, and `release-input-security-test.sh` pass | absent | absent | Gate exists; operator signing and accepted artifacts are still required |
+| Release artifact v3 captures immutable inputs and partitions secrets | present | `release-contract-test.sh`, `release-runtime-partition-test.sh`, and `release-input-security-test.sh` pass (Linux/macOS only); `rollback-rehearsal-test.sh`, `acceptance-thresholds-test.sh` and `coresystem-conformance-artifact-test.sh` pass | absent | absent | Gate, rehearsal script, signed-artifact conformance check and operator runbook exist; no signed baseline or candidate has been built and no rehearsal has run; operator signing keys and accepted artifacts are still required |
 | ZDR is issuer-monotonic and local durable boundaries fail closed | present | Rust gateway/inference/session tests pass | absent | absent | Safe failure is proven; no usable provider route is attested |
-| One provider deployment is independently ZDR-attested | configuration gate only | no external provider attestation | absent | absent | Release blocker |
+| One provider deployment is independently ZDR-attested | configuration gate and operator check (`scripts/zdr-attestation-check.sh`) present | `zdr-attestation-check-test.sh` passes against a fixture attestation marked non-production (Azure OpenAI and Azure Anthropic claims, incomplete, edited, lapsed, not-yet-in-force, review-by boundary); no external provider attestation and no written contract | absent | absent | Release blocker: Z-40 needs a real written contract (`docs/ZDR.md` Step 0), then the six `*_ZDR_*` fields in the signed policy, a candidate with `ZDR_RETENTION_PATH=zdr-provider-route-attested`, and the pass 2 live proof; the fixture attests nothing |
 | Approval delivery resumes the exact approved action | worker, encrypted descriptor table, and descriptor protocol present | focused worker tests pass; disposable-Postgres lease-expiry/reclaim test passes with duplicate start receipt suppression | absent | absent | Local crash/recovery is proven; immutable-candidate and deployed effect observation remain required |
 | Grounded answer uses authorized Data Plane evidence and citations | source path present | unit coverage present; customer journey E2E absent | absent | absent | Integration proof required |
 | Normal chat persists the canonical conversation and resumes after disconnect/restart | message store, identity-scoped SSE buffer, and thread replay query present | gateway Redis restart/cross-device harness and disposable-Postgres thread replay test pass; full deployed chat journey absent | absent | absent | Local durability parity is proven; staging observation and canonical BFF ownership remain required |
@@ -1175,7 +1175,8 @@ Before a release claim can move to `candidate`:
 3. Restore the images in a non-production environment and run the authenticated
    negative and positive boundary matrix.
 4. Rehearse the separate rollback artifact with a distinct source revision and
-   image payload.
+   image payload (`scripts/rollback-rehearsal.sh`; sequence in
+   `docs/runbooks/release-rollback-rehearsal.md`).
 5. Attach the four customer-proof scenarios: grounded chat, durable chat,
    effectful approval recovery, and learning review.
 6. Record observation windows, thresholds, operator sign-off, and the exact
@@ -1183,6 +1184,72 @@ Before a release claim can move to `candidate`:
 
 Until those rows are populated with the required evidence classes, the Model
 Plane remains source-verified or locally integrated, not production-ready.
+
+## Content-safety corpus and live eval (WS26-S8, 2026-10-29)
+
+Evidence class reached: `test`, for the offline gate (`cargo test -p mp-content-safety`). The live eval's six offline tests passed before their last edit (the bearer check now also requires the org claim); they are re-run once the model-gateway lib builds again. The live run has not been made, so the `integration` class is not reached.
+
+What exists in source:
+
+- `rust/crates/mp-content-safety/tests/corpus/`: four corpus files, 1,032 rows in all. The deterministic attacks (487), the semantic attacks (103), the benign rows (349) and the semantic benign rows (93) each carry `expect` and `needs`.
+- `cargo test -p mp-content-safety`: 30 tests pass (20 unit tests and the 10 corpus gate tests).
+- `rust/services/model-gateway/tests/content_safety_eval.rs`: the live eval, `#[ignore]`d. Its six offline tests (the gate arithmetic, the bearer check and the p95 rule) run in the normal test pass.
+- `scripts/eval-content-safety.sh`: runs the offline gates, then the live eval, and archives the output. It refuses to start without `CONTENT_SAFETY_EVAL_BEARER` and `CONTENT_SAFETY_EVAL_ORG_ID`.
+
+Not yet evidence:
+
+- The live run against the classifier on a non-ZDR test org. Its thresholds are in `docs/CONTENT_SAFETY.md` under "Evaluation (WS26-S8)". They are neither met nor unmet until the run is archived here.
+- No default has changed. `CONTENT_SAFETY_MODE_DEFAULT` stays `frame`, and `CONTENT_SAFETY_SEMANTIC_INLINE` stays off.
+
+Archive slot for the live run: the output of `scripts/eval-content-safety.sh` (counts and latency only), with its date, commit, model and the test org's name, goes below this line.
+
+## Signed baseline, candidate and rehearsal pipeline (WS01-S12, code half, 2026-10-23)
+
+What exists in source, with its tests:
+
+- `scripts/release-artifact.sh` builds, signs, verifies, restores and renders a v3
+  artifact; `nats-provisioner` is in its image set and release overlay (S8).
+- `scripts/rollback-rehearsal.sh` verifies two artifacts, builds the candidate
+  schema in a disposable Postgres, boots the baseline `session-core` strict and then
+  under the rehearsal-only `SESSION_CORE_MIGRATION_IGNORE_MISSING` overlay, and writes
+  `docs/compliance/evidence/rollback-rehearsal-<date>.txt` (S10).
+  `scripts/tests/rollback-rehearsal-test.sh` passes (guard logic, no Docker).
+- `scripts/coresystem-conformance.sh --profile runtime|full` verifies both artifacts
+  against the trusted key, reads the newest rehearsal file and the thresholds, and
+  applies unexpired waivers (S11). `coresystem-conformance-artifact-test.sh` and
+  `acceptance-thresholds-test.sh` pass.
+- `docs/runbooks/release-rollback-rehearsal.md` is the operator sequence: baseline from
+  a clean detached worktree in non-release mode, the eleven-assignment gates file,
+  the release-mode candidate, verify/restore/compose/deployability, the rehearsal,
+  candidate-baseline-candidate deploys, preflight and conformance.
+
+What was run for this entry, from a Windows development checkout with the dirty
+working tree described above:
+
+- Pass: `rollback-rehearsal-test.sh`, `acceptance-thresholds-test.sh`,
+  `coresystem-conformance-artifact-test.sh`, `rebuild-service-test.sh`,
+  `migration-expand-contract-test.sh`; `release-artifact.sh dry-run` lists the
+  `nats-provisioner` build.
+- Pass with ripgrep on `PATH`: `coresystem-cross-plane-preflight-test.sh`.
+- Fail, environment: the three `release-*-test.sh` stop at "this platform does not
+  support O_NOFOLLOW" (Windows). They need a Linux host or the ops-gates CI job, so
+  no signing, verify or restore path was exercised here and no dev-keyed proof run
+  exists yet.
+- Fail, source: `capability-promotion-ledger-test.sh` and therefore
+  `coresystem-conformance-test.sh` fail because `CAPABILITY_PROMOTION_LEDGER.tsv` does
+  not list five seeded capability IDs (`cap.agent.lineage.read`, `cap.memory.index`,
+  `cap.memory.search`, `cap.process.background`, `cap.skill.summarize`). The runtime
+  profile reports `capability_promotion_ledger_invalid` until the ledger is brought up
+  to date.
+- Without ripgrep on `PATH`, the cross-plane preflight reports every open-evidence
+  marker as `recorded`. Install ripgrep before trusting its evidence lines.
+
+`coresystem-conformance.sh --profile runtime` read `blocked` here: dirty tree, no
+candidate artifact, no rollback artifact, no rehearsal evidence, invalid capability
+ledger, proposed thresholds. That is the correct reading; it will not change until the
+operator sequence has run. A dev-keyed run (ephemeral keys, see the runbook) proves the
+pipeline only: it must be labelled `DEV-KEYED`, and the Candidate and Rollback columns
+of the register stay `absent`.
 
 ## External quality-grounding implications
 

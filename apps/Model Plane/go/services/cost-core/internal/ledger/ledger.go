@@ -76,6 +76,30 @@ func NormalizeCostBasis(raw string) (basis string, ok bool) {
 	}
 }
 
+// Cache miss reasons: the closed set model-gateway's advisory classifier
+// (cache_telemetry.rs) may stamp on a USAGE_ENVELOPE. A turn that read from the
+// cache, or that nobody classified, carries none.
+const (
+	CacheMissBelowMinimum  = "below_minimum"
+	CacheMissPrefixChanged = "prefix_changed"
+	CacheMissTTLExpired    = "ttl_expired"
+	CacheMissNoBaseline    = "no_baseline"
+	CacheMissUnexplained   = "unexplained"
+)
+
+// NormalizeCacheMissReason returns the canonical reason. Empty is valid and
+// means "not classified"; ok is false for any value outside the closed set,
+// and the returned reason is then empty.
+func NormalizeCacheMissReason(raw string) (reason string, ok bool) {
+	switch value := strings.ToLower(strings.TrimSpace(raw)); value {
+	case "", CacheMissBelowMinimum, CacheMissPrefixChanged, CacheMissTTLExpired,
+		CacheMissNoBaseline, CacheMissUnexplained:
+		return value, true
+	default:
+		return "", false
+	}
+}
+
 // Entry is a single cost-bearing event written to the ledger.
 type Entry struct {
 	OrgID          string
@@ -99,6 +123,10 @@ type Entry struct {
 	// present, never a nullable column a reader must existence-check.
 	CacheReadInputTokens     int64
 	CacheCreationInputTokens int64
+	// CacheMissReason is the advisory reason a turn did not read from the
+	// prompt cache: one of the CacheMiss* values, or empty when none was
+	// reported. It is a label for the Insights view, never an input to cost.
+	CacheMissReason string
 	// CostBasis says how CostUSD was established: one of the CostBasis*
 	// constants. A CostBasisSubscription entry keeps its real token counts
 	// with a cost of 0; the other bases are priced from the catalogue when
@@ -142,6 +170,9 @@ func ValidateEntry(e Entry) error {
 	if e.CacheReadInputTokens < 0 || e.CacheCreationInputTokens < 0 ||
 		e.CacheReadInputTokens > MaxTokensPerEntry || e.CacheCreationInputTokens > MaxTokensPerEntry {
 		return fmt.Errorf("%w: cache token counts must be nonnegative and at most %d", ErrInvalidEntry, MaxTokensPerEntry)
+	}
+	if reason, ok := NormalizeCacheMissReason(e.CacheMissReason); !ok || reason != e.CacheMissReason {
+		return fmt.Errorf("%w: cache_miss_reason is not in the closed set", ErrInvalidEntry)
 	}
 	if math.IsNaN(e.CostUSD) || math.IsInf(e.CostUSD, 0) || e.CostUSD < 0 || e.CostUSD > MaxCostUSD {
 		return fmt.Errorf("%w: cost_usd must be finite and between 0 and %.0f", ErrInvalidEntry, MaxCostUSD)

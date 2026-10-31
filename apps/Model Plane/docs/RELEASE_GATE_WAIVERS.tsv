@@ -1,0 +1,15 @@
+# Release gate waivers, read by scripts/coresystem-conformance.sh.
+#
+# A row removes one named blocker from a conformance report until it expires. It is an
+# owner-signed exception, not a way to skip evidence: the report lists every applied
+# waiver under "waived", and an expired row for a live blocker adds waiver_expired:<blocker>.
+#
+# Rules the gate enforces: expires_on is at most 30 days after granted_on; granted_on is not
+# in the future; profiles is runtime, full or runtime,full; owner, reason and evidence are
+# filled in; a blocker is named once per profile set. Blockers that say the evidence itself is
+# wrong cannot be waived (*_unverified, artifact_verify_key_missing, dirty_worktree,
+# acceptance_thresholds_invalid, release_gate_waivers_invalid). One malformed row voids the
+# whole file and blocks the report.
+#
+# Columns: blocker<TAB>profiles<TAB>owner<TAB>reason<TAB>granted_on<TAB>expires_on<TAB>evidence
+# Dates are YYYY-MM-DD (UTC). Never put a credential, key path or runtime value in a row.

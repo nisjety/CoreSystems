@@ -152,6 +152,12 @@ services:
       IMPORTS_API_URL: ${IMPORTS_API_URL:-http://imports-api:3025}
       MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-http://model-gateway:8080}
       MODEL_GATEWAY_DEV_BEARER: ${MODEL_GATEWAY_DEV_BEARER:-}
+      # WS21-S2: mint a browser bearer for a personal, non-ZDR agentic turn and forward it to model-gateway. Off by
+      # default; only the literal `true`. execution-core's EXECUTION_DO_BROWSER_ENABLED must be on too.
+      BROWSER_DO_ENABLED: ${BROWSER_DO_ENABLED:-false}
+      # WS21-S7: a workspace AI run starts under a real broker grant and carries the browser bearer. Off by default; only
+      # the literal `true`. Keep it off until Quarry accepts broker grants and the broker site policy is shadow or enforce.
+      BROWSER_AI_RUN_REAL_GRANT: ${BROWSER_AI_RUN_REAL_GRANT:-false}
       MODEL_PLANE_RECOMMEND_URL: ${MODEL_PLANE_RECOMMEND_URL:-http://model-gateway:8080/v1/recommend/plan}
       # Search verticals: SearXNG (videos) + autocomplete-core (typeahead). Web/images/answer
       # ride QUARRY_EDGE_URL above. Suggestions stay empty until AUTOCOMPLETE_INTERNAL_TOKEN is set.
@@ -205,6 +211,15 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
       VEREVON_ALLOWED_ORIGINS: ${VEREVON_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:5199,http://127.0.0.1:5199,http://localhost:3186,http://127.0.0.1:3186,http://localhost:3187,http://127.0.0.1:3187}
       VEREVON_PUBLIC_ORIGIN: ${VEREVON_PUBLIC_ORIGIN:-http://localhost:5173}
+      # WS03 S8-A: forward the PARK form of POST .../runs/{run_id}/continue (an exactly empty
+      # approval_id plus a claim token, the resume of a run the executor parked). Off unless
+      # exactly "true". Flip it together with model-gateway's EXECUTION_LOOP_PARKING_ENABLED
+      # (on in front of a gateway with parking off, the park form is a 400 continue_incomplete).
+      # Nothing in the SPA calls the route yet.
+      VEREVON_GATEWAY_CONTINUE_PARK_ENABLED: ${VEREVON_GATEWAY_CONTINUE_PARK_ENABLED:-false}
+      # WS10-S5: the model entitlement admin routes (policy read, write and explain). Only the literal `true`
+      # enables them; do not enable before the matcher and the model-gateway admission are deployed.
+      MODEL_ENTITLEMENT_ADMIN_ENABLED: ${MODEL_ENTITLEMENT_ADMIN_ENABLED:-false}
     ports:
       - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:3185:3185"
     networks:
@@ -329,6 +344,9 @@ services:
       GATEWAY_PROXY_TARGET: http://gateway:3185
       VITE_ALLOW_DEV_AUTH_BYPASS: ${VITE_ALLOW_DEV_AUTH_BYPASS:-false}
       VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:-}
+      VITE_PLAN_EXECUTE_ENABLED: ${VITE_PLAN_EXECUTE_ENABLED:-false}
+      # WS08-S4: images ride as parts. Flip together with the gateway's CHAT_VISION_AS_PARTS_ENABLED.
+      VITE_CHAT_VISION_AS_PARTS_ENABLED: ${VITE_CHAT_VISION_AS_PARTS_ENABLED:-false}
     healthcheck:
       # An open TCP socket can still belong to a stalled Vite event loop.
       # Assert that same-origin HTTP and the BFF proxy actually respond.

@@ -770,10 +770,12 @@ type personalImportDecisionRequest struct {
 }
 
 type scheduleCreateDecisionRequest struct {
-	SpaceRef       string `json:"space_ref"`
-	ScheduleID     string `json:"schedule_id"`
-	TemplateDigest string `json:"template_digest"`
-	IdempotencyKey string `json:"idempotency_key"`
+	SpaceRef          string `json:"space_ref"`
+	ScheduleID        string `json:"schedule_id"`
+	TemplateDigest    string `json:"template_digest"`
+	IdempotencyKey    string `json:"idempotency_key"`
+	ContractDigest    string `json:"contract_digest"`
+	ContractExpiresAt string `json:"contract_expires_at"`
 }
 
 type watchCreateDecisionRequest struct {
@@ -911,6 +913,8 @@ func (s *Server) issueScheduleCreateDecision(c *gin.Context) {
 	decision, err := spaces.IssueScheduleCreateDecision(evidence, spaces.ScheduleCreateRequest{
 		DecisionRef: decisionRef, ScheduleID: request.ScheduleID, TemplateDigest: request.TemplateDigest,
 		IdempotencyKey: request.IdempotencyKey, Nonce: nonce,
+		ContractDigest: request.ContractDigest, ContractExpiresAt: request.ContractExpiresAt,
+		ContractsEnabled: s.scheduleContractsEnabled,
 	}, time.Now().UTC())
 	if err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Space schedule creation is not authorized"})
@@ -989,6 +993,10 @@ type scheduledRunExecutionDecisionRequest struct {
 	Intent struct {
 		scheduledRunIntent
 		ThreadID string `json:"thread_id"`
+		// The stored-consent contract of the digest-bound template, when the schedule has one
+		// (WS20-S5). Both stay empty for a legacy schedule, which keeps the v1 binding.
+		ContractDigest    string `json:"contract_digest"`
+		ContractExpiresAt string `json:"contract_expires_at"`
 	} `json:"intent"`
 }
 
@@ -1205,6 +1213,15 @@ func (s *Server) issueScheduledRunExecutionDecision(c *gin.Context) {
 		OrgID: request.Intent.OrgID, SpaceRef: request.Intent.SpaceRef, SubjectID: request.Intent.SubjectID,
 		ScheduleID: request.Intent.ScheduleID, FireKey: request.Intent.FireKey, TaskID: request.Intent.TaskID,
 		TemplateDigest: request.Intent.TemplateDigest, IdempotencyKey: request.Intent.IdempotencyKey,
+	}
+	if request.Intent.ContractDigest != "" || request.Intent.ContractExpiresAt != "" {
+		expiresAt, parseErr := time.Parse(time.RFC3339, request.Intent.ContractExpiresAt)
+		if parseErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "valid scheduled run execution intent is required"})
+			return
+		}
+		intent.ContractDigest = request.Intent.ContractDigest
+		intent.ContractExpiresAt = expiresAt.UTC()
 	}
 	if err := intent.Validate(); err != nil || strings.TrimSpace(request.Intent.ThreadID) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "valid scheduled run execution intent is required"})

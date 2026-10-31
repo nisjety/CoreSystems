@@ -762,6 +762,35 @@ const memoryDeleteInput = z.object({
   memoryId: z.string().min(1),
 })
 
+// The caller's own memory state; whose memory it is comes from the session.
+const memorySetStateInput = z.object({
+  state: z.enum(['on', 'paused', 'off']),
+})
+
+// Erases every memory about the caller. The literal `true` is the user's
+// confirmation: an absent or false value never reaches the owner.
+const memoryResetInput = z.object({
+  confirm: z.literal(true),
+})
+
+// `threadId` only proves the caller owns a thread (IndexMemory resolves the
+// user from it); the saved fact is not scoped to it.
+const memoryRememberInput = z.object({
+  threadId: z.string().min(1),
+  content: z.string().trim().min(1),
+})
+
+// A learned-skill proposal, by the skill's id. Only its owner may decide it, and
+// session-core checks that; the caller's own identity never comes from here.
+const learningSkillDecisionInput = z.object({
+  skillId: z.string().min(1),
+})
+
+// One ledger entry of the caller's own, by its id; a learned memory is not undone here.
+const learningUndoInput = z.object({
+  entryId: z.string().min(1),
+})
+
 const settingsUpdateMeInput = z.object({
   name: z.string().trim().optional(),
   displayName: z.string().trim().optional(),
@@ -812,6 +841,37 @@ const mcpShareServerInput = z.object({
   serverId: z.string().min(1),
   userIds: z.array(z.string().min(1)),
 })
+
+// A tool is approved by naming the digest of the definition the person reviewed,
+// never "whatever is observed now": the owner pins only a digest that is still the
+// observed one, so a definition that changed after the person looked is not pinned
+// unseen. The org is never an input; it comes from the verified session.
+const mcpApproveToolInput = z
+  .object({
+    serverId: z.string().min(1),
+    tool: z.string().min(1),
+    approvedDigest: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  .strict()
+
+// A per-tool policy. `allow` is the only decision that relaxes an approval, so it
+// alone names the digest of the tool definition the person reviewed (the owner
+// pins it and reads an allow for a changed definition as an ask); `ask` and
+// `never` only tighten and take none. `scope` defaults to the caller's own; an
+// org-wide policy needs an org admin and is checked by the owner, not here.
+const toolsSetPolicyInput = z
+  .object({
+    capabilityId: z.string().min(1),
+    scope: z.enum(['user', 'org']).optional(),
+    decision: z.enum(['allow', 'ask', 'never']),
+    pinnedDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    reason: z.string().max(500).optional(),
+  })
+  .strict()
+  .refine((input) => (input.decision === 'allow') === (input.pinnedDigest !== undefined), {
+    message: 'pinnedDigest is required for an allow and refused for ask and never',
+    path: ['pinnedDigest'],
+  })
 
 const monitoringCheckNowInput = z.object({
   url: z.string().url(),
@@ -970,6 +1030,51 @@ const integrationsExtendInboxHistoryInput = z.object({
   id: z.string().min(1),
 })
 
+// Connected-app reads for the composer's picker (WS23 S6). The operation is a closed enum, so a
+// client names a listing or a content read and never a write; integration-corev2 still checks that
+// the caller owns the connection. Exported so the browser client validates its calls against them.
+export const integrationsBrowseConnectionInput = z
+  .object({
+    connectionId: z.string().min(1),
+    operation: z.enum(['mail.messages', 'gmail.messages', 'drive.files', 'calendar.events']),
+    params: z.record(z.string(), z.unknown()).optional(),
+  })
+  .strict()
+
+export const integrationsFetchConnectionContentInput = z
+  .object({
+    connectionId: z.string().min(1),
+    operation: z.enum([
+      'drive.file.content',
+      'microsoft.drive.file.content',
+      'google.drive.file.content',
+      'mail.messages.get',
+      'microsoft.mail.messages.get',
+      'google.gmail.messages.get',
+      'gmail.messages.get',
+    ]),
+    params: z.record(z.string(), z.unknown()),
+  })
+  .strict()
+
+const integrationsConnectorActionOutput = z.object({
+  providerKey: z.string(),
+  operation: z.string(),
+  result: z.unknown(),
+})
+
+// The connected accounts one chat turn may read (WS23 S6): the chip selection the composer sends as
+// `connector_scope`. The bounds are the gateway's own (model-gateway `connector_scope`): at most 8
+// distinct ids of 1-128 characters from [A-Za-z0-9_-]. An empty list clears the choice.
+const chatSetConnectorScopeInput = z
+  .object({
+    connectionIds: z
+      .array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/))
+      .max(8)
+      .refine((ids) => new Set(ids).size === ids.length, { message: 'connection ids must be distinct' }),
+  })
+  .strict()
+
 // The org-admin schemas below all describe operations whose owner requires
 // require_org_admin (or, for the two self-service deletion checkpoints,
 // require_active_org) — enforced server-side, not by this schema. Getting the
@@ -1000,6 +1105,28 @@ const orgSetQuotaInput = z.object({
   reset_period: z.enum(['daily', 'monthly', 'none']).optional(),
 })
 
+// One layer of an org model policy (WS10-S5). The limits mirror org-core's; org-core stays the
+// owner of every semantic rule (known efforts and tiers, defaults against the policy they sit in).
+// Strict, so a misspelled field is refused instead of being dropped and read as set.
+const modelPolicyLayer = z.object({
+  allow_mode: z.enum(['all', 'listed']),
+  allow: z.array(z.string().max(128)).max(500).optional(),
+  deny: z.array(z.string().max(128)).max(500).optional(),
+  max_effort: z.string().optional(),
+  min_privacy_tier: z.string().optional(),
+  defaults: z.record(
+    z.string(),
+    z.object({ model: z.string().optional(), effort: z.string().optional() }).strict(),
+  ).optional(),
+}).strict()
+
+const orgSetModelEntitlementInput = z.object({
+  orgId: z.string().min(1),
+  expected_revision: z.number().int().nonnegative(),
+  org_default: modelPolicyLayer.nullable().optional(),
+  roles: z.record(z.string().min(1), modelPolicyLayer).optional(),
+}).strict()
+
 const orgUpdateInstructionsInput = z.object({
   orgId: z.string().min(1),
   instructions: z.string().trim().optional(),
@@ -1013,6 +1140,12 @@ const orgUpdateZdrInput = z.object({
 const orgUpdateSupportAiModeInput = z.object({
   orgId: z.string().min(1),
   supportAiMode: z.enum(['off', 'assist', 'review']),
+})
+
+const orgUpdateAgentLearningPolicyInput = z.object({
+  orgId: z.string().min(1),
+  memory: z.enum(['allow', 'disabled']).optional(),
+  learningReview: z.enum(['disabled', 'proposals']).optional(),
 })
 
 const membershipInviteMemberInput = z.object({
@@ -1039,22 +1172,107 @@ const organizationSwitchActiveInput = z.object({
 // Grants a running model invocation an autonomy rung up to
 // danger_full_access. The owner (model-gateway) checks run ownership
 // server-side; nothing here or in the gateway re-derives that check.
+//
+// `planId` names the structured plan the person approved and `editedSteps` are
+// the edits they made to its steps; both are optional, so the rung-only grant
+// is unchanged. A step with no `stepId` is a new one, and `removed` marks one
+// the person dropped (it is kept, as skipped, rather than deleted).
 const chatApprovePlanInput = z.object({
   runId: z.string().min(1),
   grantedRung: z.enum(['read_only', 'workspace_write', 'danger_full_access']),
   justification: z.string().trim().min(1),
+  planId: z.string().min(1).optional(),
+  editedSteps: z
+    .array(
+      z.object({
+        stepId: z.string().optional(),
+        title: z.string().min(1),
+        operation: z.string().optional(),
+        removed: z.boolean().optional(),
+      }),
+    )
+    .optional(),
 })
+
+// Starts the turn that runs an approved plan. Strict on purpose: the rung is
+// held by the server (the grant recorded when the person approved the plan) and
+// is never a client input, so a supplied `grantedRung` must fail to parse. The
+// controller spends the grant on connect: one approval is one execute turn.
+const chatExecuteApprovedPlanInput = z
+  .object({
+    threadId: z.string().min(1),
+    planId: z.string().min(1).optional(),
+  })
+  .strict()
 
 const chatCancelInvocationInput = z.object({
   requestId: z.string().min(1),
 })
 
+// `clientMessageId` is the send's receipt, minted by the caller: the owner stores the message under it
+// before delivering it and names it in the delivery, so a repeat of the same send (a retry after a lost
+// reply, or the message sent again as a new turn because the run never took it) is one transcript row.
+// The shape is the one the owner stores (it checks again). Omitted for a zero-retention thread.
 const chatQueueInvocationInput = z.object({
   requestId: z.string().min(1),
   content: z.string().trim().min(1),
   threadId: z.string().optional(),
   spaceRef: z.string().optional(),
+  clientMessageId: z
+    .string()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/)
+    .optional(),
 })
+
+// The granted approval named here is the gate for the continuation, so the entry
+// is not approval-gated a second time: the claim token proves the caller holds
+// the pause it resumes. Not model-executable (see model-eligibility.ts).
+//
+// approvalId is absent for the park form (WS03 S8): the continue of a run the executor
+// parked, which has no approval. A present approvalId is never blank; the empty approval
+// id on the wire is the client's to write for the park form, never a caller's input.
+const chatRunContinueInput = z.object({
+  runId: z.string().min(1),
+  approvalId: z.string().min(1).optional(),
+  claimToken: z.string().min(1),
+})
+
+// The person's answer to a question a run put to them (build plan WS14 S3), or a skip. A
+// question is its own store with its own owner-only answer, never an approval: an answer is
+// information and carries no authority, so the entry is low risk and shares nothing with the
+// approval decisions. Strict, so a client cannot name an org, a user or the message that
+// carries the answer: those are the server's. The bounds mirror the shared contract
+// (`mp_contracts::user_question`): 4 items, 6 options, 2000 characters.
+const chatAnswerQuestionAnswer = z
+  .object({
+    itemId: z.string().min(1).max(64),
+    optionIds: z.array(z.string().min(1).max(64)).max(6).optional(),
+    text: z.string().max(2000).optional(),
+  })
+  .strict()
+
+const chatAnswerQuestionInput = z
+  .object({
+    questionId: z.string().min(1),
+    answers: z.array(chatAnswerQuestionAnswer).max(4).optional(),
+    skip: z.boolean().optional(),
+  })
+  .strict()
+  .refine((input) => (input.skip === true ? (input.answers ?? []).length === 0 : (input.answers ?? []).length > 0), {
+    message: 'A skip carries no answers, and an answer carries at least one.',
+  })
+
+// The decision on a pending approval (build plan WS13 S2). The decider is the verified credential's,
+// never an input, so a field naming one, a decision source or a grant is refused rather than ignored.
+// `scope` is how far the decision reaches; only `once` exists until standing grants do.
+const approvalsDecideInput = z
+  .object({
+    approvalId: z.string().min(1),
+    decision: z.enum(['approve', 'reject']),
+    reason: z.string().max(500).optional(),
+    scope: z.literal('once').optional(),
+  })
+  .strict()
 
 const chatClearThreadsInput = z.object({})
 
@@ -1346,6 +1564,57 @@ const ticketConfigOutput = z.object({
 // field to the top of the execution envelope the way tickets.* promotes
 // ticketId — only the always-present envelope status is asserted here,
 // matching the same minimal-claim posture as ticketOutput.
+// Audit compliance (WS06-S6). Owner/admin only at the gateway and again in
+// audit-core / org-core; no org id here, the session names the org. None of
+// these is model-eligible (model-eligibility.ts stays an allowlist): an agent
+// never reads or administers the audit log.
+const auditVerifyChainInput = z.object({
+  fromSeq: z.number().int().min(0).optional(),
+  fromHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  maxRows: z.number().int().min(1).max(1_000_000).optional(),
+})
+
+const auditExportLogInput = z.object({
+  event: z.string().trim().max(128).optional(),
+  userId: z.string().trim().max(128).optional(),
+  plane: z.string().trim().max(128).optional(),
+  outcome: z.string().trim().max(128).optional(),
+  since: z.string().datetime().optional(),
+  until: z.string().datetime().optional(),
+})
+
+const auditSiemEventFilter = z.object({
+  events: z.array(z.string().trim().min(1).max(128)).max(128).optional(),
+  planes: z.array(z.string().trim().min(1).max(128)).max(128).optional(),
+})
+
+const auditCreateSiemDestinationInput = z.object({
+  kind: z.enum(['ndjson_webhook', 'splunk_hec']),
+  url: z.string().url().max(2048).refine((value) => {
+    try {
+      return new URL(value).protocol === 'https:'
+    } catch {
+      return false
+    }
+  }, 'url must use https'),
+  secret: z.string().min(1).max(512),
+  enabled: z.boolean().optional(),
+  eventFilter: auditSiemEventFilter.optional(),
+})
+
+const auditUpdateSiemDestinationInput = z.object({
+  destinationId: z.string().min(1).max(64),
+  expectedRevision: z.number().int().min(0),
+  url: z.string().url().max(2048).optional(),
+  secret: z.string().min(1).max(512).optional(),
+  enabled: z.boolean().optional(),
+  eventFilter: auditSiemEventFilter.optional(),
+})
+
+const auditDeleteSiemDestinationInput = z.object({
+  destinationId: z.string().min(1).max(64),
+})
+
 const envelopeStatusOutput = z.object({
   status: z.string(),
 })
@@ -2431,6 +2700,72 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'memory.set_state',
+    label: 'Set memory state',
+    description: 'Turn the caller\'s own memory on, pause it, or turn it off. Paused keeps what is stored but neither recalls nor learns; off also hides it.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: memorySetStateInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'memory.reset',
+    label: 'Reset memory',
+    description: 'Erase everything Verevon remembers about the caller. Destructive and non-recoverable.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: false,
+    inputSchema: memoryResetInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'memory.remember',
+    label: 'Remember this',
+    description: 'Save one fact the caller chose to a durable personal memory. Refused while memory is paused, off, or disabled by the organization.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: memoryRememberInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'learning.accept_skill',
+    label: 'Accept learned skill',
+    description: 'Accept a skill Verevon proposed from the caller\'s own conversation, so it is used in their chats. Only the owner of the proposal can decide it.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: learningSkillDecisionInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'learning.reject_skill',
+    label: 'Reject learned skill',
+    description: 'Reject a skill Verevon proposed, so it is never used. Only the owner of the proposal can decide it.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: learningSkillDecisionInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'learning.undo',
+    label: 'Undo learning',
+    description: 'Undo the newest change to one of the caller\'s learned skills by restoring the snapshot taken before it, or removing the skill if the change created it. Only the owner can undo.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: learningUndoInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'settings.update_me',
     label: 'Update profile',
     description: 'Update the caller\'s own profile fields (name, avatar, timezone, and similar).',
@@ -2505,6 +2840,28 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: mcpShareServerInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'mcp.approve_tool',
+    label: 'Approve MCP tool',
+    description: 'Accept the definition of one tool of an MCP server that the person reviewed, so a tool whose definition changed can be used again. The body names the digest the person saw (approvedDigest); it is pinned only if it is still the observed one, otherwise the call is refused 409 and the person reviews the tool again. Allowed for the owner of a user-scoped server and for an admin of a shared one, derived by the owner from the verified credential. Refused typed under zero data retention. Never model-executable: a model does not approve the tools it is offered.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: mcpApproveToolInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'tools.set_policy',
+    label: 'Set tool policy',
+    description: 'Set an allow, ask or never policy on the tools of a capability, for the caller or, for an org admin, for the whole org. never and ask tighten and apply to every tool; allow relaxes and is accepted only for an approved MCP tool the scope may relax, never for a built-in tool, an owner effect or an unclassified tool, and it must carry the digest of the definition the person reviewed: a changed definition is asked about again. The strictest policy in force wins, whoever set it. Refused typed under zero data retention, and a policy only takes effect where the deployment has switched policies on. Never model-executable: a model does not set the rules it runs under.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: toolsSetPolicyInput,
     outputSchema: envelopeStatusOutput,
   },
   {
@@ -2750,6 +3107,28 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'integrations.browse_connection',
+    label: 'Browse connected app',
+    description: 'List mail, calendar or file items in one of the person\'s own connected Microsoft or Google accounts. Read-only: the owner checks that the caller owns the connection, nothing is written and no approval is needed. Only the four listings in the operation enum are accepted.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: integrationsBrowseConnectionInput,
+    outputSchema: integrationsConnectorActionOutput,
+  },
+  {
+    id: 'integrations.fetch_connection_content',
+    label: 'Read connected app content',
+    description: 'Read one mail message or file from one of the person\'s own connected Microsoft or Google accounts. Read-only, with no approval and no write; the owner applies the same ownership check as the listing.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: integrationsFetchConnectionContentInput,
+    outputSchema: integrationsConnectorActionOutput,
+  },
+  {
     id: 'org.soft_delete',
     label: 'Soft-delete organization',
     description: 'Open the organization\'s 30-day GDPR deletion grace window. Reversible via org.restore only inside that window.',
@@ -2805,6 +3184,17 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'org.set_model_entitlement',
+    label: 'Set organization model access',
+    description: 'Replace which chat models the organization and each role may use. Takes effect for every member and is refused when it would leave a Zero Data Retention organization with no attested model.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: orgSetModelEntitlementInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'org.update_instructions',
     label: 'Update organization instructions',
     description: 'Update the organization-wide standing instructions agents follow.',
@@ -2835,6 +3225,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: orgUpdateSupportAiModeInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.update_agent_learning_policy',
+    label: 'Update organization memory and learning policy',
+    description: 'Allow or disable memory for the whole organization, and opt in or out of learning review of conversations. Affects every member.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: orgUpdateAgentLearningPolicyInput,
     outputSchema: envelopeStatusOutput,
   },
   {
@@ -2884,12 +3285,23 @@ export const actionRegistry = [
   {
     id: 'chat.approve_plan',
     label: 'Approve run autonomy',
-    description: 'Grant a running agent invocation an autonomy rung, up to danger_full_access. The owner independently verifies the caller owns the run.',
+    description: 'Grant a planning run an autonomy rung, up to danger_full_access, for the thread it belongs to. When planId is given the structured plan is approved with the person\'s editedSteps in the same decision, and the grant records its expiry. The owner independently verifies the caller owns the run, and the grant is held by the server, not by the client. Never model-executable: a model does not grant itself authority.',
     ownerPlane: 'model',
     risk: 'high',
     requiresApproval: false,
     reversible: false,
     inputSchema: chatApprovePlanInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.execute_approved_plan',
+    label: 'Run approved plan',
+    description: 'Start a NEW executing run on a thread whose plan the person approved, under the rung the server holds for that thread. The plan run itself stays read-only and is never widened. The turn is refused typed, with nothing run, when the server holds no live grant (plan_grant_unavailable) or the capability is switched off on the deployment (plan_execute_disabled). One approval is one execute turn on the client, and the grant is never accepted from a client. It is the person\'s click after they approved the plan, and never model-executable.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: chatExecuteApprovedPlanInput,
     outputSchema: envelopeStatusOutput,
   },
   {
@@ -2906,12 +3318,45 @@ export const actionRegistry = [
   {
     id: 'chat.queue_invocation_input',
     label: 'Queue invocation input',
-    description: 'Deliver a message typed mid-stream to a running agent invocation.',
+    description: 'Deliver a message typed mid-stream to a running agent invocation. With a clientMessageId the owner stores the message under that id before delivering it: a repeat of the same id is one transcript row, and the answer names the message (client_message_id, message_id, persisted). A run that ended before the message landed answers resend_as_new_turn (persisted says whether it was already stored): send it as an ordinary turn under the same id.',
     ownerPlane: 'model',
     risk: 'low',
     requiresApproval: false,
     reversible: false,
     inputSchema: chatQueueInvocationInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.run.continue',
+    label: 'Continue approved run',
+    description: 'Resume a run that paused for a granted approval: the approved call runs once under the authority the pause recorded, then the same run finishes. Streams the continuation. The claim token is single use, and every consumed approval is refused with 409 continuation_already_consumed, the same token included. The closed refusals, and what each says about the spend, live in chat-run-continue-contract.ts. A connected or error frame carrying approval_spent true is final: follow the run and never retry with a new token. After an ambiguous failure (a 502 upstream_unavailable, a 504, a network error, an error frame from the closed set without approval_spent, or a not_resumable, approval_not_found or continue_disabled that a spent approval can also get) do not assume either way: follow the run by its id with the existing run read; the run read is the arbiter. A retry with the same token is answered either with the continuation or with a refusal, and only 409 continuation_already_consumed means the click was spent; not_resumable, approval_not_found and continue_disabled leave the spend unknown. Following the run does not promise that the run is live: after continue_unavailable a run may still be recovered inside the recovery window, about 15 minutes from the consume. The thread\'s approved plan and its grant are not consumed. A PARKED run (one the executor parked at a round boundary) is continued through this same action in its park form: omit approvalId and send only runId and claimToken. No approval is read and nothing is spent, so a failure frame carrying park_continue true never says approval_spent. It uses the closed refusals, including park_not_restorable, park_route_unavailable and park_not_due, and the client follows the run by its id with the existing run read. The run read is the arbiter of whether the run stays parked: not_resumable and park_not_restorable say it does not, continue_outcome_unknown, continue_in_progress and a bare agent_dispatch_unavailable on a park stream leave that unknown, and every other park refusal leaves it parked.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: chatRunContinueInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.answer_question',
+    label: 'Answer a run question',
+    description: 'Answer, or skip, a question a run put to the person (a run_questions row, not an approval). The owner records one answer per question: an identical retry is accepted again, a different second answer is refused 409 question_already_answered, a question past its time is refused 410 question_expired, another person\'s question is 404 question_not_found, and an answer that does not fit the question is 422 invalid_answer with the refused field and reason. An answer is information, never an authority grant, and it cannot approve a tool call or a plan. Refused typed under zero data retention and for a waived credential, since a zero-retention or waived run holds no question. Never model-executable: the answer is the person\'s own.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: chatAnswerQuestionInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'approvals.decide',
+    label: 'Decide an approval',
+    description: 'Approve or reject one pending approval of a run, for this one call. Only the person the approval is requested of can decide it; the decider is the verified credential, never an input, and a client field naming a decider, a decision source or a grant is refused 400. A scope other than once is refused 422 scope_not_enabled until standing grants exist, so a caller never believes it granted more than it did. A decision is idempotent, and a different second decision is a 412 conflict. Refused typed under zero data retention and for a waived credential, since such a run holds no approval. Never model-executable: an approval is the person\'s own authority, and a model deciding its own approval would void the gate.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: approvalsDecideInput,
     outputSchema: envelopeStatusOutput,
   },
   {
@@ -2978,6 +3423,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: z.object({ filename: z.string().min(1).max(255), content_base64: z.string().min(1).max(1_400_000), content_type: z.string().max(128).optional() }),
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.set_connector_scope',
+    label: 'Choose connected apps for a turn',
+    description: 'Name the connected accounts one chat turn may read: the composer\'s connected-apps chips, sent as connector_scope on that turn only. At most 8 distinct connections, and an empty list clears the choice. The selection is the person\'s consent for that turn, so it is never remembered between turns, and a turn that is zero-retention, Space-scoped or filtered to one source never carries it. Never model-executable: a model does not choose which mailbox it reads.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatSetConnectorScopeInput,
     outputSchema: envelopeStatusOutput,
   },
   {
@@ -3253,6 +3709,61 @@ export const actionRegistry = [
     requiresApproval: true,
     reversible: true,
     inputSchema: routerPolicyUpdateInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'audit.verify_chain',
+    label: 'Verify audit log integrity',
+    description: 'Recompute the organization\'s audit hash chain and report verified, verified_with_legacy, broken (with the first broken position), partial or key_unavailable. Read-only; owner or admin, human sessions only. The run is itself recorded in the audit log.',
+    ownerPlane: 'control',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: auditVerifyChainInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'audit.export_log',
+    label: 'Export audit log',
+    description: 'Page the organization\'s full chained audit log, each row carrying its hash and previous hash so it can be verified offline. Owner or admin, human sessions only; every read is recorded in the audit log.',
+    ownerPlane: 'control',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: auditExportLogInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'audit.create_siem_destination',
+    label: 'Add SIEM destination',
+    description: 'Register an https endpoint (NDJSON webhook or Splunk HEC) that receives the organization\'s audit log. The secret is write-only and sealed by Control. Owner or admin, human sessions only; plan-gated.',
+    ownerPlane: 'control',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: auditCreateSiemDestinationInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'audit.update_siem_destination',
+    label: 'Update SIEM destination',
+    description: 'Change, pause or resume one SIEM destination, guarded by the revision it was read at. Owner or admin, human sessions only.',
+    ownerPlane: 'control',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: auditUpdateSiemDestinationInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'audit.delete_siem_destination',
+    label: 'Remove SIEM destination',
+    description: 'Remove one SIEM destination and its sealed secret. Rows already delivered stay with the receiver. Owner or admin, human sessions only.',
+    ownerPlane: 'control',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: auditDeleteSiemDestinationInput,
     outputSchema: envelopeStatusOutput,
   },
 ] as const satisfies readonly ActionDescriptor[]

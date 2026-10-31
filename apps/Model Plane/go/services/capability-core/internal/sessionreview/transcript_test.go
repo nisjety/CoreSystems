@@ -17,11 +17,13 @@ type fakeReader struct {
 	skills    *mpv1.ListAgentSkillsResponse
 	convoErr  error
 	skillsErr error
+	lastConvo *mpv1.ListConversationRequest
 }
 
 func (f *fakeReader) ListConversation(
-	_ context.Context, _ *mpv1.ListConversationRequest, _ ...grpc.CallOption,
+	_ context.Context, in *mpv1.ListConversationRequest, _ ...grpc.CallOption,
 ) (*mpv1.ListConversationResponse, error) {
+	f.lastConvo = in
 	return f.convo, f.convoErr
 }
 
@@ -111,5 +113,30 @@ func TestFetch_ConversationOnlyDoesNotReadSkillsOrReviewContent(t *testing.T) {
 	got, err := src.Fetch(context.Background(), SessionRef{})
 	if err != nil || got.Text != "" || len(got.Existing) != 0 || got.Skip != learning.SkipConversationScope {
 		t.Fatalf("isolated task was not skipped as conversation_scope: %+v error=%v", got, err)
+	}
+}
+
+func TestSkillLearningReaderNeverSeesInactive(t *testing.T) {
+	r := &fakeReader{
+		convo: &mpv1.ListConversationResponse{Messages: []*mpv1.SessionMessage{
+			{Role: "user", Content: "how do I cache?", SiblingCount: 1, OnActivePath: true},
+			{Role: "assistant", Content: "an answer the owner regenerated away", ParentMessageId: "q", SiblingOrdinal: 1, SiblingCount: 2},
+			{Role: "assistant", Content: "the answer on the active path", ParentMessageId: "q", SiblingOrdinal: 2, SiblingCount: 2, OnActivePath: true},
+		}},
+		skills: &mpv1.ListAgentSkillsResponse{},
+	}
+	src := NewSessionCoreTranscriptSource(r)
+	got, err := src.Fetch(context.Background(), SessionRef{OrgID: "o", RunID: "r", ThreadID: "t"})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if r.lastConvo.GetIncludeInactive() {
+		t.Fatal("the transcript read asked Session Core for inactive turns")
+	}
+	if strings.Contains(got.Text, "regenerated away") {
+		t.Fatalf("a turn on another branch reached review: %q", got.Text)
+	}
+	if !strings.Contains(got.Text, "the answer on the active path") || !strings.Contains(got.Text, "how do I cache?") {
+		t.Fatalf("the active path is missing from review: %q", got.Text)
 	}
 }

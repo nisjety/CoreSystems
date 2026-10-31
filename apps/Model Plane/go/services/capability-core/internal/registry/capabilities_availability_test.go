@@ -78,6 +78,7 @@ func availabilityCapabilityValues(id, orgID string) []any {
 		"available", "runtime_healthy", "probe succeeded",
 		"direct_read", "bounded", &healthCheckedAt,
 		"service:registry", createdAt, createdAt,
+		"read", "none",
 	}
 }
 
@@ -93,6 +94,9 @@ func TestGetGlobalPinsLookupToGlobalCapabilityRow(t *testing.T) {
 	}
 	if row.ID != "cap.retrieval.query" || row.OrgID != "global" || row.Version != "1.0.0" {
 		t.Fatalf("global row = %#v", row)
+	}
+	if row.SideEffectClass != "read" || row.ApprovalFloor != "none" {
+		t.Fatalf("global row class = %q/%q, want the stored pair read/none", row.SideEffectClass, row.ApprovalFloor)
 	}
 	if len(database.args) != 1 || database.args[0] != "cap.retrieval.query" {
 		t.Fatalf("GetGlobal args = %#v", database.args)

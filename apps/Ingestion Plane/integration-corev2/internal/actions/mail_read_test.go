@@ -538,6 +538,9 @@ func TestMailReadOutlookDoesNotHandOutANextLinkItWouldRefuse(t *testing.T) {
 	if token, present := payload["nextPageToken"]; present {
 		t.Fatalf("nextPageToken = %#v for a link on a foreign host", token)
 	}
+	if payload["moreAvailable"] != true {
+		t.Fatalf("moreAvailable = %v, want true so the caller can tell the list is cut short", payload["moreAvailable"])
+	}
 }
 
 func TestMailReadOutlookUnreadWithSearchIsAppliedLocallyBecauseSearchCannotTakeAFilter(t *testing.T) {

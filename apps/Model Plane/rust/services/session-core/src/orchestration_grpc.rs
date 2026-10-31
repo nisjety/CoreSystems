@@ -16,11 +16,14 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use futures::{Stream, StreamExt};
+use mp_contracts::approval_cause::{self, CauseCode};
 use mp_contracts::model_plane::v1::{
     self as proto,
     orchestration_core_service_server::{OrchestrationCoreService, OrchestrationCoreServiceServer},
     orchestration_event,
 };
+use mp_contracts::user_question;
+use mp_contracts::zdr_refusal::Refusal;
 use serde_json::Value as JsonValue;
 use sqlx::Row;
 use tokio::sync::broadcast;
@@ -315,16 +318,70 @@ fn pin_approval_decision_identity(
     Ok(())
 }
 
+/// Whether a decision request repeats the one already recorded. A retry must also name the
+/// same scope: a different scope is a different decision, and it is refused rather than
+/// reported as success.
 fn is_idempotent_approval_retry(
     approval: &store::ApprovalRow,
     status: &str,
     decided_by: &str,
     decision_reason: &str,
+    scope: &str,
 ) -> bool {
     !decided_by.is_empty()
         && approval.status == status
         && approval.decided_by == decided_by
         && approval.decision_reason == decision_reason
+        && stored_decision_scope(approval) == scope
+}
+
+/// The scope a decision was recorded under. A row decided before the record existed was
+/// decided under the only scope that existed, `once`.
+fn stored_decision_scope(approval: &store::ApprovalRow) -> &str {
+    approval.metadata["decision"]["scope"]
+        .as_str()
+        .unwrap_or("once")
+}
+
+/// The decision fields a state event carries, read from the approval's stored record (build
+/// plan WS13 S3).
+struct DecisionFields {
+    cause_code: String,
+    rule_id: String,
+    scope: i32,
+    decision_source: i32,
+    step_up_verified: bool,
+}
+
+fn decision_fields(approval: &store::ApprovalRow) -> DecisionFields {
+    let decision = &approval.metadata["decision"];
+    DecisionFields {
+        cause_code: approval.metadata["cause"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        rule_id: approval.metadata["cause"]["rule_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        scope: approval_scope_from_str(stored_decision_scope(approval)),
+        decision_source: approval_decision_source_from_str(
+            decision["source"].as_str().unwrap_or_default(),
+        ),
+        step_up_verified: decision["step_up_verified"].as_bool().unwrap_or(false),
+    }
+}
+
+/// Whether an audited decision enqueues its `approval_decided` audit row (build plan WS13 S3).
+/// Default off: only the literal `true` enables it.
+fn approval_audit_events_enabled() -> bool {
+    approval_audit_switch_from(std::env::var(APPROVAL_AUDIT_EVENTS_ENV).ok().as_deref())
+}
+
+const APPROVAL_AUDIT_EVENTS_ENV: &str = "APPROVAL_AUDIT_EVENTS_ENABLED";
+
+fn approval_audit_switch_from(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
 }
 
 // ---------------------------------------------------------------------------
@@ -721,6 +778,54 @@ pub(crate) fn approval_kind_to_str(code: i32) -> Option<&'static str> {
     }
 }
 
+/// The name a decision is recorded under in `metadata.decision.source` (build plan WS13 S3).
+/// UNSPECIFIED is `unattributed`: a caller that states no source is counted, never guessed.
+/// `None` for a number outside the enum.
+pub(crate) fn approval_decision_source_to_str(code: i32) -> Option<&'static str> {
+    Some(match proto::ApprovalDecisionSource::try_from(code).ok()? {
+        proto::ApprovalDecisionSource::Unspecified => "unattributed",
+        proto::ApprovalDecisionSource::User => "user",
+        proto::ApprovalDecisionSource::PostureAuto => "posture_auto",
+        proto::ApprovalDecisionSource::StandingGrant => "standing_grant",
+        proto::ApprovalDecisionSource::Timeout => "timeout",
+        proto::ApprovalDecisionSource::System => "system",
+    })
+}
+
+/// The inverse of [`approval_decision_source_to_str`]. A name this build does not know reads
+/// as UNSPECIFIED.
+pub(crate) fn approval_decision_source_from_str(name: &str) -> i32 {
+    let source = match name {
+        "user" => proto::ApprovalDecisionSource::User,
+        "posture_auto" => proto::ApprovalDecisionSource::PostureAuto,
+        "standing_grant" => proto::ApprovalDecisionSource::StandingGrant,
+        "timeout" => proto::ApprovalDecisionSource::Timeout,
+        "system" => proto::ApprovalDecisionSource::System,
+        _ => proto::ApprovalDecisionSource::Unspecified,
+    };
+    source as i32
+}
+
+/// The name of a decision's scope (build plan WS13 S3). UNSPECIFIED is read as `once`; `None`
+/// for a number outside the enum.
+pub(crate) fn approval_scope_to_str(code: i32) -> Option<&'static str> {
+    Some(match proto::ApprovalScope::try_from(code).ok()? {
+        proto::ApprovalScope::Unspecified | proto::ApprovalScope::Once => "once",
+        proto::ApprovalScope::Thread => "thread",
+        proto::ApprovalScope::Run => "run",
+    })
+}
+
+/// The inverse of [`approval_scope_to_str`]. Anything but `thread` or `run` reads as `once`.
+pub(crate) fn approval_scope_from_str(name: &str) -> i32 {
+    let scope = match name {
+        "thread" => proto::ApprovalScope::Thread,
+        "run" => proto::ApprovalScope::Run,
+        _ => proto::ApprovalScope::Once,
+    };
+    scope as i32
+}
+
 pub(crate) fn approval_state_from_str(s: &str) -> i32 {
     match s {
         "requested" => proto::ApprovalState::Requested as i32,
@@ -758,12 +863,117 @@ fn validate_approval_decision_context(org_id: &str, decided_by: &str) -> Result<
     Ok(())
 }
 
-const MAX_CONTINUATION_DESCRIPTOR_BYTES: usize = 16 * 1024;
+/// The largest plaintext descriptor a continuation may retain. The mirror value in
+/// execution-core (`runtime_loop::resume::MAX_SNAPSHOT_BYTES`) must match it.
+///
+/// The ceiling is the encrypted row, not the plaintext: `approval_continuation_descriptors`
+/// CHECKs `length(ciphertext) <= 131072`, and the ciphertext is `v1:` plus base64 of
+/// nonce + plaintext + tag. 64 KiB leaves headroom under that CHECK (about 87 KB of
+/// ciphertext); the const assertion below fails the build if the cap ever outgrows it.
+const MAX_CONTINUATION_DESCRIPTOR_BYTES: usize = 64 * 1024;
+const _: () = assert!(
+    3 + (MAX_CONTINUATION_DESCRIPTOR_BYTES + 28) * 4 / 3 + 4 <= 131_072,
+    "descriptor cap must fit the approval_continuation_descriptors ciphertext CHECK"
+);
 
 /// Validate a retained continuation as an exact, approval-scoped action
 /// description. It cannot carry reusable credentials; execution remains
 /// unavailable until a service-only dispatcher obtains separate authority.
 #[allow(clippy::result_large_err)]
+/// The authority snapshot a consume hands back, read from the retained
+/// descriptor's `offered` section. `None` when the approval retained none.
+fn approved_authority(offered_json: &str) -> Option<proto::ApprovedAuthority> {
+    if offered_json.is_empty() {
+        return None;
+    }
+    let value: JsonValue = serde_json::from_str(offered_json).ok()?;
+    let authority = value.get("authority")?;
+    let text = |v: &JsonValue, key: &str| {
+        v.get(key)
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let tool_names: Vec<String> = authority
+        .get("tool_names")
+        .and_then(JsonValue::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let tools: Vec<proto::ApprovedTool> = value
+        .get("tools")
+        .and_then(JsonValue::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|tool| proto::ApprovedTool {
+                    name: text(tool, "name"),
+                    description: text(tool, "description"),
+                    parameters_json: text(tool, "parameters_json"),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(proto::ApprovedAuthority {
+        mode: text(authority, "mode"),
+        plan_mode: authority
+            .get("plan_mode")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false),
+        autonomy_rung: text(authority, "autonomy_rung"),
+        space_id: text(authority, "space_id"),
+        min_privacy_tier: authority
+            .get("min_privacy_tier")
+            .and_then(JsonValue::as_i64)
+            .and_then(|v| i32::try_from(v).ok())
+            .unwrap_or(0),
+        provider_hint: text(authority, "provider_hint"),
+        max_rounds: authority
+            .get("max_rounds")
+            .and_then(JsonValue::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0),
+        tool_names,
+        tools,
+        digest: text(authority, "digest"),
+    })
+}
+
+/// The wire answer to a consume. A spend-only consume (`omit_call`) carries the
+/// three flags and nothing else, whatever the outcome holds: no call content, no
+/// step and no authority snapshot. Otherwise it is the call, the step and the
+/// snapshot the retained descriptor named, for the claim holder, and empty fields
+/// when the outcome has no call (another claim).
+fn consume_response(done: store::ConsumeOutcome, omit_call: bool) -> proto::ConsumeApprovalResponse {
+    if omit_call {
+        return proto::ConsumeApprovalResponse {
+            consumed: done.consumed,
+            already_consumed: done.already_consumed,
+            same_claim: done.same_claim,
+            ..Default::default()
+        };
+    }
+    let call = done.call.unwrap_or_else(|| store::ConsumedCall {
+        step_id: String::new(),
+        tool_name: String::new(),
+        tool_input_json: String::new(),
+        offered_json: String::new(),
+    });
+    proto::ConsumeApprovalResponse {
+        consumed: done.consumed,
+        already_consumed: done.already_consumed,
+        same_claim: done.same_claim,
+        tool_name: call.tool_name,
+        tool_input_json: call.tool_input_json,
+        step_id: call.step_id,
+        authority: approved_authority(&call.offered_json),
+    }
+}
+
 fn validate_continuation_descriptor(
     raw: &str,
     req: &proto::CreateApprovalRequest,
@@ -1153,7 +1363,45 @@ fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
         decided_at: row.decided_at.map(ts),
         expires_at: row.expires_at.map(ts),
         org_id: row.org_id.clone(),
+        consumed_at: row.consumed_at.map(ts),
+        continuation_mode: row.continuation_mode.clone(),
+        cause: approval_cause::from_metadata(&row.metadata),
     }
+}
+
+/// The `metadata` a new approval row is created with: the reason and the gated step,
+/// and the cause the creator stated (build plan WS13 S1). Also returns the stored cause
+/// code, for the counter.
+///
+/// The cause is checked here and not trusted: a code outside the closed vocabulary is
+/// stored as `unclassified_gate` (and logged, because it means a creator is newer than
+/// this service), the scope options are the code's own, and every field is bounded. A
+/// zero-retention credential stores none, so nothing of an approval's cause outlives a
+/// ZDR caller; an approval with no stated cause is stored exactly as before.
+fn new_approval_metadata(
+    req: &proto::CreateApprovalRequest,
+    zdr: bool,
+) -> (JsonValue, Option<&'static str>) {
+    let mut metadata_map = serde_json::Map::new();
+    if !req.reason.is_empty() {
+        metadata_map.insert("reason".to_owned(), JsonValue::String(req.reason.clone()));
+    }
+    if !req.step_id.is_empty() {
+        metadata_map.insert("step_id".to_owned(), JsonValue::String(req.step_id.clone()));
+    }
+    let mut stored_code = None;
+    if let Some(cause) = req.cause.clone().filter(|_| !zdr) {
+        let (cause, known) = approval_cause::normalized(cause);
+        if !known {
+            warn!(
+                run_id = %req.run_id,
+                "create_approval: unknown approval cause code stored as unclassified_gate"
+            );
+        }
+        stored_code = Some(CauseCode::from_wire(&cause.code).as_str());
+        metadata_map.insert("cause".to_owned(), approval_cause::to_metadata(&cause));
+    }
+    (JsonValue::Object(metadata_map), stored_code)
 }
 
 /// The evidence dimensions the vision's proof model names that this plane
@@ -1618,6 +1866,105 @@ async fn assemble_plan(pool: &Pool, plan: &store::PlanRow) -> Result<proto::Plan
     Ok(plan_from_row(plan, steps))
 }
 
+/// `RunParked` and `RunResumed` (WS03 S8) describe the park store, so they are
+/// recorded only while it is active ([`crate::terminalization::park_recovery_active`]).
+/// Before those tags existed prost skipped them, so any caller that sent one got
+/// `InvalidArgument("event payload is required")`; with the park store off a caller
+/// still gets exactly that answer, so the new tags open no new write path by default:
+/// nothing is persisted or broadcast for them on this gRPC path. The two NATS ingresses
+/// (`nats.rs`, `orchestration_nats.rs`) refuse the park events outright, so this handler is the
+/// only way in.
+///
+/// Not a principal check. The executor records every run event under the RUN OWNER'S
+/// delegated bearer (as it does for `SubagentStopped`), never as `service:execution-core`,
+/// so a gate on the service principal refused the executor's own park events: found live
+/// 2026-10-20 (`failed to publish RunParked (best-effort)`, `InvalidArgument`). With the
+/// store active the ordinary gate applies: `orchestration:write`, then the run-owner check
+/// (the run's own user, or a same-org service holding `orchestration:write`, which the
+/// service-principal registry grants to no principal today), exactly as for the other run
+/// events a caller can already record. On top of that the event must match the run's own
+/// fold ([`require_park_event_to_match_the_fold`]), and its id and time are the server's
+/// (the `record_orchestration_event` handler), so a caller can only add a true statement about a run
+/// it owns. The events carry ids and a segment number only and are write-only (nothing reads
+/// them back as proof that a run is parked: the fold store is the truth). The fold check proves
+/// the event consistent with the store, not that the executor produced the fold: the holder of
+/// the run's bearer can write a fold of its own through `SaveLoopCheckpoint` and
+/// `ClaimLoopCheckpoint` (the same scope), so what stays writable is a true statement about a
+/// fold the run really holds.
+#[allow(clippy::result_large_err)]
+fn refuse_park_events_while_parking_is_off(
+    park_store_active: bool,
+    event: &proto::OrchestrationEvent,
+) -> Result<(), Status> {
+    if is_park_event(event) && !park_store_active {
+        return Err(Status::invalid_argument("event payload is required"));
+    }
+    Ok(())
+}
+
+/// Whether `event` is one of the two park events, `RunParked` or `RunResumed`.
+fn is_park_event(event: &proto::OrchestrationEvent) -> bool {
+    matches!(
+        event.event,
+        Some(orchestration_event::Event::RunParked(_) | orchestration_event::Event::RunResumed(_))
+    )
+}
+
+/// What a `RunParked` says is true: the run holds a PARK fold in state `parked`. A run that
+/// is not persistent (ZDR or a ZDR waiver) never holds a fold, so it never passes.
+const PARKED_FOLD_EXISTS_SQL: &str = "SELECT EXISTS ( \
+    SELECT 1 FROM run_loop_checkpoints \
+    WHERE run_id = $1 AND kind = 'park' AND state = 'parked')";
+
+/// What a `RunResumed` says is true: the run's latest claim was a claim of a park (the claim
+/// wrote a `CHECKPOINT_RESTORED` event of kind `park`; a later pause claim would be the latest
+/// instead) and it now holds an open fold of the segment the event names. The fence save of the
+/// resumed loop replaces the parked fold, so the fold is no longer `parked` by the time the
+/// executor publishes.
+const RESUMED_FOLD_EXISTS_SQL: &str = "SELECT EXISTS ( \
+    SELECT 1 FROM run_loop_checkpoints c \
+    WHERE c.run_id = $1 AND c.state <> 'closed' AND c.segment_no = $2 \
+      AND (SELECT e.payload->>'kind' FROM events e \
+           WHERE e.run_id = c.run_id AND e.event_type = 'CHECKPOINT_RESTORED' \
+           ORDER BY e.ts DESC, e.id DESC LIMIT 1) = 'park')";
+
+/// Refuse a `RunParked` or `RunResumed` that the run's own fold does not bear out. Called
+/// after the run-owner check, so only the run's caller learns whether it holds a fold. Any
+/// other event is untouched. The executor publishes right after the fold write it describes,
+/// so a refusal here (a cancel purged the fold in between, or the run already finished)
+/// loses only a best-effort display event.
+async fn require_park_event_to_match_the_fold(
+    pool: &Pool,
+    event: &proto::OrchestrationEvent,
+) -> Result<(), Status> {
+    let mismatch = || Status::failed_precondition("park event does not match the run's fold");
+    let holds: bool = match event.event.as_ref() {
+        Some(orchestration_event::Event::RunParked(value)) => {
+            sqlx::query_scalar::<_, bool>(PARKED_FOLD_EXISTS_SQL)
+                .bind(&value.run_id)
+                .fetch_one(pool)
+                .await
+        }
+        Some(orchestration_event::Event::RunResumed(value)) => {
+            let Ok(segment) = i32::try_from(value.resumed_segment) else {
+                return Err(mismatch());
+            };
+            sqlx::query_scalar::<_, bool>(RESUMED_FOLD_EXISTS_SQL)
+                .bind(&value.run_id)
+                .bind(segment)
+                .fetch_one(pool)
+                .await
+        }
+        _ => return Ok(()),
+    }
+    .map_err(|error| Status::internal(error.to_string()))?;
+    if holds {
+        Ok(())
+    } else {
+        Err(mismatch())
+    }
+}
+
 /// Persist the safe browser-agent event projection in the canonical event log.
 ///
 /// Browser progress historically lived only in the per-run Redis/in-memory
@@ -1721,6 +2068,33 @@ async fn persist_browser_event(
             },
             "type.googleapis.com/model_plane.v1.ApprovalContinuationVerified",
         ),
+        // Durable loop (WS03 S8): ids and a segment number only. The park
+        // reason never rides this projection, so a reader of the event log
+        // learns that a run parked, never why.
+        //
+        // Today these two rows are WRITE-ONLY. The durable replay maps the
+        // RUN_PARKED / RUN_RESUMED event types to EVENT_TYPE_UNSPECIFIED (no
+        // `EventType` value exists for them) and the gateway's durable-run-event
+        // projection drops everything outside its allowlist, so they are not
+        // readable back and this persistence is not a durable replay of a park.
+        // Whether they become a ChatEvent is decided by the design's S8-7/S8-8 and
+        // WS15 S7; pinned by `replay_maps_the_park_event_types_to_unspecified`
+        // in grpc.rs.
+        Some(orchestration_event::Event::RunParked(value)) => (
+            "RUN_PARKED",
+            value.run_id.as_str(),
+            serde_json::json!({ "run_id": value.run_id }),
+            "type.googleapis.com/model_plane.v1.RunParked",
+        ),
+        Some(orchestration_event::Event::RunResumed(value)) => (
+            "RUN_RESUMED",
+            value.run_id.as_str(),
+            serde_json::json!({
+                "run_id": value.run_id,
+                "resumed_segment": value.resumed_segment,
+            }),
+            "type.googleapis.com/model_plane.v1.RunResumed",
+        ),
         _ => return Ok(()),
     };
     if run_id.trim().is_empty() {
@@ -1796,6 +2170,7 @@ fn broadcast_approval_decision_events(
     if !transition_applied {
         return;
     }
+    let fields = decision_fields(approval);
 
     broadcast_event(
         tx,
@@ -1810,6 +2185,11 @@ fn broadcast_approval_decision_events(
                     approval_kind: approval_kind_from_str(&approval.kind),
                     to: decision,
                     decided_by: approval.decided_by.clone(),
+                    cause_code: fields.cause_code,
+                    rule_id: fields.rule_id,
+                    scope: fields.scope,
+                    decision_source: fields.decision_source,
+                    step_up_verified: fields.step_up_verified,
                 },
             )),
         },
@@ -1845,6 +2225,295 @@ fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
         orchestration_event::Event::BrowserActionApprovalRequired(p) => Some(&p.run_id),
         orchestration_event::Event::BrowserActionDecided(p) => Some(&p.run_id),
         orchestration_event::Event::ApprovalContinuationVerified(p) => Some(&p.run_id),
+        // Durable loop (WS03 S8): both are run-scoped, so they reach the per-run
+        // stream and the replay buffer.
+        orchestration_event::Event::RunParked(p) => Some(&p.run_id),
+        orchestration_event::Event::RunResumed(p) => Some(&p.run_id),
+        // Questions (WS14 S3): run-scoped, ids only.
+        orchestration_event::Event::QuestionAsked(p) => Some(&p.run_id),
+        orchestration_event::Event::QuestionAnswered(p) => Some(&p.run_id),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Run questions (build plan WS14 S3)
+// ---------------------------------------------------------------------------
+
+/// Whether `event` is one of the two question events. Only the question store writes them.
+fn is_question_event(event: &proto::OrchestrationEvent) -> bool {
+    matches!(
+        event.event,
+        Some(
+            orchestration_event::Event::QuestionAsked(_)
+                | orchestration_event::Event::QuestionAnswered(_)
+        )
+    )
+}
+
+/// Refuse a question event published through `RecordOrchestrationEvent`. A question's events say
+/// that a row was written, so a caller that could publish them could announce a question that
+/// does not exist or an answer that was never given; the store is their only author.
+#[allow(clippy::result_large_err)]
+fn refuse_question_events_from_callers(event: &proto::OrchestrationEvent) -> Result<(), Status> {
+    if is_question_event(event) {
+        return Err(Status::invalid_argument(
+            "question events are written by the question store",
+        ));
+    }
+    Ok(())
+}
+
+/// The ZDR gate of the question RPCs. A question is a new durable store, so a ZDR credential never
+/// reaches it, and a waived one does not either: a waived run counts as ZDR for every new store
+/// (DEC-32). Decided before any lookup, so a refused call reads and writes nothing.
+#[allow(clippy::result_large_err)]
+fn refuse_zdr_or_waived_question_caller(caller: &VerifiedIdentity) -> Result<(), Status> {
+    retention_receipt::refuse_zdr_continuation(caller)?;
+    if caller.zdr_waiver().is_some() {
+        return Err(Refusal::WAIVER_ROUTE_MISMATCH.grpc_status(tonic::Code::PermissionDenied));
+    }
+    Ok(())
+}
+
+/// Only a persistent run keeps a question: a zero-retention run keeps nothing, and a waived run is
+/// persistent only for chat, so it asks nothing and stores nothing new (DEC-32).
+#[allow(clippy::result_large_err)]
+fn require_persistent_run_for_question(
+    stored: &retention_receipt::RunRetention,
+) -> Result<(), Status> {
+    if stored.class == retention_receipt::RetentionClass::Persistent {
+        Ok(())
+    } else {
+        Err(Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::FailedPrecondition))
+    }
+}
+
+/// The typed status of an invalid question. The message is `invalid_question: <field>: <reason>`
+/// and the gateway reads the code and the problem back out of it.
+fn invalid_question(problem: &user_question::Problem) -> Status {
+    Status::invalid_argument(format!("invalid_question: {problem}"))
+}
+
+/// The typed status of an invalid answer: `invalid_answer: <field>: <reason>`.
+fn invalid_answer(problem: &user_question::Problem) -> Status {
+    Status::invalid_argument(format!("invalid_answer: {problem}"))
+}
+
+fn question_items_from_proto(items: &[proto::QuestionItem]) -> Vec<user_question::Item> {
+    items
+        .iter()
+        .map(|item| user_question::Item {
+            id: item.id.clone(),
+            kind: item.kind.clone(),
+            prompt: item.prompt.clone(),
+            options: item
+                .options
+                .iter()
+                .map(|option| user_question::OptionSpec {
+                    id: option.id.clone(),
+                    label: option.label.clone(),
+                    description: option.description.clone(),
+                })
+                .collect(),
+            allow_other: item.allow_other,
+        })
+        .collect()
+}
+
+fn question_items_to_proto(items: &[user_question::Item]) -> Vec<proto::QuestionItem> {
+    items
+        .iter()
+        .map(|item| proto::QuestionItem {
+            id: item.id.clone(),
+            kind: item.kind.clone(),
+            prompt: item.prompt.clone(),
+            options: item
+                .options
+                .iter()
+                .map(|option| proto::QuestionOption {
+                    id: option.id.clone(),
+                    label: option.label.clone(),
+                    description: option.description.clone(),
+                })
+                .collect(),
+            allow_other: item.allow_other,
+        })
+        .collect()
+}
+
+fn question_answers_from_proto(answers: &[proto::QuestionAnswerItem]) -> Vec<user_question::Answer> {
+    answers
+        .iter()
+        .map(|answer| user_question::Answer {
+            item_id: answer.item_id.clone(),
+            option_ids: answer.option_ids.clone(),
+            text: answer.text.clone(),
+        })
+        .collect()
+}
+
+fn question_answers_to_proto(answers: &[user_question::Answer]) -> Vec<proto::QuestionAnswerItem> {
+    answers
+        .iter()
+        .map(|answer| proto::QuestionAnswerItem {
+            item_id: answer.item_id.clone(),
+            option_ids: answer.option_ids.clone(),
+            text: answer.text.clone(),
+        })
+        .collect()
+}
+
+fn question_state_to_proto(state: &str) -> proto::QuestionState {
+    match state {
+        "requested" => proto::QuestionState::Requested,
+        "answered" => proto::QuestionState::Answered,
+        "skipped" => proto::QuestionState::Skipped,
+        "expired" => proto::QuestionState::Expired,
+        "cancelled" => proto::QuestionState::Cancelled,
+        _ => proto::QuestionState::Unspecified,
+    }
+}
+
+/// The wire form of a stored question.
+///
+/// # Errors
+/// `internal` when the stored spec or answers are not the shared contract's shape, which no writer
+/// of this table produces.
+#[allow(clippy::result_large_err)]
+fn run_question_from_row(row: &store::RunQuestionRow) -> Result<proto::RunQuestion, Status> {
+    let items: Vec<user_question::Item> = serde_json::from_value(row.spec.clone())
+        .map_err(|_| Status::internal("stored question is malformed"))?;
+    let answers: Vec<user_question::Answer> = match row.answers.as_ref() {
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|_| Status::internal("stored answer is malformed"))?,
+        None => Vec::new(),
+    };
+    Ok(proto::RunQuestion {
+        id: row.id.clone(),
+        run_id: row.run_id.clone(),
+        thread_id: row.thread_id.clone(),
+        step_id: row.step_id.clone(),
+        org_id: row.org_id.clone(),
+        user_id: row.user_id.clone(),
+        state: question_state_to_proto(&row.state) as i32,
+        delivery: row.delivery.clone(),
+        items: question_items_to_proto(&items),
+        requested_at: Some(ts(row.requested_at)),
+        expires_at: Some(ts(row.expires_at)),
+        answered_at: row.answered_at.map(ts),
+        answers: question_answers_to_proto(&answers),
+        answered_message_id: row.answered_message_id.clone(),
+    })
+}
+
+/// A question ready to store: everything `CreateRunQuestion` decides before it writes.
+#[derive(Debug)]
+struct PreparedQuestion {
+    delivery: &'static str,
+    expires_in: chrono::Duration,
+    spec: JsonValue,
+}
+
+/// Validate a create request's own fields and shape them for the store. Pure, so every refusal is
+/// tested without a database.
+///
+/// `resume` is a delivery the schema holds but nothing serves yet, so it is refused here rather
+/// than stored as a question that no later step would pick up.
+#[allow(clippy::result_large_err)]
+fn prepare_question(req: &proto::CreateRunQuestionRequest) -> Result<PreparedQuestion, Status> {
+    let delivery = match req.delivery.as_str() {
+        "" | user_question::DELIVERY_NEXT_TURN => user_question::DELIVERY_NEXT_TURN,
+        user_question::DELIVERY_RESUME => {
+            return Err(Status::invalid_argument("question_delivery_unavailable"));
+        }
+        _ => {
+            return Err(invalid_question(&user_question::Problem {
+                field: "delivery".to_owned(),
+                reason: "unknown_delivery",
+            }));
+        }
+    };
+    for (field, value) in [("step_id", &req.step_id), ("idempotency_key", &req.idempotency_key)] {
+        if value.len() > 256 {
+            return Err(invalid_question(&user_question::Problem {
+                field: field.to_owned(),
+                reason: "text_too_long",
+            }));
+        }
+    }
+    let items = question_items_from_proto(&req.items);
+    user_question::validate_items(&items).map_err(|problem| invalid_question(&problem))?;
+    let ceiling = user_question::delivery_ttl_secs(delivery)
+        .ok_or_else(|| Status::internal("delivery has no lifetime"))?;
+    let lifetime = if req.expires_in_seconds == 0 {
+        ceiling
+    } else {
+        req.expires_in_seconds.min(ceiling)
+    };
+    Ok(PreparedQuestion {
+        delivery,
+        expires_in: chrono::Duration::seconds(i64::from(lifetime)),
+        spec: serde_json::to_value(&items).map_err(|_| Status::internal("question is not JSON"))?,
+    })
+}
+
+/// An answer checked against its question and shaped for the store.
+#[derive(Debug)]
+struct PreparedAnswer {
+    answers: JsonValue,
+    digest: String,
+}
+
+/// Check an answer request against the stored question's items. Pure.
+#[allow(clippy::result_large_err)]
+fn prepare_answer(
+    row: &store::RunQuestionRow,
+    req: &proto::AnswerRunQuestionRequest,
+) -> Result<PreparedAnswer, Status> {
+    if req.answered_message_id.len() > 256 {
+        return Err(invalid_answer(&user_question::Problem {
+            field: "answered_message_id".to_owned(),
+            reason: "text_too_long",
+        }));
+    }
+    let items: Vec<user_question::Item> = serde_json::from_value(row.spec.clone())
+        .map_err(|_| Status::internal("stored question is malformed"))?;
+    let answers = question_answers_from_proto(&req.answers);
+    user_question::validate_answers(&items, &answers, req.skip)
+        .map_err(|problem| invalid_answer(&problem))?;
+    Ok(PreparedAnswer {
+        digest: user_question::answers_digest(&answers, req.skip),
+        answers: serde_json::to_value(&answers)
+            .map_err(|_| Status::internal("answer is not JSON"))?,
+    })
+}
+
+fn question_asked_event(row: &store::RunQuestionRow) -> proto::OrchestrationEvent {
+    proto::OrchestrationEvent {
+        event_id: String::new(),
+        at: Some(now_ts()),
+        event: Some(orchestration_event::Event::QuestionAsked(
+            orchestration_event::QuestionAsked {
+                run_id: row.run_id.clone(),
+                question_id: row.id.clone(),
+                delivery: row.delivery.clone(),
+                expires_at: Some(ts(row.expires_at)),
+            },
+        )),
+    }
+}
+
+fn question_answered_event(row: &store::RunQuestionRow) -> proto::OrchestrationEvent {
+    proto::OrchestrationEvent {
+        event_id: String::new(),
+        at: Some(now_ts()),
+        event: Some(orchestration_event::Event::QuestionAnswered(
+            orchestration_event::QuestionAnswered {
+                run_id: row.run_id.clone(),
+                question_id: row.id.clone(),
+                state: question_state_to_proto(&row.state) as i32,
+            },
+        )),
     }
 }
 
@@ -2524,6 +3193,14 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 .ok_or_else(|| Status::invalid_argument("invalid approval kind"))?;
             let continuation_descriptor =
                 validate_continuation_descriptor(&req.continuation_descriptor_json, &req)?;
+            // A loop continuation retains a fold: a zero-retention caller never
+            // raises one, and only the two named modes exist.
+            if !matches!(req.continuation_mode.as_str(), "" | "segment" | "loop") {
+                return Err(Status::invalid_argument("invalid continuation_mode"));
+            }
+            if !req.continuation_mode.is_empty() {
+                retention_receipt::refuse_zdr_continuation(&caller)?;
+            }
 
             // Honor a caller-supplied id (matrix §4.1) so an upstream cache
             // (the gateway ApprovalStore) stays aligned with the durable
@@ -2545,14 +3222,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             } else {
                 None
             };
-            let mut metadata_map = serde_json::Map::new();
-            if !req.reason.is_empty() {
-                metadata_map.insert("reason".to_owned(), JsonValue::String(req.reason.clone()));
-            }
-            if !req.step_id.is_empty() {
-                metadata_map.insert("step_id".to_owned(), JsonValue::String(req.step_id.clone()));
-            }
-            let metadata = JsonValue::Object(metadata_map);
+            let (metadata, cause_code) = new_approval_metadata(&req, caller.zdr());
 
             let created = store::request_approval(
                 &self.pool,
@@ -2572,10 +3242,16 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &metadata,
                 continuation_descriptor.as_ref(),
                 expires_at,
+                &req.continuation_mode,
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
+            // Counted when a row was inserted, so a retried request that collapses onto
+            // an existing approval is not counted twice.
+            if let (Some(_), Some(code)) = (&created, cause_code) {
+                metrics::counter!("mp_session_approval_cause_total", "code" => code).increment(1);
+            }
             // On the `DO NOTHING` no-op path `created` is None and the existing
             // durable row keeps its ORIGINAL id (not the new caller id), so we
             // must resolve it by the idempotency key rather than by `id`.
@@ -2613,6 +3289,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                             approval_kind: approval_kind_from_str(&row.kind),
                             to: proto::ApprovalState::Requested as i32,
                             decided_by: String::new(),
+                            ..Default::default()
                         },
                     )),
                 },
@@ -2638,6 +3315,277 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         }
         .await;
         record_metrics("create_approval", started, result.is_ok());
+        result
+    }
+
+    // Build plan WS14 S3: a question is its own pause kind with its own store, never an
+    // approval. It is stored for a persistent run only, bound to the run's owner, and
+    // answered once by that owner alone.
+    async fn create_run_question(
+        &self,
+        request: Request<proto::CreateRunQuestionRequest>,
+    ) -> Result<Response<proto::CreateRunQuestionResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::CreateRunQuestionResponse>, Status> = async {
+            let caller = identity(&request)?;
+            refuse_zdr_or_waived_question_caller(&caller)?;
+            authorize_operation(&caller, "orchestration:write")?;
+            let req = request.into_inner();
+            if req.run_id.is_empty() {
+                return Err(Status::invalid_argument("run_id is required"));
+            }
+            caller.authorize_org(&req.org_id)?;
+            let scope = store::run_question_scope(&self.pool, &req.run_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                .ok_or_else(|| Status::not_found("run not found"))?;
+            authorize_owner_row(&caller, &scope.org_id, &scope.user_id, OwnerIntent::Mutate)?;
+            // A system workload owns no person to ask.
+            if crate::auth::is_system_run_owner(&scope.user_id) {
+                return Err(Status::failed_precondition("question_run_has_no_owner"));
+            }
+            require_persistent_run_for_question(
+                &retention_receipt::stored_run_retention(&self.pool, &req.run_id).await?,
+            )?;
+            let prepared = prepare_question(&req)?;
+
+            let id = format!("q_{}", mp_ids::new_ulid());
+            let created = store::create_run_question(
+                &self.pool,
+                &store::NewRunQuestion {
+                    id: &id,
+                    run_id: &req.run_id,
+                    thread_id: &scope.thread_id,
+                    step_id: &req.step_id,
+                    org_id: &scope.org_id,
+                    user_id: &scope.user_id,
+                    delivery: prepared.delivery,
+                    spec: &prepared.spec,
+                    idempotency_key: &req.idempotency_key,
+                    expires_at: Utc::now() + prepared.expires_in,
+                },
+                user_question::MAX_QUESTIONS_PER_RUN,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            let row = match created {
+                store::CreatedRunQuestion::Created(row) => {
+                    // Only a question this call wrote is announced; a retry that resolved to the
+                    // stored one stays silent.
+                    broadcast_event(&self.events_tx, &self.replay, question_asked_event(&row));
+                    row
+                }
+                store::CreatedRunQuestion::Existing(row) => row,
+                store::CreatedRunQuestion::BudgetExhausted => {
+                    return Err(Status::resource_exhausted("question_budget_exhausted"));
+                }
+                store::CreatedRunQuestion::KeyInUse => {
+                    return Err(Status::already_exists("question_key_in_use"));
+                }
+            };
+            Ok(Response::new(proto::CreateRunQuestionResponse {
+                question: Some(run_question_from_row(&row)?),
+            }))
+        }
+        .await;
+        record_metrics("create_run_question", started, result.is_ok());
+        result
+    }
+
+    async fn list_run_questions(
+        &self,
+        request: Request<proto::ListRunQuestionsRequest>,
+    ) -> Result<Response<proto::ListRunQuestionsResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::ListRunQuestionsResponse>, Status> = async {
+            let caller = identity(&request)?;
+            refuse_zdr_or_waived_question_caller(&caller)?;
+            authorize_operation(&caller, "orchestration:read")?;
+            let req = request.into_inner();
+            if req.run_id.is_empty() {
+                return Err(Status::invalid_argument("run_id is required"));
+            }
+            caller.authorize_org(&req.org_id)?;
+            // Questions are the owner's alone, so a credential with no user behind it reads none.
+            let user_id = caller
+                .user_id()
+                .ok_or_else(|| Status::permission_denied("user-bound credential required"))?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Read).await?;
+            let rows = store::list_run_questions(&self.pool, &req.run_id, &req.org_id, user_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            let questions = rows
+                .iter()
+                .map(run_question_from_row)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Response::new(proto::ListRunQuestionsResponse { questions }))
+        }
+        .await;
+        record_metrics("list_run_questions", started, result.is_ok());
+        result
+    }
+
+    async fn answer_run_question(
+        &self,
+        request: Request<proto::AnswerRunQuestionRequest>,
+    ) -> Result<Response<proto::AnswerRunQuestionResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::AnswerRunQuestionResponse>, Status> = async {
+            let caller = identity(&request)?;
+            refuse_zdr_or_waived_question_caller(&caller)?;
+            authorize_operation(&caller, "orchestration:write")?;
+            let req = request.into_inner();
+            if req.question_id.is_empty() {
+                return Err(Status::invalid_argument("question_id is required"));
+            }
+            caller.authorize_org(&req.org_id)?;
+            let user_id = caller
+                .user_id()
+                .ok_or_else(|| Status::permission_denied("user-bound credential required"))?;
+            // Another user's question, and one that does not exist, answer the same.
+            let stored =
+                store::get_run_question(&self.pool, &req.question_id, &req.org_id, user_id)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?
+                    .ok_or_else(|| Status::not_found("question_not_found"))?;
+            let prepared = prepare_answer(&stored, &req)?;
+
+            let outcome = store::answer_run_question(
+                &self.pool,
+                &req.question_id,
+                &req.org_id,
+                user_id,
+                &prepared.answers,
+                &prepared.digest,
+                req.skip,
+                &req.answered_message_id,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            let row = match outcome {
+                store::AnsweredRunQuestion::Answered(row) => {
+                    // Only the answer that won the compare-and-set is announced.
+                    broadcast_event(&self.events_tx, &self.replay, question_answered_event(&row));
+                    row
+                }
+                store::AnsweredRunQuestion::Replay(row) => row,
+                store::AnsweredRunQuestion::AlreadyAnswered => {
+                    return Err(Status::already_exists("question_already_answered"));
+                }
+                store::AnsweredRunQuestion::Gone(_) => {
+                    return Err(Status::failed_precondition("question_expired"));
+                }
+                store::AnsweredRunQuestion::NotFound => {
+                    return Err(Status::not_found("question_not_found"));
+                }
+            };
+            Ok(Response::new(proto::AnswerRunQuestionResponse {
+                question: Some(run_question_from_row(&row)?),
+            }))
+        }
+        .await;
+        record_metrics("answer_run_question", started, result.is_ok());
+        result
+    }
+
+    // Build plan WS03 S2: the durable Do loop claims a granted loop-mode approval
+    // exactly once when it re-enters. The cold delivery worker never sees a
+    // loop-mode approval (decide_approval makes no delivery row for it), so the
+    // call is run by the loop once and never also by the worker.
+    async fn consume_approval(
+        &self,
+        request: Request<proto::ConsumeApprovalRequest>,
+    ) -> Result<Response<proto::ConsumeApprovalResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::ConsumeApprovalResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "orchestration:write")?;
+            let req = request.into_inner();
+            if req.approval_id.is_empty()
+                || req.run_id.is_empty()
+                || req.org_id.is_empty()
+                || req.claim_token.is_empty()
+            {
+                return Err(Status::invalid_argument(
+                    "approval_id, run_id, org_id and claim_token are required",
+                ));
+            }
+            caller.authorize_org(&req.org_id)?;
+            let user_id = caller
+                .user_id()
+                .ok_or_else(|| Status::permission_denied("user-bound approval credential required"))?
+                .to_owned();
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
+            // Only a hash of the claim token is stored.
+            let claim_hash = blake3::hash(req.claim_token.as_bytes()).to_hex().to_string();
+            // A caller that consumes for the spend only (the gateway, ahead of the
+            // executor) is neither handed nor does it cause the descriptor to be
+            // read; its winning consume also renews the run's recovery deadline.
+            let outcome = if req.omit_call {
+                store::consume_approval_spend_only(
+                    &self.pool,
+                    &req.approval_id,
+                    &req.org_id,
+                    &req.run_id,
+                    &user_id,
+                    &req.action_fingerprint,
+                    &claim_hash,
+                )
+                .await
+            } else {
+                store::consume_approval(
+                    &self.pool,
+                    &req.approval_id,
+                    &req.org_id,
+                    &req.run_id,
+                    &user_id,
+                    &req.action_fingerprint,
+                    &claim_hash,
+                )
+                .await
+            }
+            .map_err(|e| Status::internal(e.to_string()))?;
+            match outcome {
+                Ok(done) => {
+                    if done.consumed {
+                        broadcast_event(
+                            &self.events_tx,
+                            &self.replay,
+                            proto::OrchestrationEvent {
+                                event_id: String::new(),
+                                at: Some(now_ts()),
+                                event: Some(orchestration_event::Event::RunResumedAfterApproval(
+                                    orchestration_event::RunResumedAfterApproval {
+                                        run_id: req.run_id.clone(),
+                                        approval_id: req.approval_id.clone(),
+                                    },
+                                )),
+                            },
+                        );
+                    }
+                    Ok(Response::new(consume_response(done, req.omit_call)))
+                }
+                // Closed wording only: nothing about the call or its content.
+                Err(store::ConsumeRefusal::NotFound) => {
+                    Err(Status::not_found("approval not found for this run"))
+                }
+                Err(store::ConsumeRefusal::NotGranted) => {
+                    Err(Status::failed_precondition("approval_not_granted"))
+                }
+                Err(store::ConsumeRefusal::Expired) => {
+                    Err(Status::failed_precondition("approval_expired"))
+                }
+                Err(store::ConsumeRefusal::FingerprintMismatch) => {
+                    Err(Status::failed_precondition("approval_action_mismatch"))
+                }
+                Err(store::ConsumeRefusal::NotResumable) => {
+                    Err(Status::failed_precondition("approval_not_resumable"))
+                }
+            }
+        }
+        .await;
+        record_metrics("consume_approval", started, result.is_ok());
         result
     }
 
@@ -2677,7 +3625,11 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 ));
             }
 
-            let decision_write = store::decide_approval(
+            let source = approval_decision_source_to_str(req.decision_source)
+                .ok_or_else(|| Status::invalid_argument("invalid decision source"))?;
+            let scope = approval_scope_to_str(req.scope)
+                .ok_or_else(|| Status::invalid_argument("invalid decision scope"))?;
+            let decision_write = store::decide_approval_recorded(
                 &self.pool,
                 &req.approval_id,
                 &req.org_id,
@@ -2685,10 +3637,19 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 new_status,
                 &req.decided_by,
                 &req.decision_reason,
+                &store::DecisionRecord {
+                    source,
+                    scope,
+                    audit: approval_audit_events_enabled(),
+                },
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
             let updated = decision_write.updated;
+            if updated {
+                metrics::counter!("mp_session_approval_decisions_total", "source" => source)
+                    .increment(1);
+            }
 
             let after = store::get_approval_for_org(
                 &self.pool,
@@ -2706,6 +3667,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                             new_status,
                             &req.decided_by,
                             &req.decision_reason,
+                            scope,
                         ) => {}
                     Some(_) => {
                         return Err(Status::failed_precondition("approval is already decided"));
@@ -2713,7 +3675,12 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     None => return Err(Status::not_found("approval not found")),
                 }
             }
-            if new_status == "granted" && decision_write.delivery_id.is_none() {
+            // A loop-owned approval has no delivery record by design (the durable loop
+            // consumes it); only a cold approval without one is a missing durable state.
+            if new_status == "granted"
+                && decision_write.delivery_id.is_none()
+                && !decision_write.loop_owned
+            {
                 return Err(Status::unavailable(
                     "approval is granted but durable delivery state is unavailable",
                 ));
@@ -3204,6 +4171,12 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             if ev.event.is_none() {
                 return Err(Status::invalid_argument("event payload is required"));
             }
+            // Before anything is looked up, persisted or broadcast.
+            refuse_park_events_while_parking_is_off(
+                crate::terminalization::park_recovery_active(),
+                &ev,
+            )?;
+            refuse_question_events_from_callers(&ev)?;
             // Only run-scoped events are deliverable on the per-run stream;
             // reject ones we couldn't route so callers learn early.
             if event_run_id(&ev).is_none_or(str::is_empty) {
@@ -3211,8 +4184,15 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     "event must carry a non-empty run_id",
                 ));
             }
-            let run_id = event_run_id(&ev).expect("validated run id");
-            authorize_run_owner(&self.pool, &caller, run_id, OwnerIntent::Mutate).await?;
+            let run_id = event_run_id(&ev).expect("validated run id").to_owned();
+            authorize_run_owner(&self.pool, &caller, &run_id, OwnerIntent::Mutate).await?;
+            if is_park_event(&ev) {
+                // The caller's own event id and time are never taken for these two tags (the
+                // server assigns both below), and the event must match the run's own fold.
+                ev.event_id = String::new();
+                ev.at = None;
+                require_park_event_to_match_the_fold(&self.pool, &ev).await?;
+            }
             // Server owns the timestamp; fill it in when the caller left it empty.
             if ev.at.is_none() {
                 ev.at = Some(now_ts());
@@ -3306,6 +4286,118 @@ impl OrchestrationCoreService for OrchestrationGrpc {
 mod tests {
     use super::*;
 
+    /// A won consume's call, with a retained authority snapshot, as the store
+    /// hands it to the handler.
+    fn consumed_with_call(consumed: bool, same_claim: bool) -> store::ConsumeOutcome {
+        store::ConsumeOutcome {
+            consumed,
+            already_consumed: !consumed,
+            same_claim,
+            call: Some(store::ConsumedCall {
+                step_id: "s1.tool_1_call-1".to_owned(),
+                tool_name: "delete_records".to_owned(),
+                tool_input_json: r#"{"table":"t"}"#.to_owned(),
+                offered_json: r#"{"tools":[{"name":"delete_records","description":"d","parameters_json":"{}"}],"authority":{"mode":"ask","plan_mode":false,"autonomy_rung":"","space_id":"","min_privacy_tier":0,"provider_hint":"","max_rounds":4,"tool_names":["delete_records"],"digest":"abc"}}"#
+                    .to_owned(),
+            }),
+        }
+    }
+
+    // S7c-A2: a spend-only consume (the gateway's, ahead of the executor) gets the
+    // three flags and nothing else: no call content, no step, no authority.
+    #[test]
+    fn omit_call_withholds_the_call_but_keeps_the_flags() {
+        for (consumed, same_claim) in [(true, false), (false, true), (false, false)] {
+            let response = consume_response(consumed_with_call(consumed, same_claim), true);
+            assert_eq!(response.consumed, consumed);
+            assert_eq!(response.already_consumed, !consumed);
+            assert_eq!(response.same_claim, same_claim);
+            assert_eq!(response.tool_name, "");
+            assert_eq!(response.tool_input_json, "");
+            assert_eq!(response.step_id, "");
+            assert!(response.authority.is_none(), "the snapshot is withheld too");
+        }
+        // An outcome that carries no call at all answers the same way.
+        let bare = store::ConsumeOutcome {
+            consumed: true,
+            already_consumed: false,
+            same_claim: false,
+            call: None,
+        };
+        assert_eq!(
+            consume_response(bare, true),
+            proto::ConsumeApprovalResponse {
+                consumed: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    // Without omit_call the answer is what the handler built inline before this
+    // change: the call, the step and the snapshot, to the claim holder.
+    #[test]
+    fn without_omit_call_the_response_is_unchanged() {
+        let won = consume_response(consumed_with_call(true, false), false);
+        assert!(won.consumed && !won.already_consumed && !won.same_claim);
+        assert_eq!(won.tool_name, "delete_records");
+        assert_eq!(won.tool_input_json, r#"{"table":"t"}"#);
+        assert_eq!(won.step_id, "s1.tool_1_call-1");
+        let authority = won.authority.expect("the snapshot comes back with the call");
+        assert_eq!(authority.digest, "abc");
+        assert_eq!(authority.tool_names, vec!["delete_records".to_owned()]);
+
+        let replay = consume_response(consumed_with_call(false, true), false);
+        assert!(!replay.consumed && replay.already_consumed && replay.same_claim);
+        assert_eq!(replay.tool_name, "delete_records");
+
+        // No call (another claim): empty fields and no authority, as before.
+        let other = consume_response(
+            store::ConsumeOutcome {
+                consumed: false,
+                already_consumed: true,
+                same_claim: false,
+                call: None,
+            },
+            false,
+        );
+        assert_eq!(
+            other,
+            proto::ConsumeApprovalResponse {
+                already_consumed: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    // The handler picks the store function from the request and keeps the event
+    // tied to a WON consume only. The source is scanned because the handler needs a
+    // database to run.
+    #[test]
+    fn the_consume_handler_routes_omit_call_to_the_spend_only_store_call() {
+        let source = include_str!("orchestration_grpc.rs").replace("\r\n", "\n");
+        let start = source
+            .find("    async fn consume_approval(")
+            .expect("the handler is present");
+        let rest = &source[start..];
+        let body = &rest[..rest.find("\n    async fn decide_approval(").expect("the next handler")];
+        assert!(body.contains("if req.omit_call {"));
+        assert!(body.contains("store::consume_approval_spend_only("));
+        assert!(body.contains("store::consume_approval("));
+        assert!(
+            body.find("store::consume_approval_spend_only(").unwrap()
+                < body.find("store::consume_approval(").unwrap(),
+            "the spend-only branch is the one under the omit_call test"
+        );
+        assert!(body.contains("consume_response(done, req.omit_call)"));
+        assert!(
+            body.contains("if done.consumed {"),
+            "RunResumedAfterApproval stays tied to the winning consume"
+        );
+        // The checks that come before the store call do not depend on omit_call.
+        let gate = body.find("authorize_run_owner(").unwrap();
+        assert!(gate < body.find("if req.omit_call {").unwrap());
+    }
+
     #[test]
     fn approval_identity_is_pinned_and_cross_tenant_requests_are_rejected() {
         let caller = crate::auth::VerifiedIdentity::user_for_test("org-1", "user-1");
@@ -3380,6 +4472,33 @@ mod tests {
                 .expect_err("descriptor retention must have a finite expiry")
                 .code(),
             tonic::Code::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn continuation_descriptor_size_cap_refuses_one_byte_over() {
+        let req = proto::CreateApprovalRequest {
+            run_id: "run-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            expires_in_seconds: 3600,
+            ..Default::default()
+        };
+        // At the cap the size check passes; this non-JSON body is then refused by
+        // the parser, which proves the cap itself did not fire.
+        let at_cap = "x".repeat(MAX_CONTINUATION_DESCRIPTOR_BYTES);
+        assert_eq!(
+            validate_continuation_descriptor(&at_cap, &req)
+                .expect_err("not JSON")
+                .message(),
+            "continuation descriptor must be JSON"
+        );
+        let over = "x".repeat(MAX_CONTINUATION_DESCRIPTOR_BYTES + 1);
+        assert_eq!(
+            validate_continuation_descriptor(&over, &req)
+                .expect_err("one byte over the cap")
+                .message(),
+            "continuation descriptor is too large"
         );
     }
 
@@ -3824,16 +4943,148 @@ mod tests {
             requested_at: Utc::now(),
             decided_at: Some(Utc::now()),
             expires_at: None,
+            continuation_mode: String::new(),
+            consumed_at: None,
         };
         assert!(is_idempotent_approval_retry(
-            &row, "granted", "user-1", "approved"
+            &row, "granted", "user-1", "approved", "once"
         ));
         assert!(!is_idempotent_approval_retry(
-            &row, "denied", "user-1", "approved"
+            &row, "denied", "user-1", "approved", "once"
         ));
         assert!(!is_idempotent_approval_retry(
-            &row, "granted", "user-2", "approved"
+            &row, "granted", "user-2", "approved", "once"
         ));
+    }
+
+    #[test]
+    fn an_unspecified_source_is_recorded_as_unattributed() {
+        assert_eq!(approval_decision_source_to_str(0), Some("unattributed"));
+        assert_eq!(approval_decision_source_to_str(1), Some("user"));
+        assert_eq!(approval_decision_source_to_str(2), Some("posture_auto"));
+        assert_eq!(approval_decision_source_to_str(99), None, "a number outside the enum is refused");
+        assert_eq!(approval_decision_source_from_str("unattributed"), 0);
+        assert_eq!(approval_decision_source_from_str("a_future_source"), 0);
+    }
+
+    #[test]
+    fn a_retry_with_a_different_scope_conflicts() {
+        let row = store::ApprovalRow {
+            id: "appr-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            plan_id: None,
+            kind: "tool_call".to_owned(),
+            status: "granted".to_owned(),
+            requested_by: "user-1".to_owned(),
+            decided_by: "user-1".to_owned(),
+            decision_reason: "approved".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            idempotency_key: String::new(),
+            metadata: serde_json::json!({ "decision": { "source": "user", "scope": "once" } }),
+            requested_at: Utc::now(),
+            decided_at: Some(Utc::now()),
+            expires_at: None,
+            continuation_mode: String::new(),
+            consumed_at: None,
+        };
+        assert!(is_idempotent_approval_retry(&row, "granted", "user-1", "approved", "once"));
+        assert!(!is_idempotent_approval_retry(&row, "granted", "user-1", "approved", "thread"));
+        assert!(!is_idempotent_approval_retry(&row, "granted", "user-1", "approved", "run"));
+    }
+
+    #[test]
+    fn the_approval_audit_switch_is_on_only_for_the_literal_true() {
+        assert!(!approval_audit_switch_from(None));
+        for value in ["", "1", "yes", "on", "false"] {
+            assert!(!approval_audit_switch_from(Some(value)), "{value:?} must not enable it");
+        }
+        assert!(approval_audit_switch_from(Some("true")));
+        assert!(approval_audit_switch_from(Some(" TRUE ")));
+    }
+
+    fn create_with_cause(code: &str) -> proto::CreateApprovalRequest {
+        proto::CreateApprovalRequest {
+            run_id: "run-1".to_owned(),
+            step_id: "step-1".to_owned(),
+            reason: "tool 'delete_records' requires approval".to_owned(),
+            cause: Some(proto::ApprovalCause {
+                code: code.to_owned(),
+                tool: "delete_records".to_owned(),
+                action_key: "delete_records".to_owned(),
+                call_digest: "d".repeat(64),
+                scope_options: vec!["once".to_owned()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_stated_cause_is_stored_beside_the_reason_and_read_back() {
+        let (metadata, code) =
+            new_approval_metadata(&create_with_cause("risky_effect_under_ask"), false);
+        assert_eq!(code, Some("risky_effect_under_ask"));
+        assert_eq!(
+            metadata["reason"],
+            "tool 'delete_records' requires approval"
+        );
+        assert_eq!(metadata["step_id"], "step-1");
+        assert_eq!(metadata["cause"]["code"], "risky_effect_under_ask");
+        assert_eq!(metadata["cause"]["tool"], "delete_records");
+
+        let mut row = test_approval("appr_1");
+        row.metadata = metadata;
+        let approval = approval_from_row(&row);
+        let cause = approval.cause.expect("the stored cause comes back");
+        assert_eq!(cause.code, "risky_effect_under_ask");
+        assert_eq!(cause.call_digest, "d".repeat(64));
+        assert_eq!(cause.scope_options, vec!["once".to_owned()]);
+    }
+
+    #[test]
+    fn an_unknown_cause_code_is_stored_as_unclassified_gate() {
+        let mut req = create_with_cause("tainted_egress");
+        req.cause.as_mut().expect("cause").scope_options = vec!["run".to_owned()];
+        let (metadata, code) = new_approval_metadata(&req, false);
+        assert_eq!(code, Some("unclassified_gate"));
+        assert_eq!(metadata["cause"]["code"], "unclassified_gate");
+        assert_eq!(
+            metadata["cause"]["scope_options"],
+            serde_json::json!(["once"]),
+            "a creator cannot widen the scopes it offers"
+        );
+        let (metadata, _) = new_approval_metadata(&create_with_cause(""), false);
+        assert_eq!(metadata["cause"]["code"], "unclassified_gate");
+    }
+
+    #[test]
+    fn a_zero_retention_caller_stores_no_cause() {
+        let (metadata, code) = new_approval_metadata(&create_with_cause("provider_write"), true);
+        assert_eq!(code, None);
+        assert!(metadata.get("cause").is_none(), "{metadata}");
+        assert_eq!(
+            metadata["reason"],
+            "tool 'delete_records' requires approval"
+        );
+    }
+
+    #[test]
+    fn an_approval_with_no_stated_cause_is_stored_exactly_as_before() {
+        let mut req = create_with_cause("provider_write");
+        req.cause = None;
+        let (metadata, code) = new_approval_metadata(&req, false);
+        assert_eq!(code, None);
+        assert_eq!(
+            metadata,
+            serde_json::json!({
+                "reason": "tool 'delete_records' requires approval",
+                "step_id": "step-1",
+            })
+        );
+        let mut row = test_approval("appr_2");
+        row.metadata = metadata;
+        assert!(approval_from_row(&row).cause.is_none());
     }
 
     #[tokio::test]
@@ -3854,6 +5105,8 @@ mod tests {
             requested_at: Utc::now(),
             decided_at: Some(Utc::now()),
             expires_at: None,
+            continuation_mode: String::new(),
+            consumed_at: None,
         };
         let (events_tx, mut events_rx) = broadcast::channel(8);
         let replay = ReplayBuffer::default();
@@ -4186,6 +5439,7 @@ mod tests {
                     approval_kind: 0,
                     to: 0,
                     decided_by: String::new(),
+                    ..Default::default()
                 },
             )),
         };
@@ -4310,6 +5564,199 @@ mod tests {
             )),
         };
         assert_eq!(event_run_id(&resumed_run), Some("run_p"));
+
+        // A durable-loop park and its resume are run-scoped, so both reach the
+        // per-run stream and the replay buffer (WS03 S8).
+        let parked = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::RunParked(
+                orchestration_event::RunParked {
+                    run_id: "run_k".into(),
+                },
+            )),
+        };
+        assert_eq!(event_run_id(&parked), Some("run_k"));
+
+        let loop_resumed = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::RunResumed(
+                orchestration_event::RunResumed {
+                    run_id: "run_k".into(),
+                    resumed_segment: 3,
+                },
+            )),
+        };
+        assert_eq!(event_run_id(&loop_resumed), Some("run_k"));
+    }
+
+    fn park_event(resumed: bool, run_id: &str) -> proto::OrchestrationEvent {
+        proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(if resumed {
+                orchestration_event::Event::RunResumed(orchestration_event::RunResumed {
+                    run_id: run_id.to_owned(),
+                    resumed_segment: 2,
+                })
+            } else {
+                orchestration_event::Event::RunParked(orchestration_event::RunParked {
+                    run_id: run_id.to_owned(),
+                })
+            }),
+        }
+    }
+
+    // WS03 S8 review finding: before S8-2 prost skipped tags 24 and 25, so every
+    // caller got "event payload is required" for them. With the park store off every
+    // caller still does; with it on the ordinary gate applies. The gate is the switch,
+    // not a principal: the executor records under the run owner's bearer, so a gate on
+    // `service:execution-core` refused its own events (found live 2026-10-20).
+    #[test]
+    fn park_events_are_recorded_only_while_the_park_store_is_active() {
+        for resumed in [false, true] {
+            let ev = park_event(resumed, "run_x");
+            let refused = refuse_park_events_while_parking_is_off(false, &ev)
+                .expect_err("a park event is refused while the park store is off");
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+            assert_eq!(refused.message(), "event payload is required");
+            assert!(refuse_park_events_while_parking_is_off(true, &ev).is_ok());
+        }
+        // Every other event is untouched by this gate, with the store on or off.
+        let other = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::BrowserRunPaused(
+                orchestration_event::BrowserRunPaused {
+                    run_id: "run_x".into(),
+                    plan_id: "plan_x".into(),
+                },
+            )),
+        };
+        for active in [false, true] {
+            assert!(refuse_park_events_while_parking_is_off(active, &other).is_ok());
+        }
+    }
+
+    // The ORDER in the handler is the protection: the park-store gate, then the run-owner
+    // check, then the caller's own event id and time dropped, then the fold check, and only
+    // then the broadcast and the persist. A source scan, because the order cannot be seen from
+    // outside without a database; the DB test pins the behaviour, this pins what it rests on.
+    #[test]
+    fn the_handler_gates_checks_the_owner_and_the_fold_before_it_broadcasts_or_persists() {
+        let source = include_str!("orchestration_grpc.rs");
+        let start = source
+            .find("async fn record_orchestration_event(")
+            .expect("the handler");
+        let body = &source[start..];
+        let body = &body[..body
+            .find("async fn stream_run_events(")
+            .expect("the next handler")];
+        let order = [
+            "refuse_park_events_while_parking_is_off(",
+            "authorize_run_owner(",
+            "if is_park_event(&ev) {",
+            "ev.event_id = String::new();",
+            "ev.at = None;",
+            "require_park_event_to_match_the_fold(&self.pool, &ev).await?;",
+            "broadcast_event(",
+            "persist_browser_event(",
+        ];
+        let mut last = 0;
+        for needle in order {
+            let at = body
+                .find(needle)
+                .unwrap_or_else(|| panic!("the handler lost `{needle}`"));
+            assert!(at > last, "`{needle}` is out of order in the handler");
+            last = at;
+        }
+        // What each fold check says is true must not loosen unnoticed.
+        // Both are scoped to the event's own run, not to its tenant.
+        for predicate in ["run_id = $1", "kind = 'park'", "state = 'parked'"] {
+            assert!(PARKED_FOLD_EXISTS_SQL.contains(predicate), "{predicate}");
+        }
+        for predicate in [
+            "c.run_id = $1",
+            "c.state <> 'closed'",
+            "c.segment_no = $2",
+            "e.event_type = 'CHECKPOINT_RESTORED'",
+            "e.run_id = c.run_id",
+            "ORDER BY e.ts DESC, e.id DESC LIMIT 1) = 'park'",
+        ] {
+            assert!(RESUMED_FOLD_EXISTS_SQL.contains(predicate), "{predicate}");
+        }
+    }
+
+    // The handler runs the park-event gate before the run-owner lookup, the broadcast and the
+    // persist, and the gate needs BOTH halves of `park_recovery_active` (the fold store AND park
+    // recovery). The pool is lazy and unreachable with a short acquire timeout: reaching the owner
+    // lookup answers Internal, a refusal by the gate answers InvalidArgument "event payload is
+    // required", and a broadcast would reach `rx`. Both a human owner and a service holding
+    // `orchestration:write` are tried: the gate is the switch, not the caller.
+    #[tokio::test]
+    async fn record_orchestration_event_gates_park_events_on_the_whole_park_store_before_anything_runs(
+    ) {
+        use crate::loop_checkpoint::test_switch as store_switch;
+        use crate::terminalization::park_test_switch;
+        let (tx, mut rx) = broadcast::channel::<proto::OrchestrationEvent>(8);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgresql://session-core@127.0.0.1:1/session_core")
+            .expect("lazy pool");
+        let svc = OrchestrationGrpc::new(pool, tx);
+        let callers = || {
+            [
+                VerifiedIdentity::user_for_test("org_x", "user_x"),
+                VerifiedIdentity::service_for_test_as(
+                    "org_x",
+                    "service:model-gateway",
+                    &["orchestration:write"],
+                    false,
+                ),
+            ]
+        };
+        // (fold store, park recovery, whether the park store is active)
+        for (store, park, active) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, false),
+            (true, true, true),
+        ] {
+            // Forced for this thread, so the answer does not depend on the process environment.
+            let _store = store_switch::Forced::set(store);
+            let _park = park_test_switch::Forced::set(park);
+            for resumed in [false, true] {
+                for caller in callers() {
+                    let mut request = Request::new(proto::RecordOrchestrationEventRequest {
+                        event: Some(park_event(resumed, "run_x")),
+                    });
+                    request.extensions_mut().insert(caller);
+                    let answer = svc
+                        .record_orchestration_event(request)
+                        .await
+                        .expect_err("the unreachable pool means no call can succeed");
+                    if active {
+                        assert_eq!(
+                            answer.code(),
+                            tonic::Code::Internal,
+                            "store {store}, park {park}: the gate passed and the owner lookup was reached"
+                        );
+                    } else {
+                        assert_eq!(
+                            answer.code(),
+                            tonic::Code::InvalidArgument,
+                            "store {store}, park {park}: refused by the gate"
+                        );
+                        assert_eq!(answer.message(), "event payload is required");
+                    }
+                }
+            }
+        }
+        assert!(
+            matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
+            "a park event that did not pass the gate and the owner lookup is never broadcast"
+        );
     }
 
     #[tokio::test]
@@ -4340,6 +5787,471 @@ mod tests {
 
         let buffered = replay.replay_after("run_rec", "").await;
         assert_eq!(buffered.len(), 1, "browser event buffered for replay");
+    }
+
+    // -----------------------------------------------------------------------
+    // Run questions (build plan WS14 S3)
+    // -----------------------------------------------------------------------
+
+    fn question_item(id: &str, kind: &str) -> proto::QuestionItem {
+        proto::QuestionItem {
+            id: id.to_owned(),
+            kind: kind.to_owned(),
+            prompt: "Which one?".to_owned(),
+            options: if kind == "text" {
+                Vec::new()
+            } else {
+                vec![
+                    proto::QuestionOption {
+                        id: "a".to_owned(),
+                        label: "A".to_owned(),
+                        description: String::new(),
+                    },
+                    proto::QuestionOption {
+                        id: "b".to_owned(),
+                        label: "B".to_owned(),
+                        description: String::new(),
+                    },
+                ]
+            },
+            allow_other: false,
+        }
+    }
+
+    fn create_question_request(items: Vec<proto::QuestionItem>) -> proto::CreateRunQuestionRequest {
+        proto::CreateRunQuestionRequest {
+            run_id: "run_q".to_owned(),
+            org_id: "org_q".to_owned(),
+            items,
+            ..Default::default()
+        }
+    }
+
+    fn stored_question(spec: JsonValue) -> store::RunQuestionRow {
+        store::RunQuestionRow {
+            id: "q_1".to_owned(),
+            run_id: "run_q".to_owned(),
+            thread_id: "thread_q".to_owned(),
+            step_id: "step-1".to_owned(),
+            org_id: "org_q".to_owned(),
+            user_id: "user_q".to_owned(),
+            state: "requested".to_owned(),
+            delivery: "next_turn".to_owned(),
+            spec,
+            answers: None,
+            answers_digest: None,
+            answered_message_id: String::new(),
+            idempotency_key: String::new(),
+            requested_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            answered_at: None,
+        }
+    }
+
+    fn lazy_unreachable_service() -> (OrchestrationGrpc, broadcast::Receiver<proto::OrchestrationEvent>) {
+        let (tx, rx) = broadcast::channel::<proto::OrchestrationEvent>(8);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgresql://session-core@127.0.0.1:1/session_core")
+            .expect("lazy pool");
+        (OrchestrationGrpc::new(pool, tx), rx)
+    }
+
+    fn with_caller<T>(message: T, caller: VerifiedIdentity) -> Request<T> {
+        let mut request = Request::new(message);
+        request.extensions_mut().insert(caller);
+        request
+    }
+
+    #[test]
+    fn run_question_create_defaults_to_next_turn_and_clamps_the_lifetime() {
+        let items = vec![question_item("scope", "single")];
+        let mut req = create_question_request(items);
+        let prepared = prepare_question(&req).expect("valid");
+        assert_eq!(prepared.delivery, "next_turn");
+        assert_eq!(prepared.expires_in, chrono::Duration::hours(24));
+        assert_eq!(prepared.spec[0]["id"], "scope");
+        req.expires_in_seconds = 90;
+        assert_eq!(
+            prepare_question(&req).expect("valid").expires_in,
+            chrono::Duration::seconds(90)
+        );
+        req.expires_in_seconds = 999_999;
+        assert_eq!(
+            prepare_question(&req).expect("valid").expires_in,
+            chrono::Duration::hours(24),
+            "a longer lifetime is clamped to the delivery's ceiling"
+        );
+    }
+
+    #[test]
+    fn run_question_create_refuses_resume_and_unknown_deliveries() {
+        let mut req = create_question_request(vec![question_item("scope", "single")]);
+        req.delivery = "resume".to_owned();
+        let refused = prepare_question(&req).expect_err("resume is not served yet");
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        assert_eq!(refused.message(), "question_delivery_unavailable");
+        req.delivery = "whenever".to_owned();
+        assert_eq!(
+            prepare_question(&req).expect_err("unknown").message(),
+            "invalid_question: delivery: unknown_delivery"
+        );
+    }
+
+    #[test]
+    fn run_question_create_names_the_problem_the_shared_contract_found() {
+        for (items, message) in [
+            (vec![], "invalid_question: items: no_items"),
+            (
+                vec![question_item("scope", "secret")],
+                "invalid_question: items[0].kind: unsupported_kind",
+            ),
+            (
+                vec![question_item("a", "text"), question_item("a", "text")],
+                "invalid_question: items[1].id: duplicate_id",
+            ),
+        ] {
+            let refused = prepare_question(&create_question_request(items)).expect_err("invalid");
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+            assert_eq!(refused.message(), message);
+        }
+        let mut req = create_question_request(vec![question_item("scope", "single")]);
+        req.idempotency_key = "k".repeat(257);
+        assert_eq!(
+            prepare_question(&req).expect_err("long key").message(),
+            "invalid_question: idempotency_key: text_too_long"
+        );
+    }
+
+    #[test]
+    fn run_question_answer_is_checked_against_the_stored_items() {
+        let items = vec![question_item("scope", "single")];
+        let row = stored_question(
+            prepare_question(&create_question_request(items))
+                .expect("valid")
+                .spec,
+        );
+        let answer = |options: &[&str]| proto::AnswerRunQuestionRequest {
+            question_id: "q_1".to_owned(),
+            org_id: "org_q".to_owned(),
+            answers: vec![proto::QuestionAnswerItem {
+                item_id: "scope".to_owned(),
+                option_ids: options.iter().map(|o| (*o).to_owned()).collect(),
+                text: String::new(),
+            }],
+            ..Default::default()
+        };
+        let ok = prepare_answer(&row, &answer(&["a"])).expect("valid");
+        assert_eq!(ok.answers[0]["option_ids"][0], "a");
+        assert_eq!(ok.digest.len(), 64);
+        assert_ne!(ok.digest, prepare_answer(&row, &answer(&["b"])).expect("valid").digest);
+        let refused = prepare_answer(&row, &answer(&["z"])).expect_err("unknown option");
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        assert_eq!(refused.message(), "invalid_answer: answers[0].option_ids[0]: unknown_option");
+        let skip = proto::AnswerRunQuestionRequest {
+            skip: true,
+            ..answer(&[])
+        };
+        assert_eq!(
+            prepare_answer(&row, &skip).expect_err("a skip carries no answers").message(),
+            "invalid_answer: answers: skip_with_answers"
+        );
+    }
+
+    #[test]
+    fn run_question_a_stored_question_reads_back_as_it_was_written() {
+        let prepared = prepare_question(&create_question_request(vec![
+            question_item("scope", "single"),
+            question_item("notes", "text"),
+        ]))
+        .expect("valid");
+        let mut row = stored_question(prepared.spec);
+        let wire = run_question_from_row(&row).expect("readable");
+        assert_eq!(wire.state, proto::QuestionState::Requested as i32);
+        assert_eq!(wire.items.len(), 2);
+        assert_eq!(wire.items[0].options.len(), 2);
+        assert!(wire.answered_at.is_none() && wire.answers.is_empty());
+
+        row.state = "answered".to_owned();
+        row.answers = Some(serde_json::json!([{"item_id": "scope", "option_ids": ["a"], "text": ""}]));
+        row.answered_at = Some(Utc::now());
+        let wire = run_question_from_row(&row).expect("readable");
+        assert_eq!(wire.state, proto::QuestionState::Answered as i32);
+        assert_eq!(wire.answers[0].option_ids, vec!["a".to_owned()]);
+
+        row.spec = serde_json::json!({"not": "a list of items"});
+        assert_eq!(
+            run_question_from_row(&row).expect_err("malformed").code(),
+            tonic::Code::Internal
+        );
+    }
+
+    #[test]
+    fn run_question_only_a_persistent_run_may_ask() {
+        use retention_receipt::RunRetention;
+        assert!(require_persistent_run_for_question(&RunRetention::persistent()).is_ok());
+        for stored in [RunRetention::zdr(), RunRetention::waived("ack-1", "conn-1")] {
+            let refused = require_persistent_run_for_question(&stored).expect_err("refused");
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(
+                Refusal::from_status(&refused).expect("typed").code(),
+                mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN
+            );
+        }
+    }
+
+    #[test]
+    fn run_question_a_zdr_or_waived_caller_is_refused_with_a_typed_refusal() {
+        use crate::auth::VerifiedIdentity as Id;
+        assert!(refuse_zdr_or_waived_question_caller(&Id::user_for_test("org_q", "user_q")).is_ok());
+        let zdr = refuse_zdr_or_waived_question_caller(&Id::user_for_test_with_zdr(
+            "org_q", "user_q", true,
+        ))
+        .expect_err("a ZDR credential is refused");
+        assert_eq!(zdr.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            Refusal::from_status(&zdr).expect("typed").code(),
+            mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN
+        );
+        let waived = refuse_zdr_or_waived_question_caller(&Id::user_for_test_with_waiver(
+            "org_q", "user_q", "conn-1", "ack-1",
+        ))
+        .expect_err("a waived credential is refused: a waived run counts as ZDR for a new store");
+        assert_eq!(waived.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            Refusal::from_status(&waived).expect("typed").code(),
+            mp_contracts::zdr_refusal::code::WAIVER_ROUTE_MISMATCH
+        );
+    }
+
+    // Every question RPC refuses a ZDR or waived caller before it reads or writes anything. The pool
+    // is unreachable: reaching the database would answer Internal, a refusal answers the typed code.
+    #[tokio::test]
+    async fn run_question_every_rpc_refuses_a_zdr_or_waived_caller_before_any_lookup() {
+        let (svc, mut rx) = lazy_unreachable_service();
+        let callers = || {
+            [
+                VerifiedIdentity::user_for_test_with_zdr("org_q", "user_q", true),
+                VerifiedIdentity::user_for_test_with_waiver("org_q", "user_q", "conn-1", "ack-1"),
+            ]
+        };
+        for caller in callers() {
+            let created = svc
+                .create_run_question(with_caller(
+                    create_question_request(vec![question_item("scope", "single")]),
+                    caller,
+                ))
+                .await
+                .expect_err("refused");
+            assert_ne!(created.code(), tonic::Code::Internal, "create reached the database");
+            assert!(Refusal::from_status(&created).is_some(), "create: {created}");
+        }
+        for caller in callers() {
+            let listed = svc
+                .list_run_questions(with_caller(
+                    proto::ListRunQuestionsRequest {
+                        run_id: "run_q".to_owned(),
+                        org_id: "org_q".to_owned(),
+                    },
+                    caller,
+                ))
+                .await
+                .expect_err("refused");
+            assert_ne!(listed.code(), tonic::Code::Internal, "list reached the database");
+            assert!(Refusal::from_status(&listed).is_some(), "list: {listed}");
+        }
+        for caller in callers() {
+            let answered = svc
+                .answer_run_question(with_caller(
+                    proto::AnswerRunQuestionRequest {
+                        question_id: "q_1".to_owned(),
+                        org_id: "org_q".to_owned(),
+                        skip: true,
+                        ..Default::default()
+                    },
+                    caller,
+                ))
+                .await
+                .expect_err("refused");
+            assert_ne!(answered.code(), tonic::Code::Internal, "answer reached the database");
+            assert!(Refusal::from_status(&answered).is_some(), "answer: {answered}");
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    // A ZDR service workload is refused too: the write scope gate keeps it out of the store.
+    #[tokio::test]
+    async fn run_question_a_zdr_service_token_cannot_create_a_question() {
+        let (svc, _rx) = lazy_unreachable_service();
+        let caller = VerifiedIdentity::service_for_test_as(
+            "org_q",
+            "service:execution-core",
+            &["orchestration:write"],
+            true,
+        );
+        let refused = svc
+            .create_run_question(with_caller(
+                create_question_request(vec![question_item("scope", "single")]),
+                caller,
+            ))
+            .await
+            .expect_err("refused");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+    }
+
+    // The org is the verified credential's, never the request's.
+    #[tokio::test]
+    async fn run_question_a_request_for_another_org_is_refused_before_any_lookup() {
+        let (svc, _rx) = lazy_unreachable_service();
+        let caller = || VerifiedIdentity::user_for_test("org_q", "user_q");
+        let mut create = create_question_request(vec![question_item("scope", "single")]);
+        create.org_id = "org_other".to_owned();
+        assert_eq!(
+            svc.create_run_question(with_caller(create, caller()))
+                .await
+                .expect_err("refused")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            svc.list_run_questions(with_caller(
+                proto::ListRunQuestionsRequest {
+                    run_id: "run_q".to_owned(),
+                    org_id: "org_other".to_owned(),
+                },
+                caller()
+            ))
+            .await
+            .expect_err("refused")
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            svc.answer_run_question(with_caller(
+                proto::AnswerRunQuestionRequest {
+                    question_id: "q_1".to_owned(),
+                    org_id: "org_other".to_owned(),
+                    skip: true,
+                    ..Default::default()
+                },
+                caller()
+            ))
+            .await
+            .expect_err("refused")
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    // The question events say a row was written, so no caller may publish them.
+    #[tokio::test]
+    async fn run_question_events_cannot_be_published_through_record_orchestration_event() {
+        let (svc, mut rx) = lazy_unreachable_service();
+        for event in [
+            question_asked_event(&stored_question(serde_json::json!([]))),
+            question_answered_event(&stored_question(serde_json::json!([]))),
+        ] {
+            for caller in [
+                VerifiedIdentity::user_for_test("org_q", "user_q"),
+                VerifiedIdentity::service_for_test_as(
+                    "org_q",
+                    "service:execution-core",
+                    &["orchestration:write"],
+                    false,
+                ),
+            ] {
+                let refused = svc
+                    .record_orchestration_event(with_caller(
+                        proto::RecordOrchestrationEventRequest {
+                            event: Some(event.clone()),
+                        },
+                        caller,
+                    ))
+                    .await
+                    .expect_err("refused");
+                assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+                assert_eq!(
+                    refused.message(),
+                    "question events are written by the question store"
+                );
+            }
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn run_question_events_carry_ids_and_state_only() {
+        let mut row = stored_question(serde_json::json!([]));
+        let asked = question_asked_event(&row);
+        assert_eq!(event_run_id(&asked), Some("run_q"));
+        let Some(orchestration_event::Event::QuestionAsked(asked)) = asked.event else {
+            panic!("a QuestionAsked event");
+        };
+        assert_eq!(asked.question_id, "q_1");
+        assert_eq!(asked.delivery, "next_turn");
+        assert!(asked.expires_at.is_some());
+
+        row.state = "skipped".to_owned();
+        let answered = question_answered_event(&row);
+        assert_eq!(event_run_id(&answered), Some("run_q"));
+        let Some(orchestration_event::Event::QuestionAnswered(answered)) = answered.event else {
+            panic!("a QuestionAnswered event");
+        };
+        assert_eq!(answered.state, proto::QuestionState::Skipped as i32);
+    }
+
+    // The handlers need a database to run, so the order of their gates is read from the source:
+    // the ZDR gate first, the scope gate, then the org, and only then any lookup. The event is
+    // broadcast only for the call that won the write.
+    #[test]
+    fn run_question_handlers_gate_before_they_look_anything_up() {
+        let source = include_str!("orchestration_grpc.rs").replace("\r\n", "\n");
+        for (handler, next, scope) in [
+            ("create_run_question", "list_run_questions", "orchestration:write"),
+            ("list_run_questions", "answer_run_question", "orchestration:read"),
+            ("answer_run_question", "consume_approval", "orchestration:write"),
+        ] {
+            let start = source
+                .find(&format!("    async fn {handler}("))
+                .unwrap_or_else(|| panic!("{handler} is present"));
+            let rest = &source[start..];
+            let body = &rest[..rest.find(&format!("async fn {next}(")).expect("the next handler")];
+            let gate = body
+                .find("refuse_zdr_or_waived_question_caller(&caller)?;")
+                .unwrap_or_else(|| panic!("{handler} lost its ZDR gate"));
+            let operation = body
+                .find(&format!("authorize_operation(&caller, \"{scope}\")?;"))
+                .unwrap_or_else(|| panic!("{handler} lost its scope gate"));
+            let org = body
+                .find("caller.authorize_org(&req.org_id)?;")
+                .unwrap_or_else(|| panic!("{handler} lost its org gate"));
+            let lookup = body.find("store::").expect("a store call");
+            assert!(gate < operation && operation < org && org < lookup, "{handler} gate order");
+        }
+        let create = &source[source.find("    async fn create_run_question(").unwrap()..];
+        let create = &create[..create.find("async fn list_run_questions(").unwrap()];
+        let persistent = create
+            .find("require_persistent_run_for_question(")
+            .expect("create checks the run's own receipt");
+        assert!(
+            create.find("store::run_question_scope(").unwrap() < persistent
+                && persistent < create.find("store::create_run_question(").unwrap(),
+            "the run's receipt is read before anything is written"
+        );
+        assert!(create.contains("store::CreatedRunQuestion::Created(row) => {"));
+        let answer = &source[source.find("    async fn answer_run_question(").unwrap()..];
+        let answer = &answer[..answer.find("async fn consume_approval(").unwrap()];
+        assert!(answer.contains("store::AnsweredRunQuestion::Answered(row) => {"));
+        assert!(
+            answer.matches("broadcast_event(").count() == 1,
+            "only the winning answer is announced"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4396,6 +6308,8 @@ mod tests {
 
     fn test_approval(id: &str) -> store::ApprovalRow {
         store::ApprovalRow {
+            consumed_at: None,
+            continuation_mode: String::new(),
             id: id.to_owned(),
             run_id: "run_1".to_owned(),
             plan_id: None,
@@ -5171,6 +7085,531 @@ mod tests {
                 first.await.expect("first decision task"),
                 second.await.expect("second decision task"),
             )
+        }
+
+        // -----------------------------------------------------------------
+        // the durable-loop park events (WS03 S8-2)
+        // -----------------------------------------------------------------
+
+        /// The run's fold row as the store leaves it, with the kind, state and segment given. A
+        /// park carries its reference, reason and resume time; any other kind carries none.
+        async fn put_fold(db: &PlanGateDb, run: &str, kind: &str, state: &str, segment: i32) {
+            let parked = kind == "park";
+            sqlx::query(
+                "INSERT INTO run_loop_checkpoints \
+                    (run_id, org_id, user_id, seq, kind, state, pause_ref, park_reason, \
+                     park_until, authority_digest, segment_no, ciphertext, fold_digest) \
+                 VALUES ($1, $2, $3, 1, $4, $5, $6, $7, $8, 'auth-1', $9, 'x', $10) \
+                 ON CONFLICT (run_id) DO UPDATE SET \
+                    kind = EXCLUDED.kind, state = EXCLUDED.state, \
+                    pause_ref = EXCLUDED.pause_ref, park_reason = EXCLUDED.park_reason, \
+                    park_until = EXCLUDED.park_until, segment_no = EXCLUDED.segment_no",
+            )
+            .bind(run)
+            .bind(&db.org)
+            .bind(&db.user)
+            .bind(kind)
+            .bind(state)
+            .bind(parked.then(|| format!("park:{run}:1")))
+            .bind(parked.then_some("upstream_unavailable"))
+            .bind(parked.then(|| chrono::Utc::now() + chrono::Duration::seconds(60)))
+            .bind(segment)
+            .bind("0".repeat(64))
+            .execute(&db.pool)
+            .await
+            .expect("put the fold row");
+        }
+
+        /// The `CHECKPOINT_RESTORED` event the store writes when a fold is claimed, of the claimed
+        /// fold's `kind` (`park` for a park, `pause` for a pause), `offset_secs` from now (the
+        /// handler asks which claim is the latest).
+        async fn put_claim_event(db: &PlanGateDb, run: &str, kind: &str, offset_secs: i32) {
+            sqlx::query(
+                "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, \
+                    correlation_id, causation_id, idempotency_key, resource_ref, type_url, \
+                    producer, schema_version) \
+                 VALUES ($1, 'CHECKPOINT_RESTORED', $2, $3, now() + make_interval(secs => $9), \
+                    $4, $5, $2, '', $6, $7, $8, 'session-core', 1)",
+            )
+            .bind(mp_ids::new_ulid())
+            .bind(run)
+            .bind(serde_json::json!({ "seq": 1, "kind": kind }))
+            .bind(&db.org)
+            .bind(&db.user)
+            .bind(format!("{run}:1:CHECKPOINT_RESTORED:{kind}:{offset_secs}"))
+            .bind(format!(
+                "run:{run}:loop_checkpoint:1:CHECKPOINT_RESTORED:{kind}:{offset_secs}"
+            ))
+            .bind("type.googleapis.com/model_plane.v1.CheckpointRestored")
+            .bind(f64::from(offset_secs))
+            .execute(&db.pool)
+            .await
+            .expect("put the claim event");
+        }
+
+        async fn count_events(db: &PlanGateDb, run: &str) -> i64 {
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE run_id = $1")
+                .bind(run)
+                .fetch_one(&db.pool)
+                .await
+                .expect("count events")
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        #[allow(clippy::too_many_lines)]
+        async fn the_run_owners_bearer_records_run_parked_and_run_resumed_for_the_fold_they_describe(
+        ) {
+            // The executor records every run event under the run owner's delegated bearer, never
+            // as `service:execution-core` (found live 2026-10-20: a gate on that principal refused
+            // the executor's own park events). The park store is forced on for this test's thread.
+            let _store = crate::loop_checkpoint::test_switch::Forced::set(true);
+            let _park = crate::terminalization::park_test_switch::Forced::set(true);
+            let db = PlanGateDb::connect().await;
+            let run = db.new_run(&db.thread).await;
+            let long_ago = || prost_types::Timestamp {
+                seconds: 978_307_200, // 2001-01-01
+                nanos: 0,
+            };
+            let record = |resumed: bool,
+                          segment: u32,
+                          event_id: &str,
+                          at: Option<prost_types::Timestamp>| {
+                let event = if resumed {
+                    orchestration_event::Event::RunResumed(orchestration_event::RunResumed {
+                        run_id: run.clone(),
+                        resumed_segment: segment,
+                    })
+                } else {
+                    orchestration_event::Event::RunParked(orchestration_event::RunParked {
+                        run_id: run.clone(),
+                    })
+                };
+                db.as_owner(proto::RecordOrchestrationEventRequest {
+                    event: Some(proto::OrchestrationEvent {
+                        event_id: event_id.to_owned(),
+                        at,
+                        event: Some(event),
+                    }),
+                })
+            };
+            let mismatch = |code: tonic::Code, message: &str| {
+                assert_eq!(code, tonic::Code::FailedPrecondition);
+                assert_eq!(message, "park event does not match the run's fold");
+            };
+
+            // A run that holds no fold has nothing to describe: both events are refused, and
+            // nothing is written. (A run that is not persistent never holds a fold.)
+            for resumed in [false, true] {
+                let refused = db
+                    .svc
+                    .record_orchestration_event(record(resumed, 2, "", None))
+                    .await
+                    .expect_err("a run without a fold records no park event");
+                mismatch(refused.code(), refused.message());
+            }
+            assert_eq!(count_events(&db, &run).await, 0);
+
+            // A parked fold: RunParked is recorded, and the caller's own event id and time are
+            // ignored, the server assigns both.
+            put_fold(&db, &run, "park", "parked", 1).await;
+            let parked = db
+                .svc
+                .record_orchestration_event(record(
+                    false,
+                    0,
+                    "caller-chosen-event-id",
+                    Some(long_ago()),
+                ))
+                .await
+                .expect("the run owner's bearer records RunParked for a parked fold")
+                .into_inner()
+                .event_id;
+            assert_ne!(
+                parked, "caller-chosen-event-id",
+                "the server assigns the event id"
+            );
+            let (stored_id, recent): (String, bool) = sqlx::query_as(
+                "SELECT id, ts > now() - interval '5 minutes' FROM events \
+                 WHERE run_id = $1 AND event_type = 'RUN_PARKED'",
+            )
+            .bind(&run)
+            .fetch_one(&db.pool)
+            .await
+            .expect("the RUN_PARKED row");
+            assert_eq!(stored_id, parked);
+            assert!(recent, "the server assigns the time, not the caller's 2001");
+
+            // The same parked fold does not bear out a RunResumed: the park was never claimed.
+            let refused = db
+                .svc
+                .record_orchestration_event(record(true, 1, "", None))
+                .await
+                .expect_err("no RunResumed before the park was claimed");
+            mismatch(refused.code(), refused.message());
+
+            // The park is claimed and the resumed loop's fence replaces the fold: an open fold of
+            // segment 2. RunResumed now matches segment 2 and no other; RunParked no longer
+            // matches, the fold is not parked.
+            put_claim_event(&db, &run, "park", -10).await;
+            put_fold(&db, &run, "pre_effect", "active", 2).await;
+            for segment in [1_u32, 3, u32::MAX] {
+                let refused = db
+                    .svc
+                    .record_orchestration_event(record(true, segment, "", None))
+                    .await
+                    .expect_err("a RunResumed names the fold's own segment");
+                mismatch(refused.code(), refused.message());
+            }
+            let refused = db
+                .svc
+                .record_orchestration_event(record(false, 0, "", None))
+                .await
+                .expect_err("no RunParked while the fold is active");
+            mismatch(refused.code(), refused.message());
+            // The caller's own event id and time are ignored for RunResumed as well.
+            let resumed = db
+                .svc
+                .record_orchestration_event(record(
+                    true,
+                    2,
+                    "caller-chosen-resumed-id",
+                    Some(long_ago()),
+                ))
+                .await
+                .expect("the run owner's bearer records RunResumed for the resumed fold")
+                .into_inner()
+                .event_id;
+            assert_ne!(
+                resumed, "caller-chosen-resumed-id",
+                "the server assigns the event id"
+            );
+            let (stored_id, recent): (String, bool) = sqlx::query_as(
+                "SELECT id, ts > now() - interval '5 minutes' FROM events \
+                 WHERE run_id = $1 AND event_type = 'RUN_RESUMED'",
+            )
+            .bind(&run)
+            .fetch_one(&db.pool)
+            .await
+            .expect("the RUN_RESUMED row");
+            assert_eq!(stored_id, resumed);
+            assert!(recent, "the server assigns the time, not the caller's 2001");
+
+            // Only the run's LATEST claim bears out a RunResumed: once a later claim is a pause's
+            // (an approval resume), the earlier park claim no longer does. A later park claim
+            // restores the case the rest of this test relies on.
+            put_claim_event(&db, &run, "pause", 10).await;
+            let refused = db
+                .svc
+                .record_orchestration_event(record(true, 2, "", None))
+                .await
+                .expect_err("a later pause claim is the run's latest claim");
+            mismatch(refused.code(), refused.message());
+            put_claim_event(&db, &run, "park", 20).await;
+
+            // The fold lookups are the event's own run's: a sibling run of the same tenant holds
+            // no fold, whatever this run holds, so it records neither event; and a caller outside
+            // the tenant is refused by the owner check, before the fold is looked at.
+            // The run holds a PARKED fold of the segment both events name, and a park claim is its
+            // latest, while the sibling is asked about: were a lookup scoped to the tenant, the
+            // sibling would borrow it. (With the run's fold merely active a tenant-scoped RunParked
+            // lookup finds no parked fold anywhere and refuses the sibling for the wrong reason.)
+            put_fold(&db, &run, "park", "parked", 2).await;
+            let sibling = db.new_run(&db.thread).await;
+            for resumed in [false, true] {
+                let refused = db
+                    .svc
+                    .record_orchestration_event(db.as_owner(
+                        proto::RecordOrchestrationEventRequest {
+                            event: Some(park_event(resumed, &sibling)),
+                        },
+                    ))
+                    .await
+                    .expect_err("a sibling run without a fold records no park event");
+                mismatch(refused.code(), refused.message());
+                let mut stranger = Request::new(proto::RecordOrchestrationEventRequest {
+                    event: Some(park_event(resumed, &sibling)),
+                });
+                stranger
+                    .extensions_mut()
+                    .insert(VerifiedIdentity::user_for_test(
+                        "org-someone-else",
+                        "user-x",
+                    ));
+                let refused = db
+                    .svc
+                    .record_orchestration_event(stranger)
+                    .await
+                    .expect_err("another tenant's caller is refused before the fold is read");
+                assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+            }
+            assert_eq!(count_events(&db, &sibling).await, 0);
+            put_fold(&db, &run, "pre_effect", "active", 2).await;
+
+            // A paused fold and a fold under a claim are not parked folds either, and a closed
+            // fold is nothing to resume.
+            for (kind, state) in [("pause", "paused"), ("park", "resuming")] {
+                put_fold(&db, &run, kind, state, 2).await;
+                let refused = db
+                    .svc
+                    .record_orchestration_event(record(false, 0, "", None))
+                    .await
+                    .expect_err("only a parked fold bears out RunParked");
+                mismatch(refused.code(), refused.message());
+            }
+            put_fold(&db, &run, "pre_effect", "closed", 2).await;
+            let refused = db
+                .svc
+                .record_orchestration_event(record(true, 2, "", None))
+                .await
+                .expect_err("a closed fold bears out nothing");
+            mismatch(refused.code(), refused.message());
+
+            // The projection is ids and a segment number only, under the closed event types and
+            // their type URLs, one row of each.
+            let rows: Vec<(String, String, serde_json::Value, String)> = sqlx::query_as(
+                "SELECT id, event_type, payload, type_url FROM events \
+                 WHERE run_id = $1 AND event_type IN ('RUN_PARKED', 'RUN_RESUMED') \
+                 ORDER BY event_type",
+            )
+            .bind(&run)
+            .fetch_all(&db.pool)
+            .await
+            .expect("read the event log");
+            assert_eq!(
+                rows,
+                vec![
+                    (
+                        parked,
+                        "RUN_PARKED".to_owned(),
+                        serde_json::json!({ "run_id": run }),
+                        "type.googleapis.com/model_plane.v1.RunParked".to_owned(),
+                    ),
+                    (
+                        resumed,
+                        "RUN_RESUMED".to_owned(),
+                        serde_json::json!({ "run_id": run, "resumed_segment": 2 }),
+                        "type.googleapis.com/model_plane.v1.RunResumed".to_owned(),
+                    ),
+                ]
+            );
+
+            // With the park store ON the ordinary gate is the first protection, so each way past
+            // it is pinned with its exact refusal, and none writes a row: another org's user,
+            // another user of the same org, the owner's own ZDR credential, and a service
+            // without `orchestration:write`. The fold is put where BOTH events would match, so
+            // each refusal below is the gate's and not the fold check's.
+            put_fold(&db, &run, "park", "parked", 2).await;
+            let events_before_refusals = count_events(&db, &run).await;
+            let refused_callers = [
+                (
+                    "another org's user",
+                    VerifiedIdentity::user_for_test("org-someone-else", "user-x"),
+                    tonic::Code::PermissionDenied,
+                ),
+                (
+                    "another user of the same org",
+                    VerifiedIdentity::user_for_test(&db.org, "user-someone-else"),
+                    tonic::Code::PermissionDenied,
+                ),
+                (
+                    "the owner's ZDR credential",
+                    VerifiedIdentity::user_for_test_with_zdr(&db.org, &db.user, true),
+                    tonic::Code::FailedPrecondition,
+                ),
+                (
+                    "a service without orchestration:write",
+                    VerifiedIdentity::service_for_test_as(
+                        &db.org,
+                        "service:model-gateway",
+                        &["orchestration:read"],
+                        false,
+                    ),
+                    tonic::Code::PermissionDenied,
+                ),
+            ];
+            for (who, identity, expected) in refused_callers {
+                for resumed in [false, true] {
+                    let mut request = Request::new(proto::RecordOrchestrationEventRequest {
+                        event: Some(park_event(resumed, &run)),
+                    });
+                    request.extensions_mut().insert(identity.clone());
+                    let refused = db.svc.record_orchestration_event(request).await.expect_err(
+                        "a caller outside the ordinary gate must not record a park event",
+                    );
+                    assert_eq!(refused.code(), expected, "{who}, resumed {resumed}");
+                }
+            }
+            assert_eq!(
+                events_before_refusals,
+                count_events(&db, &run).await,
+                "a refused park event writes no events row"
+            );
+
+            // With the park store off the run's own owner and a service principal that
+            // holds orchestration:write are refused with exactly the answer they got before
+            // the tags existed, even for a fold that bears the event out, and nothing is
+            // written.
+            let _off = crate::terminalization::park_test_switch::Forced::set(false);
+            let mut as_other_service = Request::new(proto::RecordOrchestrationEventRequest {
+                event: Some(park_event(false, &run)),
+            });
+            as_other_service
+                .extensions_mut()
+                .insert(VerifiedIdentity::service_for_test_as(
+                    &db.org,
+                    "service:model-gateway",
+                    &["orchestration:write"],
+                    false,
+                ));
+            let callers = [
+                db.as_owner(proto::RecordOrchestrationEventRequest {
+                    event: Some(park_event(false, &run)),
+                }),
+                db.as_owner(proto::RecordOrchestrationEventRequest {
+                    event: Some(park_event(true, &run)),
+                }),
+                as_other_service,
+            ];
+            for request in callers {
+                let refused = db
+                    .svc
+                    .record_orchestration_event(request)
+                    .await
+                    .expect_err("no caller records a park event while the park store is off");
+                assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+                assert_eq!(refused.message(), "event payload is required");
+            }
+            assert_eq!(
+                events_before_refusals,
+                count_events(&db, &run).await,
+                "a refused park event writes no events row"
+            );
+
+            sqlx::query("DELETE FROM events WHERE run_id = $1")
+                .bind(&run)
+                .execute(&db.pool)
+                .await
+                .expect("cleanup events");
+            db.cleanup().await;
+        }
+
+        // The first test builds its fold rows by hand, so a change in what the store really
+        // writes would not turn it red. This one lets the store write them: the real park save, the
+        // real park claim and the real fence save (the sequence the executor drives), and asks the
+        // handler at each step what it would record.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn the_stores_own_park_save_claim_and_fence_bear_out_the_park_events() {
+            use crate::loop_checkpoint::test_support::{cipher, fold_for, seed_fold};
+            use crate::loop_checkpoint::{claim, save, SaveInput};
+            let _store = crate::loop_checkpoint::test_switch::Forced::set(true);
+            let _park = crate::terminalization::park_test_switch::Forced::set(true);
+            let db = PlanGateDb::connect().await;
+            let run = db.new_run(&db.thread).await;
+            let record = |resumed: bool, segment: u32| {
+                let event = if resumed {
+                    orchestration_event::Event::RunResumed(orchestration_event::RunResumed {
+                        run_id: run.clone(),
+                        resumed_segment: segment,
+                    })
+                } else {
+                    orchestration_event::Event::RunParked(orchestration_event::RunParked {
+                        run_id: run.clone(),
+                    })
+                };
+                db.as_owner(proto::RecordOrchestrationEventRequest {
+                    event: Some(proto::OrchestrationEvent {
+                        event_id: String::new(),
+                        at: None,
+                        event: Some(event),
+                    }),
+                })
+            };
+
+            // Before any fold: nothing to describe.
+            let refused = db
+                .svc
+                .record_orchestration_event(record(false, 0))
+                .await
+                .expect_err("no RunParked before the park save");
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+
+            // The real park save. It is already due, so the claim below is allowed.
+            let reference = mp_contracts::loop_fold::park_ref(&run, 1);
+            seed_fold(
+                &db.pool,
+                &run,
+                "park",
+                &reference,
+                "upstream_unavailable",
+                Some(chrono::Utc::now() - chrono::Duration::seconds(5)),
+            )
+            .await
+            .expect("the store's park save");
+            db.svc
+                .record_orchestration_event(record(false, 0))
+                .await
+                .expect("RunParked after the store's own park save");
+            let refused = db
+                .svc
+                .record_orchestration_event(record(true, 2))
+                .await
+                .expect_err("no RunResumed before the park is claimed");
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+
+            // The real park claim (the empty reference) and the resumed loop's fence save at the
+            // claimed seq, in the next segment.
+            let claimed = claim(&db.pool, &cipher(), &run, "", "claim-token-1")
+                .await
+                .expect("the store's park claim");
+            let resumed_segment = claimed.segment_no + 1;
+            let mut fence: serde_json::Value =
+                serde_json::from_slice(&fold_for(&run)).expect("fold json");
+            fence["segment_no"] = serde_json::json!(resumed_segment);
+            save(
+                &db.pool,
+                &cipher(),
+                SaveInput {
+                    run_id: &run,
+                    expected_seq: claimed.seq,
+                    kind: "pre_effect",
+                    fold: &serde_json::to_vec(&fence).expect("fold json"),
+                    authority_digest: "auth-1",
+                    pause_ref: "",
+                    park_reason: "",
+                    park_until: None,
+                },
+            )
+            .await
+            .expect("the store's fence save");
+            let segment = u32::try_from(resumed_segment).expect("segment");
+            for wrong in [segment - 1, segment + 1] {
+                let refused = db
+                    .svc
+                    .record_orchestration_event(record(true, wrong))
+                    .await
+                    .expect_err("a RunResumed names the fenced fold's own segment");
+                assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+            }
+            db.svc
+                .record_orchestration_event(record(true, segment))
+                .await
+                .expect("RunResumed after the store's own claim and fence");
+            // The fold is no longer parked: a RunParked would now be a different, later park.
+            let refused = db
+                .svc
+                .record_orchestration_event(record(false, 0))
+                .await
+                .expect_err("no RunParked while the fenced fold is active");
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+
+            sqlx::query("DELETE FROM events WHERE run_id = $1")
+                .bind(&run)
+                .execute(&db.pool)
+                .await
+                .expect("cleanup events");
+            db.cleanup().await;
         }
 
         // -----------------------------------------------------------------

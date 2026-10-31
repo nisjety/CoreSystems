@@ -1,12 +1,21 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { prepareChatAttachments } from './prepare-chat-attachments'
-import { extractChatDocument } from '@/shared/api/chat-client'
+import { extractChatDocument, getAttachmentPolicy } from '@/shared/api/chat-client'
 
-vi.mock('@/shared/api/chat-client', () => ({ extractChatDocument: vi.fn() }))
+vi.mock('@/shared/api/chat-client', () => ({ extractChatDocument: vi.fn(), getAttachmentPolicy: vi.fn(() => undefined) }))
 const file = (name: string, text: string) => ({ id: name, name, size: text.length, type: 'text/plain', url: `data:text/plain,${encodeURIComponent(text)}` })
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks() })
 describe('complete attachment preparation before submission', () => {
+  it('reads the per-file limit from the declared policy and names it in the refusal', async () => {
+    const big = { ...file('big.csv', 'content'), size: 2_000_000 }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => 'content' }))
+    await expect(prepareChatAttachments([big])).rejects.toThrow('under 1 MB')
+    vi.mocked(getAttachmentPolicy).mockReturnValueOnce({ maxFileBytes: 4_000_000 } as ReturnType<typeof getAttachmentPolicy>)
+    expect((await prepareChatAttachments([big]))[0]?.extractedText).toBe('content')
+    vi.mocked(getAttachmentPolicy).mockReturnValueOnce({ maxFileBytes: 1_500_000 } as ReturnType<typeof getAttachmentPolicy>)
+    await expect(prepareChatAttachments([big])).rejects.toThrow('under 1,5 MB')
+  })
   it('preserves both same-named files in order', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({ ok: true, text: async () => 'first' }).mockResolvedValueOnce({ ok: true, text: async () => 'second' }))
     expect((await prepareChatAttachments([file('notes.md', 'first'), file('notes.md', 'second')])).map(a => a.extractedText)).toEqual(['first', 'second'])

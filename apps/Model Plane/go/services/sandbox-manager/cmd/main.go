@@ -18,6 +18,7 @@ import (
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/process"
 	sbxserver "github.com/triodelab/model-plane/services/sandbox-manager/internal/server"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/snapshot"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/threadworkspace"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/workspace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -103,6 +104,9 @@ func main() {
 	// Nil unless a durable database is configured; a Server without it
 	// refuses every process RPC.
 	var processStore sbxserver.ProcessStore
+	// Nil unless a durable database is configured; a Server without it refuses
+	// every thread-workspace RPC (WS22-S1).
+	var threadStore sbxserver.ThreadWorkspaceStore
 	if databaseURL != "" {
 		pool, err := pgxpool.New(ctx, databaseURL)
 		if err != nil {
@@ -141,6 +145,16 @@ func main() {
 			os.Exit(1)
 		}
 		processStore = pgProcessStore
+
+		// WS22-S1: the per-thread workspace store. Built even while the switch is
+		// off, so turning it on needs no other change, and it is only reached
+		// through a Server that has the switch on.
+		pgThreadStore, err := threadworkspace.NewStore(pool)
+		if err != nil {
+			slog.Error("sandbox-manager thread workspace store unavailable", "error", err)
+			os.Exit(1)
+		}
+		threadStore = pgThreadStore
 		if process.EnvSweeperEnabled() {
 			interval, staleAfter := process.TimingFromEnv(os.Getenv)
 			// The concrete store, not the Server's narrowed interface: the
@@ -157,7 +171,25 @@ func main() {
 		slog.Warn("starting sandbox-manager with in-memory lease/snapshot/workspace stores (ephemeral development only); a restart discards all leases, snapshots, and workspace overlays")
 	}
 
-	server := sbxserver.NewServer(leaseStore, snapStore, workspaceStore).WithProcessStore(processStore)
+	// SANDBOX_MANAGER_THREAD_WORKSPACE is read through the strict parser: only
+	// the literal "true" switches the per-thread workspace on. The caps are
+	// parsed here too, so a malformed value stops startup rather than loosening
+	// a cap.
+	threadWorkspaceOn := threadWorkspaceEnabled(os.Getenv("SANDBOX_MANAGER_THREAD_WORKSPACE"))
+	threadLimits, threadLimitsErr := threadworkspace.LimitsFromEnv(os.Getenv)
+	if threadLimitsErr != nil {
+		slog.Error("sandbox-manager thread workspace caps are invalid", "error", threadLimitsErr)
+		os.Exit(1)
+	}
+	if threadWorkspaceOn && threadStore == nil {
+		slog.Warn("thread workspace is enabled but no durable database is configured; every thread-workspace RPC will be refused")
+	}
+	if threadWorkspaceOn {
+		slog.Info("thread workspace enabled", "max_files", threadLimits.MaxFiles, "max_bytes", threadLimits.MaxBytes)
+	}
+
+	server := sbxserver.NewServer(leaseStore, snapStore, workspaceStore).WithProcessStore(processStore).
+		WithThreadWorkspace(threadWorkspaceOn, threadStore, threadLimits)
 	if capabilityVerifier != nil {
 		server = server.WithCapabilityVerifier(capabilityVerifier.Verify, backendID)
 		// The same Control key verifies both envelopes, so human read
@@ -186,5 +218,12 @@ func main() {
 }
 
 func ephemeralDevelopmentEnabled(value string) bool {
+	return value == "true"
+}
+
+// threadWorkspaceEnabled reads SANDBOX_MANAGER_THREAD_WORKSPACE with the same
+// strict rule as the ephemeral-development switch: only the literal "true"
+// enables it, so an empty, mistyped or capitalised value leaves it off.
+func threadWorkspaceEnabled(value string) bool {
 	return value == "true"
 }

@@ -1510,6 +1510,10 @@ async fn browser_run_start_inner(
             // which wired code_interpreter's ExecuteStepRequest.space_id but
             // explicitly left this path's own separate gap for a follow-up).
             space_id: String::new(),
+            // browser_agent reads no attached files.
+            attachments: Vec::new(),
+            // Only code_interpreter steps mount skill bundles.
+            skill_mounts: Vec::new(),
         });
         let authorization = format!("Bearer {}", execution_bearer.as_str())
             .parse()
@@ -3928,7 +3932,7 @@ mod tests {
                                 return Err(Status::unavailable("append is down"));
                             }
                             this.appends.lock().expect("appends").push(r.into_inner());
-                            Ok(tonic::Response::new(AppendMessageResponse { sequence: 1 }))
+                            Ok(tonic::Response::new(AppendMessageResponse { sequence: 1, ..Default::default() }))
                         })
                         .await)
                     }),

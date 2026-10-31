@@ -17,6 +17,10 @@ use axum::response::sse::Event;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::Sender;
 
+// Declared here, not in lib.rs, so this slice stays inside its owned files (WS27-S6).
+#[path = "run_ceiling.rs"]
+pub mod run_ceiling;
+
 /// Who processed one answer, as the server stamped it. It rides on the `usage`
 /// frame so the answer meta can say where an answer was processed, from
 /// server-stamped values only: the client never infers residency from a model
@@ -225,7 +229,8 @@ pub enum ChatEvent {
         /// never inferred client-side — so a `knowledge_only`/`web_only`
         /// turn's receipt and Sources panel can show, and the server can
         /// defensively reject, a citation whose family disagrees with the
-        /// turn's active retrieval scope.
+        /// turn's active retrieval scope. `"connector"` marks a connected account's read (WS23-S5): listed
+        /// as a source, never numbered, and carrying metadata only.
         origin: String,
     },
     /// Per-turn retrieval-source filter transparency frame (chat-wave2 scope
@@ -283,6 +288,22 @@ pub enum ChatEvent {
         /// How the answer's content was retained, when the turn's posture is
         /// known (see [`RetentionClass`]). `None` omits the key.
         retention_class: Option<RetentionClass>,
+        /// Prompt tokens served from the provider's cache, and written to it, on
+        /// this turn (zero where the provider reports none or the turn is
+        /// zero-retention). Counts only. Omitted from the payload when both are
+        /// zero so every earlier payload stays valid.
+        cache_read_tokens: u32,
+        cache_write_tokens: u32,
+        /// Model calls this total covers: the tool-decision rounds, the artifact
+        /// checks, the overhead calls and the answer. A turn whose answer was its
+        /// only call says 1.
+        calls: u32,
+        /// Of `calls`, the metered ones whose price was unknown. A total that has
+        /// any is missing that call's cost, so `cost_usd` is then null.
+        unpriced_calls: u32,
+        /// The cost split by what was billed, present exactly when `cost_usd` is a
+        /// metered total.
+        cost_by_category: Option<crate::pricing::CategoryCost>,
     },
     /// Per-turn phase timing (Q14): ids, milliseconds and counts, never
     /// content. Emitted once, just before the terminal `done`, `error` or
@@ -358,6 +379,15 @@ pub enum ChatEvent {
     /// watching for it. Hiding it behind a feature family would reproduce the
     /// exact bug it exists to fix — a message that seems to have vanished.
     QueuedInput { messages: Vec<String> },
+    /// [`ChatEvent::QueuedInput`] with the `client_message_id` of each delivered message (WS04 S6,
+    /// behind `MODEL_GATEWAY_SEND_RECEIPTS`): the same `queued_input` frame plus an additive `ids`
+    /// key, parallel to `messages`, an empty string for a message sent without one. The SPA's tray
+    /// matches a delivery to the message it sent by id instead of by text. A separate variant so
+    /// the frame with the switch off stays exactly what it was.
+    QueuedInputReceipted {
+        messages: Vec<String>,
+        ids: Vec<String>,
+    },
     /// The turn's answer was produced in a reduced form, and the user must be told (Z-41b). Emitted once
     /// per such answer, before the answer streams, and only on a turn whose retrieval was restrictive: a
     /// ZDR answer whose query embedding had no ZDR-approved route answered from text search alone.
@@ -368,6 +398,53 @@ pub enum ChatEvent {
     RetrievalNotice {
         notice: crate::retrieval_metadata::RetrievalNotice,
     },
+    // ---- usage progress (WS27) ----
+    /// The turn's running total after one of its provider calls, streamed while the turn runs
+    /// (`MODEL_GATEWAY_USAGE_PROGRESS`). It belongs to the `usage` family, so a client that did not ask
+    /// for usage never receives it. Counts and closed tokens only: no content, tool name or argument.
+    /// The terminal `usage` frame stays the authority for the turn's total.
+    UsageProgress {
+        /// The provider call this frame reports, as its closed phase token.
+        phase: crate::usage_meter::CallPhase,
+        /// The turn so far, the call included.
+        snapshot: crate::usage_meter::Snapshot,
+        /// The turn's run ceiling, on the frames that carry one (WS27-S6). `None` leaves the frame
+        /// as it was before the ceiling existed.
+        ceiling: Option<crate::sse_events::run_ceiling::CeilingProgress>,
+    },
+    // ---- end usage progress (WS27) ----
+    // ---- lifecycle (WS15) ----
+    /// A tool call is being retried after a transient failure, before the next attempt. Counts and
+    /// closed tokens only (see `mp_contracts::lifecycle_notice`): the error text never reaches here.
+    /// `steps` family, so only a client that asked for step detail sees it.
+    RetryScheduled {
+        scope: &'static str,
+        tool: String,
+        attempt: u32,
+        max_attempts: u32,
+        wait_ms: u64,
+        reason: &'static str,
+    },
+    /// The history or the tool results were compacted to fit the model. A control event, ungated:
+    /// a client that never opted in still has to be told that its answer was built from less.
+    Compaction {
+        scope: &'static str,
+        outcome: &'static str,
+        messages_compacted: Option<u32>,
+        messages_kept: Option<u32>,
+        pinned_kept: Option<u32>,
+    },
+    /// The context the model was given changed: history shed, skill guidance cut short, or a run
+    /// context part skipped. A control event, ungated, for the same reason as `Compaction`.
+    ContextChange {
+        change: &'static str,
+        messages_dropped: Option<u32>,
+        skills_truncated: Option<u32>,
+        skills_dropped: Option<u32>,
+        layer: Option<&'static str>,
+        state: Option<&'static str>,
+    },
+    // ---- end lifecycle (WS15) ----
     /// Terminal control: generation stopped/cancelled by the user.
     Stopped { reason: String },
     /// Terminal control: a structured error (chat-parity §20). `code` is a
@@ -420,7 +497,12 @@ impl ChatEvent {
             ChatEvent::Usage { .. }
             | ChatEvent::ResultReceipt { .. }
             | ChatEvent::TurnTiming { .. } => Some("usage"),
+            // ---- usage progress (WS27) ----
+            ChatEvent::UsageProgress { .. } => Some("usage"),
+            // ---- end usage progress (WS27) ----
             ChatEvent::MemoryRecall { .. } => Some("memory"),
+            // ---- lifecycle (WS15) ----
+            ChatEvent::RetryScheduled { .. } => Some("steps"),
             // control events — always allowed (Title/FollowUps only exist when
             // the gateway actually generated them; gating on a feature family
             // would silently drop them for the plain `chat` profile, which is
@@ -434,12 +516,16 @@ impl ChatEvent {
             // The user typed this and is watching for it — gating it would
             // reproduce the vanishing-message bug it exists to fix.
             | ChatEvent::QueuedInput { .. }
+            | ChatEvent::QueuedInputReceipted { .. }
             // A reduced answer's notice (Z-41b) — a client that never opted in still has to hear it.
             | ChatEvent::RetrievalNotice { .. }
             | ChatEvent::Stopped { .. }
             | ChatEvent::Error { .. }
             | ChatEvent::ZdrError { .. }
-            | ChatEvent::SubscriptionError { .. } => None,
+            | ChatEvent::SubscriptionError { .. }
+            // ---- lifecycle (WS15) ----
+            | ChatEvent::Compaction { .. }
+            | ChatEvent::ContextChange { .. } => None,
         }
     }
 
@@ -473,11 +559,18 @@ impl ChatEvent {
             ChatEvent::TurnTiming { .. } => "turn_timing",
             ChatEvent::Verification { .. } => "verification",
             ChatEvent::MemoryRecall { .. } => "memory_recall",
+            // ---- lifecycle (WS15) ----
+            ChatEvent::RetryScheduled { .. } => "retry_scheduled",
+            ChatEvent::Compaction { .. } => "compaction",
+            ChatEvent::ContextChange { .. } => "context_change",
             ChatEvent::Title { .. } => "title",
             ChatEvent::FollowUps { .. } => "follow_ups",
             ChatEvent::PlanProposed { .. } => "plan_proposed",
-            ChatEvent::QueuedInput { .. } => "queued_input",
+            ChatEvent::QueuedInput { .. } | ChatEvent::QueuedInputReceipted { .. } => "queued_input",
             ChatEvent::RetrievalNotice { .. } => "retrieval_notice",
+            // ---- usage progress (WS27) ----
+            ChatEvent::UsageProgress { .. } => "usage_progress",
+            // ---- end usage progress (WS27) ----
             ChatEvent::Stopped { .. } => "stopped",
             ChatEvent::Error { .. }
             | ChatEvent::ZdrError { .. }
@@ -586,6 +679,11 @@ impl ChatEvent {
                 confidence,
                 served_by,
                 retention_class,
+                cache_read_tokens,
+                cache_write_tokens,
+                calls,
+                unpriced_calls,
+                cost_by_category,
             } => {
                 let mut usage = json!({
                     "input_tokens": input_tokens,
@@ -594,9 +692,26 @@ impl ChatEvent {
                     "latency_ms": latency_ms,
                     "confidence": confidence,
                 });
+                // Optional, and only when the provider reported cache activity.
+                if *cache_read_tokens > 0 || *cache_write_tokens > 0 {
+                    usage["cache_read_tokens"] = json!(cache_read_tokens);
+                    usage["cache_write_tokens"] = json!(cache_write_tokens);
+                }
                 // Optional: a client that predates it sees the same payload.
                 if let Some(basis) = cost_basis {
                     usage["cost_basis"] = json!(basis.as_str());
+                }
+                // Always stated, so a total is never read as covering calls it does not.
+                usage["calls"] = json!(calls);
+                usage["unpriced_calls"] = json!(unpriced_calls);
+                // Only where the total was priced; a breakdown of nothing is not stated.
+                if let Some(parts) = cost_by_category {
+                    usage["cost_by_category"] = json!({
+                        "input_usd": parts.input_usd,
+                        "cache_read_usd": parts.cache_read_usd,
+                        "cache_write_usd": parts.cache_write_usd,
+                        "output_usd": parts.output_usd,
+                    });
                 }
                 // Optional, and per field: an empty value is left out.
                 if let Some(served_by) = served_by {
@@ -668,12 +783,120 @@ impl ChatEvent {
             ChatEvent::QueuedInput { messages } => {
                 json!({ "messages": messages, "request_id": request_id })
             }
+            ChatEvent::QueuedInputReceipted { messages, ids } => {
+                json!({ "messages": messages, "ids": ids, "request_id": request_id })
+            }
             // The typed code and the wording key, and nothing else: see the variant's docs.
             ChatEvent::RetrievalNotice { notice } => json!({
                 "code": notice.code,
                 "wording_key": notice.wording_key,
                 "request_id": request_id,
             }),
+            // ---- usage progress (WS27) ----
+            ChatEvent::UsageProgress {
+                phase,
+                snapshot,
+                ceiling,
+            } => {
+                let mut payload = json!({
+                    "calls": snapshot.calls,
+                    "phase": phase.as_str(),
+                    "input_tokens": snapshot.input,
+                    "output_tokens": snapshot.output,
+                    "cache_read_tokens": snapshot.cache_read,
+                    "cache_write_tokens": snapshot.cache_write,
+                    "cost_usd": snapshot.cost_usd,
+                });
+                // Omitted, not null, where the total has no single basis: a basis stated for a mixed
+                // total would describe one of its calls as if it described all of them.
+                if let Some(basis) = snapshot.basis {
+                    payload["cost_basis"] = json!(basis.as_str());
+                }
+                // Stated only once a call went unpriced, so a frame whose calls are all priced keeps its shape.
+                if snapshot.unpriced_calls > 0 {
+                    payload["unpriced_calls"] = json!(snapshot.unpriced_calls);
+                }
+                // Each ceiling key rides only a frame that carries a value for it, so a frame without a
+                // ceiling keeps the shape it had before.
+                if let Some(ceiling) = ceiling {
+                    if let Some(usd) = ceiling.ceiling_usd {
+                        payload["ceiling_usd"] = json!(usd);
+                    }
+                    if let Some(tokens) = ceiling.ceiling_tokens {
+                        payload["ceiling_tokens"] = json!(tokens);
+                    }
+                    if let Some(fraction) = ceiling.fraction {
+                        payload["fraction"] = json!(fraction);
+                    }
+                    if let Some(warning) = ceiling.warning {
+                        payload["warning"] = json!(warning.as_str());
+                    }
+                }
+                payload
+            }
+            // ---- end usage progress (WS27) ----
+            // ---- lifecycle (WS15) ----
+            ChatEvent::RetryScheduled {
+                scope,
+                tool,
+                attempt,
+                max_attempts,
+                wait_ms,
+                reason,
+            } => json!({
+                "scope": scope,
+                "tool": tool,
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "wait_ms": wait_ms,
+                "reason": reason,
+                "request_id": request_id,
+            }),
+            ChatEvent::Compaction {
+                scope,
+                outcome,
+                messages_compacted,
+                messages_kept,
+                pinned_kept,
+            } => {
+                let mut payload = json!({ "scope": scope, "outcome": outcome, "request_id": request_id });
+                // Each count is omitted, not null, when the gateway did not measure it.
+                for (key, count) in [
+                    ("messages_compacted", messages_compacted),
+                    ("messages_kept", messages_kept),
+                    ("pinned_kept", pinned_kept),
+                ] {
+                    if let Some(count) = count {
+                        payload[key] = json!(count);
+                    }
+                }
+                payload
+            }
+            ChatEvent::ContextChange {
+                change,
+                messages_dropped,
+                skills_truncated,
+                skills_dropped,
+                layer,
+                state,
+            } => {
+                let mut payload = json!({ "change": change, "request_id": request_id });
+                for (key, count) in [
+                    ("messages_dropped", messages_dropped),
+                    ("skills_truncated", skills_truncated),
+                    ("skills_dropped", skills_dropped),
+                ] {
+                    if let Some(count) = count {
+                        payload[key] = json!(count);
+                    }
+                }
+                for (key, token) in [("layer", layer), ("state", state)] {
+                    if let Some(token) = token {
+                        payload[key] = json!(token);
+                    }
+                }
+                payload
+            }
             ChatEvent::Stopped { reason } => json!({ "reason": reason, "request_id": request_id }),
             ChatEvent::Error {
                 code,
@@ -785,9 +1008,25 @@ pub struct RichEventSink {
     /// copy lived in the browser that watched the stream. Generated binaries
     /// (data: URIs) are NOT recorded — see [`RecordedArtifact::from_event`].
     artifacts: std::sync::Arc<std::sync::Mutex<Vec<RecordedArtifact>>>,
+    /// The provider calls the turn made beside its answer and its tool rounds (a
+    /// source judge, a self-consistency resample), kept for the final usage frame
+    /// and their ledger rows. Each is recorded by the site that made it.
+    overhead: std::sync::Arc<std::sync::Mutex<Vec<crate::usage_meter::CallUsage>>>,
+    /// Whether this turn streams a `usage_progress` frame for each call it records (WS27 S3). The
+    /// handler that builds the sink sets it once, from the switch, so every site reads one answer.
+    usage_progress: bool,
+    /// Whether a run ceiling is tracked on this turn (WS27-S6). A tracked ceiling needs every call
+    /// priced and counted, streamed or not, so the sink says whether it records calls at all.
+    ceiling_tracked: bool,
+    /// The running total of the calls this sink has recorded, which each progress frame states, and
+    /// the turn's run ceiling. One lock, so a frame never states a total its ceiling does not match.
+    tally: std::sync::Mutex<RunTally>,
     /// The turn's clock, shared the same way, so the tool loop and the draft
     /// checks it runs can time their calls without new parameters.
     timing: Option<crate::turn_timing::TurnTiming>,
+    /// The connected accounts the person selected for this turn (WS23-S5), read by the Ask loop's
+    /// connected-app read. It rides here as the clock does, so the loop takes no new parameter.
+    connector_turn: Option<crate::tool_loop::connector_reads::ConnectorTurn>,
     /// The stream's resume buffer and its shared frame cursor, when the caller
     /// attached them. Tool calls, tool results and steps used to go out on the
     /// live channel only, so a reload during the tool phase, source review or
@@ -802,6 +1041,36 @@ pub struct RichEventSink {
             crate::subscription_failure::FailureContext,
         )>,
     >,
+}
+
+/// What a sink keeps of a turn's calls: the running total every progress frame states, and the turn's
+/// run ceiling when one is tracked.
+#[derive(Default)]
+struct RunTally {
+    meter: crate::usage_meter::UsageMeter,
+    ceiling: Option<crate::sse_events::run_ceiling::CeilingTracker>,
+}
+
+/// The tokens a call adds to a token cap: its input and output when it is metered. A subscription
+/// call's tokens are usage, not spend, so it adds none, as cost-core counts them.
+#[must_use]
+pub fn metered_tokens(call: &crate::usage_meter::CallUsage) -> u64 {
+    if call.basis != crate::pricing::CostBasis::Metered {
+        return 0;
+    }
+    let count = |tokens: i64| u64::try_from(tokens.max(0)).unwrap_or(0);
+    count(call.input).saturating_add(count(call.output))
+}
+
+/// The metered tokens of a set of calls, as a token cap counts them.
+#[must_use]
+pub fn metered_tokens_of<'a>(
+    calls: impl IntoIterator<Item = &'a crate::usage_meter::CallUsage>,
+) -> u64 {
+    calls
+        .into_iter()
+        .map(metered_tokens)
+        .fold(0, u64::saturating_add)
 }
 
 /// Where a sink buffers what it sends: the same store, key and `id:` cursor
@@ -907,7 +1176,12 @@ impl RichEventSink {
             request_id,
             citations: std::sync::Arc::default(),
             artifacts: std::sync::Arc::default(),
+            overhead: std::sync::Arc::default(),
+            usage_progress: false,
+            ceiling_tracked: false,
+            tally: std::sync::Mutex::new(RunTally::default()),
             timing: None,
+            connector_turn: None,
             resume: None,
             subscription_failure: std::sync::Mutex::new(None),
         }
@@ -958,6 +1232,22 @@ impl RichEventSink {
     #[must_use]
     pub fn timing(&self) -> Option<&crate::turn_timing::TurnTiming> {
         self.timing.as_ref()
+    }
+
+    /// Attach the connected accounts this turn selected (WS23-S5).
+    #[must_use]
+    pub fn with_connector_turn(
+        mut self,
+        turn: crate::tool_loop::connector_reads::ConnectorTurn,
+    ) -> Self {
+        self.connector_turn = Some(turn);
+        self
+    }
+
+    /// The turn's connected-account selection, when the route attached one.
+    #[must_use]
+    pub fn connector_turn(&self) -> Option<&crate::tool_loop::connector_reads::ConnectorTurn> {
+        self.connector_turn.as_ref()
     }
 
     /// Buffer every frame this sink sends for resume, under the stream's own
@@ -1080,6 +1370,117 @@ impl RichEventSink {
             return;
         }
         let _ = self.tx.send(Ok(event.to_sse(&self.request_id))).await;
+    }
+
+    /// Record a provider call the turn made beside its answer. It is stored as an
+    /// overhead call whatever phase it was built with.
+    pub fn record_overhead(&self, call: crate::usage_meter::CallUsage) {
+        if let Ok(mut recorded) = self.overhead.lock() {
+            recorded.push(crate::usage_meter::CallUsage {
+                phase: crate::usage_meter::CallPhase::Overhead,
+                ..call
+            });
+        }
+    }
+
+    /// The overhead calls recorded so far, in the order they ran.
+    #[must_use]
+    pub fn overhead_usage(&self) -> Vec<crate::usage_meter::CallUsage> {
+        self.overhead
+            .lock()
+            .map(|recorded| recorded.clone())
+            .unwrap_or_default()
+    }
+
+    /// Stream a `usage_progress` frame for each call this sink records, when `enabled`.
+    #[must_use]
+    pub fn with_usage_progress(mut self, enabled: bool) -> Self {
+        self.usage_progress = enabled;
+        self
+    }
+
+    /// Whether this sink streams usage progress.
+    #[must_use]
+    pub fn streams_usage_progress(&self) -> bool {
+        self.usage_progress
+    }
+
+    /// Attach the turn's run ceiling (WS27-S6), when the handler resolved one. The tracker carries
+    /// the switches, so the sink records calls exactly when it holds one.
+    #[must_use]
+    pub fn with_run_ceiling(mut self, ceiling: Option<crate::sse_events::run_ceiling::CeilingTracker>) -> Self {
+        self.ceiling_tracked = ceiling.is_some();
+        if let Ok(tally) = self.tally.get_mut() {
+            tally.ceiling = ceiling;
+        }
+        self
+    }
+
+    /// Whether this sink records the calls it is given: it streams usage progress, or it tracks a run
+    /// ceiling. A caller prices a call for [`Self::record_call`] only then, so a turn with neither reads
+    /// the price catalogue no more often than it did before.
+    #[must_use]
+    pub fn records_calls(&self) -> bool {
+        self.usage_progress || self.ceiling_tracked
+    }
+
+    /// Record a provider call the turn made and, when the sink streams usage progress, stream the turn's
+    /// running total after it. Does nothing unless the sink records calls.
+    pub async fn record_call(
+        &self,
+        call: &crate::usage_meter::CallUsage,
+        priced: &crate::pricing::Priced,
+    ) {
+        if !self.records_calls() {
+            return;
+        }
+        // The lock is released before the emit below: a frame is never sent while the tally is held.
+        let Ok((snapshot, ceiling)) = self.tally.lock().map(|mut tally| {
+            let snapshot = tally.meter.record(call, priced);
+            let ceiling = tally
+                .ceiling
+                .as_mut()
+                .and_then(|ceiling| ceiling.record(metered_tokens(call), snapshot.cost_usd));
+            (snapshot, ceiling)
+        }) else {
+            return;
+        };
+        if self.usage_progress {
+            self.emit(ChatEvent::UsageProgress {
+                phase: call.phase,
+                snapshot,
+                ceiling,
+            })
+            .await;
+        }
+    }
+
+    /// The run ceiling as the closing answer frame states it: the turn's own total, and the metered
+    /// tokens of every call the turn counts, the answer's included, since the answer is not in the tally
+    /// yet. `None` unless the ceiling reports on frames.
+    #[must_use]
+    pub fn run_ceiling_at_turn_end(
+        &self,
+        turn: &crate::usage_meter::Snapshot,
+        turn_metered_tokens: u64,
+    ) -> Option<crate::sse_events::run_ceiling::CeilingProgress> {
+        let mut tally = self.tally.lock().ok()?;
+        tally
+            .ceiling
+            .as_mut()?
+            .progress(turn.cost_usd, turn_metered_tokens)
+    }
+
+    /// Whether the tool phase ends before its next round: enforcement is on and the run has reached a
+    /// cap. The tool loop asks at each round boundary.
+    #[must_use]
+    pub fn run_ceiling_stops_tool_phase(&self) -> bool {
+        self.tally.lock().is_ok_and(|tally| {
+            tally
+                .ceiling
+                .as_ref()
+                .is_some_and(|ceiling| ceiling.stops_tool_phase(tally.meter.snapshot().cost_usd))
+        })
     }
 
     /// The artifacts seen so far, one entry per id carrying its LATEST version,
@@ -1465,6 +1866,11 @@ mod tests {
         }
         .should_emit(&no_features));
         assert!(!ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 1,
             output_tokens: 2,
             cost_usd: None,
@@ -1546,6 +1952,11 @@ mod tests {
         }
         .should_emit(&feats));
         assert!(ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 1,
             output_tokens: 2,
             cost_usd: Some(0.01),
@@ -1556,7 +1967,14 @@ mod tests {
             retention_class: None,
         }
         .should_emit(&feats));
+        let progress = ChatEvent::UsageProgress {
+            phase: crate::usage_meter::CallPhase::ToolRound,
+            snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.01))]),
+            ceiling: None,
+        };
+        assert!(progress.should_emit(&feats));
         // Not opted in:
+        assert!(!progress.should_emit(&families(&["reasoning"])));
         assert!(!ChatEvent::Citation {
             id: "c".into(),
             title: "t".into(),
@@ -1580,6 +1998,288 @@ mod tests {
         .should_emit(&feats));
     }
 
+    /// The running total a sink's meter states after `calls`, each a `(basis, price)`: a metered call
+    /// is priced at its figure (`None` is unpriced), and a subscription call is priced at a known zero.
+    fn running_total(
+        calls: &[(crate::pricing::CostBasis, Option<f64>)],
+    ) -> crate::usage_meter::Snapshot {
+        use crate::pricing::{CategoryCost, CostBasis, PriceSource, Priced};
+        use crate::usage_meter::{CallPhase, CallUsage, UsageMeter};
+        let mut meter = UsageMeter::default();
+        let mut total = meter.snapshot();
+        for &(basis, usd) in calls {
+            let call = CallUsage {
+                phase: CallPhase::ToolRound,
+                model: "gpt-5".into(),
+                provider: "openai".into(),
+                basis,
+                input: 1_000,
+                output: 100,
+                cache_read: 200,
+                cache_write: 0,
+            };
+            let priced = match basis {
+                CostBasis::Subscription => Priced {
+                    usd: Some(0.0),
+                    by_category: None,
+                    source: PriceSource::Subscription,
+                },
+                CostBasis::Metered => Priced {
+                    usd,
+                    by_category: usd.map(|usd| CategoryCost {
+                        input_usd: usd,
+                        cache_read_usd: 0.0,
+                        cache_write_usd: 0.0,
+                        output_usd: 0.0,
+                    }),
+                    source: if usd.is_some() { PriceSource::Exact } else { PriceSource::Default },
+                },
+            };
+            total = meter.record(&call, &priced);
+        }
+        total
+    }
+
+    /// The keys a progress frame of `calls` carries, and the frame's own payload.
+    fn progress_payload(
+        calls: &[(crate::pricing::CostBasis, Option<f64>)],
+    ) -> serde_json::Map<String, Value> {
+        ChatEvent::UsageProgress {
+            phase: crate::usage_meter::CallPhase::Overhead,
+            snapshot: running_total(calls),
+            ceiling: None,
+        }
+        .payload("req-1")
+        .as_object()
+        .expect("a progress payload is an object")
+        .clone()
+    }
+
+    /// Each progress frame states the closed keys its total supports and no others: `cost_basis` only
+    /// for one basis, `unpriced_calls` only once a call went unpriced, and `cost_usd` null otherwise.
+    #[test]
+    fn usage_progress_has_only_closed_keys() {
+        use crate::pricing::CostBasis::{Metered, Subscription};
+        use std::collections::BTreeSet;
+        let closed: BTreeSet<String> = [
+            "calls",
+            "phase",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "cost_usd",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        // The closed keys, and the optional ones a frame states beside them.
+        let with = |extra: &[&str]| -> BTreeSet<String> {
+            let mut keys = closed.clone();
+            keys.extend(extra.iter().map(|key| (*key).to_owned()));
+            keys
+        };
+        let keys_of = |payload: &serde_json::Map<String, Value>| -> BTreeSet<String> {
+            payload.keys().cloned().collect()
+        };
+
+        // Every call priced and metered: a total in one basis, stated as such.
+        let priced = progress_payload(&[(Metered, Some(0.25)), (Metered, Some(0.5))]);
+        assert_eq!(keys_of(&priced), with(&["cost_basis"]));
+        assert_eq!(priced["cost_usd"], 0.75);
+        assert_eq!(priced["cost_basis"], "metered");
+        assert_eq!(priced["phase"], "overhead");
+
+        // One unpriced call: the cost is null, never the priced calls' sum, and the count is stated.
+        let unpriced = progress_payload(&[(Metered, Some(0.25)), (Metered, None)]);
+        assert_eq!(keys_of(&unpriced), with(&["cost_basis", "unpriced_calls"]));
+        assert!(unpriced["cost_usd"].is_null());
+        assert_eq!(unpriced["unpriced_calls"], 1);
+
+        // A subscription turn has no dollar figure, and its basis says so.
+        let subscription = progress_payload(&[(Subscription, None)]);
+        assert_eq!(keys_of(&subscription), with(&["cost_basis"]));
+        assert!(subscription["cost_usd"].is_null());
+        assert_eq!(subscription["cost_basis"], "subscription");
+
+        // Mixed bases state no basis, and the metered part's cost stays.
+        let mixed = progress_payload(&[(Metered, Some(0.25)), (Subscription, None)]);
+        assert_eq!(keys_of(&mixed), with(&[]));
+        assert_eq!(mixed["cost_usd"], 0.25);
+
+        // Before any call the total states no basis and no cost.
+        let empty = progress_payload(&[]);
+        assert_eq!(keys_of(&empty), with(&[]));
+        assert!(empty["cost_usd"].is_null());
+        assert_eq!(empty["calls"], 0);
+    }
+
+    /// A progress frame belongs to the `usage` family, so it is gated exactly as the usage frame is.
+    #[test]
+    fn usage_progress_is_gated_with_the_usage_family() {
+        let event = ChatEvent::UsageProgress {
+            phase: crate::usage_meter::CallPhase::Answer,
+            snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.25))]),
+            ceiling: None,
+        };
+        assert_eq!(event.family(), Some("usage"));
+        assert_eq!(event.name(), "usage_progress");
+        assert!(event.should_emit(&families(&["usage"])));
+        assert!(!event.should_emit(&families(&["steps", "tools"])), "not asked for, not sent");
+        assert!(!event.should_emit(&[]), "the plain chat profile never receives it");
+    }
+
+    /// A sink streams one frame for each call it records, and only while it is switched on and its
+    /// client asked for usage.
+    #[tokio::test]
+    async fn a_recorded_call_streams_the_running_total_only_when_the_sink_streams_it() {
+        async fn frames_sent(streams: bool, features: &[&str]) -> usize {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            let sink = RichEventSink::new(tx, families(features), "req-1".to_owned())
+                .with_usage_progress(streams);
+            let call = crate::usage_meter::CallUsage {
+                phase: crate::usage_meter::CallPhase::ToolRound,
+                model: "gpt-5".into(),
+                provider: "openai".into(),
+                basis: crate::pricing::CostBasis::Metered,
+                input: 1_000,
+                output: 100,
+                cache_read: 0,
+                cache_write: 0,
+            };
+            let priced = crate::pricing::Priced {
+                usd: Some(0.25),
+                by_category: Some(crate::pricing::CategoryCost {
+                    input_usd: 0.25,
+                    cache_read_usd: 0.0,
+                    cache_write_usd: 0.0,
+                    output_usd: 0.0,
+                }),
+                source: crate::pricing::PriceSource::Exact,
+            };
+            sink.record_call(&call, &priced).await;
+            sink.record_call(&call, &priced).await;
+            drop(sink);
+            let mut sent = 0;
+            while rx.try_recv().is_ok() {
+                sent += 1;
+            }
+            sent
+        }
+        assert_eq!(frames_sent(true, &["usage"]).await, 2, "one frame per recorded call");
+        assert_eq!(frames_sent(false, &["usage"]).await, 0, "the switch is off");
+        assert_eq!(frames_sent(true, &[]).await, 0, "a client that did not ask for usage gets none");
+    }
+
+    /// A sink whose ceiling is enforced counts the calls it is given without a progress stream, and the
+    /// tool phase ends once a recorded call takes the run to its cap.
+    #[tokio::test]
+    async fn run_ceiling_stops_the_tool_phase_once_a_recorded_call_reaches_the_cap() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let cap = crate::sse_events::run_ceiling::RunCeiling {
+            usd: Some(0.2),
+            tokens: None,
+        };
+        let sink = RichEventSink::new(tx, Vec::new(), "req-ceiling".to_owned()).with_run_ceiling(
+            crate::sse_events::run_ceiling::CeilingTracker::for_turn(cap, false, true),
+        );
+        assert!(
+            sink.records_calls(),
+            "an enforced ceiling counts calls without a stream"
+        );
+        assert!(!sink.streams_usage_progress());
+        let call = crate::usage_meter::CallUsage {
+            phase: crate::usage_meter::CallPhase::ToolRound,
+            model: "gpt-5".into(),
+            provider: "openai".into(),
+            basis: crate::pricing::CostBasis::Metered,
+            input: 1_000,
+            output: 100,
+            cache_read: 0,
+            cache_write: 0,
+        };
+        let priced = crate::pricing::Priced {
+            usd: Some(0.1),
+            by_category: Some(crate::pricing::CategoryCost {
+                input_usd: 0.1,
+                cache_read_usd: 0.0,
+                cache_write_usd: 0.0,
+                output_usd: 0.0,
+            }),
+            source: crate::pricing::PriceSource::Exact,
+        };
+        sink.record_call(&call, &priced).await;
+        assert!(
+            !sink.run_ceiling_stops_tool_phase(),
+            "half of the cap is not the cap"
+        );
+        sink.record_call(&call, &priced).await;
+        assert!(
+            sink.run_ceiling_stops_tool_phase(),
+            "two calls reach the cap"
+        );
+    }
+
+    /// The ceiling's keys ride a frame that carries a ceiling, and no other frame states them.
+    #[test]
+    fn usage_progress_states_the_ceiling_keys_only_when_it_carries_one() {
+        let carried = ChatEvent::UsageProgress {
+            phase: crate::usage_meter::CallPhase::ToolRound,
+            snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.04))]),
+            ceiling: Some(crate::sse_events::run_ceiling::CeilingProgress {
+                ceiling_usd: Some(0.05),
+                ceiling_tokens: Some(20_000),
+                fraction: Some(0.8),
+                warning: Some(crate::sse_events::run_ceiling::CeilingWarning::Eighty),
+            }),
+        }
+        .payload("req-1");
+        assert_eq!(carried["ceiling_usd"], json!(0.05));
+        assert_eq!(carried["ceiling_tokens"], json!(20_000));
+        assert_eq!(carried["fraction"], json!(0.8));
+        assert_eq!(carried["warning"], json!("run_ceiling_80"));
+        let plain = progress_payload(&[(crate::pricing::CostBasis::Metered, Some(0.04))]);
+        for key in ["ceiling_usd", "ceiling_tokens", "fraction", "warning"] {
+            assert!(
+                !plain.contains_key(key),
+                "{key} is stated only on a frame that carries a ceiling"
+            );
+        }
+    }
+
+    /// A token cap counts the input and output of metered calls only: a subscription call's tokens are
+    /// usage, and cost-core never lets them exhaust the cap.
+    #[test]
+    fn a_token_cap_counts_metered_calls_and_never_a_subscription_call() {
+        let call = |basis| crate::usage_meter::CallUsage {
+            phase: crate::usage_meter::CallPhase::ToolRound,
+            model: "m".into(),
+            provider: "p".into(),
+            basis,
+            input: 800,
+            output: 200,
+            cache_read: 500,
+            cache_write: 0,
+        };
+        assert_eq!(
+            metered_tokens(&call(crate::pricing::CostBasis::Metered)),
+            1_000,
+            "the input already folds in the cache legs, and the output adds to it"
+        );
+        assert_eq!(
+            metered_tokens(&call(crate::pricing::CostBasis::Subscription)),
+            0
+        );
+        assert_eq!(
+            metered_tokens_of([
+                &call(crate::pricing::CostBasis::Metered),
+                &call(crate::pricing::CostBasis::Subscription),
+                &call(crate::pricing::CostBasis::Metered),
+            ]),
+            2_000
+        );
+    }
+
     #[test]
     fn tools_family_covers_both_call_and_result() {
         let feats = families(&["tools"]);
@@ -1601,6 +2301,11 @@ mod tests {
     #[test]
     fn names_and_payload_shapes_are_stable() {
         let usage = ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 12,
             output_tokens: 34,
             cost_usd: Some(0.002),
@@ -1617,6 +2322,13 @@ mod tests {
         assert_eq!(p["latency_ms"], 880);
         assert!((p["cost_usd"].as_f64().unwrap() - 0.002).abs() < 1e-9);
         assert_eq!(p["cost_basis"], "metered");
+
+        let progress = ChatEvent::UsageProgress {
+            phase: crate::usage_meter::CallPhase::Answer,
+            snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.01))]),
+            ceiling: None,
+        };
+        assert_eq!(progress.name(), "usage_progress");
 
         let cite = ChatEvent::Citation {
             id: "c1".into(),
@@ -1729,6 +2441,11 @@ mod tests {
         // A subscription turn keeps `cost_usd` at 0.0 for older clients and
         // says why; a turn with no established basis keeps the old keys.
         let subscription = ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 1_800,
             output_tokens: 120,
             cost_usd: Some(0.0),
@@ -1743,6 +2460,11 @@ mod tests {
         assert_eq!(subscription["cost_basis"], "subscription");
         assert_eq!(subscription["input_tokens"], 1_800);
         let unestablished = ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,
@@ -1763,17 +2485,24 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "calls",
                 "confidence",
                 "cost_usd",
                 "input_tokens",
                 "latency_ms",
-                "output_tokens"
+                "output_tokens",
+                "unpriced_calls"
             ]
         );
     }
 
     fn usage_with(served_by: Option<ServedBy>) -> serde_json::Value {
         ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 10,
             output_tokens: 5,
             cost_usd: Some(0.0),
@@ -1789,6 +2518,37 @@ mod tests {
     /// The usage payload carries the three provenance fields when the server
     /// stamped them, and exactly the keys it always had when it did not.
     #[test]
+fn usage_carries_cache_tokens_and_omits_them_when_zero() {
+    let frame = |read: u32, write: u32| {
+        ChatEvent::Usage {
+            cache_read_tokens: read,
+            cache_write_tokens: write,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
+            input_tokens: 1200,
+            output_tokens: 80,
+            cost_usd: None,
+            cost_basis: None,
+            latency_ms: 10,
+            confidence: None,
+            served_by: None,
+            retention_class: None,
+        }
+        .payload("req-1")
+    };
+    let hit = frame(900, 0);
+    assert_eq!(hit["cache_read_tokens"], 900);
+    assert_eq!(hit["cache_write_tokens"], 0);
+    let written = frame(0, 300);
+    assert_eq!(written["cache_write_tokens"], 300);
+    // The zero-retention shape (and every provider that reports no cache) is byte-identical to before.
+    let none = frame(0, 0);
+    assert!(none.get("cache_read_tokens").is_none());
+    assert!(none.get("cache_write_tokens").is_none());
+}
+
+#[test]
     fn usage_carries_server_stamped_provenance_and_omits_it_when_empty() {
         let baseline = usage_with(None);
         let mut baseline_keys: Vec<&str> = baseline
@@ -1801,14 +2561,16 @@ mod tests {
         assert_eq!(
             baseline_keys,
             [
+                "calls",
                 "confidence",
                 "cost_basis",
                 "cost_usd",
                 "input_tokens",
                 "latency_ms",
-                "output_tokens"
+                "output_tokens",
+                "unpriced_calls"
             ],
-            "no provenance, no new keys"
+            "no provenance: the provenance keys stay out"
         );
 
         let azure = usage_with(ServedBy::stamped("azure-openai", "eu", 3));
@@ -1895,6 +2657,11 @@ mod tests {
     #[test]
     fn usage_names_its_retention_class_only_when_one_is_stamped() {
         let zdr = ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 3,
             output_tokens: 4,
             cost_usd: None,
@@ -1918,6 +2685,11 @@ mod tests {
     #[test]
     fn a_waived_usage_frame_states_its_class_and_reason() {
         let waived = ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 3,
             output_tokens: 4,
             cost_usd: None,
@@ -1941,6 +2713,11 @@ mod tests {
         );
 
         let zdr = ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 3,
             output_tokens: 4,
             cost_usd: None,
@@ -1966,6 +2743,11 @@ mod tests {
             .unwrap();
         let event = ChatEvent::TurnTiming { report };
         let usage = ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            calls: 1,
+            unpriced_calls: 0,
+            cost_by_category: None,
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,
@@ -2096,5 +2878,659 @@ mod memory_recall_payload_tests {
         let body = payload(Vec::new());
         assert_eq!(body["memories"].as_array().map(Vec::len), Some(0));
         assert!(body["latency_ms"].is_number());
+    }
+}
+
+/// The key, type and presence golden of every `ChatEvent` payload (WS12-S7): what the SPA's
+/// `chat-client.ts` may rely on, generated from the real `payload()` rather than written by hand.
+/// Each variant is sampled twice, minimal (every optional empty) and full (every optional set), so a
+/// conditionally written key reads as `optional` and a renamed or retyped key changes the file.
+/// Names, types and presence only: no sample text is recorded, so the golden carries no content.
+#[cfg(test)]
+mod payload_contract {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use serde::Serialize;
+    use serde_json::{json, Value};
+
+    use super::{ChatEvent, RetentionClass, ServedBy};
+
+    const REQUEST_ID: &str = "req-sample";
+
+    /// The committed golden. Regenerate with `MP_UPDATE_GOLDEN=1`; the repo-level
+    /// `scripts/tests/zdr-contract-sync.test.sh` then needs its pinned digest, the `.sha256` pin and the
+    /// SPA's vendored copy refreshed, which is the deliberate second step of changing the contract.
+    const GOLDEN_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../api/contracts/sse-event-payloads.json"
+    );
+
+    /// Every variant name `covered` can return. A variant added to `ChatEvent` does not compile until
+    /// `covered` names it, and `every_variant_has_a_minimal_and_a_full_sample` then fails until it is
+    /// listed here with its samples.
+    const VARIANTS: &[&str] = &[
+        "ResultReceipt",
+        "ReasoningDelta",
+        "StepUpdate",
+        "ToolCall",
+        "ToolResult",
+        "Citation",
+        "SourceScopeApplied",
+        "Grounding",
+        "Artifact",
+        "Attachment",
+        "Usage",
+        "UsageProgress",
+        "TurnTiming",
+        "Title",
+        "FollowUps",
+        "PlanProposed",
+        "Verification",
+        "MemoryRecall",
+        "QueuedInput",
+        "QueuedInputReceipted",
+        "RetrievalNotice",
+        "Stopped",
+        "Error",
+        "ZdrError",
+        "SubscriptionError",
+        "RetryScheduled",
+        "Compaction",
+        "ContextChange",
+    ];
+
+    /// The variant's name. No wildcard arm, so a new `ChatEvent` variant is a compile error here.
+    fn covered(event: &ChatEvent) -> &'static str {
+        match event {
+            ChatEvent::ResultReceipt { .. } => "ResultReceipt",
+            ChatEvent::ReasoningDelta { .. } => "ReasoningDelta",
+            ChatEvent::StepUpdate { .. } => "StepUpdate",
+            ChatEvent::ToolCall { .. } => "ToolCall",
+            ChatEvent::ToolResult { .. } => "ToolResult",
+            ChatEvent::Citation { .. } => "Citation",
+            ChatEvent::SourceScopeApplied { .. } => "SourceScopeApplied",
+            ChatEvent::Grounding { .. } => "Grounding",
+            ChatEvent::Artifact { .. } => "Artifact",
+            ChatEvent::Attachment { .. } => "Attachment",
+            ChatEvent::Usage { .. } => "Usage",
+            ChatEvent::UsageProgress { .. } => "UsageProgress",
+            ChatEvent::TurnTiming { .. } => "TurnTiming",
+            ChatEvent::Title { .. } => "Title",
+            ChatEvent::FollowUps { .. } => "FollowUps",
+            ChatEvent::PlanProposed { .. } => "PlanProposed",
+            ChatEvent::Verification { .. } => "Verification",
+            ChatEvent::MemoryRecall { .. } => "MemoryRecall",
+            ChatEvent::QueuedInput { .. } => "QueuedInput",
+            ChatEvent::QueuedInputReceipted { .. } => "QueuedInputReceipted",
+            ChatEvent::RetrievalNotice { .. } => "RetrievalNotice",
+            ChatEvent::Stopped { .. } => "Stopped",
+            ChatEvent::Error { .. } => "Error",
+            ChatEvent::ZdrError { .. } => "ZdrError",
+            ChatEvent::SubscriptionError { .. } => "SubscriptionError",
+            ChatEvent::RetryScheduled { .. } => "RetryScheduled",
+            ChatEvent::Compaction { .. } => "Compaction",
+            ChatEvent::ContextChange { .. } => "ContextChange",
+        }
+    }
+
+    fn s(text: &str) -> String {
+        text.to_owned()
+    }
+
+    fn citation(full: bool) -> ChatEvent {
+        ChatEvent::Citation {
+            id: s("c1"),
+            title: s("Doc"),
+            url: s("https://example.test/doc"),
+            snippet: s("snippet"),
+            source_group_id: s("kb:sharepoint"),
+            source_group_label: full.then(|| s("Microsoft 365")),
+            number: full.then_some(1),
+            claim_id: full.then(|| s("turn-1:claim-0")),
+            start: full.then_some(12),
+            end: full.then_some(15),
+            origin: s("knowledge"),
+        }
+    }
+
+    fn grounding(full: bool) -> ChatEvent {
+        let grounding = if full {
+            crate::retrieval::Grounding {
+                mode: s("hybrid"),
+                query: s("query"),
+                trace_id: Some(s("trace-1")),
+                low_confidence: true,
+                fact_count: 1,
+                source_count: 1,
+                facts: vec![crate::retrieval::GroundingFact {
+                    knowledge_id: s("kid-1"),
+                    document_id: s("doc-1"),
+                    text: s("fact"),
+                    score: 0.9,
+                    source_title: s("Title"),
+                    source_type: s("policy"),
+                    provider: s("Notion"),
+                    chunk_index: 0,
+                }],
+                sources: vec![crate::retrieval::GroundingSource {
+                    id: s("doc-1"),
+                    kind: s("knowledge"),
+                    title: s("Title"),
+                    snippet: s("snippet"),
+                    provider: s("Notion"),
+                    source_type: s("policy"),
+                    document_id: s("doc-1"),
+                    href: s("/knowledge"),
+                    score: 0.9,
+                }],
+                graph: Some(crate::retrieval::GroundingGraph {
+                    trace_id: Some(s("graph-1")),
+                    community_summaries: vec![s("summary")],
+                    edge_count: 1,
+                    nodes: vec![crate::retrieval::GroundingGraphNode {
+                        id: s("node-1"),
+                        label: s("Label"),
+                        kind: s("policy"),
+                    }],
+                }),
+                suggested_next_tools: vec![s("knowledge_search")],
+                zdr_actions_applied: vec![s("ephemeral_no_trace_persist")],
+                ..Default::default()
+            }
+        } else {
+            crate::retrieval::Grounding::default()
+        };
+        ChatEvent::Grounding { grounding }
+    }
+
+    fn usage(full: bool) -> ChatEvent {
+        ChatEvent::Usage {
+            input_tokens: 12,
+            output_tokens: 34,
+            cost_usd: full.then_some(0.002),
+            cost_basis: full.then_some(crate::pricing::CostBasis::Metered),
+            latency_ms: 880,
+            confidence: full.then_some(0.77),
+            served_by: full.then(|| ServedBy {
+                provider_used: s("provider-a"),
+                residency: s("eu"),
+                privacy_tier: Some("eu_resident"),
+            }),
+            retention_class: full.then_some(RetentionClass::ZdrWaived {
+                reason: "connection_not_zdr_capable",
+            }),
+            cache_read_tokens: u32::from(full) * 5,
+            cache_write_tokens: u32::from(full) * 3,
+            calls: 1 + 2 * u32::from(full),
+            unpriced_calls: 0,
+            // The breakdown is stated only where the total is priced, so the golden
+            // records the key as present on some payloads and absent on others.
+            cost_by_category: full.then_some(crate::pricing::CategoryCost {
+                input_usd: 0.001,
+                cache_read_usd: 0.0005,
+                cache_write_usd: 0.0,
+                output_usd: 0.0005,
+            }),
+        }
+    }
+
+    /// A progress frame of a turn whose tokens are fixed, so only its calls, its cost and the optional
+    /// keys that go with them vary.
+    fn usage_progress(
+        calls: u32,
+        cost_usd: Option<f64>,
+        basis: Option<crate::pricing::CostBasis>,
+        unpriced_calls: u32,
+    ) -> ChatEvent {
+        usage_progress_with_ceiling(calls, cost_usd, basis, unpriced_calls, None)
+    }
+
+    /// A progress frame of the same turn, carrying the run ceiling it states.
+    fn usage_progress_with_ceiling(
+        calls: u32,
+        cost_usd: Option<f64>,
+        basis: Option<crate::pricing::CostBasis>,
+        unpriced_calls: u32,
+        ceiling: Option<crate::sse_events::run_ceiling::CeilingProgress>,
+    ) -> ChatEvent {
+        ChatEvent::UsageProgress {
+            phase: crate::usage_meter::CallPhase::ToolRound,
+            snapshot: crate::usage_meter::Snapshot {
+                calls,
+                input: 2_042,
+                output: 207,
+                cache_read: 5,
+                cache_write: 3,
+                cost_usd,
+                unpriced_calls,
+                basis,
+                by_category: cost_usd.map(|_| crate::pricing::CategoryCost {
+                    input_usd: 0.001,
+                    cache_read_usd: 0.0005,
+                    cache_write_usd: 0.0,
+                    output_usd: 0.0005,
+                }),
+            },
+            ceiling,
+        }
+    }
+
+    fn turn_timing(full: bool) -> ChatEvent {
+        use crate::turn_timing::{Counts, Draft, Marks, Outcome, Phase, PhaseSpan, ProviderSummary};
+        let report = crate::turn_timing::TurnTimingReport {
+            request_id: s(REQUEST_ID),
+            outcome: Outcome::Completed,
+            server_ms: 900,
+            provider_ms: 700,
+            orchestration_ms: 200,
+            marks: if full {
+                Marks {
+                    connected_ms: Some(1),
+                    source_ready_ms: Some(2),
+                    first_token_ms: Some(3),
+                    first_draft_ms: Some(4),
+                    first_validated_ms: Some(5),
+                    durable_ms: Some(6),
+                }
+            } else {
+                Marks::default()
+            },
+            counts: Counts { model_rounds: u32::from(full), ..Default::default() },
+            tokens_reported: full,
+            phases: if full {
+                vec![PhaseSpan {
+                    phase: Phase::Generation,
+                    start_ms: 1,
+                    end_ms: 9,
+                    round: Some(1),
+                    pass: Some(1),
+                    batch: Some(1),
+                    attempt: Some(1),
+                    outcome: Some("ok"),
+                    tools: vec![s("create_artifact")],
+                    provider: Some(ProviderSummary {
+                        handler_ms: 8,
+                        provider_ms: 7,
+                        first_token_ms: Some(2),
+                        attempts: 1,
+                        failed_attempts_ms: 0,
+                        retry_wait_ms: 0,
+                        response_cache_hit: false,
+                        upstream_ms: BTreeMap::from([(s("connect"), 1)]),
+                    }),
+                    budget_ms: Some(100),
+                }]
+            } else {
+                Vec::new()
+            },
+            phases_dropped: u32::from(full),
+            draft: if full {
+                Draft { model_writes: 1, model_write_chars: 10, stored_chars: 9, ..Default::default() }
+            } else {
+                Draft::default()
+            },
+        };
+        ChatEvent::TurnTiming { report }
+    }
+
+    fn memory_recall(full: bool) -> ChatEvent {
+        use crate::memory_provenance::{MemoryOrigin, MemoryRole, RecalledMemoryView};
+        let memories = if full {
+            vec![RecalledMemoryView {
+                memory_id: s("mem-1"),
+                role: MemoryRole::Recall,
+                origin: MemoryOrigin::Stated,
+                label: s("USER"),
+                preview: s("preview"),
+            }]
+        } else {
+            Vec::new()
+        };
+        ChatEvent::MemoryRecall { count: memories.len() as u32, latency_ms: 12, memories }
+    }
+
+    /// A minimal and a full sample of every variant, minimal first.
+    fn samples() -> Vec<ChatEvent> {
+        let refusal = |feature: Option<&'static str>| match feature {
+            Some(key) => mp_contracts::zdr_refusal::Refusal::feature_not_supported(key),
+            None => mp_contracts::zdr_refusal::Refusal::UNAVAILABLE,
+        };
+        vec![
+            ChatEvent::ResultReceipt { receipt: json!({}) },
+            ChatEvent::ResultReceipt { receipt: json!({ "checks": [] }) },
+            ChatEvent::ReasoningDelta { delta: s("") },
+            ChatEvent::ReasoningDelta { delta: s("thinking") },
+            ChatEvent::StepUpdate { id: s("1"), title: s(""), detail: s(""), status: s("running") },
+            ChatEvent::StepUpdate { id: s("1"), title: s("Title"), detail: s("Detail"), status: s("done") },
+            ChatEvent::ToolCall { id: s("1"), name: s("web_search"), args: json!({}) },
+            ChatEvent::ToolCall { id: s("1"), name: s("web_search"), args: json!({ "query": "q" }) },
+            ChatEvent::ToolResult { id: s("1"), status: s("ok"), output: s(""), error: None },
+            ChatEvent::ToolResult { id: s("1"), status: s("error"), output: s("out"), error: Some(s("boom")) },
+            citation(false),
+            citation(true),
+            ChatEvent::SourceScopeApplied { scope: s("web_only"), excluded_tools: Vec::new() },
+            ChatEvent::SourceScopeApplied { scope: s("knowledge_only"), excluded_tools: vec![s("web_search")] },
+            grounding(false),
+            grounding(true),
+            ChatEvent::Artifact { id: s("a1"), kind: s("document"), title: s(""), content: s(""), version: 1 },
+            ChatEvent::Artifact { id: s("a1"), kind: s("code"), title: s("T"), content: s("body"), version: 2 },
+            ChatEvent::Attachment { id: s("f1"), name: s("f.png"), mime: s("image/png"), url: s("blob:1"), size: 0 },
+            ChatEvent::Attachment { id: s("f1"), name: s("f.png"), mime: s("image/png"), url: s("blob:1"), size: 2048 },
+            usage(false),
+            usage(true),
+            usage_progress(1, None, Some(crate::pricing::CostBasis::Subscription), 0),
+            usage_progress(
+                3,
+                Some(0.002_456),
+                Some(crate::pricing::CostBasis::Metered),
+                0,
+            ),
+            usage_progress(2, None, Some(crate::pricing::CostBasis::Metered), 1),
+            // A mixed total states its cost and no basis, which is why the golden must mark `cost_basis` optional.
+            usage_progress(4, Some(0.25), None, 0),
+            // A frame that states the run ceiling: the share used, and the 80% warning it is the first to carry.
+            usage_progress_with_ceiling(
+                3,
+                Some(0.002_456),
+                Some(crate::pricing::CostBasis::Metered),
+                0,
+                Some(crate::sse_events::run_ceiling::CeilingProgress {
+                    ceiling_usd: Some(0.05),
+                    ceiling_tokens: Some(20_000),
+                    fraction: Some(0.8),
+                    warning: Some(crate::sse_events::run_ceiling::CeilingWarning::Eighty),
+                }),
+            ),
+            turn_timing(false),
+            turn_timing(true),
+            ChatEvent::Title { title: s("") },
+            ChatEvent::Title { title: s("A title") },
+            ChatEvent::FollowUps { suggestions: Vec::new() },
+            ChatEvent::FollowUps { suggestions: vec![s("Why?")] },
+            ChatEvent::PlanProposed { plan_id: s("p1"), summary: s(""), steps: json!([]) },
+            ChatEvent::PlanProposed {
+                plan_id: s("p1"),
+                summary: s("Summary"),
+                steps: json!([{ "id": "s1", "title": "T", "operation": "write" }]),
+            },
+            ChatEvent::Verification { verdict: "unrelated", kb_citations: 0, web_citations: 0, web_allowed: false },
+            ChatEvent::Verification { verdict: "supports", kb_citations: 2, web_citations: 1, web_allowed: true },
+            memory_recall(false),
+            memory_recall(true),
+            ChatEvent::QueuedInput { messages: Vec::new() },
+            ChatEvent::QueuedInput { messages: vec![s("one more thing")] },
+            ChatEvent::QueuedInputReceipted { messages: Vec::new(), ids: Vec::new() },
+            ChatEvent::QueuedInputReceipted { messages: vec![s("one more thing")], ids: vec![s("msg-1")] },
+            ChatEvent::RetrievalNotice {
+                notice: crate::retrieval_metadata::notice_for_code("zdr_dense_unavailable")
+                    .expect("the ZDR notice is catalogued"),
+            },
+            ChatEvent::RetrievalNotice {
+                notice: crate::retrieval_metadata::notice_for_code("another_reduction")
+                    .expect("the generic notice is catalogued"),
+            },
+            ChatEvent::Stopped { reason: s("") },
+            ChatEvent::Stopped { reason: s("user") },
+            ChatEvent::Error { code: s("internal"), message: s(""), retryable: false },
+            ChatEvent::Error { code: s("upstream_unavailable"), message: s("Try again"), retryable: true },
+            ChatEvent::ZdrError { refusal: refusal(None) },
+            ChatEvent::ZdrError { refusal: refusal(Some("attachments")) },
+            ChatEvent::RetryScheduled {
+                scope: "tool",
+                tool: s("knowledge_search"),
+                attempt: 2,
+                max_attempts: 3,
+                wait_ms: 0,
+                reason: "other",
+            },
+            ChatEvent::RetryScheduled {
+                scope: "tool",
+                tool: s("knowledge_search"),
+                attempt: 2,
+                max_attempts: 3,
+                wait_ms: 250,
+                reason: "rate_limited",
+            },
+            ChatEvent::Compaction {
+                scope: "history",
+                outcome: "truncated",
+                messages_compacted: None,
+                messages_kept: None,
+                pinned_kept: None,
+            },
+            ChatEvent::Compaction {
+                scope: "tool_results",
+                outcome: "summarized",
+                messages_compacted: Some(12),
+                messages_kept: Some(6),
+                pinned_kept: Some(2),
+            },
+            ChatEvent::ContextChange {
+                change: "history_shed",
+                messages_dropped: None,
+                skills_truncated: None,
+                skills_dropped: None,
+                layer: None,
+                state: None,
+            },
+            ChatEvent::ContextChange {
+                change: "run_context_skipped",
+                messages_dropped: Some(4),
+                skills_truncated: Some(1),
+                skills_dropped: Some(0),
+                layer: Some("memory"),
+                state: Some("skipped_by_policy"),
+            },
+            ChatEvent::SubscriptionError {
+                code: s("rate_limited"),
+                message: s(""),
+                retryable: false,
+                retry_after_ms: None,
+                resets_at: None,
+                retry_at: None,
+            },
+            ChatEvent::SubscriptionError {
+                code: s("rate_limited"),
+                message: s("Wait"),
+                retryable: true,
+                retry_after_ms: Some(1000),
+                resets_at: Some(s("2026-01-01T00:00:00Z")),
+                retry_at: Some(s("2026-01-01T00:00:01Z")),
+            },
+        ]
+    }
+
+    fn json_type(value: &Value) -> &'static str {
+        match value {
+            Value::Null => "null",
+            Value::Bool(_) => "boolean",
+            Value::Number(number) if number.is_f64() => "number",
+            Value::Number(_) => "integer",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        }
+    }
+
+    #[derive(Serialize)]
+    struct KeyShape {
+        types: Vec<&'static str>,
+        presence: &'static str,
+    }
+
+    #[derive(Serialize)]
+    struct EventShape {
+        family: Option<&'static str>,
+        variants: Vec<&'static str>,
+        keys: BTreeMap<String, KeyShape>,
+    }
+
+    #[derive(Serialize)]
+    struct Contract {
+        contract: &'static str,
+        version: u32,
+        generated_by: &'static str,
+        events: BTreeMap<&'static str, EventShape>,
+    }
+
+    /// What the samples say about each SSE event name: the families and variants behind it and, per
+    /// payload key, the JSON types it took and whether every sample carried it. The three `error`
+    /// variants are one event name, so they merge into one entry.
+    fn render() -> String {
+        struct Seen {
+            family: Option<&'static str>,
+            variants: BTreeSet<&'static str>,
+            samples: usize,
+            keys: BTreeMap<String, (BTreeSet<&'static str>, usize)>,
+        }
+        let mut seen: BTreeMap<&'static str, Seen> = BTreeMap::new();
+        for event in samples() {
+            let entry = seen.entry(event.name()).or_insert_with(|| Seen {
+                family: event.family(),
+                variants: BTreeSet::new(),
+                samples: 0,
+                keys: BTreeMap::new(),
+            });
+            assert_eq!(entry.family, event.family(), "{} mixes feature families", event.name());
+            entry.variants.insert(covered(&event));
+            entry.samples += 1;
+            let payload = event.payload(REQUEST_ID);
+            let object = payload.as_object().expect("an SSE payload is a JSON object");
+            for (key, value) in object {
+                let slot = entry.keys.entry(key.clone()).or_default();
+                slot.0.insert(json_type(value));
+                slot.1 += 1;
+            }
+        }
+        let events = seen
+            .into_iter()
+            .map(|(name, seen)| {
+                let keys = seen
+                    .keys
+                    .into_iter()
+                    .map(|(key, (types, count))| {
+                        let presence = if count == seen.samples { "always" } else { "optional" };
+                        (key, KeyShape { types: types.into_iter().collect(), presence })
+                    })
+                    .collect();
+                (name, EventShape { family: seen.family, variants: seen.variants.into_iter().collect(), keys })
+            })
+            .collect();
+        let contract = Contract {
+            contract: "model-gateway.sse-event-payloads",
+            version: 1,
+            generated_by: "model-gateway sse_events payload_contract tests (MP_UPDATE_GOLDEN=1)",
+            events,
+        };
+        let mut text = serde_json::to_string_pretty(&contract).expect("the contract serializes");
+        text.push('\n');
+        text
+    }
+
+    #[test]
+    fn every_variant_has_a_minimal_and_a_full_sample() {
+        let mut count: BTreeMap<&str, usize> = BTreeMap::new();
+        for event in samples() {
+            *count.entry(covered(&event)).or_default() += 1;
+        }
+        for variant in VARIANTS {
+            assert!(
+                count.get(variant).copied().unwrap_or(0) >= 2,
+                "{variant} needs a minimal and a full sample in samples()"
+            );
+        }
+        assert_eq!(
+            count.keys().copied().collect::<BTreeSet<_>>(),
+            VARIANTS.iter().copied().collect::<BTreeSet<_>>(),
+            "samples() and VARIANTS name different variants"
+        );
+    }
+
+    #[test]
+    fn the_golden_carries_names_and_types_and_never_sample_content() {
+        let text = render();
+        for content in ["thinking", "Try again", "one more thing", "A title", "Wait"] {
+            assert!(!text.contains(content), "the golden records sample text: {content}");
+        }
+    }
+
+    /// The frames that carry retention and refusal facts keep the keys the SPA reads them by.
+    #[test]
+    fn the_zdr_bearing_frames_keep_their_keys() {
+        let contract: Value = serde_json::from_str(&render()).expect("the golden is JSON");
+        let key = |event: &str, key: &str| contract["events"][event]["keys"].get(key).cloned();
+        assert_eq!(key("usage", "retention_class").unwrap()["presence"], "optional");
+        assert_eq!(key("usage", "retention_reason").unwrap()["presence"], "optional");
+        assert_eq!(key("error", "code").unwrap()["presence"], "always");
+        assert_eq!(key("error", "action").unwrap()["presence"], "optional");
+        assert_eq!(key("error", "feature").unwrap()["presence"], "optional");
+        assert_eq!(key("retrieval_notice", "wording_key").unwrap()["presence"], "always");
+    }
+
+    #[test]
+    fn sse_event_payload_golden() {
+        let generated = render();
+        if std::env::var("MP_UPDATE_GOLDEN").is_ok_and(|value| value == "1") {
+            std::fs::create_dir_all(std::path::Path::new(GOLDEN_PATH).parent().unwrap())
+                .expect("the contracts directory");
+            std::fs::write(GOLDEN_PATH, &generated).expect("write the SSE payload golden");
+            return;
+        }
+        let committed = std::fs::read_to_string(GOLDEN_PATH).unwrap_or_else(|error| {
+            panic!(
+                "cannot read {GOLDEN_PATH} ({error}). Generate it with MP_UPDATE_GOLDEN=1 cargo test \
+                 -p model-gateway --lib sse_event_payload_golden, then pin its digest in \
+                 scripts/tests/zdr-contract-sync.test.sh."
+            )
+        });
+        assert!(
+            !committed.contains('\r'),
+            "the SSE payload golden must keep LF line endings (see .gitattributes)"
+        );
+        assert_eq!(
+            committed, generated,
+            "the committed SSE payload golden differs from what ChatEvent::payload produces. If the \
+             change is intended, regenerate it with MP_UPDATE_GOLDEN=1 cargo test -p model-gateway \
+             --lib sse_event_payload_golden, refresh its .sha256 pin and the SPA's vendored copy, and \
+             update the pinned digest in scripts/tests/zdr-contract-sync.test.sh."
+        );
+    }
+}
+
+#[cfg(test)]
+mod connector_turn_tests {
+    use super::*;
+    use crate::tool_loop::connector_reads::ConnectorTurn;
+
+    /// The selection rides on the sink, and a connected-account source is recorded with its origin and
+    /// no number, so the turn's evidence never gives it a number another source could share.
+    #[tokio::test]
+    async fn a_connector_citation_is_recorded_unnumbered_on_the_turn_sink() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let sink = RichEventSink::new(tx, Vec::new(), "req-1".to_owned()).with_connector_turn(
+            ConnectorTurn::new(vec!["conn_1".to_owned()], true),
+        );
+        assert_eq!(
+            sink.connector_turn().map(|turn| turn.selection.clone()),
+            Some(vec!["conn_1".to_owned()])
+        );
+        sink.emit(ChatEvent::Citation {
+            id: "conn-0123456789abcdef".to_owned(),
+            title: "Invoice 42".to_owned(),
+            url: String::new(),
+            snippet: "Ada · 2026-10-28".to_owned(),
+            source_group_id: "connector:microsoft".to_owned(),
+            source_group_label: Some("Microsoft 365".to_owned()),
+            number: None,
+            claim_id: None,
+            start: None,
+            end: None,
+            origin: "connector".to_owned(),
+        })
+        .await;
+        let recorded = sink.recorded_citations();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].origin, "connector");
+        assert_eq!(recorded[0].number, None);
     }
 }

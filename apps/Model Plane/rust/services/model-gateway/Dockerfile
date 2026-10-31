@@ -41,6 +41,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo chef cook --release --package model-gateway --recipe-path recipe.json
 WORKDIR /app
 COPY rust/ rust/
+# builtin_skills.rs embeds the first-party Office SKILL.md files with include_str! (WS19-S9).
+COPY skills/office/ skills/office/
 WORKDIR /app/rust
 # target/ is a BuildKit cache mount, so the compiled binary lives inside the
 # cache and not in the image layer — copy it out within the same RUN so the

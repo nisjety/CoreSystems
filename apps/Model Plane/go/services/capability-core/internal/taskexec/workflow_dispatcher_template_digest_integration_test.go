@@ -28,9 +28,13 @@ import (
 // The stages below are the production ones, in order: the create handler's
 // decode-and-marshal of the body (replicated, it is inline in the handler and
 // pinned by internal/api/workplane_apis_template_digest_test.go), the real
-// cron.Sweeper.RunOnce, and the real canonicalScheduledTemplate. The two tables
-// carry only the columns those stages touch, with the column types of
-// session-core migrations 0004 and 0028.
+// cron.Sweeper.RunOnce, and the real canonicalScheduledTemplate. The three
+// tables carry only the columns those stages touch, with the column types of
+// session-core migrations 0004 (tasks, cron_schedules, cron_fires), 0028
+// (cron_schedules' space and template columns) and 0056 (cron_fires' fire_key,
+// written by fireOne). Keep them in step with RunOnce's SQL: a column it writes
+// that is missing here fails the fire inside its transaction, and the test then
+// sees only a commit rollback.
 //
 // Run with: go test -tags integration -run TestScheduleTemplateDigestSurvivesJSONB ./internal/taskexec/
 
@@ -70,7 +74,8 @@ CREATE TABLE cron_fires (
     task_id TEXT,
     fired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     status TEXT NOT NULL DEFAULT 'pending',
-    error TEXT
+    error TEXT,
+    fire_key TEXT NOT NULL DEFAULT ''
 );
 `
 

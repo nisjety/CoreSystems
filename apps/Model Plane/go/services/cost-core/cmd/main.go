@@ -96,6 +96,22 @@ type usagePayload struct {
 	CacheReadInputTokens     int64   `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int64   `json:"cache_creation_input_tokens"`
 	CostBasis                string  `json:"cost_basis"`
+	// CacheMissReason is model-gateway's advisory classification of a turn
+	// that did not read from the prompt cache. Absent from an older gateway
+	// and from any turn it did not classify.
+	CacheMissReason string `json:"cache_miss_reason"`
+}
+
+// cacheMissReasonOf returns the payload's canonical miss reason. An unknown
+// value is dropped to "not classified" rather than rejecting the event, which
+// would lose its tokens from the ledger.
+func cacheMissReasonOf(orgID string, p usagePayload) string {
+	reason, ok := ledger.NormalizeCacheMissReason(p.CacheMissReason)
+	if !ok {
+		slog.Warn("unrecognised usage cache_miss_reason; storing none",
+			"org_id", orgID, "request_id", p.RequestID, "cache_miss_reason_bytes", len(p.CacheMissReason))
+	}
+	return reason
 }
 
 // costBasisOf returns the payload's canonical cost basis. An unrecognised
@@ -542,6 +558,7 @@ func decodeUsageMessage(subject string, data []byte, createdAt time.Time) (ledge
 		CreatedAt:                createdAt,
 		CacheReadInputTokens:     p.CacheReadInputTokens,
 		CacheCreationInputTokens: p.CacheCreationInputTokens,
+		CacheMissReason:          cacheMissReasonOf(subjectOrgID, p),
 		CostBasis:                costBasisOf(subjectOrgID, p),
 	}
 	if err := ledger.ValidateEntry(entry); err != nil {

@@ -11,6 +11,7 @@ members = [
     "crates/mp-toon",
     "crates/mp-tokens",
     "crates/mp-authctx",
+    "crates/mp-content-safety",
     "services/model-gateway",
     "services/session-core",
     "services/inference-core",

@@ -7,14 +7,27 @@ const usageBucketSchema = z.object({
   requests: z.number().int().nonnegative(), input_tokens: z.number().int().nonnegative(),
   output_tokens: z.number().int().nonnegative(), metered_cost_usd: z.number().finite().nonnegative(),
   unmeasured_requests: z.number().int().nonnegative(),
+  // Cache figures cover API-basis turns only. An older cost-core omits them, which reads as no cache activity.
+  cache_read_input_tokens: z.number().int().nonnegative().default(0),
+  cache_creation_input_tokens: z.number().int().nonnegative().default(0),
+  cache_reported_input_tokens: z.number().int().nonnegative().default(0),
+})
+// Miss reasons are an advisory guess made per gateway replica. The reason stays a plain string so a new
+// closed-set value shows up as itself rather than failing the whole report.
+const cacheMissBucketSchema = z.object({
+  day: z.string(), model: z.string(), provider: z.string(), reason: z.string(),
+  requests: z.number().int().nonnegative(),
 })
 const usageAnalyticsSchema = z.object({
   buckets: z.array(usageBucketSchema), scope: z.enum(['me', 'organization']),
+  cache_breakdown: z.object({ miss_reasons: z.array(cacheMissBucketSchema).default([]), advisory: z.boolean().default(true) })
+    .default({ miss_reasons: [], advisory: true }),
   reporting_started_at: z.string().datetime({ offset: true }).nullable(),
   from: z.string().datetime({ offset: true }).nullable(), to: z.string().datetime({ offset: true }),
   timezone: z.literal('UTC'),
 })
 export type UsageBucket = z.infer<typeof usageBucketSchema>
+export type CacheMissBucket = z.infer<typeof cacheMissBucketSchema>
 export type UsageAnalytics = z.infer<typeof usageAnalyticsSchema>
 
 export async function getUsageAnalytics(query: CostSummaryQuery): Promise<UsageAnalytics> {

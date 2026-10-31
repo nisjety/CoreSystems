@@ -1,0 +1,19 @@
+{
+  "id": "space-origin-is-never-announced",
+  "category": "space_origin",
+  "description": "A run on a thread whose origin is a Space is not a chat turn. Session Core drops it before the outbox insert, so the review never receives it. The envelope carries no origin, so capability-core cannot re-check it; this case is covered by that upstream gate.",
+  "upstream": "session-core src/learning_events.rs: a run whose thread origin is not chat is dropped before the outbox insert (memory_state_and_origin_gates_precede_the_outbox_insert)",
+  "controls": {"learning_allowed": true, "reason": "on"},
+  "conversation": [],
+  "existing_skills": [],
+  "model_reply": "",
+  "model_stop_reason": "",
+  "run": {"event_type": "RUN_COMPLETED", "org_id": "org-1", "user_id": "user-1", "run_id": "run-1", "thread_id": "thread-1", "zdr": false},
+  "attempts": [],
+  "expect": {
+    "outcomes": [],
+    "model_calls": 0,
+    "transcript_reads": 0,
+    "proposal_count": 0
+  }
+}

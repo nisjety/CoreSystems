@@ -12,8 +12,11 @@ use mp_contracts::model_plane::v1::{
     browser_broker_client::BrowserBrokerClient, capability_core_client::CapabilityCoreClient,
     execution_core_client::ExecutionCoreClient, finetune_jobs_client::FinetuneJobsClient,
     inference_core_client::InferenceCoreClient,
+    learning_governance_service_client::LearningGovernanceServiceClient,
     managed_run_lifecycle_client::ManagedRunLifecycleClient,
+    message_search_client::MessageSearchClient,
     memory_service_client::MemoryServiceClient,
+    message_tree_service_client::MessageTreeServiceClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient,
     run_service_client::RunServiceClient, sandbox_manager_client::SandboxManagerClient,
     session_core_client::SessionCoreClient,
@@ -99,6 +102,12 @@ pub struct AppState {
     pub rate_limiter: RateLimiter,
     pub inference_client: InferenceCoreClient<Channel>,
     pub session_client: SessionCoreClient<Channel>,
+    /// Session Core's MessageSearch service, on the same endpoint as `session_client` (WS17-S3).
+    pub message_search_client: MessageSearchClient<Channel>,
+    /// Session Core's MessageTree service on the session_client endpoint (WS17-S8).
+    pub message_tree_client: MessageTreeServiceClient<Channel>,
+    /// Session Core's LearningGovernance service on the same endpoint as `session_client` (WS07-S9).
+    pub learning_client: LearningGovernanceServiceClient<Channel>,
     /// Additive managed-run terminalization service hosted by Session Core on
     /// the same gRPC endpoint. It deliberately remains separate from the
     /// legacy `SessionCore` client so existing callers retain their contracts.
@@ -127,6 +136,12 @@ pub struct AppState {
     /// server, so it reuses the session endpoint/channel.
     pub run_client: RunServiceClient<Channel>,
     pub orchestration_client: OrchestrationCoreServiceClient<Channel>,
+    /// The `OrchestrationCoreService` hosted by session-core itself, on the session endpoint.
+    /// Only `ConsumeApproval` goes through it: orchestrator-core (Go), behind
+    /// `orchestration_client`, proxies the approval reads and decisions but does not serve the
+    /// consume (it answers Unimplemented), and the executor makes its own consume against
+    /// session-core too. Found by the first live /continue (2026-10-19).
+    pub consume_client: OrchestrationCoreServiceClient<Channel>,
     /// execution-core (:9093). Used to resume a run after an approval is
     /// granted — the gateway is the approval decision point but does not drive
     /// the execution loop, so it signals execution-core directly.
@@ -249,6 +264,10 @@ pub struct AppState {
     /// by `/v1/invoke/stream`; appended to by `POST /v1/invoke/{id}/queue`.
     /// Replaces the SPA silently discarding anything typed while streaming.
     pub queued_inputs: crate::queued_input::QueuedInputRegistry,
+    /// Cancel, queue and probe routed to the replica that owns a stream (build plan WS04-S1).
+    /// Off unless `MODEL_GATEWAY_RUN_CONTROL_BUS=true` and the boot self-test passes; off, the
+    /// two registries above answer for this process alone, as before.
+    pub run_control: crate::run_control::RunControl,
     /// chat-parity §1 — idempotent-regenerate guard for `/v1/invoke`. Keyed by
     /// a client-supplied `idempotency_key`; dedupes double-submit / regenerate
     /// retries so they neither re-run inference nor re-charge budget.
@@ -387,6 +406,7 @@ impl AppState {
         let finetune_channel = session_channel.clone();
         let run_channel = session_channel.clone();
         let managed_run_channel = session_channel.clone();
+        let consume_channel = session_channel.clone();
         let orchestration_channel = lazy_static_channel("http://localhost:9080");
         let execution_channel = lazy_static_channel("http://localhost:9093");
         let sandbox_channel = lazy_static_channel("http://localhost:9094");
@@ -402,6 +422,9 @@ impl AppState {
             publisher: Arc::new(DynPublisher::InMemory(InMemoryPublisher::new())),
             rate_limiter: RateLimiter::from_env(),
             inference_client: InferenceCoreClient::new(inference_channel),
+            message_search_client: MessageSearchClient::new(session_channel.clone()),
+            message_tree_client: MessageTreeServiceClient::new(session_channel.clone()),
+            learning_client: LearningGovernanceServiceClient::new(session_channel.clone()),
             session_client: SessionCoreClient::new(session_channel),
             managed_run_client: ManagedRunLifecycleClient::new(managed_run_channel),
             session_terminal_tokens: None,
@@ -410,6 +433,7 @@ impl AppState {
             run_start_guard: Arc::default(),
             run_client: RunServiceClient::new(run_channel),
             orchestration_client: OrchestrationCoreServiceClient::new(orchestration_channel),
+            consume_client: OrchestrationCoreServiceClient::new(consume_channel),
             execution_client: ExecutionCoreClient::new(execution_channel),
             sandbox_client: SandboxManagerClient::new(sandbox_channel),
             browser_client: BrowserBrokerClient::new(browser_channel),
@@ -448,6 +472,7 @@ impl AppState {
             doc_ready: crate::doc_indexed_consumer::DocReadyRegistry::new(),
             cancels: crate::cancel_registry::CancelRegistry::new(),
             queued_inputs: crate::queued_input::QueuedInputRegistry::new(),
+            run_control: crate::run_control::RunControl::off(),
             idempotency: crate::idempotency_registry::IdempotencyRegistry::new(),
             // `Client::new` with empty base_url returns an Unavailable
             // client; the gRPC handlers degrade to Unimplemented in
@@ -557,6 +582,21 @@ impl AppState {
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
         )?);
+        let message_search_client = MessageSearchClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let message_tree_client = MessageTreeServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let learning_client = LearningGovernanceServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
         let managed_run_client = ManagedRunLifecycleClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
@@ -568,6 +608,11 @@ impl AppState {
         );
         let managed_start_keys = ManagedStartKeyDeriver::from_env()
             .context("managed-run start-key credential configuration failed")?;
+        let consume_client = OrchestrationCoreServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
         let orchestration_client = OrchestrationCoreServiceClient::new(Self::lazy_channel(
             "ORCHESTRATOR_CORE_URL",
             "ORCHESTRATOR_CORE_ADDR",
@@ -751,12 +796,16 @@ impl AppState {
             let mut state = Self::with_nats(nats);
             state.inference_client = inference_client;
             state.session_client = session_client;
+            state.message_search_client = message_search_client;
+            state.message_tree_client = message_tree_client;
+            state.learning_client = learning_client;
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
             state.mail_task_bridge_tokens = mail_task_bridge_tokens.clone();
             state.managed_start_keys = managed_start_keys;
             state.run_client = run_client;
             state.orchestration_client = orchestration_client;
+            state.consume_client = consume_client.clone();
             state.execution_client = execution_client.clone();
             state.sandbox_client = sandbox_client;
             state.browser_client = browser_client;
@@ -790,6 +839,8 @@ impl AppState {
             state.lsp = lsp_client.clone();
             // Redis-backed resume buffer when REDIS_URL is set (multi-replica).
             state.stream_buffers = crate::stream_buffer::StreamBufferStore::from_env().await;
+            // Off unless the switch is `true`; a failed boot check degrades it, never the boot.
+            state.run_control = crate::run_control::RunControl::from_env(Some(url.as_str())).await;
             // plan_mode + team_workers default to empty stores —
             // explicit assignment is unnecessary but kept for symmetry
             // with the dev branch below.
@@ -799,12 +850,16 @@ impl AppState {
             let mut state = Self::new();
             state.inference_client = inference_client;
             state.session_client = session_client;
+            state.message_search_client = message_search_client;
+            state.message_tree_client = message_tree_client;
+            state.learning_client = learning_client;
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
             state.mail_task_bridge_tokens = mail_task_bridge_tokens;
             state.managed_start_keys = managed_start_keys;
             state.run_client = run_client;
             state.orchestration_client = orchestration_client;
+            state.consume_client = consume_client.clone();
             state.execution_client = execution_client;
             state.sandbox_client = sandbox_client;
             state.browser_client = browser_client;
@@ -839,6 +894,7 @@ impl AppState {
             // disabled in dev mode even when LSP_BRIDGE_URL is configured.
             state.lsp = lsp_client;
             state.stream_buffers = crate::stream_buffer::StreamBufferStore::from_env().await;
+            state.run_control = crate::run_control::RunControl::from_env(None).await;
             Ok(state)
         }
     }

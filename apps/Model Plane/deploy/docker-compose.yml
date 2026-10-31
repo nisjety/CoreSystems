@@ -222,6 +222,8 @@ services:
       # works with whichever provider key is set (Anthropic-only, OpenAI-only,
       # or both). Set DEFAULT_MODEL to pin a specific model org-wide.
       DEFAULT_MODEL: ${DEFAULT_MODEL:-}
+      # Title, follow-up and judge calls; empty = gpt-4o-mini. On an Anthropic-only chain set claude-haiku-5-5.
+      MODEL_GATEWAY_AUX_MODEL: ${MODEL_GATEWAY_AUX_MODEL:-}
       RATE_LIMIT_RPM: "100"
       # Resume buffer for chat streams (chat gap closure I3). With it the frames
       # a turn has already sent are kept in the model plane's Dragonfly, so a
@@ -245,6 +247,140 @@ services:
       # routed here, and the listener stays open for resume and stop. Keep
       # stop_grace_period above this plus about 10 s.
       MODEL_GATEWAY_DRAIN_SECS: ${MODEL_GATEWAY_DRAIN_SECS:-120}
+      # Build plan WS03 S3: the same switch execution-core reads. With it on, the
+      # gateway serves `POST /v1/orchestration/runs/{run_id}/continue` for a granted
+      # loop-owned approval; with it off, that route answers 409 continue_disabled.
+      # The two services must agree: a gateway that is on while execution-core is
+      # off would accept a continue for an approval nothing minted as loop-owned,
+      # and the reverse mints loop-owned approvals nothing can continue. OFF by
+      # default; flip it on both services together.
+      AGENT_CONTINUE_AFTER_APPROVAL_ENABLED: ${AGENT_CONTINUE_AFTER_APPROVAL_ENABLED:-false}
+      # Build plan WS03 S7: the in-place resume of a paused Do loop. With it on, `/continue`
+      # spends the approval itself and asks execution-core for the `loop` stage; with it off
+      # (or with any prerequisite off) the continuation runs as a `segment`, as before. OFF
+      # by default; only the literal `true` turns it on. One coupled flip with
+      # EXECUTION_EFFECT_LEDGER_ENABLED, EXECUTION_LOOP_CHECKPOINT_ENABLED and
+      # AGENT_CONTINUE_AFTER_APPROVAL_ENABLED on execution-core (the last one is read on this
+      # service too) and SESSION_CORE_LOOP_CHECKPOINT_ENABLED on session-core: flip them
+      # together, deploy execution-core first, then session-core, then model-gateway, then the
+      # BFF, and roll back in reverse (this service off first). This service reads the
+      # variable once, in the /continue handler, through loop_resume_enabled (S7c-B; the
+      # durable_loop_contract guard ties this entry to that reader). A gateway that is on while the
+      # executor's ledger is off, or while the executor's continue switch is off, spends the
+      # user's click and has the executor refuse it: the click is lost and the run waits out
+      # the renewed recovery window (see the execution-core entry for what each mismatch does).
+      EXECUTION_LOOP_RESUME_ENABLED: ${EXECUTION_LOOP_RESUME_ENABLED:-false}
+      # Build plan WS03 S8-A (S8-7): on THIS service the parking switch only ACCEPTS the park
+      # form of /continue (an exactly empty approval_id with a claim token), which asks
+      # execution-core to resume a parked run and never terminalizes it. Execution-core's own
+      # entry of the same name WRITES parks. OFF by default; only the literal `true` turns it on.
+      # With it off an empty approval_id is the committed 400 continue_incomplete. It needs
+      # EXECUTION_LOOP_RESUME_ENABLED above (a park continue with it off is 409
+      # continue_disabled). Flip it together with the BFF's VEREVON_GATEWAY_CONTINUE_PARK_ENABLED,
+      # BEFORE execution-core's parking switch, and turn it off only after session-core's park
+      # recovery is off or no park is left. It is NOT the executor's flip, so it is read from a
+      # host variable of its own, MODEL_GATEWAY_LOOP_PARKING_ENABLED: turning the executor's
+      # parking off must leave the existing parks resumable here.
+      EXECUTION_LOOP_PARKING_ENABLED: ${MODEL_GATEWAY_LOOP_PARKING_ENABLED:-false}
+      # WS14 S2a, "run the approved plan": the kill switch of the execute turn (the request
+      # field `execute_granted`, sent by the SPA after a plan approval). OFF by default; only
+      # the literal `true` turns it on. With it off such a turn is refused typed
+      # (`plan_execute_disabled`, not retryable) before any run exists, and every other turn
+      # is untouched. No other service reads it, but it is COUPLED to the WS03 approval-resume
+      # flip: the widest rung of an execute turn runs under the `ask` posture, whose per-call
+      # approval is resumed through /continue, so while AGENT_CONTINUE_AFTER_APPROVAL_ENABLED
+      # (above, read by this service) is off an execute turn is refused with the same typed
+      # `plan_execute_disabled` whatever this switch says. Turn it on AFTER the coupled WS03
+      # flip, and off BEFORE rolling that flip back. Deploy the gateway first, then the BFF,
+      # then the SPA, and turn it off here to roll back. The
+      # grant an execute turn runs under lives in this process's memory for 24 hours at most;
+      # a restart drops it and the turn is then refused typed (`plan_grant_unavailable`).
+      MODEL_GATEWAY_PLAN_EXECUTE_ENABLED: ${MODEL_GATEWAY_PLAN_EXECUTE_ENABLED:-false}
+      # WS04-S1: cancel, queue and probe routed to the replica that owns a stream, over NATS request/reply.
+      # On by default since the WS04-S9 two-replica live proof (2026-10-27, docs/compliance/evidence/
+      # live-proof-ws04-replica-run-control-2026-10-27.txt); only the literal `true` turns it on. Deploy order: the
+      # nats.conf ACL (mp.v1.runctl.>) first, then the gateways. A boot self-test that finds the ACL missing leaves
+      # the bus degraded and behaving as off, never the gateway down. Roll back with false plus a restart.
+      MODEL_GATEWAY_RUN_CONTROL_BUS: ${MODEL_GATEWAY_RUN_CONTROL_BUS:-true}
+      MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS: ${MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS:-750}
+      # WS26-S1: sample rate (0 to 1) of the semantic shadow pass over external tool results. Telemetry only; ZDR turns
+      # never reach it. 0.2 is the code's own default, so declaring it changes nothing.
+      CONTENT_SAFETY_SHADOW_SAMPLE_RATE: ${CONTENT_SAFETY_SHADOW_SAMPLE_RATE:-0.2}
+      # WS26-S6 (DEC-31 defaults): the inline, tighten-only prompt-injection pass over external tool results. Off by
+      # default; only the literal `true` turns it on, and an org then still needs a mode above `frame`. Fails open at the
+      # deadline, at most MAX_CALLS_PER_RUN classifier calls per tool loop; ZDR turns never reach it. Keep it off until
+      # the owner has seen the live proof.
+      CONTENT_SAFETY_SEMANTIC_INLINE: ${CONTENT_SAFETY_SEMANTIC_INLINE:-false}
+      CONTENT_SAFETY_MODE_DEFAULT: ${CONTENT_SAFETY_MODE_DEFAULT:-frame}
+      CONTENT_SAFETY_SEMANTIC_DEADLINE_MS: ${CONTENT_SAFETY_SEMANTIC_DEADLINE_MS:-2500}
+      CONTENT_SAFETY_SEMANTIC_MAX_CALLS_PER_RUN: ${CONTENT_SAFETY_SEMANTIC_MAX_CALLS_PER_RUN:-6}
+      CONTENT_SAFETY_INJECTION_MODEL: ${CONTENT_SAFETY_INJECTION_MODEL:-}
+      # WS19-S7: the skill_file tool reads a matched skill's bundle from capability-core. Off by default; only the literal
+      # `true` turns it on. A skill has a bundle only once an admin uploaded one (SKILL_BUNDLES_ENABLED on capability-core).
+      SKILL_FILE_TOOL_ENABLED: ${SKILL_FILE_TOOL_ENABLED:-false}
+      # WS19-S9: first-party Office skills (docx, xlsx, pptx, pdf) listed for every org. Off by default; only the literal
+      # `true` turns it on.
+      BUILTIN_OFFICE_SKILLS_ENABLED: ${BUILTIN_OFFICE_SKILLS_ENABLED:-false}
+      # WS19-S8: name a turn's skill bundles to execution-core so code_interpreter sees them read-only at /skills. Off by
+      # default; only the literal `true`.
+      SKILL_BUNDLE_MOUNT_ENABLED: ${SKILL_BUNDLE_MOUNT_ENABLED:-false}
+      # WS04-S6: durable send receipts (client_message_id on a send, dedupe in session-core, ids on the queued_input
+      # delivery event). On by default since the WS04-S9 proof; only the literal `true` turns it on. Deploy order:
+      # session-core (migration 0052) first, then model-gateway, then the BFF and frontend. Roll back with false plus a
+      # restart.
+      MODEL_GATEWAY_SEND_RECEIPTS: ${MODEL_GATEWAY_SEND_RECEIPTS:-true}
+      # WS17-S8: message versions (branch and rewind). Off by default; set it together with
+      # SESSION_CORE_MESSAGE_VERSIONS_ENABLED on session-core.
+      MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED: ${MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED:-false}
+      # WS04-S5: a mirror in Redis/Dragonfly that holds ids only (run_id, skill ids, 24 h), so a turn streamed on one
+      # replica can be rated on another. On by default since the WS04-S9 proof; only the literal `true` turns it on.
+      # Dragonfly eviction degrades to the single-replica behaviour.
+      MODEL_GATEWAY_SHARED_TURN_RECORD: ${MODEL_GATEWAY_SHARED_TURN_RECORD:-true}
+      # WS04-S7: a shared idempotency claim in Redis that holds ids only. Off by default; only the literal `true`
+      # turns it on, and it stays off until its own two-replica duplicate-send proof.
+      MODEL_GATEWAY_SHARED_IDEMPOTENCY: ${MODEL_GATEWAY_SHARED_IDEMPOTENCY:-false}
+      # WS08-S2: the server attachment contract (route, count and size limits, typed refusals). It only
+      # tightens, so it is on by default; CHAT_ATTACHMENT_POLICY_ENABLED=false turns it off. Do not pass
+      # CHAT_SANDBOX_ATTACHMENTS_ENABLED: that opt-in belongs to WS08-S5.
+      CHAT_ATTACHMENT_POLICY_ENABLED: ${CHAT_ATTACHMENT_POLICY_ENABLED:-true}
+      CHAT_ATTACHMENT_MAX_IMAGES: ${CHAT_ATTACHMENT_MAX_IMAGES:-4}
+      CHAT_ATTACHMENT_MAX_IMAGE_BYTES: ${CHAT_ATTACHMENT_MAX_IMAGE_BYTES:-1000000}
+      CHAT_ATTACHMENT_MAX_FILES: ${CHAT_ATTACHMENT_MAX_FILES:-3}
+      CHAT_ATTACHMENT_MAX_FILE_BYTES: ${CHAT_ATTACHMENT_MAX_FILE_BYTES:-1000000}
+      CHAT_ATTACHMENT_MAX_TOTAL_BYTES: ${CHAT_ATTACHMENT_MAX_TOTAL_BYTES:-3145728}
+      CHAT_STREAM_BODY_LIMIT_BYTES: ${CHAT_STREAM_BODY_LIMIT_BYTES:-12582912}
+      # WS08-S4: images ride to the model as parts instead of the vision diversion. Unset is off; flip it together
+      # with the client's VITE_CHAT_VISION_AS_PARTS_ENABLED.
+      CHAT_VISION_AS_PARTS_ENABLED: ${CHAT_VISION_AS_PARTS_ENABLED:-}
+      # WS08-S6: a Do run carries the turn's attachments. Unset is off; flip it together with the client's
+      # VITE_CHAT_DO_ATTACHMENTS_ENABLED. The server declares it on /v1/models as modes.do_attachments.
+      CHAT_DO_ATTACHMENTS_ENABLED: ${CHAT_DO_ATTACHMENTS_ENABLED:-}
+      # WS18-S2: a follow-up turn's Space append context (from the BFF's GATEWAY_SPACE_APPEND_RETRIEVAL) scopes its
+      # retrieval to the thread's Space. Off by default; only the literal `true` turns it on, and only after the
+      # staging proof.
+      MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL: ${MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL:-false}
+      # WS11-S5: derive the reasoning level once in the gateway and send it to inference-core. Off by default; only the
+      # literal `true` turns it on. Roll out in this order: inference-core adapter flags on first, then this switch. With
+      # this on and the adapter flags off, a deep request sends budget 0 and a level nothing renders (no thinking).
+      MODEL_GATEWAY_EFFORT_LADDER: ${MODEL_GATEWAY_EFFORT_LADDER:-false}
+      # WS27-S5: a ZDR answer's usage frame states its cost in-stream, numbers only, nothing stored (no ledger row, no usage
+      # envelope). Off by default; only the literal `true` turns it on. Turning it on is an owner call (DEC-18(d)).
+      MODEL_GATEWAY_ZDR_STREAM_COST: ${MODEL_GATEWAY_ZDR_STREAM_COST:-false}
+      # WS27-S2: a turn's usage frame and ledger rows count every tool round and the overhead calls, with run_id. Off by
+      # default; only the literal `true`. Billing attribution (DEC-18, WS27-D5) must be confirmed before it is turned on.
+      MODEL_GATEWAY_TURN_USAGE_COMPLETE: ${MODEL_GATEWAY_TURN_USAGE_COMPLETE:-false}
+      # WS27-S3: stream a usage_progress frame after each provider call of a turn, for a client that asked for usage.
+      # Off by default; only the literal `true`. ZDR turns never stream it.
+      MODEL_GATEWAY_USAGE_PROGRESS: ${MODEL_GATEWAY_USAGE_PROGRESS:-false}
+      # WS27-S6: the per-run cost and token ceiling (request cap, else the org ceiling): WARN streams run_ceiling_80 and
+      # run_ceiling_reached on the usage_progress frames, ENFORCE also ends the tool phase at the cap. Both off by default,
+      # only the literal `true`. Keep both off until the budget.rs precedence P0 (a request cap can loosen the org cap) is fixed.
+      MODEL_GATEWAY_RUN_CEILING_WARN: ${MODEL_GATEWAY_RUN_CEILING_WARN:-false}
+      MODEL_GATEWAY_RUN_CEILING_ENFORCE: ${MODEL_GATEWAY_RUN_CEILING_ENFORCE:-false}
+      # WS04-S4: read the plan grant from session-core so a Do run started on another replica carries the rung. On by default
+      # since the WS04-S9 proof; only the literal `true` turns it on. Deploy session-core first so migration 0050 has applied;
+      # false keeps the in-memory grants (kept as the rollback path).
+      MODEL_GATEWAY_DURABLE_PLAN_GRANT: ${MODEL_GATEWAY_DURABLE_PLAN_GRANT:-true}
       # Kill-switches for the review-latency levers. Empty keeps a lever ON;
       # 0/off/false/no/disabled turns it off at the next restart, no rebuild.
       MODEL_GATEWAY_SOLE_NOTE_PREFETCH: ${MODEL_GATEWAY_SOLE_NOTE_PREFETCH:-}
@@ -415,6 +551,9 @@ services:
       MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER: ${MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER:-}
       MODEL_GATEWAY_COMPACTION_TOKEN_BUDGET: ${MODEL_GATEWAY_COMPACTION_TOKEN_BUDGET:-}
       MODEL_GATEWAY_DEDUP_CONTEXT_HISTORY: ${MODEL_GATEWAY_DEDUP_CONTEXT_HISTORY:-}
+      # Run context for Do/Plan runs (WS02-S6): off, instructions or full. Empty is off.
+      MODEL_GATEWAY_RUN_CONTEXT: ${MODEL_GATEWAY_RUN_CONTEXT:-}
+      MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS: ${MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS:-}
       # Source-check deadlines in seconds. The code default is 90 per artifact
       # and 150 for the shared tool phase, and the code treats an empty value as
       # unset. Here `:-120` fills in an empty value too, so the per-artifact
@@ -610,6 +749,10 @@ services:
       # unreachable from inside this container; execution-core's own agentic
       # tool reaches the same service via its separate SHIPPING_CORE_URL_EXEC.
       SHIPPING_CORE_URL: ${SHIPPING_CORE_URL:-http://shipping-core:8080}
+      # WS23-S5: Ask-mode connector reads (read_provider_action) for the connections the person selected, with citations
+      # and no body text in history. Off by default; only the literal `true`. Reads go to integration-corev2.
+      CONNECTOR_ASK_READS_ENABLED: ${CONNECTOR_ASK_READS_ENABLED:-false}
+      INTEGRATION_COREV2_URL: ${INTEGRATION_COREV2_URL:-http://integration-api:3026}
       # information-core (Application Plane weather/traffic/news aggregator,
       # wraps Yr/met.no) — backs the plain-chat `get_weather` builtin. Without
       # this the gateway falls back to http://information-core:3190, which is
@@ -686,6 +829,14 @@ services:
       # disables the resolve path — servers with no stored OAuth tokens are
       # unaffected either way.
       MCP_OAUTH_SERVICE_TOKEN: ${MCP_OAUTH_SERVICE_TOKEN:-}
+      # WS05-S2: post each MCP tool definition's digest and annotations to capability-core so a first-seen tool is pinned and a
+      # changed one drifts. Off by default; only the literal `true` turns it on. Needs the same MCP_OAUTH_SERVICE_TOKEN as
+      # capability-core. Skipped for a ZDR turn.
+      MCP_TOOL_OBSERVATION_ENABLED: ${MCP_TOOL_OBSERVATION_ENABLED:-false}
+      # WS13-S5: a grant whose approval cause demands a fresh password re-check (step_up claim in the Model Plane
+      # token, minted after auth-core's POST /api/v2/auth/step-up). Only the literal `shadow` (log, let through) or
+      # `enforce` (refuse) turns it on; anything else is off. A denial never needs it.
+      APPROVAL_STEP_UP_ENFORCED: ${APPROVAL_STEP_UP_ENFORCED:-off}
       # ADR-0003 — the platform layer of the authored-instruction hierarchy
       # (`apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md`): deployment-level
       # configuration, deliberately not a database row (no "platform
@@ -753,6 +904,46 @@ services:
       # AES-256-GCM key for encrypted approval continuation descriptors. The
       # service fails closed when a descriptor is requested without this key.
       SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY: ${SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY:-}
+      # Durable loop fold store (WS03 S4). Off by default: a loop keeps its fold in
+      # memory and a pause cannot be resumed from the store. Sealed under the key above.
+      SESSION_CORE_LOOP_CHECKPOINT_ENABLED: ${SESSION_CORE_LOOP_CHECKPOINT_ENABLED:-false}
+      # Sweep that closes a tool reservation still open long after its run ended or
+      # parked, as `unknown_outcome` (WS03 S5). Off by default: turning it on changes
+      # what audit sees for such rows, so it is a deliberate rollout step.
+      SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED: ${SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED:-false}
+      # An approval that has run past its expires_at no longer holds the recovery worker back
+      # from its run (WS03 S8-0). Off by default, and only the literal `true` turns it on: any
+      # requested or granted, unconsumed approval then spares its run only until it expires, or
+      # while a delivery worker holds a live lease on it. An expired, never-consumed one lets the
+      # run end outcome_unknown at its deadline (about 15 minutes after the last heartbeat) and
+      # its fold is purged with it. Independent of the other durable-loop switches: flip and
+      # roll back on its own.
+      SESSION_CORE_RECOVERY_APPROVAL_EXPIRY_ENABLED: ${SESSION_CORE_RECOVERY_APPROVAL_EXPIRY_ENABLED:-false}
+      # Session-core's side of parking a pinned run's recoverable stop (WS03 S8-4). Off by default,
+      # and only the literal `true` turns it on; it also needs SESSION_CORE_LOOP_CHECKPOINT_ENABLED.
+      # On: the fold store takes a park fold under the park rules and says so (park_accepted), an
+      # empty pause reference claims the run's due parked fold, and the recovery worker spares a
+      # parked fold until the wait below has passed since the park save, then ends the run
+      # outcome_unknown through the unchanged receipt path. Off: a park is stored and claimed as
+      # before, nothing says park_accepted, and every park is ended at the ordinary deadline
+      # (about 15 minutes), so the executor never parks against it. Roll it back AFTER executor
+      # parking is off, and before any gateway or BFF park switch (see the flip order).
+      SESSION_CORE_PARK_RECOVERY_ENABLED: ${SESSION_CORE_PARK_RECOVERY_ENABLED:-false}
+      # WS17-S3: the conversation search query path (SearchMessages). Off by default; the index itself is built
+      # by migration 0055 either way.
+      SESSION_CORE_MESSAGE_SEARCH_ENABLED: ${SESSION_CORE_MESSAGE_SEARCH_ENABLED:-false}
+      # WS17-S8: the persisted message tree (versions, branch and rewind). Off by default; set it together with
+      # MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED on model-gateway. Build the 0061 indexes CONCURRENTLY first on a
+      # populated messages table.
+      SESSION_CORE_MESSAGE_VERSIONS_ENABLED: ${SESSION_CORE_MESSAGE_VERSIONS_ENABLED:-false}
+      # WS13-S3: the approval decision audit event and its provenance record. Off by default.
+      APPROVAL_AUDIT_EVENTS_ENABLED: ${APPROVAL_AUDIT_EVENTS_ENABLED:-false}
+      # WS03-S8: park a crashed run instead of ending it (needs park recovery and the fold store on). Off by
+      # default and owner-gated: the executor half is not built, so the worker parks nothing yet.
+      SESSION_CORE_CRASH_PARK_ENABLED: ${SESSION_CORE_CRASH_PARK_ENABLED:-false}
+      # How long a parked run waits for its continuation, in seconds, counted from the park save
+      # (WS03 S8-4). Default one day, clamped to 60..2592000. Only read while park recovery is on.
+      SESSION_CORE_PARK_TTL_SECONDS: ${SESSION_CORE_PARK_TTL_SECONDS:-86400}
       # Dreaming's LLM memory extraction (dream_extractor.rs). Unset this
       # address, or set DREAMING_LLM_EXTRACTION=0, and Dreaming falls back to
       # the deterministic phrase matcher alone.
@@ -765,6 +956,18 @@ services:
       # Turn it on (=1) only for a deployment that accepts a paid extraction
       # model, or after Dreaming can run on the user's own route.
       DREAMING_LLM_EXTRACTION: ${DREAMING_LLM_EXTRACTION:-0}
+      # WS07-S1 kill switch. Default true: the memory gate enforces each user's paused/off state. false restores
+      # pre-S1 behaviour (every user treated as on) and logs ERROR once per Dreaming cycle; SetMemoryControls is
+      # then refused.
+      MEMORY_CONTROLS_ENABLED: ${MEMORY_CONTROLS_ENABLED:-true}
+      # WS07-S4: the org memory and learning policy mirror. An empty service token keeps the whole mirror
+      # dormant; ORG_POLICY_FAIL_CLOSED is the strict literal true; ORG_POLICY_MAX_STALE is in seconds.
+      ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
+      SESSION_ORG_CORE_SERVICE_TOKEN: ${SESSION_ORG_CORE_SERVICE_TOKEN:-}
+      ORG_POLICY_POLL_SECS: ${ORG_POLICY_POLL_SECS:-60}
+      ORG_POLICY_MAX_STALE: ${ORG_POLICY_MAX_STALE:-900}
+      ORG_POLICY_FAIL_CLOSED: ${ORG_POLICY_FAIL_CLOSED:-false}
+      ORG_LEARNING_DEFAULT: ${ORG_LEARNING_DEFAULT:-disabled}
       DREAMING_LLM_MODEL: ${DREAMING_LLM_MODEL:-claude-haiku-4-5}
       # Write-time memory grounding (memory_grounding.rs). Off by default --
       # set MEMORY_GROUNDING_ENABLED=1 to let Dreaming classify a candidate as
@@ -773,6 +976,10 @@ services:
       # SESSION_CORE_SERVICE_ID/SESSION_CORE_SERVICE_API_KEY already set above.
       MEMORY_GROUNDING_ENABLED: ${MEMORY_GROUNDING_ENABLED:-0}
       MEMORY_GROUNDING_MODEL: ${MEMORY_GROUNDING_MODEL:-claude-haiku-4-5}
+      # WS26-S4: one content policy on every memory write (instruction markers, hidden characters, secret shapes, and
+      # org scope only for origin `user`). `off` by default; `report` counts refusals and still writes, `enforce` refuses.
+      # Only those two exact words turn it on. The rollout default and the enforce date are the owner's call.
+      CONTENT_WRITE_POLICY: ${CONTENT_WRITE_POLICY:-off}
       CONTEXT_RECENT_MESSAGES: "20"
       COMPACTION_THRESHOLD: "80000"
       # P0.4 residency: region stamped onto every run record at StartRun.
@@ -799,7 +1006,12 @@ services:
         condition: service_completed_successfully
     networks:
       default: {}
-      inter-plane-bus: {}
+      inter-plane-bus:
+        # Plane-unique alias: Control Plane also defines a `session-core` service
+        # on this network, so the bare name is ambiguous. Prometheus scrapes
+        # model-session-core:8081 for the audit outbox gauges (WS01 S1).
+        aliases:
+          - model-session-core
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8081/healthz"]
       interval: 10s
@@ -833,6 +1045,22 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: inference-core
       INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-azure,anthropic,openai,cohere}
+      # Reasoning-effort ladder (WS11): the level reaches the provider body only when its switch is the literal
+      # `true`; both are off by default and the request body is then byte-identical to before. The aliases map an
+      # Azure deployment name to its base model (e.g. prod-chat=gpt-5-mini).
+      INFERENCE_CORE_OPENAI_REASONING_EFFORT: ${INFERENCE_CORE_OPENAI_REASONING_EFFORT:-false}
+      INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING: ${INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING:-false}
+      # WS10-S3: model entitlement PEP. off | shadow | enforce; unset or empty means off, an unknown value means
+      # enforce (this switch guards access). Needs the org-core address and the inference-core service token.
+      MODEL_ENTITLEMENT_MODE: ${MODEL_ENTITLEMENT_MODE:-off}
+      ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
+      INFERENCE_ORG_CORE_SERVICE_TOKEN: ${INFERENCE_ORG_CORE_SERVICE_TOKEN:-}
+      # WS08-S7: sets the decode limit for attachments; unset keeps the 16 MiB floor.
+      CHAT_ATTACHMENT_MAX_TOTAL_BYTES: ${CHAT_ATTACHMENT_MAX_TOTAL_BYTES:-3145728}
+      # WS02-S9: tiered Anthropic system blocks (Stable, Context, per-turn). Only the
+      # literal true enables it; ZDR requests never take the tiered form.
+      INFERENCE_ANTHROPIC_TIERED_SYSTEM: ${INFERENCE_ANTHROPIC_TIERED_SYSTEM:-false}
+      INFERENCE_CORE_EFFORT_MODEL_ALIASES: ${INFERENCE_CORE_EFFORT_MODEL_ALIASES:-}
       # Optional ChatGPT subscription route. Add openai-codex-subscription to
       # INFERENCE_PROVIDER_ORDER only after setting all three variables. This
       # service gets an opaque connection id plus this dedicated service key;
@@ -1023,6 +1251,74 @@ services:
       - "127.0.0.1:9093:9093"   # gRPC compatibility probe; production overlay removes host ports
     environment:
       RUST_LOG: info
+      # Build plan WS03 S2: raise Do-loop approvals as loop-owned (consumed once by
+      # the durable loop through ConsumeApproval) instead of the cold delivery
+      # worker's. OFF by default and never for ZDR runs. Stage 1 `/continue` is
+      # built (the gateway route and this service's consume-and-run segment), so a
+      # loop-owned approval has a consumer; the switch stays off by default until
+      # the live proof, and is flipped on both services together.
+      AGENT_CONTINUE_AFTER_APPROVAL_ENABLED: ${AGENT_CONTINUE_AFTER_APPROVAL_ENABLED:-false}
+      # Effect ledger (WS03 S5): an effectful tool call is reserved in session-core
+      # before it runs and finalized after, and a call that cannot be reserved is not
+      # run. OFF by default. Needs session-core's migration 0048.
+      EXECUTION_EFFECT_LEDGER_ENABLED: ${EXECUTION_EFFECT_LEDGER_ENABLED:-false}
+      # WS11-S8: a Do run's rounds use the turn's effort level (RunAgentRequest field 21).
+      # Only the literal `true` turns it on; off, every round sends no level, as before.
+      EXECUTION_CORE_RUN_EFFORT: ${EXECUTION_CORE_RUN_EFFORT:-false}
+      # WS25-S5: run-scoped result handles and result_query. `on` or `true` enables; off by default.
+      EXECUTION_RESULT_HANDLES: ${EXECUTION_RESULT_HANDLES:-off}
+      # Durable loop fold writer (WS03 S6): the Do loop saves its history, counters and
+      # open tool round to session-core at the end of a round, before an effectful call
+      # and before a pause for approval. OFF by default; with it off the loop makes no
+      # call and behaves exactly as before. Only the literal `true` turns it on. Needs
+      # EXECUTION_EFFECT_LEDGER_ENABLED (a fold without ledger rows cannot be
+      # reconciled; otherwise it logs once and writes nothing) AND session-core's
+      # SESSION_CORE_LOOP_CHECKPOINT_ENABLED (otherwise the first save is refused and
+      # the writer turns itself off). Turn session-core on first, execution-core second.
+      EXECUTION_LOOP_CHECKPOINT_ENABLED: ${EXECUTION_LOOP_CHECKPOINT_ENABLED:-false}
+      # In-place resume of a paused Do loop (WS03 S7): a `/continue` in the `loop` stage
+      # claims the pause's fold and re-enters the loop instead of starting a fresh segment.
+      # OFF by default. With it off, or with the ledger or the fold writer off, or for a
+      # zero-retention or waived run, `loop` runs as a `segment` (a downgrade, never a refusal).
+      # A pause whose fold cannot be restored (not claimable, tombstone, prompt drift, a ledger
+      # that cannot be read) also runs as a `segment`, under the same consume. A denied claim
+      # or ledger read, a release the ledger already holds, or a fence or pre-reserve that
+      # cannot be written is REFUSED with nothing dispatched (the click is spent).
+      # The continue switch is not a downgrade: with AGENT_CONTINUE_AFTER_APPROVAL_ENABLED off
+      # here a continue is REFUSED (continue_disabled) after the gateway has already spent the
+      # click, and the click is lost. Only the literal `true` turns this switch on. The same
+      # variable is read by model-gateway (once, in continue_run): one coupled flip with
+      # EXECUTION_EFFECT_LEDGER_ENABLED, EXECUTION_LOOP_CHECKPOINT_ENABLED,
+      # SESSION_CORE_LOOP_CHECKPOINT_ENABLED and AGENT_CONTINUE_AFTER_APPROVAL_ENABLED (both
+      # services). What a mismatch does, with the gateway's resume switch on: the executor's
+      # ledger off, or its continue switch off, refuses the replay of the click the gateway
+      # spent (continuation_already_consumed, or continue_disabled) and the click is lost; the
+      # executor's own resume switch, fold writer or session-core's fold store off only
+      # downgrade `loop` to a `segment`. The operator's signature for the ledger case is the
+      # warn line continue_replay_refused_ledger_off. Deploy this service first, then
+      # session-core, then model-gateway, then the BFF.
+      EXECUTION_LOOP_RESUME_ENABLED: ${EXECUTION_LOOP_RESUME_ENABLED:-false}
+      # Parking a recoverable stop of a pinned Do loop (WS03 S8-A): instead of ending in a failed
+      # run, a pinned, persistent, root run that meets a spent usage limit, a transient upstream
+      # failure, an expired sign-in or its credential deadline at a round boundary saves a `park`
+      # fold, returns `parked` and stays open, to be resumed through the one /continue route
+      # (AgentResume.mode `park`: this image resumes it from the fold, on the pinned route the
+      # fold recorded, fenced before its first inference; the gateway's park form ships later,
+      # so do not turn this on before it is deployed). OFF by
+      # default: with it off no park is written and runs end exactly as before. Only the
+      # literal `true` turns it on, and it takes effect only with EXECUTION_LOOP_RESUME_ENABLED,
+      # AGENT_CONTINUE_AFTER_APPROVAL_ENABLED, EXECUTION_LOOP_CHECKPOINT_ENABLED and
+      # EXECUTION_EFFECT_LEDGER_ENABLED also on (a park nothing can resume is never written).
+      # A park resume is NOT gated by this switch: with it off, existing parks stay resumable.
+      # This service WRITES parks; model-gateway reads the same container name to ACCEPT the
+      # park form of /continue, from its own host variable MODEL_GATEWAY_LOOP_PARKING_ENABLED,
+      # so turning this one off does not turn the gateway's acceptance off. Needs session-core's
+      # SESSION_CORE_PARK_RECOVERY_ENABLED (a store that does not accept the park leaves the run
+      # with its committed outcome). Flip it last, after the gateway and the BFF; turn it off first.
+      EXECUTION_LOOP_PARKING_ENABLED: ${EXECUTION_LOOP_PARKING_ENABLED:-false}
+      # WS13-S4: within one run, a call the user already declined (same tool, same arguments) is refused from the
+      # run's approvals instead of being asked again. Off by default; only the literal `true` turns it on.
+      APPROVAL_DENIAL_MEMORY_ENABLED: ${APPROVAL_DENIAL_MEMORY_ENABLED:-false}
       # Autonomous tool-using runs route through Azure's model-router deployment,
       # which selects the best model per turn (tool-calling model selection is
       # handled by the router, cost-aware). Overridable per deployment; empty →
@@ -1123,6 +1419,13 @@ services:
       EXECUTION_CORE_AUTH_AUDIENCE: ${EXECUTION_CORE_AUTH_AUDIENCE:-execution-core}
       EXECUTION_CORE_SERVICE_ID: ${EXECUTION_CORE_SERVICE_ID:-execution-core}
       EXECUTION_CORE_SERVICE_API_KEY: ${EXECUTION_CORE_SERVICE_API_KEY:?EXECUTION_CORE_SERVICE_API_KEY is required}
+      # WS05-S3/S4: how the permission engine reads a tool's declared class. TOOL_CLASS_GATE is off, shadow or enforce (an unknown value is
+      # off): shadow compares with the legacy name heuristics and counts divergence, enforce reads the signed v2 decision. MCP tools reach a
+      # Do run only with MCP_DO_TOOLS=read (read-class tools; `all` is blocked) AND TOOL_CLASS_GATE=enforce; MCP_DO_TOOL_CAP bounds the offer.
+      # Roll execution-core first, then capability-core, then shadow, then enforce.
+      TOOL_CLASS_GATE: ${TOOL_CLASS_GATE:-off}
+      MCP_DO_TOOLS: ${MCP_DO_TOOLS:-off}
+      MCP_DO_TOOL_CAP: ${MCP_DO_TOOL_CAP:-40}
       # Per-call capability decisions are signed by capability-core and
       # verified immediately before execution. Development may leave these
       # unset (allow decisions then carry no evidence); production overlays
@@ -1134,6 +1437,12 @@ services:
       # Control public key set; an absent key keeps the lane disabled.
       EXECUTION_CORE_SCHEDULED_STEP_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
       EXECUTION_CORE_SCHEDULED_STEP_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
+      # WS20-S6: the scheduled Do lane (a scheduled fire runs the agent loop under its contract). Empty is off;
+      # execution-core and orchestrator-core must agree. Do not enable before the contract and the run's
+      # retention reach the lane (see the depth register).
+      EXECUTION_SCHEDULED_AGENT_ENABLED: ${EXECUTION_SCHEDULED_AGENT_ENABLED:-}
+      # WS08-S7: sets the decode limit for attachments; unset keeps the 16 MiB floor.
+      CHAT_ATTACHMENT_MAX_TOTAL_BYTES: ${CHAT_ATTACHMENT_MAX_TOTAL_BYTES:-3145728}
       # Governed tickets.create adapter. All bindings are intentionally empty
       # by default: the adapter stays disabled until Control, Conversation
       # Core, and Execution Core have distinct, least-privilege credentials.
@@ -1182,6 +1491,17 @@ services:
       # space:processes before any of them can actually start.
       # See apps/Frontend Plane/verevonv3/docs/S4_2_PROCESS_REGISTRY_DESIGN_2026-09-13.md §3.1.
       EXECUTION_CORE_PROCESS_HOST: ${EXECUTION_CORE_PROCESS_HOST:-}
+      # WS24-S3/S4: workspace tools for Space Do runs. `off` by default; `read` offers the read tools, `all` also the
+      # per-run overlay writes (workspace_edit, workspace_put). cap.workspace.read and cap.workspace.write stay
+      # unattested until then. ZDR and non-Space runs never get them; plan mode refuses the writes.
+      WORKSPACE_TOOLS: ${WORKSPACE_TOOLS:-off}
+      # WS26-S7: Do-mode tool results ask model-gateway ScreenContent for the same tighten-only verdict chat gets. Off by
+      # default; only the literal `true`. A refused, slow or mismatched answer keeps the local verdict; ZDR runs never ask.
+      CONTENT_SAFETY_SCREEN_RPC: ${CONTENT_SAFETY_SCREEN_RPC:-false}
+      # WS21-S1/S2: the Do loop's browser tools, offered only to a run that carries a verified browser bearer and is not
+      # ZDR. Off by default; only the value `1` turns it on (unlike the `true` switches). The Verevon gateway's
+      # BROWSER_DO_ENABLED decides whether a bearer is minted at all.
+      EXECUTION_DO_BROWSER_ENABLED: ${EXECUTION_DO_BROWSER_ENABLED:-0}
       # Feature-gates QuarryAgentClient::from_env() (browser_agent loop) — the
       # env var this block's QUARRY_EDGE_URL comment already promises but that
       # was never actually wired here (Phase 2, found live: run_browser_agent_loop
@@ -1293,6 +1613,8 @@ services:
       NATS_USER: orchestrator-core-runtime
       NATS_PASSWORD: ${MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD:?MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD is required}
       SESSION_CORE_ADDR: session-core:9091
+      # WS20-S6: must agree with execution-core's switch of the same name. Empty is off.
+      EXECUTION_SCHEDULED_AGENT_ENABLED: ${EXECUTION_SCHEDULED_AGENT_ENABLED:-}
       LETTA_BRIDGE_AUTH_AUDIENCE: ${LETTA_BRIDGE_AUTH_AUDIENCE:-letta-bridge}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
@@ -1395,6 +1717,12 @@ services:
       CAPABILITY_CORE_AUTH_AUDIENCE: ${CAPABILITY_CORE_AUTH_AUDIENCE:-capability-core}
       CAPABILITY_CORE_DECISION_SIGNING_KEY: ${CAPABILITY_CORE_DECISION_SIGNING_KEY:-}
       CAPABILITY_CORE_DECISION_SIGNING_KID: ${CAPABILITY_CORE_DECISION_SIGNING_KID:-capability-decision-v1}
+      # WS25-S7: org agent policy API (routes answer 404 while off). Only the literal `true` enables it.
+      ORG_AGENT_POLICY_API: ${ORG_AGENT_POLICY_API:-false}
+      # WS20-S4: stored-consent schedule contracts. Only the literal `true` enables it; user-core takes the same name.
+      SCHEDULE_CONTRACT_ENABLED: ${SCHEDULE_CONTRACT_ENABLED:-false}
+      # WS05-S5: stored per-tool allow/ask/never policies. Only the literal `true` enables them; off, they are stored and ignored.
+      TOOL_POLICY_ENFORCED: ${TOOL_POLICY_ENFORCED:-false}
       # Outbound service-token minting for the skill-learning review, which
       # calls session-core (read the transcript, upsert the skill) and
       # inference-core (review it). The two JWKS/ISSUER vars above verify
@@ -1406,9 +1734,9 @@ services:
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       CAPABILITY_CORE_SERVICE_ID: ${CAPABILITY_CORE_SERVICE_ID:-capability-core}
       CAPABILITY_CORE_SERVICE_API_KEY: ${CAPABILITY_CORE_SERVICE_API_KEY:-}
-      # llmreviewer's DefaultModel ("claude-sonnet-4-20250514") is inference-
+      # llmreviewer's DefaultModel ("claude-sonnet-5-5") is inference-
       # core's DEFAULT_ANTHROPIC_MODEL constant (rust/services/inference-core/
-      # src/provider/anthropic.rs) -- the direct-API dated-snapshot name, not
+      # src/provider/anthropic.rs) -- the direct-API model id, not
       # one of this environment's actual Azure deployments
       # (AZURE_ANTHROPIC_DEPLOYMENTS below). Every azure-anthropic call for it
       # 404s ("DeploymentNotFound"). Pin the review call to a real deployment
@@ -1427,6 +1755,17 @@ services:
       # consumer; the service credentials above are untouched. Set
       # LEARNING_REVIEW_ENABLED=true to turn learning back on.
       LEARNING_REVIEW_ENABLED: ${LEARNING_REVIEW_ENABLED:-false}
+      # WS19-S6: the skill bundle HTTP routes (PUT, GET and DELETE /api/v1/skills/{id}/bundle). Off by default (404);
+      # only the literal `true` turns them on.
+      SKILL_BUNDLES_ENABLED: ${SKILL_BUNDLES_ENABLED:-false}
+      # Cost controls for the learning review (WS07-S10). Off unless the switch is
+      # exactly true; the bounds apply only then. With no counter store wired the
+      # day caps skip every review (budget_unavailable), so keep the switch false.
+      LEARNING_REVIEW_COST_CONTROLS: ${LEARNING_REVIEW_COST_CONTROLS:-false}
+      LEARNING_REVIEW_MIN_USER_TURNS: ${LEARNING_REVIEW_MIN_USER_TURNS:-3}
+      LEARNING_REVIEW_MAX_TRANSCRIPT_CHARS: ${LEARNING_REVIEW_MAX_TRANSCRIPT_CHARS:-60000}
+      LEARNING_REVIEW_MAX_PER_USER_PER_DAY: ${LEARNING_REVIEW_MAX_PER_USER_PER_DAY:-5}
+      LEARNING_REVIEW_MAX_PER_ORG_PER_DAY: ${LEARNING_REVIEW_MAX_PER_ORG_PER_DAY:-100}
       # Capability Core reauthorizes every due scheduled fire directly with
       # Control before it can prepare a service-owned Session Core thread.
       # The credential must be registered only as capability-core with
@@ -1460,6 +1799,8 @@ services:
       # MCP_OAUTH_SERVICE_TOKEN above. Empty disables that one path; the
       # per-user JWT path is unaffected either way.
       MCP_OAUTH_SERVICE_TOKEN: ${MCP_OAUTH_SERVICE_TOKEN:-}
+      # WS05-S2: how long an observation counts as the tool's health attestation (default 1 h, capped at 24 h). Empty is the default.
+      MCP_TOOL_OBSERVATION_TTL: ${MCP_TOOL_OBSERVATION_TTL:-}
       # Backends for the /commands delegation AND — the reason they are now set
       # — the G7 learning-review consumer. startLearningConsumer is a no-op when
       # either address is empty, so with these unset the RUN_COMPLETED consumer
@@ -1599,6 +1940,11 @@ services:
       # docker-compose.override.yml) — a production instance must always be
       # able to verify, since any AcquireLease request could carry a space_id.
       SANDBOX_MANAGER_BACKEND_ID: ${SANDBOX_MANAGER_BACKEND_ID:-}
+      # WS22-S1: thread-scoped leases and the thread workspace RPCs. Empty keeps the switch off; do not set it to true in any environment
+      # until WS22-S5 (retention and erasure) ships, because DeleteThreadWorkspace is still unimplemented.
+      SANDBOX_MANAGER_THREAD_WORKSPACE: ${SANDBOX_MANAGER_THREAD_WORKSPACE:-}
+      SANDBOX_MANAGER_THREAD_MAX_FILES: ${SANDBOX_MANAGER_THREAD_MAX_FILES:-256}
+      SANDBOX_MANAGER_THREAD_MAX_BYTES: ${SANDBOX_MANAGER_THREAD_MAX_BYTES:-67108864}
       CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
       CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
     depends_on:
@@ -1647,17 +1993,32 @@ services:
       BROWSER_BROKER_MAX_ATTACH_DOMAINS: ${BROWSER_BROKER_MAX_ATTACH_DOMAINS:-8}
       # Durable grant store (WS1.C). Required: without it the broker exits 1 at
       # boot unless BROWSER_BROKER_ALLOW_EPHEMERAL_DEVELOPMENT=true (dev only).
-      # Quarry's Postgres server (ingestion-postgres, reached over the
-      # browser-broker-db network below), but a DEDICATED database and role
-      # (browser_broker): browser_ tables never share a schema with Quarry's
-      # databases. apps/Ingestion Plane/scripts/bootstrap_broker_db.sh creates
-      # them from the same BROWSER_BROKER_PG_PASSWORD. The password must be
-      # URL-safe (it sits inside this URL). No depends_on: the database lives in
-      # another compose project; until it answers the entrypoint's migration step
-      # fails, the container exits and restarts (unless-stopped). ZDR grants are
-      # never written here (X-2): they stay in memory, so the broker stays one
-      # replica.
-      DATABASE_URL: postgresql://browser_broker:${BROWSER_BROKER_PG_PASSWORD:?BROWSER_BROKER_PG_PASSWORD is required}@ingestion-postgres:5432/browser_broker
+      # The store is this plane's own postgres, in the session_core database and
+      # as the postgres superuser role that the other persisting services use.
+      # The plane creates no per-service database or role, so a dedicated one
+      # would need an init path first. The entrypoint's migrations create
+      # browser_grants on each start. The password is MODEL_POSTGRES_PASSWORD,
+      # which this plane already requires, and it must be URL-safe (it sits
+      # inside this URL). ZDR grants are never written here (X-2): they stay in
+      # memory, so the broker stays one replica.
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
+      # cap.browser.open health (internal/healthattest). The broker owns the
+      # browser runtime, so it alone attests the capability to capability-core,
+      # on POST /api/v1/capabilities/browser/health, as service:browser-broker
+      # (Control Plane principal row "browser-broker", consumerEnv below). It
+      # probes its grant store and quarry-edge's /ready every 60 s (clamped to
+      # 15-150 s by BROWSER_BROKER_HEALTH_ATTEST_INTERVAL_SECONDS). An empty
+      # service key turns attestation off and the broker still boots; the row
+      # then lapses to health_attestation_stale and the browser stays denied.
+      CAPABILITY_CORE_HTTP_URL: http://capability-core:8085
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      BROWSER_BROKER_SERVICE_API_KEY: ${BROWSER_BROKER_SERVICE_API_KEY:-}
+      BROWSER_BROKER_QUARRY_READY_URL: ${BROWSER_BROKER_QUARRY_READY_URL:-${QUARRY_EDGE_URL:-http://quarry-edge:8082}/ready}
+    # The entrypoint's migrations need postgres, so wait for it to be healthy;
+    # otherwise a first boot before it answers fails and restarts the container.
+    depends_on:
+      postgres:
+        condition: service_healthy
     # Quarry (Ingestion Plane) validates grants over gRPC, so the broker must be
     # reachable on inter-plane-bus. Auth is a verified JWT with audience
     # browser-broker on every method; only the gRPC health service is public.
@@ -1667,8 +2028,6 @@ services:
         aliases:
           - model-plane-browser-broker-1
           - browser-broker
-      # Postgres-only link to ingestion-postgres (Ingestion Plane compose owns it).
-      browser-broker-db: {}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8087/healthz"]
       interval: 10s
@@ -1899,8 +2258,4 @@ networks:
   default:
     name: model-plane-network
   inter-plane-bus:
-    external: true
-  # Created by the Ingestion Plane compose (service postgres); the broker is the
-  # only Model Plane service on it.
-  browser-broker-db:
     external: true

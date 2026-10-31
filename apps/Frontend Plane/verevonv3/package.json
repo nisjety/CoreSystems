@@ -9,6 +9,7 @@
     "dev:studio-demo": "vite --config vite.studio-demo.config.ts --host 127.0.0.1 --port 5174 --strictPort",
     "build": "pnpm typecheck && vite build",
     "build:studio-demo": "pnpm typecheck && vite build --config vite.studio-demo.config.ts",
+    "gen:chat-events": "node scripts/gen-chat-event-types.mjs",
     "audit": "pnpm audit",
     "lint": "eslint .",
     "preview": "vite preview",

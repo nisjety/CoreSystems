@@ -1,0 +1,28 @@
+id: "15-do-run-remembers-a-thread-fact"
+name: "A Do run must know a fact stated earlier in its thread"
+# WS02-S6. An Ask turn is always handed the thread's earlier turns; a Do run
+# (the execution-core loop) used to start from its goal alone, so a fact stated
+# one turn earlier was simply not there. With MODEL_GATEWAY_RUN_CONTEXT=full the
+# gateway composes the bounded history into RunAgentRequest.run_context.
+#
+# The harness sends every turn of a case with the case's own features, so the
+# seed turn is an agentic run too: the thread it builds is the same either way
+# (the user's turn is persisted before dispatch), which is all this case needs.
+# The fact is short and the thread is one turn long, so nothing here depends on
+# compaction; that is the 13 and 14 cases' job.
+#
+# Skips (does not fail) on a stack that does not run the switch at `full`: set
+# EVAL_CAPABILITIES=run-context-full once it does.
+profile: deployed_agent
+features: [usage, tools, citations, agentic]
+seed_turns:
+  - "Remember this for the rest of our conversation: my project codename is BLUEHERON-4471. Just confirm you have it."
+prompt: "What is my project codename? Answer with the codename only."
+checks:
+  contains: ["BLUEHERON-4471"]
+loop:
+  max_tool_calls: 4
+  max_errors: 1
+requires: [run-context-full]
+tags: [run-context, recall, agentic]
+timeout_s: 240.0

@@ -142,4 +142,34 @@ describe('a zero-retention refusal in a turn', () => {
       expect(mockResumeStream).not.toHaveBeenCalled()
     })
   })
+
+  it('reads a feature refusal whose feature the catalogue does not know as the unnamed fallback', async () => {
+    await withController(async (controller) => {
+      await sendAndFail(controller, {
+        code: 'zdr_feature_not_supported',
+        message: 'This is not supported with zero data retention yet: hologram export.',
+        feature: 'hologram_export',
+      })
+
+      const turn = controller.state.turns.at(-1)
+      expect(turn).toMatchObject({ status: 'error', failureAction: 'none' })
+      expect(turn?.content).toMatch(/this feature|denne funksjonen/)
+      expect(turn?.content).not.toMatch(/hologram/i)
+      expect(turn?.content).not.toContain('This is not supported with zero data retention yet')
+    })
+  })
+
+  it('reads a feature refusal frame without a feature as the unnamed fallback', async () => {
+    await withController(async (controller) => {
+      await sendAndFail(controller, {
+        code: 'zdr_feature_not_supported',
+        message: 'This is not supported with zero data retention yet: web search and browsing.',
+      })
+
+      const turn = controller.state.turns.at(-1)
+      expect(turn).toMatchObject({ status: 'error', failureAction: 'none' })
+      expect(turn?.content).toMatch(/this feature|denne funksjonen/)
+      expect(turn?.content).not.toMatch(/web search and browsing|websøk og nettlesing/)
+    })
+  })
 })

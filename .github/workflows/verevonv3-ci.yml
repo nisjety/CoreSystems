@@ -9,7 +9,7 @@ name: Verevon v3 CI
 # v2/.github/workflows/ci.yml, where GitHub never executed it).
 on:
   pull_request:
-    branches: [main]
+    branches: [main, develop, fix/ui-premium-restore]
     paths:
       - 'apps/Frontend Plane/verevonv3/**'
       # The SPA's @quarry/client is generated from this spec, so a spec change
@@ -22,7 +22,7 @@ on:
       - 'apps/Ingestion Plane/Quarry-v2/sdks/python/tests/**'
       - '.github/workflows/verevonv3-ci.yml'
   push:
-    branches: [main]
+    branches: [main, develop, fix/ui-premium-restore]
     paths:
       - 'apps/Frontend Plane/verevonv3/**'
       # The SPA's @quarry/client is generated from this spec, so a spec change
@@ -251,6 +251,141 @@ jobs:
 
       - name: Verify (lint -> typecheck -> test -> build)
         run: pnpm verify
+
+      # This file uses node:test, which Vitest cannot run, so vite.config.ts keeps it
+      # out of Vitest and this step is the one that runs it.
+      - name: Bundle budget script test
+        run: node --test scripts/check-bundle-budget.test.mjs
+
+      # Shrink-only gzipped budget over the build that `pnpm verify` just wrote.
+      # On a pull request the base commit is fetched shallowly, so a change cannot
+      # raise a ceiling above the base branch's (--base-ref).
+      - name: Bundle budget (gzipped entry chunk and total JS)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -n "$BASE_SHA" ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            node scripts/check-bundle-budget.mjs --base-ref FETCH_HEAD
+          else
+            node scripts/check-bundle-budget.mjs
+          fi
+
+  # UI copy and raw-colour gate for the chat and agents surfaces, plus every
+  # product file this change adds under src/. It is its own job so a red
+  # spa-verify (lint, typecheck, tests) cannot hide it. Existing findings are
+  # baselined in eslint-suppressions.json: the ESLint CLI fails when the tree has
+  # more findings than the baseline (a new leak) or fewer (a fixed leak that was
+  # not pruned from the baseline in the same change).
+  spa-ui-gates:
+    name: SPA — UI copy and raw-colour gates
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 'apps/Frontend Plane/verevonv3'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The new-file scan diffs against the base commit, so it needs history.
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: '11.3.0'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: 'apps/Frontend Plane/verevonv3/pnpm-lock.yaml'
+
+      # Same as spa-verify: package.json depends on the generated Quarry SDK by
+      # file: path, so the install cannot resolve without it.
+      - name: Generate and build the Quarry TypeScript SDK
+        working-directory: 'apps/Ingestion Plane/Quarry-v2/sdks'
+        run: |
+          ./generate.sh
+          cd typescript
+          pnpm install --ignore-scripts
+          pnpm run build
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Chat and agents against the baseline
+        run: pnpm exec eslint -c eslint.ui-gates.config.js src
+
+      - name: Product files this change adds
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          base="${PR_BASE_SHA:-$PUSH_BEFORE_SHA}"
+          # A push that creates the branch has no previous tip to diff against.
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            base=HEAD~1
+          fi
+          node scripts/ui-gates-new-files.mjs "$base"
+
+  # Stack-free browser fixtures: the chunk-recovery Playwright project runs against
+  # a production build served by `vite preview`. It needs no gateway, Control Plane
+  # or Docker stack, because its stale-chunk case is answered in the browser
+  # (tests/e2e/chunk-recovery.spec.ts). Its own job, so a red here cannot hide
+  # behind spa-verify.
+  spa-browser-fixtures:
+    name: SPA - stack-free browser fixtures
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 'apps/Frontend Plane/verevonv3'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: '11.3.0'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: 'apps/Frontend Plane/verevonv3/pnpm-lock.yaml'
+
+      # Same as spa-verify: the build resolves the generated Quarry SDK and
+      # @verevon/remote-core through their dist/ output, so both must exist first.
+      - name: Generate and build the Quarry TypeScript SDK
+        working-directory: 'apps/Ingestion Plane/Quarry-v2/sdks'
+        run: |
+          ./generate.sh
+          cd typescript
+          pnpm install --ignore-scripts
+          pnpm run build
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build @verevon/remote-core workspace package
+        run: pnpm --filter @verevon/remote-core run build
+
+      - name: Production build
+        run: pnpm exec vite build
+
+      - name: Install Chromium with its system dependencies
+        run: pnpm exec playwright install --with-deps chromium
+
+      # The preview server lives only for this step. Its log is printed when the
+      # step fails, because the server is what failed to answer.
+      - name: chunk-recovery project against the production preview
+        run: |
+          pnpm exec vite preview --port 5176 --strictPort > "$RUNNER_TEMP/vite-preview.log" 2>&1 &
+          preview_pid=$!
+          trap 'status=$?; kill "$preview_pid" 2>/dev/null || true; if [ "$status" -ne 0 ]; then cat "$RUNNER_TEMP/vite-preview.log"; fi' EXIT
+          curl --silent --show-error --fail --retry 30 --retry-connrefused --retry-delay 1 --output /dev/null http://localhost:5176/
+          pnpm exec playwright test --project=chunk-recovery
 
   docker-image:
     name: Docker — production SPA image

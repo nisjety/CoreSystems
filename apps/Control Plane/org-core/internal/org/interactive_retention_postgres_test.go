@@ -76,18 +76,30 @@ func TestControlLifecycleInteractiveRetentionOutboxDrainsOnTransition(t *testing
 	service := NewService(repo, nil)
 	service.SetSharedPublisher(publisher)
 
-	// Enabling for the first time is a false-to-true transition: it must enqueue.
+	// Enabling for the first time is a false-to-true transition: it enqueues one
+	// event, and the inline flush publishes it, so nothing is left pending.
 	if _, err := service.SetInteractiveRetention(ctx, orgID, true, "user-1"); err != nil {
 		t.Fatalf("enable interactive retention: %v", err)
 	}
-	var pending int64
+	var pendingAfterFirstEnable int64
 	if err := db.Pool.QueryRow(ctx, `
 SELECT COUNT(*) FROM organization_interactive_retention_outbox
-WHERE org_id = $1 AND published_at IS NULL`, orgID).Scan(&pending); err != nil {
+WHERE org_id = $1 AND published_at IS NULL`, orgID).Scan(&pendingAfterFirstEnable); err != nil {
 		t.Fatalf("read outbox after first enable: %v", err)
 	}
-	if pending != 1 {
-		t.Fatalf("pending after first enable=%d; want 1", pending)
+	if pendingAfterFirstEnable != 0 {
+		t.Fatalf("pending after first enable=%d; want 0 (the inline publish drains it)", pendingAfterFirstEnable)
+	}
+	var totalAfterFirstEnable int64
+	if err := db.Pool.QueryRow(ctx, `
+SELECT COUNT(*) FROM organization_interactive_retention_outbox WHERE org_id = $1`, orgID).Scan(&totalAfterFirstEnable); err != nil {
+		t.Fatalf("read outbox total after first enable: %v", err)
+	}
+	if totalAfterFirstEnable != 1 {
+		t.Fatalf("total outbox rows after first enable=%d; want 1", totalAfterFirstEnable)
+	}
+	if len(publisher.orgIDs) != 1 || publisher.orgIDs[0] != orgID || len(publisher.eventIDs) != 1 {
+		t.Fatalf("inline publish after first enable orgIDs=%v eventIDs=%v; want one publish for %s", publisher.orgIDs, publisher.eventIDs, orgID)
 	}
 
 	// Re-enabling an already-true posture is not a transition: no new row.
@@ -102,6 +114,9 @@ SELECT COUNT(*) FROM organization_interactive_retention_outbox WHERE org_id = $1
 	if totalAfterReenable != 1 {
 		t.Fatalf("total outbox rows after re-enable=%d; want 1 (no duplicate)", totalAfterReenable)
 	}
+	if len(publisher.orgIDs) != 1 {
+		t.Fatalf("publishes after re-enable=%d; want 1 (no extra publish)", len(publisher.orgIDs))
+	}
 
 	// Disabling never enqueues.
 	if _, err := service.SetInteractiveRetention(ctx, orgID, false, "user-1"); err != nil {
@@ -115,11 +130,34 @@ SELECT COUNT(*) FROM organization_interactive_retention_outbox WHERE org_id = $1
 	if totalAfterDisable != 1 {
 		t.Fatalf("total outbox rows after disable=%d; want 1 (disable must not enqueue)", totalAfterDisable)
 	}
+	if len(publisher.orgIDs) != 1 {
+		t.Fatalf("publishes after disable=%d; want 1 (disable must not publish)", len(publisher.orgIDs))
+	}
 
-	// A publish failure leaves the row pending with attempts/last_error recorded.
+	// A committed change succeeds even when the inline publish fails: the row
+	// stays pending with attempts/last_error recorded for the outbox worker.
 	publisher.err = errors.New("fixture publish failure")
-	if _, err := service.SetInteractiveRetention(ctx, orgID, true, "user-1"); err != nil {
-		t.Fatalf("re-enable after disable: %v", err)
+	updated, err := service.SetInteractiveRetention(ctx, orgID, true, "user-1")
+	if err != nil {
+		t.Fatalf("re-enable after disable with failing publish: %v", err)
+	}
+	if updated == nil {
+		t.Fatal("re-enable after disable returned no organization")
+	}
+	posture, err := service.GetRetentionPosture(ctx, orgID)
+	if err != nil {
+		t.Fatalf("read posture after failed publish: %v", err)
+	}
+	if !posture.ZDRIntent {
+		t.Fatal("posture after failed publish has ZDRIntent=false; want true because the change committed")
+	}
+	var totalAfterFailedPublish int64
+	if err := db.Pool.QueryRow(ctx, `
+SELECT COUNT(*) FROM organization_interactive_retention_outbox WHERE org_id = $1`, orgID).Scan(&totalAfterFailedPublish); err != nil {
+		t.Fatalf("read outbox total after failed publish: %v", err)
+	}
+	if totalAfterFailedPublish != 2 {
+		t.Fatalf("total outbox rows after failed publish=%d; want 2 (the transition enqueued a second row)", totalAfterFailedPublish)
 	}
 	var secondPending int64
 	if err := db.Pool.QueryRow(ctx, `
@@ -146,8 +184,12 @@ WHERE org_id = $1 AND published_at IS NULL`, orgID).Scan(&attempts, &lastError);
 	if err != nil || published != 1 {
 		t.Fatalf("retry outbox: published=%d err=%v", published, err)
 	}
-	if len(publisher.orgIDs) != 1 || publisher.orgIDs[0] != orgID {
-		t.Fatalf("published org ids=%v; want [%s]", publisher.orgIDs, orgID)
+	// Two successful publishes in total: the first enable inline, then this retry.
+	if len(publisher.orgIDs) != 2 || publisher.orgIDs[0] != orgID || publisher.orgIDs[1] != orgID {
+		t.Fatalf("published org ids=%v; want [%s %s]", publisher.orgIDs, orgID, orgID)
+	}
+	if len(publisher.eventIDs) != 2 || publisher.eventIDs[0] == publisher.eventIDs[1] {
+		t.Fatalf("published event ids=%v; want two distinct events", publisher.eventIDs)
 	}
 	var finalPending int64
 	if err := db.Pool.QueryRow(ctx, `

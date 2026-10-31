@@ -32,8 +32,8 @@
  */
 
 import { createRoot, flush } from 'solid-js'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ChatStreamHandlers } from '@/shared/api/chat-client'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { getThreadMessages, type ChatMessage, type ChatStreamHandlers } from '@/shared/api/chat-client'
 import { __resetRetentionForTests } from '@/features/chat/lib/chat-retention'
 
 type CapturedStream = {
@@ -259,6 +259,139 @@ describe('Q08 connection recovery', () => {
       expect(mockStreamChat).toHaveBeenCalledTimes(1)
       expect(mockResumeStream).not.toHaveBeenCalled()
       expect(controller.state.turns.at(-1)).toMatchObject({ status: 'error', content: 'Partial' })
+    })
+  })
+})
+
+/**
+ * WS17 S9: on a versioned thread the server keeps the versions, so a regenerate names the answer it replaces and
+ * an edit names the question it replaces, instead of appending the question a second time. The `connected`
+ * frame says the server keeps versions; the reconcile read after a send gives the server's ids for its turns.
+ */
+describe('WS17 S9: regenerate and edit on a versioned thread', () => {
+  const question = (id: string, content: string): ChatMessage => ({ id, role: 'user', content, createdAt: '' })
+  const answer = (id: string, content: string): ChatMessage => ({
+    id,
+    role: 'assistant',
+    content,
+    createdAt: '',
+    version: { parentMessageId: '', siblingOrdinal: 1, siblingCount: 1, onActivePath: true, siblings: [id] },
+  })
+  /** The unpaged read the controller makes to reconcile a send (the tests run with paging off). */
+  const readServerMessages = vi.mocked(getThreadMessages as (threadId: string) => Promise<ChatMessage[]>)
+  /** The active path as the server holds it, which that read returns. */
+  let serverMessages: ChatMessage[] = []
+
+  beforeEach(() => {
+    serverMessages = []
+    readServerMessages.mockClear()
+    readServerMessages.mockImplementation(async () => serverMessages)
+  })
+
+  afterEach(() => {
+    readServerMessages.mockResolvedValue([])
+  })
+
+  it('names the saved answer on each regenerate, and leaves one answer per version', async () => {
+    await withController(async (controller) => {
+      await tick()
+      await controller.handleComposerSubmit({ actions: [], attachments: [], text: 'Hva er lakselus?', tools: [] })
+      await tick()
+      const first = streams[0]!
+      first.handlers.onConnected?.({ ok: true, requestId: 'req-1', threadId: 'thread-v', versionsEnabled: true })
+      first.handlers.onMessage?.({ content: 'Lakselus er en parasitt.' })
+      serverMessages = [question('srv-q1', 'Hva er lakselus?'), answer('srv-a1', 'Lakselus er en parasitt.')]
+      first.handlers.onDone?.({ requestId: 'req-1', modelUsed: 'verevon-balance', outputTokens: 8, stopReason: 'end_turn' })
+      first.resolve()
+      await tick(5)
+
+      controller.regenerateLatest()
+      await tick()
+      expect(streams).toHaveLength(2)
+      expect(mockStreamChat.mock.calls[1]?.[0]).toMatchObject({ regenerated: true, regenerateOfMessageId: 'srv-a1' })
+      expect(controller.state.turns.map((turn) => turn.role)).toEqual(['user', 'assistant'])
+
+      const second = streams[1]!
+      second.handlers.onConnected?.({ ok: true, requestId: 'req-2', threadId: 'thread-v', versionsEnabled: true })
+      second.handlers.onMessage?.({ content: 'Lakselus lever i sjøen.' })
+      serverMessages = [question('srv-q1', 'Hva er lakselus?'), answer('srv-a2', 'Lakselus lever i sjøen.')]
+      second.handlers.onDone?.({ requestId: 'req-2', modelUsed: 'verevon-balance', outputTokens: 9, stopReason: 'end_turn' })
+      second.resolve()
+      await tick(5)
+
+      // The next regenerate names the answer it replaces, the second one, not the first.
+      controller.regenerateLatest()
+      await tick()
+      expect(streams).toHaveLength(3)
+      expect(mockStreamChat.mock.calls[2]?.[0]).toMatchObject({ regenerated: true, regenerateOfMessageId: 'srv-a2' })
+      expect(controller.state.turns.filter((turn) => turn.role === 'user')).toHaveLength(1)
+      expect(controller.state.turns.filter((turn) => turn.role === 'assistant')).toHaveLength(1)
+    })
+  })
+
+  it('stop -> regenerate -> one answer per version: a stopped answer the server has not saved is refused, not appended again', async () => {
+    await withController(async (controller) => {
+      await tick()
+      await controller.handleComposerSubmit({ actions: [], attachments: [], text: 'Hva er lakselus?', tools: [] })
+      await tick()
+      const first = streams[0]!
+      first.handlers.onConnected?.({ ok: true, requestId: 'req-1', threadId: 'thread-v', versionsEnabled: true })
+      first.handlers.onMessage?.({ content: 'Lakselus er' })
+      controller.handleStop()
+      flush()
+      expect(controller.state.turns.at(-1)?.status).toBe('stopped')
+      first.resolve()
+      await tick()
+
+      controller.regenerateLatest()
+      await tick()
+      expect(streams).toHaveLength(1)
+      expect(controller.state.turns).toHaveLength(2)
+      expect(controller.state.turns.at(-1)?.status).toBe('stopped')
+      expect(controller.feedbackNotice()).toBeTruthy()
+    })
+  })
+
+  it('edits a saved question as a sibling, naming the question it replaces', async () => {
+    await withController(async (controller) => {
+      await tick()
+      await controller.handleComposerSubmit({ actions: [], attachments: [], text: 'Hva er lakselus?', tools: [] })
+      await tick()
+      const first = streams[0]!
+      first.handlers.onConnected?.({ ok: true, requestId: 'req-1', threadId: 'thread-v', versionsEnabled: true })
+      first.handlers.onMessage?.({ content: 'Lakselus er en parasitt.' })
+      serverMessages = [question('srv-q1', 'Hva er lakselus?'), answer('srv-a1', 'Lakselus er en parasitt.')]
+      first.handlers.onDone?.({ requestId: 'req-1', modelUsed: 'verevon-balance', outputTokens: 8, stopReason: 'end_turn' })
+      first.resolve()
+      await tick(5)
+
+      void controller.editAndResubmit(controller.state.turns[0]!.id, 'Hva er lakselus i dag?')
+      await tick(5)
+      expect(streams).toHaveLength(2)
+      expect(mockStreamChat.mock.calls[1]?.[0]).toMatchObject({ editResubmit: true, editOfMessageId: 'srv-q1' })
+    })
+  })
+
+  it('keeps the regenerate request as it was when the server has not said it keeps versions', async () => {
+    await withController(async (controller) => {
+      await tick()
+      await controller.handleComposerSubmit({ actions: [], attachments: [], text: 'Hva er lakselus?', tools: [] })
+      await tick()
+      const first = streams[0]!
+      first.handlers.onConnected?.({ ok: true, requestId: 'req-1', threadId: 'thread-plain' })
+      first.handlers.onMessage?.({ content: 'Lakselus er en parasitt.' })
+      first.handlers.onDone?.({ requestId: 'req-1', modelUsed: 'verevon-balance', outputTokens: 8, stopReason: 'end_turn' })
+      first.resolve()
+      await tick(5)
+
+      controller.regenerateLatest()
+      await tick()
+      expect(streams).toHaveLength(2)
+      const request = mockStreamChat.mock.calls[1]?.[0] as { regenerated?: boolean; regenerateOfMessageId?: string }
+      expect(request.regenerated).toBe(true)
+      expect(request.regenerateOfMessageId).toBeUndefined()
+      // No versioned thread, so the regenerate reads nothing back from the server.
+      expect(readServerMessages).not.toHaveBeenCalled()
     })
   })
 })

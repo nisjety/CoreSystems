@@ -1,5 +1,6 @@
 import { createMemo, For, onCleanup, Show } from 'solid-js'
-import { Coins, Gauge, Grid2X2, PauseCircle, ShieldCheck } from '@/shared/icons'
+import { useI18n } from '@/shared/i18n'
+import { Coins, Gauge, Grid2X2, XCircle } from '@/shared/icons'
 import { Button } from '@/shared/ui/Button'
 import { cn } from '@/shared/lib/cn'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -38,6 +39,7 @@ async function fetchBudget(fleetId: string): Promise<FleetBudget> {
 }
 
 export function FleetRunConsole(props: { fleetId: string }) {
+  const i18n = useI18n()
   const [fleet] = createResource(() => props.fleetId, fetchFleet)
   const [budget, { refetch: refetchBudget }] = createResource(
     () => props.fleetId,
@@ -70,9 +72,12 @@ export function FleetRunConsole(props: { fleetId: string }) {
         {(f) => (
           <div class="flex items-center gap-3">
             <Grid2X2 class="h-5 w-5" />
-            <span class="font-medium">Fleet {f().fleet_id}</span>
+            <span class="font-medium">{i18n.tr('Flåte', 'Fleet')} {f().fleet_id}</span>
             <span class="text-sm text-muted-foreground">
-              {f().status} · {f().member_run_ids.length} runs · max {f().max_parallel_runs} parallel
+              {f().status} · {i18n.tr(
+                `${f().member_run_ids.length} kjøringer · maks ${f().max_parallel_runs} parallelle`,
+                `${f().member_run_ids.length} runs · max ${f().max_parallel_runs} parallel`,
+              )}
             </span>
           </div>
         )}
@@ -84,12 +89,12 @@ export function FleetRunConsole(props: { fleetId: string }) {
           <div class="rounded-lg border p-3">
             <div class="flex items-center gap-2 text-sm">
               <Coins class="h-4 w-4" />
-              <span>Budget</span>
+              <span>{i18n.tr('Budsjett', 'Budget')}</span>
               <span class="ml-auto font-mono">
-                ${spent().toFixed(4)} / {limit() != null ? `$${limit()!.toFixed(2)}` : 'uncapped'}
+                ${spent().toFixed(4)} / {limit() != null ? `$${limit()!.toFixed(2)}` : i18n.tr('uten tak', 'uncapped')}
               </span>
               <Show when={b().over_budget}>
-                <span class="text-destructive text-xs font-medium">OVER BUDGET</span>
+                <span class="text-destructive text-xs font-medium">{i18n.tr('OVER BUDSJETT', 'OVER BUDGET')}</span>
               </Show>
             </div>
             <Show when={limit() != null}>
@@ -128,7 +133,7 @@ export function FleetRunConsole(props: { fleetId: string }) {
                     </span>
                   </div>
                   <div class="aspect-video rounded bg-muted flex items-center justify-center text-xs text-muted-foreground">
-                    live view: /v1/agent/runs/{runId.slice(0, 8)}/live-view
+                    {i18n.tr('direkte visning', 'live view')}: /v1/agent/runs/{runId.slice(0, 8)}/live-view
                   </div>
                 </div>
               )}
@@ -151,13 +156,9 @@ export function FleetRunConsole(props: { fleetId: string }) {
             refetchBudget()
           }}
         >
-          <PauseCircle class="mr-2 h-4 w-4" />
-          Pause fleet
+          <XCircle class="mr-2 h-4 w-4" />
+          {i18n.tr('Avbryt flåten', 'Cancel fleet')}
         </Button>
-        <span class="text-xs text-muted-foreground self-center flex items-center gap-1">
-          <ShieldCheck class="h-3 w-3" />
-          Pausing cascades to all member runs (ActionCascadePolicy)
-        </span>
       </div>
     </div>
   )

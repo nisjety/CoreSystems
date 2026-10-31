@@ -1,0 +1,112 @@
+# Alert rules for the Control Plane's audit-core (build plan WS06 S0).
+#
+# Why: audit-core persists the audit events every plane publishes. It already
+# counts the events it rejects or fails to store (authority mismatch, malformed,
+# store error) and reports whether its NATS buses are connected and how far its
+# durable consumer is behind, but nothing alerted on those series. These rules
+# make them visible.
+# There is no pager yet: alerts show in the Prometheus UI until a routing target
+# is chosen (build plan WS01 decision D1).
+#
+# All series are content-free: bus, kind and result labels only (audit-core
+# internal/metrics/server.go), so nothing here is a ZDR concern.
+groups:
+  - name: control-audit-core
+    rules:
+      - alert: ControlAuditCoreAuthorityMismatch
+        expr: increase(audit_core_events_total{result="authority_mismatch"}[10m]) > 0
+        labels: { severity: critical, plane: control }
+        annotations:
+          summary: "audit-core refused audit events whose subject does not match their payload or plane"
+
+      - alert: ControlAuditCoreStoreError
+        expr: increase(audit_core_events_total{result="store_error"}[10m]) > 0
+        labels: { severity: warning, plane: control }
+        annotations:
+          summary: "audit-core could not persist an audit event (it retries, then dead-letters)"
+
+      - alert: ControlAuditCoreMalformed
+        expr: increase(audit_core_events_total{result="malformed"}[10m]) > 0
+        labels: { severity: warning, plane: control }
+        annotations:
+          summary: "audit-core received a message it cannot decode"
+
+      - alert: ControlAuditCoreConsumerPending
+        # Proposed threshold: a durable consumer with messages still pending after
+        # fifteen minutes is not keeping up. Tune after the WS01 phase 0 replay,
+        # which publishes thousands of rows at once.
+        expr: audit_core_consumer_pending > 0
+        for: 15m
+        labels: { severity: warning, plane: control }
+        annotations:
+          summary: "audit-core has audit messages pending on its durable consumer for over 15 minutes"
+
+      - alert: ControlAuditCoreNATSDisconnected
+        expr: audit_core_nats_connected == 0
+        for: 5m
+        labels: { severity: critical, plane: control }
+        annotations:
+          summary: "audit-core has been disconnected from a NATS bus for over 5 minutes"
+
+      # Chain tamper evidence (build plan WS06 S4). Both series are unlabelled
+      # counters (no org label: the per-org picture is audit_chain_verifications
+      # and audit_chain_heads), and neither carries row content.
+      - alert: ControlAuditChainVerifyFailed
+        expr: increase(audit_core_chain_verify_failures_total[1h]) > 0
+        labels: { severity: critical, plane: control }
+        annotations:
+          summary: "audit-core's chain verifier found an org's audit chain broken"
+
+      - alert: ControlAuditChainBroken
+        expr: increase(audit_core_chain_broken_total[1h]) > 0
+        labels: { severity: critical, plane: control }
+        annotations:
+          summary: "audit-core found an org's chain head disagreeing with its stored tip row at insert time"
+
+      # A chained purge refused to delete an org's expired rows, because a prefix
+      # or checkpoint did not verify (audit_chain_incidents holds the org and the
+      # kind). The purge runs every 24 hours in each replica. The 25-hour window
+      # keeps the alert up until the sweep after the last refusal has run without
+      # one. The series carries the incident kind only: no org, no row content.
+      - alert: ControlAuditChainPurgeBlocked
+        expr: increase(audit_core_chain_purge_blocked_total[25h]) > 0
+        labels: { severity: critical, plane: control }
+        annotations:
+          summary: "audit-core refused to purge an org's expired audit rows: a chain prefix or checkpoint did not verify"
+
+      - alert: ControlAuditChainVerifyStale
+        # The verifier runs once a day by default (AUDIT_CHAIN_VERIFY_INTERVAL);
+        # 36 hours leaves one missed pass. Raise this with a longer interval.
+        # The gauge starts at the loop's start time, so a verifier that never
+        # completes a pass goes stale instead of staying silent.
+        expr: time() - audit_core_chain_last_verify_timestamp_seconds > 36 * 3600
+        labels: { severity: warning, plane: control }
+        annotations:
+          summary: "audit-core's chain verifier has not completed a pass in over 36 hours"
+
+      # SIEM export (build plan WS06 S8). The series come from the siem-exporter
+      # process, which only runs under the compose profile `siem`; without it
+      # none exist and neither rule can fire. Labels are destination kind and
+      # result only: no org, destination id or URL, so nothing tenant-specific
+      # or secret is in a series.
+      - alert: ControlAuditSIEMExportLag
+        # The oldest audit row a destination has not acknowledged is over 15
+        # minutes old. The exporter backs off to 15 minutes between attempts, so
+        # this fires for a destination that is down, not for one that is slow.
+        expr: audit_siem_export_lag_seconds > 15 * 60
+        for: 5m
+        labels: { severity: warning, plane: control }
+        annotations:
+          summary: "a SIEM destination is more than 15 minutes behind the audit chain"
+
+      - alert: ControlAuditSIEMExportFailing
+        # More than half of the batches in the last 15 minutes were refused or
+        # could not be delivered. Division by zero (no batches) is NaN and does
+        # not fire.
+        expr: |
+          sum(increase(audit_siem_export_batches_total{result!="ok"}[15m]))
+            / sum(increase(audit_siem_export_batches_total[15m])) > 0.5
+        for: 10m
+        labels: { severity: warning, plane: control }
+        annotations:
+          summary: "most SIEM export batches are failing (a destination is refusing or unreachable)"

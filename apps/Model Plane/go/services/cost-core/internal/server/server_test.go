@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/services/cost-core/internal/azurecost"
 	"github.com/triodelab/model-plane/services/cost-core/internal/ledger"
 )
@@ -557,5 +558,52 @@ func TestBudgetCheckIgnoresSubscriptionTokens(t *testing.T) {
 	}
 	if usage.TotalInputTokens != 901_000 || usage.TotalOutputTokens != 90_200 {
 		t.Fatalf("usage totals = %+v, want the subscription tokens included", usage)
+	}
+}
+
+// The analytics response carries the cache legs per bucket and an advisory
+// cache_breakdown of miss reasons, scoped like the buckets themselves.
+func TestAnalyticsCarriesCacheBreakdown(t *testing.T) {
+	ctx := context.Background()
+	start := time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)
+	store := reportingLedger{Store: ledger.NewStore(), start: start}
+	at := start.Add(time.Hour)
+	for _, e := range []ledger.Entry{
+		{OrgID: "org-a", UserID: "u1", Model: "m", ProviderUsed: "p", InputTokens: 1000, CostBasis: "metered", CreatedAt: at, CacheReadInputTokens: 700},
+		{OrgID: "org-a", UserID: "u1", Model: "m", ProviderUsed: "p", InputTokens: 1000, CostBasis: "metered", CreatedAt: at, CacheMissReason: "ttl_expired"},
+		{OrgID: "org-b", UserID: "u9", Model: "m", ProviderUsed: "p", InputTokens: 1000, CostBasis: "metered", CreatedAt: at, CacheMissReason: "no_baseline"},
+	} {
+		if err := store.RecordEntry(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mux := http.NewServeMux()
+	NewServer(store).RegisterRoutes(mux)
+	p := authctx.Principal{OrganizationID: "org-a", ActorID: "u1", PrincipalType: "user", Scopes: []string{"cost:org:read"}}
+	req := httptest.NewRequest("GET", "/api/v1/cost/analytics?scope=organization", nil)
+	req = req.WithContext(authctx.ContextWithPrincipal(req.Context(), p))
+	res := httptest.NewRecorder()
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", res.Code, res.Body.String())
+	}
+	var body struct {
+		Data struct {
+			Buckets        []ledger.UsageBucket `json:"buckets"`
+			CacheBreakdown struct {
+				MissReasons []ledger.CacheMissBucket `json:"miss_reasons"`
+				Advisory    bool                     `json:"advisory"`
+			} `json:"cache_breakdown"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Data.Buckets) != 1 || body.Data.Buckets[0].CacheReadInputTokens != 700 {
+		t.Fatalf("bucket cache legs missing: %+v", body.Data.Buckets)
+	}
+	misses := body.Data.CacheBreakdown.MissReasons
+	if !body.Data.CacheBreakdown.Advisory || len(misses) != 1 || misses[0].Reason != "ttl_expired" || misses[0].Requests != 1 {
+		t.Fatalf("cache_breakdown must hold only org-a's one ttl_expired miss: %+v", body.Data.CacheBreakdown)
 	}
 }

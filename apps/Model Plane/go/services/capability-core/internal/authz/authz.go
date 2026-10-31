@@ -18,6 +18,7 @@ const (
 	// deployment-name suffix, which would accept an ambiguous principal.
 	ExecutionCoreServiceID    = "service:execution-core"
 	ConversationCoreServiceID = "service:conversation-core"
+	BrowserBrokerServiceID    = "service:browser-broker"
 
 	ReadScope  = "capability:read"
 	WriteScope = "capability:write"
@@ -40,6 +41,11 @@ const (
 	// owner-action readiness reporter. It cannot mutate the normal catalog or
 	// attest any capability other than the ticket adapter.
 	OwnerActionHealthWriteScope = "capability:owner-action:health:write"
+	// BrowserHealthWriteScope is held only by browser-broker's readiness
+	// reporter. It cannot write the catalog or attest any capability other
+	// than cap.browser.open, whose runtime (grants and the Quarry validation
+	// path) the broker owns.
+	BrowserHealthWriteScope = "capability:browser:health:write"
 	// SpaceDeletionScope is held only by the Control-coordinated deletion
 	// workload. It permits the narrow internal cancellation adapter below; it
 	// is intentionally not interchangeable with general capability writes.
@@ -99,6 +105,14 @@ func AuthorizeHTTP(principal authctx.Principal, request *http.Request) error {
 		}
 		return errDenied
 	}
+	if request.URL.Path == "/api/v1/capabilities/browser/health" {
+		if request.Method == http.MethodPost && principal.PrincipalType == "service" &&
+			principal.ActorID == BrowserBrokerServiceID && principal.OrganizationID == "global" &&
+			principal.HasScope(BrowserHealthWriteScope) {
+			return nil
+		}
+		return errDenied
+	}
 	if request.URL.Path == "/api/v1/internal/space-deletion/cron" {
 		if request.Method == http.MethodPost && principal.PrincipalType == "service" && principal.HasScope(SpaceDeletionScope) {
 			return nil
@@ -125,7 +139,13 @@ func AuthorizeHTTP(principal authctx.Principal, request *http.Request) error {
 }
 
 // AuthorizeGRPC applies the same read/write policy and rejects a caller-supplied
-// EvaluatePolicy tenant that conflicts with the signed tenant.
+// EvaluatePolicy or ResolveToolBindings tenant that conflicts with the signed
+// tenant.
+//
+// A user_id on those two requests names the person a run acts for. It is
+// asserted, not proven, by the caller, so only the execution-core workload may
+// assert one (the recorded trust assumption: execution-core takes it from the
+// run it was started for), and a person may only name themselves.
 func AuthorizeGRPC(principal authctx.Principal, method string, request any) error {
 	if principal.OrganizationID == "" || principal.ActorID == "" {
 		return errDenied
@@ -134,10 +154,35 @@ func AuthorizeGRPC(principal authctx.Principal, method string, request any) erro
 		conflicts(evaluate.GetOrgId(), principal.OrganizationID) {
 		return errDenied
 	}
+	if resolve, ok := request.(*mpv1.ResolveToolBindingsRequest); ok &&
+		conflicts(resolve.GetOrgId(), principal.OrganizationID) {
+		return errDenied
+	}
 	if method == mpv1.CapabilityCore_EvaluatePolicy_FullMethodName {
+		evaluate, _ := request.(*mpv1.EvaluatePolicyRequest)
+		if evaluate.GetUserId() != "" && principal.ActorID != ExecutionCoreServiceID {
+			return errDenied
+		}
 		if principal.PrincipalType == "service" &&
 			(principal.HasScope(ReadScope) || principal.HasScope(WriteScope) || principal.HasScope(GlobalWriteScope)) {
 			return nil
+		}
+		return errDenied
+	}
+	if method == mpv1.CapabilityCore_ResolveToolBindings_FullMethodName {
+		resolve, _ := request.(*mpv1.ResolveToolBindingsRequest)
+		switch principal.PrincipalType {
+		case "service":
+			if resolve.GetUserId() != "" && principal.ActorID != ExecutionCoreServiceID {
+				return errDenied
+			}
+			if principal.HasScope(ReadScope) || principal.HasScope(WriteScope) {
+				return nil
+			}
+		case "user":
+			if resolve.GetUserId() == "" || resolve.GetUserId() == principal.ActorID {
+				return nil
+			}
 		}
 		return errDenied
 	}

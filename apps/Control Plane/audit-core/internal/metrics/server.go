@@ -74,7 +74,61 @@ var (
 		},
 		[]string{"bus", "kind"},
 	)
+	// The chain series carry no org label: an org id per series would grow the
+	// label set with tenants, and the per-org picture is in the head table.
+	chainAppends = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "audit_core_chain_appends_total",
+			Help: "Audit rows handled by the chained insert by result (appended, duplicate, catchup, error).",
+		},
+		[]string{"result"},
+	)
+	chainHeadLockWait = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "audit_core_chain_head_lock_wait_seconds",
+			Help:    "Time a chained insert waited to take its org's chain head lock.",
+			Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10},
+		},
+	)
+	chainBroken = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "audit_core_chain_broken_total",
+			Help: "Org chains found broken by the head spot-check at insert time (counted once per org transition).",
+		},
+	)
+	// Purges refused for an org, by the incident kind written for it: the closed
+	// vocabulary in store/attest.go. Like the other chain series it has no org
+	// label; the incident row names the org.
+	chainPurgeBlocked = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "audit_core_chain_purge_blocked_total",
+			Help: "Chained purges refused because a prefix or checkpoint did not verify, by incident kind. Counted once per org per refused sweep, in dry-run and enabled modes.",
+		},
+		[]string{"kind"},
+	)
+	detailsGuard = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "audit_core_details_guard_total",
+			Help: "Observe-only check of audit details at ingest by result (ok, oversize, denied_key).",
+		},
+		[]string{"result"},
+	)
 )
+
+// chainPurgeKinds mirrors the incident kinds in store/attest.go. Each series is
+// created at zero, so the first refusal after start reads as an increase:
+// increase() cannot see a series whose first sample is already 1.
+var chainPurgeKinds = []string{
+	"chain_marked_broken",
+	"checkpoint_key_unknown",
+	"checkpoint_signature_invalid",
+	"sequence_gap",
+	"prev_hash_mismatch",
+	"row_hash_mismatch",
+	"unsupported_chain_version",
+	"unhashable_row",
+	"checkpoint_link_mismatch",
+}
 
 func init() {
 	prometheus.MustRegister(
@@ -86,7 +140,38 @@ func init() {
 		consumerPending,
 		consumerAckPending,
 		consumerRedelivered,
+		chainAppends,
+		chainHeadLockWait,
+		chainBroken,
+		chainPurgeBlocked,
+		detailsGuard,
 	)
+	for _, kind := range chainPurgeKinds {
+		chainPurgeBlocked.WithLabelValues(kind)
+	}
+}
+
+// RecordChainAppend counts one chained-insert outcome.
+func RecordChainAppend(result string) {
+	chainAppends.WithLabelValues(result).Inc()
+}
+
+func ObserveChainHeadLockWait(wait time.Duration) {
+	chainHeadLockWait.Observe(wait.Seconds())
+}
+
+func RecordChainBroken() {
+	chainBroken.Inc()
+}
+
+// RecordChainPurgeBlocked counts one purge refused for an org, by the incident
+// kind written for it.
+func RecordChainPurgeBlocked(kind string) {
+	chainPurgeBlocked.WithLabelValues(kind).Inc()
+}
+
+func RecordDetailsGuard(result string) {
+	detailsGuard.WithLabelValues(result).Inc()
 }
 
 func SetConsumerState(bus, kind string, pending uint64, ackPending, redelivered int) {

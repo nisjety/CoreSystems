@@ -9,6 +9,7 @@ export * from './AiRealtimeRequest';
 export * from './AiSpeechRequest';
 export * from './AiTranslateRequest';
 export * from './Approval';
+export * from './ApprovalCause';
 export * from './CancelRun200Response';
 export * from './Capability';
 export * from './ChatMessage';

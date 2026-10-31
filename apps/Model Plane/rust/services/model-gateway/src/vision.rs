@@ -8,13 +8,21 @@
 use base64::Engine as _;
 use serde::Deserialize;
 
+// Images carried as parts of the turn rather than diverted to `AnalyzeImage` (WS08-S4).
+// Declared here, a child of this module, so it reaches the private `is_image` below.
+#[path = "vision_parts.rs"]
+pub mod parts;
+
 /// An attachment on a chat request. Images are routed to vision; other kinds
-/// are ignored here (handled by file-upload/RAG paths).
+/// are ignored here (the attachment policy refuses them before this point).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct InvokeAttachment {
-    /// "image" | "document" | … (defaults to inferring from `mime_type`).
+    /// "image" | "file" (defaults to inferring from `mime_type`).
     #[serde(default)]
     pub kind: Option<String>,
+    /// The file's own name, validated by the attachment policy; never a path.
+    #[serde(default)]
+    pub name: Option<String>,
     /// Public image URL (mutually exclusive with `data_base64`).
     #[serde(default)]
     pub url: Option<String>,

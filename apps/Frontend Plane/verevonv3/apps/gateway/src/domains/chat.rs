@@ -2,6 +2,7 @@ pub(crate) mod documents;
 pub(crate) mod history;
 pub(crate) mod json_handlers;
 pub(crate) mod shared;
+mod search;
 mod streams;
 pub(crate) mod support;
 
@@ -14,19 +15,45 @@ use crate::{config::AppState, middleware::require_session};
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
-        .route("/api/v1/chat/stream", post(streams::stream_chat))
+        .route("/api/v1/chat/stream", streams::stream_route())
         .route("/api/v1/chat/invoke", post(json_handlers::invoke_chat))
         .route(
             "/api/v1/chat/threads",
             get(history::list_threads).delete(history::clear_threads),
         )
+        // Full-text search over the caller's chat threads (build plan WS17 S3).
+        .route("/api/v1/chat/threads/search", get(search::search_threads))
         .route(
             "/api/v1/chat/threads/{thread_id}",
-            put(history::save_thread).delete(history::delete_thread),
+            put(history::save_thread)
+                .get(history::get_thread)
+                .delete(history::delete_thread),
         )
         .route(
             "/api/v1/chat/threads/{thread_id}/transcript",
             get(history::get_thread_transcript),
+        )
+        .route(
+            "/api/v1/chat/threads/{thread_id}/archive",
+            post(history::archive_thread),
+        )
+        .route(
+            "/api/v1/chat/threads/{thread_id}/unarchive",
+            post(history::unarchive_thread),
+        )
+        // Star and read/unread state; session-core owns both (WS17-S7).
+        .route(
+            "/api/v1/chat/threads/{thread_id}/flags",
+            put(history::update_thread_flags),
+        )
+        // Move a thread's active branch: a version switch, or a rewind the client confirms first (WS17 S9).
+        .route(
+            "/api/v1/chat/threads/{thread_id}/branch",
+            post(json_handlers::branch_thread),
+        )
+        .route(
+            "/api/v1/chat/threads/{thread_id}/rewind",
+            post(json_handlers::rewind_thread),
         )
         .route(
             "/api/v1/chat/stream/resume/{request_id}",

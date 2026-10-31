@@ -99,6 +99,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::ag_ui::router(state.clone()))
         .merge(domains::ai::router(state.clone()))
         .merge(domains::audit::router(state.clone()))
+        .merge(domains::audit_compliance::router(state.clone()))
         .merge(domains::auth::router(state.clone()))
         .merge(domains::browser::router(state.clone()))
         .merge(domains::browser_evidence::router(state.clone()))
@@ -115,6 +116,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::integrations::router(state.clone()))
         .merge(domains::knowledge::router(state.clone()))
         .merge(domains::leads::router(state.clone()))
+        .merge(domains::learning::router(state.clone()))
         .merge(domains::mail_task::router(state.clone()))
         .merge(domains::anbud::router(state.clone()))
         .merge(domains::marketing::router(state.clone()))
@@ -416,6 +418,8 @@ mod tests {
             mail_task_nats_url: String::new(),
             mail_task_nats_user: String::new(),
             mail_task_nats_password: String::new(),
+            continue_park_form: false,
+            model_entitlement_admin_enabled: false,
             mail_task_pipeline: None,
         }
     }

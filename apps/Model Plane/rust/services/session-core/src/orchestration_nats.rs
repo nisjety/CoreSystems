@@ -89,6 +89,19 @@ pub async fn run(
                 )
                 .increment(1);
             }
+            Err(BridgeError::Refused) => {
+                // Only the subject is logged; its last token is the publisher's.
+                warn!(
+                    subject = %msg.subject,
+                    "orchestration NATS event refused: park events are recorded only through \
+                     RecordOrchestrationEvent"
+                );
+                metrics::counter!(
+                    "mp_session_orchestration_bridge_total",
+                    "result" => "refused",
+                )
+                .increment(1);
+            }
         }
     }
 
@@ -102,6 +115,8 @@ enum BridgeError {
     Decode(String),
     #[error("no subscribers")]
     NoSubscribers,
+    #[error("refused: park events are not accepted over NATS")]
+    Refused,
 }
 
 fn handle(
@@ -110,6 +125,15 @@ fn handle(
 ) -> Result<(), BridgeError> {
     let domain: OrchestrationEvent =
         serde_json::from_slice(payload).map_err(|e| BridgeError::Decode(e.to_string()))?;
+    // `RunParked` and `RunResumed` (WS03 S8) are recorded only through `RecordOrchestrationEvent`,
+    // where the park store must be on and the event must match the run's own fold. A publisher on
+    // this subject is not held to either, so it is refused before anything is converted or sent.
+    if matches!(
+        domain,
+        OrchestrationEvent::RunParked { .. } | OrchestrationEvent::RunResumed { .. }
+    ) {
+        return Err(BridgeError::Refused);
+    }
     let pb: proto::OrchestrationEvent = domain.into();
     events_tx
         .send(pb)
@@ -227,6 +251,75 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    // The park events never ride this bridge, whether or not anyone is listening, and nothing
+    // reaches a subscriber; every other event still does (the round-trip tests above).
+    #[tokio::test]
+    async fn handle_refuses_the_park_events_and_never_broadcasts_them() {
+        let events = [
+            OrchestrationEvent::RunParked {
+                run_id: "run_1".into(),
+                at: fixed_at(),
+            },
+            OrchestrationEvent::RunResumed {
+                run_id: "run_1".into(),
+                resumed_segment: 2,
+                at: fixed_at(),
+            },
+        ];
+        let (tx, mut rx) = broadcast::channel(8);
+        for event in &events {
+            let body = serde_json::to_vec(event).unwrap();
+            assert!(matches!(
+                handle(&body, &tx).unwrap_err(),
+                BridgeError::Refused
+            ));
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        // With nobody listening it is still a refusal, not "no subscribers".
+        drop(rx);
+        for event in &events {
+            let body = serde_json::to_vec(event).unwrap();
+            assert!(matches!(
+                handle(&body, &tx).unwrap_err(),
+                BridgeError::Refused
+            ));
+        }
+    }
+
+    // The refused set is pinned from both sides: the nearest neighbours of the park events, the
+    // approval resume and the browser resume, still go through.
+    #[tokio::test]
+    async fn handle_still_forwards_the_neighbours_of_the_park_events() {
+        let (tx, mut rx) = broadcast::channel(8);
+        for event in [
+            OrchestrationEvent::RunResumedAfterApproval {
+                run_id: "run_1".into(),
+                approval_id: "appr_1".into(),
+                at: fixed_at(),
+            },
+            OrchestrationEvent::BrowserRunResumed {
+                run_id: "run_1".into(),
+                plan_id: "plan_1".into(),
+                at: fixed_at(),
+            },
+        ] {
+            handle(&serde_json::to_vec(&event).unwrap(), &tx).expect("forwarded");
+        }
+        let first = rx.recv().await.expect("first event");
+        assert!(matches!(
+            first.event,
+            Some(orchestration_event::Event::RunResumedAfterApproval(_))
+        ));
+        let second = rx.recv().await.expect("second event");
+        assert!(matches!(
+            second.event,
+            Some(orchestration_event::Event::BrowserRunResumed(_))
+        ));
     }
 
     #[test]

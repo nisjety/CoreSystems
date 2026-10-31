@@ -571,6 +571,29 @@ impl JwtVerifier {
         Ok(DelegatedBrowserBearer(Arc::from(token)))
     }
 
+    /// Verify the run's browser bearer when the caller presents one (WS21-S2). An absent header is
+    /// `None`, not an error: a run without browser authority is an ordinary run. A present one is
+    /// checked exactly as [`Self::authenticate_delegated_browser`] checks it; whether the Do loop
+    /// may use it is decided by the run's offer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the statuses of [`Self::authenticate_delegated_browser`] for a malformed,
+    /// wrong-audience, unavailable or identity-mismatched bearer.
+    #[allow(clippy::result_large_err)]
+    pub async fn authenticate_run_browser<T>(
+        &self,
+        request: &Request<T>,
+        caller: &AuthenticatedUser,
+    ) -> Result<Option<DelegatedBrowserBearer>, Status> {
+        if !request.metadata().contains_key("x-browser-authorization") {
+            return Ok(None);
+        }
+        self.authenticate_delegated_browser(request, caller)
+            .await
+            .map(Some)
+    }
+
     /// Verify a separately delegated Data Plane credential and bind it to the
     /// already authenticated Execution Core caller. The ingress token is never
     /// reused for retrieval, including when its syntax is otherwise valid.
@@ -1264,6 +1287,55 @@ mod tests {
                 .unwrap_err()
                 .code(),
             tonic::Code::PermissionDenied
+        );
+    }
+
+    #[tokio::test]
+    async fn run_browser_credential_is_optional_and_otherwise_verified_like_the_delegated_one() {
+        let verifier = verifier("key-browser").await;
+        let execution_token = sign(&claims(), "key-browser");
+        let caller = verifier
+            .authenticate(&authenticated_request(&execution_token))
+            .await
+            .expect("execution caller");
+
+        // A run that presents no browser bearer is an ordinary run, not a refusal.
+        let absent = Request::new(());
+        assert!(verifier
+            .authenticate_run_browser(&absent, &caller)
+            .await
+            .expect("an absent browser bearer is not an error")
+            .is_none());
+
+        let mut browser_claims = claims();
+        browser_claims["aud"] = json!("browser-broker");
+        let browser_token = sign(&browser_claims, "key-browser");
+        let mut request = Request::new(());
+        request.metadata_mut().insert(
+            "x-browser-authorization",
+            format!("Bearer {browser_token}").parse().expect("metadata"),
+        );
+        let delegated = verifier
+            .authenticate_run_browser(&request, &caller)
+            .await
+            .expect("a verified browser bearer")
+            .expect("a present bearer is returned");
+        assert_eq!(delegated.as_str(), browser_token);
+
+        // A present bearer of another audience is refused, never silently dropped.
+        request.metadata_mut().insert(
+            "x-browser-authorization",
+            format!("Bearer {execution_token}")
+                .parse()
+                .expect("metadata"),
+        );
+        assert_eq!(
+            verifier
+                .authenticate_run_browser(&request, &caller)
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
         );
     }
 

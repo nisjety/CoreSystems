@@ -38,7 +38,11 @@ const RunCompletedEventType = "RUN_COMPLETED"
 
 // SessionRef identifies the session whose transcript should be reviewed.
 type SessionRef struct {
-	OrgID    string
+	OrgID string
+	// UserID is the owner of the run, from the envelope. Every skill the review
+	// proposes belongs to this user, and the review is skipped when their memory
+	// state or their organization's policy does not allow learning.
+	UserID   string
 	RunID    string
 	ThreadID string // best-effort, from the event payload when present
 }
@@ -47,7 +51,8 @@ type SessionRef struct {
 // Returns (_, false) for any other event type, an empty org, or a
 // `resource_ref` that carries no run id. The run id comes from `resource_ref`
 // ("run/<id>" per the envelope convention; "run:<id>" is also tolerated); the
-// org from `org_id`; the thread id best-effort from `payload.thread_id`.
+// org and the run's owner from `org_id` and `user_id`; the thread id
+// best-effort from `payload.thread_id`.
 //
 // The producer contract is intentionally tolerant of the historical `run/` and
 // `run:` resource-reference forms; the live trigger test pins the canonical
@@ -66,7 +71,7 @@ func ParseRunCompleted(env *envelope.Envelope) (SessionRef, bool) {
 	if runID == "" {
 		return SessionRef{}, false
 	}
-	ref := SessionRef{OrgID: env.OrgID, RunID: runID}
+	ref := SessionRef{OrgID: env.OrgID, UserID: env.UserID, RunID: runID}
 	if len(env.Payload) > 0 {
 		var p struct {
 			ThreadID string `json:"thread_id"`

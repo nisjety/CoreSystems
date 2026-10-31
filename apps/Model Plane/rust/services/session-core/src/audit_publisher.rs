@@ -39,6 +39,9 @@ pub const EVENT_TOOL_ACTION: &str = "tool_action";
 /// Audit event name of the reservation that precedes an inline tool call.
 pub const EVENT_TOOL_ACTION_RESERVED: &str = "tool_action_reserved";
 
+/// Audit event name of a recorded approval decision (build plan WS13 S3).
+pub const EVENT_APPROVAL_DECIDED: &str = "approval_decided";
+
 /// Subject family carrying Session Core's flat audit-core bodies.
 const AUDIT_SUBJECT_PREFIX: &str = "verevon.audit.v2.model.session-core.";
 
@@ -324,6 +327,70 @@ pub fn build_tool_action_body_for_phase(
             "data_category": detail.data_category,
             "zdr": detail.zdr,
             "phase": phase,
+        },
+    })
+}
+
+/// What one approval decision tells the audit trail: who decided what, under which closed
+/// cause and provenance. It never carries the decision reason, the call's arguments or the
+/// approval's context, so the row stays content-free for every retention class.
+#[derive(Debug, Clone, Copy)]
+pub struct ApprovalDecisionAudit<'a> {
+    pub org_id: &'a str,
+    pub user_id: &'a str,
+    pub run_id: &'a str,
+    pub approval_id: &'a str,
+    pub kind: &'a str,
+    /// The decided state: `granted`, `denied` or `timed_out`.
+    pub outcome: &'a str,
+    pub cause_code: &'a str,
+    pub tool: &'a str,
+    pub effect_class: &'a str,
+    pub rule_id: &'a str,
+    pub scope: &'a str,
+    pub decision_source: &'a str,
+    pub step_up_verified: bool,
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Subject of a recorded approval decision.
+#[must_use]
+pub fn approval_decision_subject() -> String {
+    format!("{AUDIT_SUBJECT_PREFIX}{EVENT_APPROVAL_DECIDED}")
+}
+
+/// The audit event id of one decision. The same decision replayed yields the same id, so
+/// the outbox row for it is written once.
+#[must_use]
+pub fn approval_decision_event_id(approval_id: &str, outcome: &str) -> String {
+    let digest = blake3::hash(format!("{approval_id}\0{outcome}").as_bytes());
+    format!("approval:session-core:{digest}")
+}
+
+/// Build the FLAT audit body of one approval decision (see [`build_tool_action_body`] for
+/// the shape audit-core decodes).
+#[must_use]
+pub fn build_approval_decision_body(audit: &ApprovalDecisionAudit<'_>) -> serde_json::Value {
+    serde_json::json!({
+        "event_id": approval_decision_event_id(audit.approval_id, audit.outcome),
+        "occurred_at": audit.occurred_at.to_rfc3339(),
+        "org_id": audit.org_id,
+        "user_id": if audit.user_id.is_empty() { "agent" } else { audit.user_id },
+        "plane": "model",
+        "producer": "session-core",
+        "event": EVENT_APPROVAL_DECIDED,
+        "subject": audit.run_id,
+        "resource_id": audit.approval_id,
+        "outcome": audit.outcome,
+        "details": {
+            "cause_code": audit.cause_code,
+            "tool": audit.tool,
+            "effect_class": audit.effect_class,
+            "rule_id": audit.rule_id,
+            "scope": audit.scope,
+            "decision_source": audit.decision_source,
+            "step_up_verified": audit.step_up_verified,
+            "kind": audit.kind,
         },
     })
 }
@@ -1092,6 +1159,96 @@ mod tests {
             assert_eq!(fixture["subject"], subject, "{name}: wire subject");
             assert_eq!(fixture["body"], body, "{name}: wire body");
         }
+    }
+
+    fn approval_decision_fixture(outcome: &str, decision_source: &str) -> serde_json::Value {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-10-03T12:00:00Z")
+            .expect("fixed instant")
+            .with_timezone(&chrono::Utc);
+        build_approval_decision_body(&ApprovalDecisionAudit {
+            org_id: "org_fixture",
+            user_id: "user_fixture",
+            run_id: "run_fixture",
+            approval_id: "appr_fixture",
+            kind: "tool_call",
+            outcome,
+            cause_code: "provider_write",
+            tool: "execute_provider_action",
+            effect_class: "external_write",
+            rule_id: "",
+            scope: "once",
+            decision_source,
+            step_up_verified: false,
+            occurred_at: at,
+        })
+    }
+
+    #[test]
+    fn approval_decided_wire_fixture_matches_the_builder() {
+        let body = approval_decision_fixture("granted", "user");
+        let subject = resolve_wire_subject(OutboxRoute::Audit, &approval_decision_subject(), &body)
+            .expect("wire subject");
+        let expected = serde_json::json!({ "subject": subject, "body": body });
+        // `UPDATE_AUDIT_CORE_FIXTURES=1 cargo test ... approval_decided_wire_fixture`
+        // rewrites the fixture; audit-core's vendored copy is then refreshed from it.
+        if std::env::var_os("UPDATE_AUDIT_CORE_FIXTURES").is_some() {
+            let path = format!(
+                "{}/tests/fixtures/audit-core-wire/approval_decided.json",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let rendered = serde_json::to_string_pretty(&expected).expect("render fixture");
+            std::fs::write(path, rendered + "\n").expect("write fixture");
+            return;
+        }
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/audit-core-wire/approval_decided.json"
+        ))
+        .expect("fixture is valid JSON");
+        assert_eq!(fixture, expected, "approval_decided: wire body and subject");
+    }
+
+    #[test]
+    fn an_approval_decision_audit_row_names_no_reason_text_or_arguments() {
+        let body = approval_decision_fixture("denied", "user");
+        let mut keys: Vec<&str> = body["details"]
+            .as_object()
+            .expect("details is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "cause_code",
+                "decision_source",
+                "effect_class",
+                "kind",
+                "rule_id",
+                "scope",
+                "step_up_verified",
+                "tool",
+            ]
+        );
+        assert!(body.get("decision_reason").is_none());
+        assert!(body.get("context").is_none());
+    }
+
+    #[test]
+    fn a_replayed_approval_decision_has_one_event_id_and_a_different_decision_has_another() {
+        let granted = approval_decision_event_id("appr_fixture", "granted");
+        assert_eq!(
+            granted,
+            approval_decision_event_id("appr_fixture", "granted")
+        );
+        assert_ne!(
+            granted,
+            approval_decision_event_id("appr_fixture", "denied")
+        );
+        assert!(
+            granted.len() <= 128,
+            "outbox event ids are at most 128 bytes"
+        );
     }
 
     #[test]

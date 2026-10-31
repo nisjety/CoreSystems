@@ -156,6 +156,7 @@ Class | Method | HTTP request | Description
  - [AiSpeechRequest](docs/AiSpeechRequest.md)
  - [AiTranslateRequest](docs/AiTranslateRequest.md)
  - [Approval](docs/Approval.md)
+ - [ApprovalCause](docs/ApprovalCause.md)
  - [CancelRun200Response](docs/CancelRun200Response.md)
  - [Capability](docs/Capability.md)
  - [ChatMessage](docs/ChatMessage.md)

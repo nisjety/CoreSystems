@@ -40,3 +40,32 @@ func TestV2AuditPayloadsCarryStableProducerIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestAuditEventWithoutOrgIsNotEnqueued(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+
+	// The payloads come from the real builders, so the named-org cases below
+	// also fail if a builder stops writing org_id under that key.
+	unscoped := map[string]map[string]any{
+		"sync with empty org":        buildProviderLeadSyncPayload("lead:sync:fixture", now, providerleads.SyncAudit{ProviderKey: "linkedin", Outcome: "failed"}),
+		"sync with whitespace org":   buildProviderLeadSyncPayload("lead:sync:fixture", now, providerleads.SyncAudit{OrgID: " \t ", ProviderKey: "linkedin", Outcome: "failed"}),
+		"export with empty org":      buildLeadExportPayload("lead:export:fixture", now, leads.LeadExportAudit{ListID: "list-1", Count: 2}),
+		"payload without org_id key": {"event": "provider_lead_sync", "outcome": "failed"},
+	}
+	for name, payload := range unscoped {
+		if hasOrgScope(payload) {
+			t.Fatalf("%s: hasOrgScope = true, want false for %#v", name, payload)
+		}
+	}
+
+	scoped := map[string]map[string]any{
+		"sync with named org":   buildProviderLeadSyncPayload("lead:sync:fixture", now, providerleads.SyncAudit{OrgID: "org-1", ProviderKey: "linkedin"}),
+		"export with named org": buildLeadExportPayload("lead:export:fixture", now, leads.LeadExportAudit{OrgID: "org-1", ListID: "list-1", Count: 2}),
+	}
+	for name, payload := range scoped {
+		if !hasOrgScope(payload) {
+			t.Fatalf("%s: hasOrgScope = false, want true for %#v", name, payload)
+		}
+	}
+}

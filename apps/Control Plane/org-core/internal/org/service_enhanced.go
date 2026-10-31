@@ -17,6 +17,7 @@ var ErrPlanUpgradeRequired = errors.New("plan upgrade required for this feature"
 var ErrOwnerConflict = errors.New("organization already has a different owner")
 var ErrOrganizationDeleted = errors.New("organization is deleted and cannot be reprovisioned")
 var ErrProjectionConflict = errors.New("conflicting state for an existing Auth projection revision")
+var ErrInvalidAgentLearningPolicy = errors.New("invalid agent learning policy")
 
 const (
 	orgCacheTTL         = 10 * time.Minute // Orgs change rarely; 10m reduces DB reads
@@ -57,6 +58,7 @@ type Service struct {
 	sharedPublisher SharedPublisher    // cross-plane events on verevon-nats
 	auditPublisher  AuditPublisher     // durable verevon.audit.v2.* dispatch on local controlplane-nats
 	cache           *rediscache.Client // optional, nil if Redis disabled
+	siemSealer      *SIEMSealer        // nil unless ORG_SIEM_DESTINATIONS_ENABLED (WS06-S7)
 }
 
 func NewService(repo *Repository, publisher Publisher, cache ...*rediscache.Client) *Service {
@@ -173,6 +175,14 @@ func (s *Service) GetEntitlements(ctx context.Context, id string) ([]Entitlement
 			Key:     InteractiveZdrEntitlementKey,
 			Enabled: PlanAllowsZeroDataRetention(current.Plan),
 		})
+		// Reported only once SIEM destinations are switched on, so the response
+		// is unchanged while the feature is off.
+		if s.SIEMDestinationsEnabled() {
+			ents = append(ents, Entitlement{
+				Key:     SIEMExportEntitlementKey,
+				Enabled: PlanAllowsSIEMExport(current.Plan),
+			})
+		}
 	}
 
 	return ents, nil
@@ -602,6 +612,9 @@ func (s *Service) GetRetentionPosture(ctx context.Context, id string) (*Retentio
 // rejected with ErrPlanUpgradeRequired unless the org's plan is entitled;
 // disabling it is always allowed. The stored value is durable org-admin intent;
 // live enforcement is applied through auth-core's managed retention policy.
+// A false-to-true transition enqueues a cleanup event in the same transaction;
+// the call publishes it once inline as best effort, and a publish failure does
+// not fail the call because the outbox worker retries it.
 // Returns the refreshed organization projection.
 func (s *Service) SetInteractiveRetention(ctx context.Context, orgID string, zdr bool, changedBy string) (*Organization, error) {
 	if strings.TrimSpace(orgID) == "" {
@@ -625,7 +638,7 @@ func (s *Service) SetInteractiveRetention(ctx context.Context, orgID string, zdr
 	}
 	if enqueued {
 		if _, err := s.FlushInteractiveRetentionOutbox(ctx, 100); err != nil {
-			return nil, err
+			log.Printf("org-core: interactive retention %s: inline outbox flush failed, left pending for the outbox worker: %v", orgID, err)
 		}
 	}
 	return s.repo.GetOrganization(ctx, orgID)
@@ -678,6 +691,113 @@ func (s *Service) SetSupportAIMode(ctx context.Context, orgID, mode, changedBy s
 		return nil, fmt.Errorf("invalid support AI mode")
 	}
 	if err := s.repo.SetSupportAIMode(ctx, orgID, mode, changedBy); err != nil {
+		return nil, err
+	}
+	if s.cache != nil {
+		_ = s.cache.Del(ctx, "org:id:"+orgID)
+	}
+	return s.repo.GetOrganization(ctx, orgID)
+}
+
+// The organization's memory and learning-review policy (metadata.agentLearning).
+// Memory is allowed unless the admin disables it; learning review is opt-in
+// because enabling it sends conversation transcripts to a paid review model.
+const (
+	AgentMemoryAllow       = "allow"
+	AgentMemoryDisabled    = "disabled"
+	AgentLearningDisabled  = "disabled"
+	AgentLearningProposals = "proposals"
+)
+
+// AgentLearningPolicy is what session-core mirrors
+// (GET /internal/orgs/:orgId/agent-policy). Wire names are a contract with
+// session-core's org_policy module; it carries no organization data.
+type AgentLearningPolicy struct {
+	Memory         string `json:"memory"`
+	LearningReview string `json:"learningReview"`
+	Revision       int64  `json:"revision"`
+	UpdatedAt      string `json:"updatedAt,omitempty"`
+}
+
+// normalizeAgentLearningPolicy turns the stored object into a policy. Absence
+// (or null) is the defaults. A value that is not exactly one of the two
+// spellings reads as the restrictive one, and so does an object that cannot be
+// parsed at all: a policy someone damaged must not read as one that allows.
+func normalizeAgentLearningPolicy(raw []byte) AgentLearningPolicy {
+	policy := AgentLearningPolicy{Memory: AgentMemoryAllow, LearningReview: AgentLearningDisabled}
+	if len(raw) == 0 || string(raw) == "null" {
+		return policy
+	}
+	var stored struct {
+		Memory         any     `json:"memory"`
+		LearningReview any     `json:"learningReview"`
+		Revision       any     `json:"revision"`
+		UpdatedAt      *string `json:"updatedAt"`
+	}
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		policy.Memory = AgentMemoryDisabled
+		return policy
+	}
+	if stored.Memory != nil && stored.Memory != AgentMemoryAllow {
+		policy.Memory = AgentMemoryDisabled
+	}
+	if stored.LearningReview == AgentLearningProposals {
+		policy.LearningReview = AgentLearningProposals
+	}
+	if revision, ok := stored.Revision.(float64); ok && revision >= 0 {
+		policy.Revision = int64(revision)
+	}
+	if stored.UpdatedAt != nil {
+		policy.UpdatedAt = *stored.UpdatedAt
+	}
+	return policy
+}
+
+// GetAgentLearningPolicy returns the org's memory and learning-review policy
+// for session-core's mirror. Like GetRetentionPosture it reads the database and
+// bypasses the organization cache: the answer gates whether members' content is
+// mined, so it must not depend on every writer remembering to invalidate.
+func (s *Service) GetAgentLearningPolicy(ctx context.Context, id string) (*AgentLearningPolicy, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, fmt.Errorf("organization id is required")
+	}
+	policy, err := s.repo.GetAgentLearningPolicy(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &policy, nil
+}
+
+// SetAgentLearningPolicy changes one or both rows of the policy. Anything but
+// the two documented spellings of a row is refused, never coerced.
+func (s *Service) SetAgentLearningPolicy(ctx context.Context, orgID string, memory, learningReview *string, changedBy string) (*Organization, error) {
+	if strings.TrimSpace(orgID) == "" {
+		return nil, fmt.Errorf("organization id is required")
+	}
+	if memory == nil && learningReview == nil {
+		return nil, ErrInvalidAgentLearningPolicy
+	}
+	canonical := func(value *string, allowed ...string) (*string, error) {
+		if value == nil {
+			return nil, nil
+		}
+		for _, candidate := range allowed {
+			if *value == candidate {
+				return value, nil
+			}
+		}
+		return nil, ErrInvalidAgentLearningPolicy
+	}
+	memory, err := canonical(memory, AgentMemoryAllow, AgentMemoryDisabled)
+	if err != nil {
+		return nil, err
+	}
+	learningReview, err = canonical(learningReview, AgentLearningDisabled, AgentLearningProposals)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.repo.SetAgentLearningPolicy(ctx, orgID, memory, learningReview, changedBy); err != nil {
 		return nil, err
 	}
 	if s.cache != nil {

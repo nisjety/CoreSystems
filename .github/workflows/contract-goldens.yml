@@ -23,16 +23,22 @@ on:
       - "apps/**/infer-statuses.json*"
       - "apps/**/inference-service-tokens.golden.json*"
       - "apps/**/zdr-refusals.json*"
+      - "apps/**/model-entitlement-refusals.json*"
+      - "apps/**/model-entitlement-matrix.json"
       - "apps/**/cross-plane-token-requests.json*"
       - "apps/**/zdr-feature-matrix.json*"
       - "apps/**/secret-shapes.v1.json*"
       - "apps/**/web-policy-catalogue.v1.json*"
+      - "apps/**/sse-event-payloads.json*"
       - "scripts/tests/zdr-contract-sync.test.sh"
       - "scripts/tests/zdr-contract-schema.mjs"
       - "scripts/tests/zdr-contract-schema.test.mjs"
+      - "scripts/tests/model-entitlement-contract-sync.test.sh"
+      - "scripts/tests/model-entitlement-contract-schema.mjs"
+      - "scripts/tests/model-entitlement-contract-schema.test.mjs"
       - ".github/workflows/contract-goldens.yml"
   push:
-    branches: [main]
+    branches: [main, fix/ui-premium-restore]
     paths:
       - "apps/Model Plane/api/contracts/**"
       - "apps/**/zdr-posture-matrix.json*"
@@ -40,13 +46,19 @@ on:
       - "apps/**/infer-statuses.json*"
       - "apps/**/inference-service-tokens.golden.json*"
       - "apps/**/zdr-refusals.json*"
+      - "apps/**/model-entitlement-refusals.json*"
+      - "apps/**/model-entitlement-matrix.json"
       - "apps/**/cross-plane-token-requests.json*"
       - "apps/**/zdr-feature-matrix.json*"
       - "apps/**/secret-shapes.v1.json*"
       - "apps/**/web-policy-catalogue.v1.json*"
+      - "apps/**/sse-event-payloads.json*"
       - "scripts/tests/zdr-contract-sync.test.sh"
       - "scripts/tests/zdr-contract-schema.mjs"
       - "scripts/tests/zdr-contract-schema.test.mjs"
+      - "scripts/tests/model-entitlement-contract-sync.test.sh"
+      - "scripts/tests/model-entitlement-contract-schema.mjs"
+      - "scripts/tests/model-entitlement-contract-schema.test.mjs"
       - ".github/workflows/contract-goldens.yml"
 
 # The job reads the checkout and runs local scripts; nothing here writes to the repository.
@@ -78,3 +90,14 @@ jobs:
 
       - name: Loader tests for the ZDR goldens
         run: node --test scripts/tests/zdr-contract-schema.test.mjs
+
+      # The model entitlement refusal golden (WS10): the same pin-and-strict-loader check, apart from
+      # the ZDR one because the two vocabularies share no file.
+      - name: Drift check for the model entitlement refusal golden
+        run: bash scripts/tests/model-entitlement-contract-sync.test.sh
+
+      - name: Prove the entitlement drift check can fail
+        run: bash scripts/tests/model-entitlement-contract-sync.test.sh --self-test
+
+      - name: Loader tests for the model entitlement golden
+        run: node --test scripts/tests/model-entitlement-contract-schema.test.mjs
