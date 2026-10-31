@@ -29,7 +29,7 @@
 //! (`zdr::zdr_refusal_body`): 400 `invalid_post` / `invalid_client_send_id` / `invalid_space`,
 //! 403 `active_membership_required` / `space_post_not_authorized`, 404 `space_not_found` /
 //! `thread_not_found` / `space_human_posts_disabled`, 409 `idempotency_key_conflict` /
-//! `space_authority_stale` (a reply re-mints once) / `thread_state_conflict`, 412
+//! `space_authority_stale` (a reply re-mints once) / `room_archived` / `thread_state_conflict`, 412
 //! `zdr_durable_mutation_forbidden`, 502 `post_not_stored` (the thread exists, the post did not
 //! land: retry with the same send id), 503 `zdr_decision_unavailable` /
 //! `space_lifecycle_unavailable` / `space_decision_unavailable` / `delegated_auth_unavailable` /
@@ -496,6 +496,16 @@ fn control_refusal(state: &AppState, status: StatusCode, body: Value) -> Reply {
             "Space is not available.",
         ),
         StatusCode::BAD_REQUEST => invalid_post("request"),
+        // An archived room is final until someone unarchives it, so it must not read as "try again".
+        StatusCode::CONFLICT
+            if body.pointer("/error/code").and_then(Value::as_str) == Some("room_archived") =>
+        {
+            refuse(
+                StatusCode::CONFLICT,
+                "room_archived",
+                "The room is archived; posting is closed.",
+            )
+        }
         StatusCode::CONFLICT => refuse(
             StatusCode::CONFLICT,
             "space_authority_stale",
@@ -1152,6 +1162,29 @@ mod tests {
             assert_eq!(status, expected_status, "control {control}: {raw}");
             assert_eq!(body["error"]["code"], expected_code, "control {control}");
             assert!(model_calls(&fx).await.is_empty(), "control {control}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_archived_room_refusal_stays_room_archived_on_create_and_reply() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (decision, uri) in [
+            ("thread-decision", create_uri()),
+            ("thread-append-decision", reply_uri()),
+        ] {
+            let fx = default_fixture().await;
+            mount_decision_status(
+                &fx,
+                decision,
+                ResponseTemplate::new(409).set_body_json(json!({
+                    "error": {"code": "room_archived", "message": "archived", "details": {}}
+                })),
+            )
+            .await;
+            let (status, body, raw) = send(&fx.state, uri, None, post("hello")).await;
+            assert_eq!(status, 409, "{decision}: {raw}");
+            assert_eq!(body["error"]["code"], "room_archived", "{decision}");
+            assert!(model_calls(&fx).await.is_empty(), "{decision}");
         }
     }
 
