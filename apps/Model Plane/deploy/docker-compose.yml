@@ -1740,6 +1740,8 @@ services:
       ORG_AGENT_POLICY_API: ${ORG_AGENT_POLICY_API:-false}
       # WS20-S4: stored-consent schedule contracts. Only the literal `true` enables it; user-core takes the same name.
       SCHEDULE_CONTRACT_ENABLED: ${SCHEDULE_CONTRACT_ENABLED:-false}
+      # WS20-S8: approval guards (auto-pause on expiry and failures, renewal refusal). Only the literal `true` enables them.
+      CRON_CONTRACT_GUARDS_ENABLED: ${CRON_CONTRACT_GUARDS_ENABLED:-false}
       # WS05-S5: stored per-tool allow/ask/never policies. Only the literal `true` enables them; off, they are stored and ignored.
       TOOL_POLICY_ENFORCED: ${TOOL_POLICY_ENFORCED:-false}
       # Outbound service-token minting for the skill-learning review, which

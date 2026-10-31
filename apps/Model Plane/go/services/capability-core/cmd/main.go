@@ -331,6 +331,8 @@ func main() {
 	cronHandler := api.NewCronHandler(pool)
 	// WS20-S4: stored-consent schedule contracts. Strict literal true; off by default.
 	cronHandler.WithScheduleContract(os.Getenv("SCHEDULE_CONTRACT_ENABLED") == "true")
+	// WS20-S8: approval guards refuse a bare re-enable of a lapsed approval. Strict literal true; off by default.
+	cronHandler.WithContractGuards(os.Getenv("CRON_CONTRACT_GUARDS_ENABLED") == "true")
 	if cronVerifier, cronVerifierErr := cronDecisionVerifierFromEnv(os.Getenv); cronVerifierErr != nil {
 		slog.Warn("Space-scoped cron creation unavailable; Control decision verifier is required", "error", cronVerifierErr)
 	} else {
@@ -347,7 +349,13 @@ func main() {
 		if cronAuthErr != nil {
 			slog.Warn("cron sweeper not started; fresh Control authorization is required", "error", cronAuthErr)
 		} else {
-			go cron.NewSweeper(pool, cronAuthorizer).Start(ctx)
+			cronSweeper := cron.NewSweeper(pool, cronAuthorizer).WithContractGuards(os.Getenv("CRON_CONTRACT_GUARDS_ENABLED") == "true")
+			// WS20-S8 pause notices follow the WS20-S7 switch: without it a pause still happens, unnoticed.
+			// The ok guard matters: a nil *notifyclient.Client would be a typed nil inside the interface.
+			if notifier, ok := notifyclient.New(os.Getenv("NOTIFICATION_CORE_URL"), os.Getenv("NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN"), nil); ok && os.Getenv("CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED") == "true" {
+				cronSweeper.WithPauseNotifier(notifier)
+			}
+			go cronSweeper.Start(ctx)
 			slog.Info("cron sweeper started with fresh Control authorization")
 		}
 	}

@@ -1510,6 +1510,7 @@ async fn browser_run_start_inner(
             // which wired code_interpreter's ExecuteStepRequest.space_id but
             // explicitly left this path's own separate gap for a follow-up).
             space_id: String::new(),
+            thread_id: String::new(),
             // browser_agent reads no attached files.
             attachments: Vec::new(),
             // Only code_interpreter steps mount skill bundles.

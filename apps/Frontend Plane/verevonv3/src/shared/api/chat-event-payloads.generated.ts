@@ -131,6 +131,14 @@ export type ChatEventPayloads = {
     tool: string
     wait_ms: number
   }
+  /** Rust variants: RunParked. */
+  run_parked: {
+    reason: string
+    request_id: string
+    resume_after: string | null
+    run_id: string
+    status: string
+  }
   /** Rust variants: SourceScopeApplied. */
   source_scope_applied: {
     excluded_tools: unknown[]

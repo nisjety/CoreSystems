@@ -612,6 +612,45 @@
         }
       }
     },
+    "run_parked": {
+      "family": null,
+      "variants": [
+        "RunParked"
+      ],
+      "keys": {
+        "reason": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "resume_after": {
+          "types": [
+            "null",
+            "string"
+          ],
+          "presence": "always"
+        },
+        "run_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "status": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
     "source_scope_applied": {
       "family": "citations",
       "variants": [

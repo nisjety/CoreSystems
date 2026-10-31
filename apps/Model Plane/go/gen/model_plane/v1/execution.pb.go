@@ -1381,6 +1381,11 @@ type ExecuteStepRequest struct {
 	// nor alter an entry. Empty = nothing staged, which is today's behaviour. A
 	// zero-retention step refuses a non-empty list at the boundary.
 	Attachments []*RunAttachment `protobuf:"bytes,12,rep,name=attachments,proto3" json:"attachments,omitempty"`
+	// The thread this step's run belongs to, read only to find the thread's
+	// workspace (WS22-S2, DEC-23). Memory tools never receive it: the direct
+	// ExecuteStep RPC still passes them an empty thread context, and a Space step
+	// and a zero-retention step ignore it.
+	ThreadId string `protobuf:"bytes,13,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
 	// Bundles of the skills this turn matched that have one, mounted read-only at
 	// /skills/<name> for this call (WS19-S8). The gateway derives them from the turn's
 	// own matches, never from the model's arguments; at most three. Field 13 is
@@ -1503,6 +1508,13 @@ func (x *ExecuteStepRequest) GetAttachments() []*RunAttachment {
 		return x.Attachments
 	}
 	return nil
+}
+
+func (x *ExecuteStepRequest) GetThreadId() string {
+	if x != nil {
+		return x.ThreadId
+	}
+	return ""
 }
 
 func (x *ExecuteStepRequest) GetSkillMounts() []*SkillMount {
@@ -2114,7 +2126,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\routput_tokens\x18\x04 \x01(\x04R\foutputTokens\x125\n" +
 	"\x17cache_read_input_tokens\x18\x05 \x01(\x04R\x14cacheReadInputTokens\x12=\n" +
 	"\x1bcache_creation_input_tokens\x18\x06 \x01(\x04R\x18cacheCreationInputTokens\x12)\n" +
-	"\x10inference_rounds\x18\a \x01(\rR\x0finferenceRounds\"\xf0\x03\n" +
+	"\x10inference_rounds\x18\a \x01(\rR\x0finferenceRounds\"\x8d\x04\n" +
 	"\x12ExecuteStepRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
 	"\astep_id\x18\x02 \x01(\tR\x06stepId\x12\x1b\n" +
@@ -2129,7 +2141,8 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\x10min_privacy_tier\x18\n" +
 	" \x01(\x0e2\x1b.model_plane.v1.PrivacyTierR\x0eminPrivacyTier\x12\x19\n" +
 	"\bspace_id\x18\v \x01(\tR\aspaceId\x12?\n" +
-	"\vattachments\x18\f \x03(\v2\x1d.model_plane.v1.RunAttachmentR\vattachments\x12=\n" +
+	"\vattachments\x18\f \x03(\v2\x1d.model_plane.v1.RunAttachmentR\vattachments\x12\x1b\n" +
+	"\tthread_id\x18\r \x01(\tR\bthreadId\x12=\n" +
 	"\fskill_mounts\x18\x0e \x03(\v2\x1a.model_plane.v1.SkillMountR\vskillMounts\"\xcf\x01\n" +
 	"\rRunAttachment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +

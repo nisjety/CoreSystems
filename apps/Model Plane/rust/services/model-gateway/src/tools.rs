@@ -233,6 +233,7 @@ pub async fn handle_code_interpreter(
         // sovereignty derivation for this field to feed.
         min_privacy_tier: mp_contracts::model_plane::v1::PrivacyTier::Unspecified as i32,
         space_id: space_id.to_owned(),
+        thread_id: String::new(),
         attachments: attachments.to_vec(),
         skill_mounts: skill_mounts.to_vec(),
     });

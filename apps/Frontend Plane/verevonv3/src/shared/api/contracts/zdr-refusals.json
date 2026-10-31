@@ -200,6 +200,10 @@
     {
       "key": "message_versions",
       "label_en": "message versions"
+    },
+    {
+      "key": "sandbox_workspace",
+      "label_en": "files kept between calls in a thread workspace"
     }
   ],
   "generated_by": "mp-contracts zdr_refusal tests (MP_UPDATE_GOLDEN=1)",
