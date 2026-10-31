@@ -837,6 +837,104 @@ fn share_tool_round_prefix(
     }
 }
 
+/// Records in the answer's metadata that an enforced loop stop ended the tool phase early, so the
+/// durable turn carries it beside its evidence. The entry is content-free: the reason, the tool's
+/// name, a hash of the call's signature (never its arguments) and how many calls the pattern
+/// covers. With no stop, which is every turn unless `LOOP_GUARD_MODE=enforce` ended the tool
+/// phase, the metadata is returned as it was.
+fn with_loop_stop(
+    metadata: Option<prost_types::Struct>,
+    stop: Option<&mp_contracts::loop_guard::LoopStop>,
+) -> Option<prost_types::Struct> {
+    use prost_types::value::Kind;
+
+    let Some(stop) = stop else {
+        return metadata;
+    };
+    let text = |value: &str| prost_types::Value {
+        kind: Some(Kind::StringValue(value.to_owned())),
+    };
+    let fields = std::collections::BTreeMap::from([
+        ("reason".to_owned(), text(stop.reason.label())),
+        ("tool".to_owned(), text(stop.tool.as_str())),
+        ("signature_hash".to_owned(), text(stop.signature_hash.as_str())),
+        (
+            "count".to_owned(),
+            prost_types::Value {
+                kind: Some(Kind::NumberValue(f64::from(stop.count))),
+            },
+        ),
+    ]);
+    let mut metadata = metadata.unwrap_or_default();
+    metadata.fields.insert(
+        "loop_stop".to_owned(),
+        prost_types::Value {
+            kind: Some(Kind::StructValue(prost_types::Struct { fields })),
+        },
+    );
+    Some(metadata)
+}
+
+#[cfg(test)]
+mod loop_stop_tests {
+    use super::*;
+    use mp_contracts::loop_guard::{LoopStop, StopReason};
+    use prost_types::value::Kind;
+
+    fn a_repeat_stop() -> LoopStop {
+        LoopStop {
+            reason: StopReason::Repeat,
+            tool: "fetch_url".to_owned(),
+            signature_hash: "9d2c".to_owned(),
+            count: 8,
+        }
+    }
+
+    fn text(value: &prost_types::Value) -> Option<&str> {
+        match &value.kind {
+            Some(Kind::StringValue(text)) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn an_enforced_stop_writes_exactly_four_content_free_fields() {
+        let metadata = with_loop_stop(None, Some(&a_repeat_stop()))
+            .expect("a stop writes the answer's metadata");
+        assert_eq!(metadata.fields.len(), 1, "nothing else is written beside the stop");
+        let Some(Kind::StructValue(entry)) = &metadata.fields["loop_stop"].kind else {
+            panic!("the stop is a struct under loop_stop");
+        };
+        let keys: Vec<&str> = entry.fields.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["count", "reason", "signature_hash", "tool"], "four fields, no arguments");
+        assert_eq!(text(&entry.fields["reason"]), Some("repeat"));
+        assert_eq!(text(&entry.fields["tool"]), Some("fetch_url"));
+        assert_eq!(text(&entry.fields["signature_hash"]), Some("9d2c"));
+        let count = match &entry.fields["count"].kind {
+            Some(Kind::NumberValue(count)) => *count,
+            _ => panic!("the count is a number"),
+        };
+        assert!((count - 8.0).abs() < f64::EPSILON, "the count is {count}");
+    }
+
+    #[test]
+    fn without_a_stop_the_answer_metadata_is_returned_as_it_was() {
+        assert!(with_loop_stop(None, None).is_none(), "no stop and no evidence writes nothing");
+        let evidence = prost_types::Struct {
+            fields: std::collections::BTreeMap::from([(
+                "citations".to_owned(),
+                prost_types::Value {
+                    kind: Some(Kind::StringValue("kept".to_owned())),
+                },
+            )]),
+        };
+        assert!(
+            with_loop_stop(Some(evidence.clone()), None) == Some(evidence),
+            "with the switch off or in shadow the metadata is unchanged"
+        );
+    }
+}
+
 #[cfg(test)]
 mod subscription_route_tests {
     use super::*;
@@ -3392,6 +3490,9 @@ pub async fn invoke_stream_sse(
         // Failed document writes this turn. Unlike a failed read, one withholds
         // the fixed completion text of a checked document.
         let mut document_tool_failures: u32 = 0;
+        // The loop guard's stop, when `LOOP_GUARD_MODE=enforce` ended the tool phase early. The
+        // answer records it, so an enforced stop leaves a durable trace and not only a log line.
+        let mut loop_stop: Option<mp_contracts::loop_guard::LoopStop> = None;
         if !tool_defs.is_empty() {
             seq = sink.sync_cursor(seq).await;
             // The research and forced-search passes above may have rewritten the head of the prompt,
@@ -3518,6 +3619,7 @@ pub async fn invoke_stream_sse(
             turn_evidence.tool_failures += rounds.tool_failures;
             turn_evidence.web_citations += rounds.web_citations;
             document_tool_failures = rounds.document_tool_failures;
+            loop_stop = rounds.loop_stop;
             messages = rounds.messages;
             tool_usage.extend(rounds.usage);
             last_round_tools = rounds.last_round_tools;
@@ -4784,46 +4886,49 @@ pub async fn invoke_stream_sse(
                             crate::session_flow::DirectAnswer {
                                 content: &assistant_output,
                                 agent_name: session_agent_name.as_deref(),
-                                metadata: crate::compaction::stamp_generation(
-                                    crate::session_flow::with_head_summary(
-                                        crate::session_flow::with_compaction_summary(
-                                            crate::session_flow::with_result_receipt(
-                                                crate::session_flow::turn_evidence_metadata(
-                                                    session_grounding.as_ref(),
-                                                    &sink.recorded_citations(),
-                                                    &sink.recorded_artifacts(),
-                                                    // Scored, and where applicable verified, just
-                                                    // above — so the durable turn carries the same
-                                                    // number the stream reported, and a reader who
-                                                    // opens this thread on another device sees why.
-                                                    crate::session_flow::TurnQuality {
-                                                        confidence,
-                                                        verification: verification_decision
-                                                            .should_verify()
-                                                            .then(|| {
-                                                                crate::session_flow::TurnVerification {
-                                                                    verdict: verdict.as_str(),
-                                                                    kb_citations: evidence.kb_citations,
-                                                                    web_citations: evidence
-                                                                        .web_citations,
-                                                                    web_allowed: verify_web_allowed,
-                                                                }
-                                                            }),
-                                                    },
+                                metadata: with_loop_stop(
+                                    crate::compaction::stamp_generation(
+                                        crate::session_flow::with_head_summary(
+                                            crate::session_flow::with_compaction_summary(
+                                                crate::session_flow::with_result_receipt(
+                                                    crate::session_flow::turn_evidence_metadata(
+                                                        session_grounding.as_ref(),
+                                                        &sink.recorded_citations(),
+                                                        &sink.recorded_artifacts(),
+                                                        // Scored, and where applicable verified, just
+                                                        // above — so the durable turn carries the same
+                                                        // number the stream reported, and a reader who
+                                                        // opens this thread on another device sees why.
+                                                        crate::session_flow::TurnQuality {
+                                                            confidence,
+                                                            verification: verification_decision
+                                                                .should_verify()
+                                                                .then(|| {
+                                                                    crate::session_flow::TurnVerification {
+                                                                        verdict: verdict.as_str(),
+                                                                        kb_citations: evidence.kb_citations,
+                                                                        web_citations: evidence
+                                                                            .web_citations,
+                                                                        web_allowed: verify_web_allowed,
+                                                                    }
+                                                                }),
+                                                        },
+                                                    ),
+                                                    result_receipt
+                                                        .lock()
+                                                        .ok()
+                                                        .and_then(|receipt| receipt.clone())
+                                                        .as_ref(),
                                                 ),
-                                                result_receipt
-                                                    .lock()
-                                                    .ok()
-                                                    .and_then(|receipt| receipt.clone())
-                                                    .as_ref(),
+                                                &chunk.compaction_summary,
+                                                effective_zdr,
                                             ),
-                                            &chunk.compaction_summary,
+                                            head_summary.as_ref().map(|new| &new.record),
                                             effective_zdr,
                                         ),
-                                        head_summary.as_ref().map(|new| &new.record),
-                                        effective_zdr,
+                                        head_summary.as_ref(),
                                     ),
-                                    head_summary.as_ref(),
+                                    loop_stop.as_ref(),
                                 ),
                             },
                             &req_id,

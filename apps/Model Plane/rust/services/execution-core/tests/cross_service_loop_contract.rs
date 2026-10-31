@@ -568,3 +568,31 @@ fn the_attachment_pins_go_red_when_either_side_drifts() {
         "reserved attachments name",
     );
 }
+
+/// The gateway's inline loop judges a loop by the shared guard (WS25-S1), so the two loops cannot
+/// drift apart on what a repeat is. Neither loop may import the other: they are separate
+/// deployments, and CLAUDE.md keeps the two dispatch loops apart on purpose. The Do loop's own
+/// import of the guard arrives with WS25-S2; until then this pins the inline half.
+#[test]
+fn the_inline_loop_judges_loops_by_the_shared_guard_and_neither_loop_imports_the_other() {
+    let inline = read(INLINE_LOOP);
+    let agent = read(AGENT_LOOP);
+    assert!(
+        code_lines(&inline)
+            .iter()
+            .any(|line| line.contains("mp_contracts::loop_guard")),
+        "the inline loop must judge loops by mp_contracts::loop_guard, not a private copy of it"
+    );
+    assert!(
+        !code_lines(&inline)
+            .iter()
+            .any(|line| line.contains("execution_core::")),
+        "model-gateway must not reach into execution-core"
+    );
+    assert!(
+        !code_lines(&agent)
+            .iter()
+            .any(|line| line.contains("model_gateway::")),
+        "execution-core must not reach into model-gateway"
+    );
+}

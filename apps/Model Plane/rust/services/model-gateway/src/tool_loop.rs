@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 
 use chrono::{Datelike, Utc};
 use mp_contracts::dataplane::retrieval_v2::RetrieveRequest;
+use mp_contracts::loop_guard::{self, CallOutcome, CallRecord, LoopGuard, LoopGuardMode, LoopStop, Verdict};
 use mp_contracts::model_plane::v1::{
     ChatMessage, FinalizeToolActionRequest, InferRequest, PromptTierPlan,
     ReserveToolActionRequest, SearchMemoryRequest, SkillBundleSummary, SkillMount, ToolCall,
@@ -75,6 +76,12 @@ pub fn max_tool_rounds() -> usize {
                 parsed.min(MAX_TOOL_ROUNDS_CEILING)
             })
     })
+}
+
+/// `LOOP_GUARD_MODE`, read once per process so the mode cannot change mid-turn. Unset is off.
+fn loop_guard_mode() -> LoopGuardMode {
+    static MODE: std::sync::OnceLock<LoopGuardMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| LoopGuardMode::from_env_value(std::env::var("LOOP_GUARD_MODE").ok().as_deref()))
 }
 
 /// Default allowance for one artifact's private check: review passes,
@@ -2469,26 +2476,16 @@ fn duplicate_call_signature(call: &ToolCall) -> Option<String> {
             (!url.is_empty()).then(|| format!("fetch_url|{url}"))
         }
         "web_search" => {
-            let query = normalize_tool_query(&arg_str(&call.arguments_json, "query"));
+            let query = loop_guard::normalise_query(&arg_str(&call.arguments_json, "query"));
             (!query.is_empty()).then(|| format!("web_search|{query}"))
         }
         "knowledge_search" => {
-            let query = normalize_tool_query(&arg_str(&call.arguments_json, "query"));
+            let query = loop_guard::normalise_query(&arg_str(&call.arguments_json, "query"));
             let top_k = arg_i64(&call.arguments_json, "top_k").unwrap_or(5);
             (!query.is_empty()).then(|| format!("knowledge_search|{top_k}|{query}"))
         }
         _ => None,
     }
-}
-
-/// Case/whitespace-insensitive normalization so "Aquatiq" and "coresystem " are
-/// treated as the same repeated query.
-fn normalize_tool_query(query: &str) -> String {
-    query
-        .split_whitespace()
-        .map(str::to_lowercase)
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// The screening decision for one external tool result: the provenance the model is
@@ -2720,6 +2717,22 @@ async fn screen_external_inline(
         },
         withheld: screen.withhold,
     }
+}
+
+/// `mp_gateway_loop_guard_verdicts_total`: one count per loop-guard verdict, by mode, verdict and
+/// stop reason (WS25-S1). Every label is a closed set, so the series cannot grow with request data.
+fn record_loop_guard_verdict(mode: LoopGuardMode, verdict: &Verdict) {
+    let reason = match verdict {
+        Verdict::Stop(stop) => stop.reason.label(),
+        Verdict::Continue | Verdict::Remind { .. } => "none",
+    };
+    metrics::counter!(
+        "mp_gateway_loop_guard_verdicts_total",
+        "mode" => mode.label(),
+        "verdict" => verdict.label(),
+        "reason" => reason,
+    )
+    .increment(1);
 }
 
 /// `mp_gateway_tool_screening_total`: one count per tool result the security audit sees, by trust
@@ -5544,6 +5557,9 @@ pub struct ToolRounds {
     /// caller, which holds the catalogue. A call that failed reports no tokens and
     /// is absent.
     pub usage: Vec<crate::usage_meter::CallUsage>,
+    /// The loop guard's stop, when `LOOP_GUARD_MODE=enforce` ended the tool phase early.
+    /// Content-free: a tool name, a hash of the call's signature and a count.
+    pub loop_stop: Option<LoopStop>,
 }
 
 /// The usage of one provider call the tool phase made, as the provider reported
@@ -6349,6 +6365,8 @@ pub async fn run_forced_web_search_for_model(
         web_citations,
         // A web lookup, not a model call: the search client bills no tokens.
         usage: Vec::new(),
+        // The forced search runs no tool-deciding rounds, so the guard never observes it.
+        loop_stop: None,
     })
 }
 
@@ -7594,6 +7612,11 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     // Persists across rounds: an exact repeat later in the same turn is still
     // suppressed, not just within one round.
     let mut attempted_calls: BTreeSet<String> = BTreeSet::new();
+    // The loop guard observes the model's rounds in this turn (WS25-S1). It is built only when
+    // `LOOP_GUARD_MODE` observes, so with the switch off no guard runs at all.
+    let guard_mode = loop_guard_mode();
+    let mut loop_guard = guard_mode.observes().then(LoopGuard::new);
+    let mut loop_stop: Option<LoopStop> = None;
     // Artifact id → kind, for artifacts authored during THIS turn. An
     // `update_artifact` does not resupply the kind (changing it mid-history
     // would break the client's renderer for older versions), so the kind has to
@@ -8380,6 +8403,18 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     .is_some_and(|signature| !attempted_calls.insert(signature));
             prepared.push((call, is_duplicate, is_truncated));
         }
+        // The guard's view of each call: its signature, and whether an identical call already
+        // suppressed it. Read before `prepared` moves into the dispatch below.
+        let loop_keys: Vec<(String, bool)> = if loop_guard.is_some() {
+            prepared
+                .iter()
+                .map(|(call, is_duplicate, _)| {
+                    (loop_guard::call_signature(&call.name, &call.arguments_json), *is_duplicate)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let offered_tools = &round_tools;
         let dispatch_started = timing.map(crate::turn_timing::TurnTiming::now_ms);
         // A shared reference, so each per-call future copies it rather than moving the turn's value.
@@ -8722,6 +8757,55 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             messages.push(ChatMessage { role: "system".to_owned(), content: "The two word-count batches for this request are used. Reuse the best counted draft and now create/update the requested artifact. Do not keep polishing or switch to a code sandbox for more counts. The document validation gate checks the supported final body limit. A word count alone does not complete a document request.".to_owned(), ..Default::default() });
         }
 
+        // The guard reads this round's calls against the whole turn. It never runs a tool: a
+        // reminder goes to the model, and a stop ends the tool phase here. The gateway's own
+        // prefetch is no model round, so it is not observed.
+        if let Some(guard) = loop_guard.as_mut().filter(|_| round.is_some()) {
+            debug_assert_eq!(loop_keys.len(), outcomes.len(), "one signature per dispatched call");
+            let records: Vec<CallRecord> = loop_keys
+                .iter()
+                .zip(&outcomes)
+                .map(|((signature, suppressed), outcome)| CallRecord {
+                    tool: outcome.name.clone(),
+                    signature: signature.clone(),
+                    outcome: if *suppressed {
+                        CallOutcome::Suppressed
+                    } else if outcome.error.is_some() {
+                        CallOutcome::Err
+                    } else {
+                        CallOutcome::Ok
+                    },
+                })
+                .collect();
+            let verdict = guard.observe_round(&records);
+            record_loop_guard_verdict(guard_mode, &verdict);
+            match verdict {
+                Verdict::Continue => {}
+                Verdict::Remind { level, text } => {
+                    tracing::info!(%request_id, mode = guard_mode.label(), level, "loop_guard verdict: remind");
+                    if guard_mode.enforces() {
+                        messages.push(ChatMessage { role: "system".to_owned(), content: text.to_owned(), ..Default::default() });
+                    }
+                }
+                Verdict::Stop(stop) => {
+                    tracing::info!(
+                        %request_id,
+                        mode = guard_mode.label(),
+                        reason = stop.reason.label(),
+                        tool = %stop.tool,
+                        count = stop.count,
+                        signature_hash = %stop.signature_hash,
+                        "loop_guard verdict: stop"
+                    );
+                    if guard_mode.enforces() {
+                        messages.push(ChatMessage { role: "system".to_owned(), content: loop_guard::STOP_NOTE.to_owned(), ..Default::default() });
+                        loop_stop = Some(stop);
+                        break;
+                    }
+                }
+            }
+        }
+
         // "There is no need to search more when the answer is so easily
         // available." The remaining rounds would each cost an inference and a
         // search, and their only effect on an answer already carried by a dated
@@ -8749,6 +8833,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         document_tool_failures,
         web_citations,
         usage,
+        loop_stop,
     })
 }
 
@@ -11524,6 +11609,7 @@ mod tests {
             document_tool_failures: 0,
             web_citations: 0,
             usage: Vec::new(),
+            loop_stop: None,
         };
         assert_eq!(rounds.resolved_model.as_deref(), Some("claude-sonnet-4-6"));
     }

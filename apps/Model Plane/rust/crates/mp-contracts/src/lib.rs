@@ -7,6 +7,7 @@ pub mod durable_gate;
 pub mod effect_ledger;
 pub mod lifecycle_notice;
 pub mod loop_fold;
+pub mod loop_guard;
 pub mod model_entitlement;
 pub mod office_verification;
 pub mod org_agent_policy;
