@@ -247,6 +247,10 @@ the owner's direct Anthropic API key with `claude-sonnet-5-5`. Live-verified in 
 | Replica-safe run control (WS04-S9, criterion C4): Stop and queue via the other replica, plan approved on A and Do run on B under the durable grant, rating across replicas, `kill -9` of the owner (Stop 404, durable cancel, `resend_as_new_turn`), NATS down 503 `run_control_unavailable`, `gateway_active_streams` back to 0 | Live-verified with two replicas; the four switches now default on, `MODEL_GATEWAY_SHARED_IDEMPOTENCY` stays off | `docs/compliance/evidence/live-proof-ws04-replica-run-control-2026-10-27.txt` |
 | Agentic (plan and Do) runs on Claude (D1-797): dotted tool names mapped to the Messages API alphabet | Live-verified in the WS04-S9 run (case 3) | same file |
 
+## WS16 attention state (2026-10-31): source-verified, every switch off
+
+The attention state, the rail and badge, the typed RUN_ATTENTION events, the notification path, the per-user stream and Web Push are built behind switches that all default off: SESSION_CORE_ATTENTION_ENABLED, SESSION_CORE_ATTENTION_EVENTS_ENABLED, SESSION_CORE_ATTENTION_STREAM_ENABLED, CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED, NOTIFICATION_NATIVE_TYPES_ENABLED and NOTIFICATION_WEB_PUSH_ENABLED. No compose file turns one on, and no slice has live evidence. The attention capability stays source_only until candidate and rollback evidence exists.
+
 ## Critical blocked behavior
 
 ### Live local protocol; no immutable rollback

@@ -636,6 +636,8 @@ services:
       # BFF forwards for a Space-scoped turn (S3.3 §3.5 B.2); pinned to the
       # same value sandbox-manager's own authz.go refuses to start without.
       SANDBOX_MANAGER_AUTH_AUDIENCE: ${SANDBOX_MANAGER_AUTH_AUDIENCE:-sandbox-manager}
+      # WS22-S3: forward thread_id to code_interpreter. Off by default (literal true).
+      SANDBOX_THREAD_WORKSPACE_ENABLED: ${SANDBOX_THREAD_WORKSPACE_ENABLED:-false}
       MEMORY_SERVICE_URL: http://model-plane-session-core-1:9091
       # Legacy env name retained for older gateway builds; memory authority is
       # session-core, which syncs to Letta through LETTA_MEMORY_ADDR below.
@@ -945,6 +947,11 @@ services:
       # only true turns it on, and only after WS01-S2's drainer fix is deployed.
       SESSION_CORE_ATTENTION_EVENTS_ENABLED: ${SESSION_CORE_ATTENTION_EVENTS_ENABLED:-false}
       SESSION_CORE_ATTENTION_SWEEP_SECONDS: ${SESSION_CORE_ATTENTION_SWEEP_SECONDS:-5}
+      # WS16-S5: the per-user attention stream. Off by default; only the literal true turns it on.
+      SESSION_CORE_ATTENTION_STREAM_ENABLED: ${SESSION_CORE_ATTENTION_STREAM_ENABLED:-false}
+      SESSION_CORE_ATTENTION_TICK_SECONDS: ${SESSION_CORE_ATTENTION_TICK_SECONDS:-5}
+      # WS17-S6: ForkThread. Off by default; only the literal true turns it on.
+      SESSION_CORE_THREAD_FORK_ENABLED: ${SESSION_CORE_THREAD_FORK_ENABLED:-false}
       # WS17-S8: the persisted message tree (versions, branch and rewind). Off by default; set it together with
       # MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED on model-gateway. Build the 0061 indexes CONCURRENTLY first on a
       # populated messages table.
@@ -1284,6 +1291,10 @@ services:
       # WS11-S8: a Do run's rounds use the turn's effort level (RunAgentRequest field 21).
       # Only the literal `true` turns it on; off, every round sends no level, as before.
       EXECUTION_CORE_RUN_EFFORT: ${EXECUTION_CORE_RUN_EFFORT:-false}
+      # WS22-S2: per-thread workspace. Off until the DEC-23 gates land (literal true).
+      EXECUTION_CORE_THREAD_WORKSPACE: ${EXECUTION_CORE_THREAD_WORKSPACE:-false}
+      # WS22-S4: Space overlay write-through per inline step. Empty is off; enabled turns it on.
+      EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH: ${EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH:-}
       # WS25-S5: run-scoped result handles and result_query. `on` or `true` enables; off by default.
       EXECUTION_RESULT_HANDLES: ${EXECUTION_RESULT_HANDLES:-off}
       # Durable loop fold writer (WS03 S6): the Do loop saves its history, counters and
@@ -1742,6 +1753,11 @@ services:
       SCHEDULE_CONTRACT_ENABLED: ${SCHEDULE_CONTRACT_ENABLED:-false}
       # WS20-S8: approval guards (auto-pause on expiry and failures, renewal refusal). Only the literal `true` enables them.
       CRON_CONTRACT_GUARDS_ENABLED: ${CRON_CONTRACT_GUARDS_ENABLED:-false}
+      # WS16-S4: RUN_ATTENTION becomes a typed notification. Off by default; turn NOTIFICATION_NATIVE_TYPES_ENABLED on first.
+      CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED: ${CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED:-false}
+      ATTENTION_NOTIFY_COALESCE_SECONDS: ${ATTENTION_NOTIFY_COALESCE_SECONDS:-60}
+      # WS20-S7: scheduled-run pause notices. Off by default.
+      CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED: ${CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED:-false}
       # WS05-S5: stored per-tool allow/ask/never policies. Only the literal `true` enables them; off, they are stored and ignored.
       TOOL_POLICY_ENFORCED: ${TOOL_POLICY_ENFORCED:-false}
       # Outbound service-token minting for the skill-learning review, which

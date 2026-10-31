@@ -17,6 +17,7 @@ use mp_contracts::model_plane::v1::{
     message_search_client::MessageSearchClient,
     memory_service_client::MemoryServiceClient,
     message_tree_service_client::MessageTreeServiceClient,
+    thread_fork_service_client::ThreadForkServiceClient,
     attention_service_client::AttentionServiceClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient,
     run_service_client::RunServiceClient, sandbox_manager_client::SandboxManagerClient,
@@ -107,6 +108,8 @@ pub struct AppState {
     pub message_search_client: MessageSearchClient<Channel>,
     /// Session Core's MessageTree service on the session_client endpoint (WS17-S8).
     pub message_tree_client: MessageTreeServiceClient<Channel>,
+    /// Session Core's ThreadFork service on the session_client endpoint (WS17-S6).
+    pub thread_fork_client: ThreadForkServiceClient<Channel>,
     /// Session Core's Attention service on the session_client endpoint (WS16-S1).
     pub attention_client: AttentionServiceClient<Channel>,
     /// Session Core's LearningGovernance service on the same endpoint as `session_client` (WS07-S9).
@@ -427,6 +430,7 @@ impl AppState {
             inference_client: InferenceCoreClient::new(inference_channel),
             message_search_client: MessageSearchClient::new(session_channel.clone()),
             message_tree_client: MessageTreeServiceClient::new(session_channel.clone()),
+            thread_fork_client: ThreadForkServiceClient::new(session_channel.clone()),
             attention_client: AttentionServiceClient::new(session_channel.clone()),
             learning_client: LearningGovernanceServiceClient::new(session_channel.clone()),
             session_client: SessionCoreClient::new(session_channel),
@@ -592,6 +596,11 @@ impl AppState {
             "http://localhost:9091",
         )?);
         let message_tree_client = MessageTreeServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let thread_fork_client = ThreadForkServiceClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
@@ -807,6 +816,7 @@ impl AppState {
             state.session_client = session_client;
             state.message_search_client = message_search_client;
             state.message_tree_client = message_tree_client;
+            state.thread_fork_client = thread_fork_client;
             state.attention_client = attention_client;
             state.learning_client = learning_client;
             state.managed_run_client = managed_run_client;
@@ -862,6 +872,7 @@ impl AppState {
             state.session_client = session_client;
             state.message_search_client = message_search_client;
             state.message_tree_client = message_tree_client;
+            state.thread_fork_client = thread_fork_client;
             state.attention_client = attention_client;
             state.learning_client = learning_client;
             state.managed_run_client = managed_run_client;

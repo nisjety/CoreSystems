@@ -155,6 +155,8 @@ services:
       # WS21-S2: mint a browser bearer for a personal, non-ZDR agentic turn and forward it to model-gateway. Off by
       # default; only the literal `true`. execution-core's EXECUTION_DO_BROWSER_ENABLED must be on too.
       BROWSER_DO_ENABLED: ${BROWSER_DO_ENABLED:-false}
+      # WS22-S3: mint the sandbox-manager credential for a personal non-ZDR turn; off by default; only the literal true.
+      SANDBOX_THREAD_WORKSPACE_ENABLED: ${SANDBOX_THREAD_WORKSPACE_ENABLED:-false}
       # WS21-S7: a workspace AI run starts under a real broker grant and carries the browser bearer. Off by default; only
       # the literal `true`. Keep it off until Quarry accepts broker grants and the broker site policy is shadow or enforce.
       BROWSER_AI_RUN_REAL_GRANT: ${BROWSER_AI_RUN_REAL_GRANT:-false}

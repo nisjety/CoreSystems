@@ -124,10 +124,10 @@
 | Service | Language | Owner scope |
 |---|---|---|
 | `model-gateway` | Rust | Public invoke, stream, structured output schema passthrough, ZDR/cross-plane guards |
-| `session-core` | Rust | Threads, runs, checkpoints, memory index, compaction, context assembly |
+| `session-core` | Rust | Threads, runs, checkpoints, plans, approvals, attention state, memory index, compaction, context assembly |
 | `inference-core` | Rust | Provider routing, streaming, structured outputs, prompt cache, speech/vision/doc provider traits where native |
 | `execution-core` | Rust | Tool loop, hooks, browser-agent observation/action protocol, secret scrub, subagents |
-| `orchestrator-core` | Go | Temporal workflows, autoresearch, wide research, tasks/cron, approvals, recovery |
+| `orchestrator-core` | Go | Temporal workflows, autoresearch, wide research, tasks/cron, recovery |
 | `capability-core` | Go | Tools, commands, skills, plugins, MCP, model routing, safety, memory adapters |
 | `browser-broker` | Go | Trusted browser grants, validate/revoke, session lease permissions |
 | `letta-bridge` | Go | Optional long-term memory block bridge; not thread or retrieval source of truth |

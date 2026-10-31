@@ -1035,9 +1035,7 @@ fn browser_derive_status_to_http(status: &tonic::Status) -> ApiError {
 fn browser_run_zdr_refusal() -> ApiError {
     (
         StatusCode::PRECONDITION_FAILED,
-        Json(json!({
-            "error": "ZDR browser runs are disabled until the durable run lifecycle is bypassed"
-        })),
+        Json(mp_contracts::zdr_refusal::Refusal::feature_not_supported("browser_run").json_body()),
     )
 }
 
