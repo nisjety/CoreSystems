@@ -33,3 +33,23 @@ Cross-cutting findings that change the brief:
 | 11 | Public PDF/DOCX to Markdown route without storing | Parsing only inside URL scrape with DOC_ROUTING=on; isolated parser with limits; plain text only; no /v1/parse, no multipart, 1 MiB body cap | `POST /v1/parse` raw bytes, own body limit, sniff, per-org concurrency, no-text-layer warning, nothing stored, default-off flag, ZDR row | 5 | not started | INNH-11-status.md |
 | 12 | Per-run results (pages a crawl/batch fetched) and run_id filter on artifacts | No results route; page_fetched events lack artifact refs; ListFilter has no run_id; documented `kind` filter unimplemented; S3 cannot list | page_fetched self-describing, control `GET /v1/jobs/{id}/results`, edge crawl/batch/jobs aliases (ZDR 403), optional run_id/kind filters, default-off flag | 4.5 | not started | INNH-12-status.md |
 | 13 | Assess only: retry/resurrect, run-finished webhooks, JSON event export, abort for crawl/batch | Agent resume only; webhooks plumbing without tenancy; paged JSON events exist; crawl/batch cancel built dark with 3 failing tests and no end-to-end proof | Verdicts: abort needs proof (1-1.5 d); export convenience (0.5-1 d); webhooks bundle with item 5 (4-5 d); URL-level retry (3-4 d) | 0.5 (assessment) | not started | INNH-13-status.md |
+
+## Integration status on `innh/integ` (2026-10-31)
+
+Branch `innh/integ` is `quarryv2-next` at 8c0884fa5 plus lanes a, b, c and d, merged in that order. Lane d carries a merge of `main` (e01a6c282), so the branch also brings `main` in. One row per item, from each `INNH-<n>-status.md`; the status files keep the detail.
+
+| # | Item | Status | Commits | Flags |
+|---|---|---|---|---|
+| 1 | Scrape AI formats (json, summary, question, highlights) | built in tests, dark; the base carries U1-U3, lane a adds the truncated_input and privacy-block fix | a8331b38c, 15ca48ed8, d4fa6ee08 (base, quarryv2-next); 336b1da1b (lane a) | `QUARRY_EDGE__AI_FORMATS` (off), `QUARRY_EDGE__AI_FORMATS_ZDR=refuse`; after the merge also gated by the QB-T17 boot gate |
+| 2 | /v1/extract uses `prompt` | built in tests; additive response fields; not run against a real Model Plane | 5f1ac3ca2 (base) | none of its own; model arm is gated by `QUARRY_EDGE__AI_FORMATS` after the merge (QB-T17) |
+| 3 | Structured extract 501 texts and enablement runbook | built in tests (lane a). Reconciled with main's QB-T17 on integration: the switch off is a fourth 501 (1b) | b2f213b3c (lane a); merge adaptation in the lane d merge commit | none of its own; see item 1 |
+| 4 | Change monitor text diff with stored artifacts | done in tests, dark (lane b) | c9cca3667, 9455099e3, 96c5dc9c3, 1608a94e5 | `QUARRY_EDGE__CHANGE_TEXT_DIFF` (off) |
+| 5 | Org-scoped webhook subscription API | done in tests, dark (lane b) | d65b5b907, b39ff7d02, 891ca11a6, f28aa71c1 | `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` (off); `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS` (off) |
+| 6 | Crawl `sitemap` and per-page `scrape_options` | built in tests, dark (lane c); Temporal replay of an old history and a side-by-side run not done | 788e98d90, c38304854, 93e62474f, 8041e2492, a2161985f | `QUARRY_EDGE__CRAWL_SITEMAP`, `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS` (both off; orchestrator before the edge flag) |
+| 7 | `max_age` on scrape (URL result cache) | done in tests (lane a); needs Redis; not run on a live stack | 31d9ad15f, 5119e6ef8 | `QUARRY_EDGE__SCRAPE_MAX_AGE` (off) |
+| 8 | Answer synthesis provider status (8a); cross-plane grant (8b) | 8a built in tests, dark, three review blockers fixed (lane d); 8b not built, owner decision | ab65682aa, 2fa5dc787 (+ main's QB-T17 via the merge) | `QUARRY_EDGE__ANSWER_SYNTHESIS` (off) |
+| 9 | Credits per job on JobSummary / JobStatusView | built and committed (base); Postgres SQL and side stack unproven | 6bbd99763 (base) | `QUARRY_CONTROL__JOB_CREDITS` (off) |
+| 10 | Direct agent API for API-key callers | Quarry side built dark (lane d), waiting for owner decisions OD-1..OD-17 and the other owners' asks; Opus security review found no blockers | a7ceb6da8, bf9f7631f, c507c9e7f, c93b6299a, 63d45fc3c | `QUARRY_EDGE__API_KEY_AGENT_RUNS` (off); touches `QUARRY_EDGE__HUMAN_BROWSE` rules |
+| 11 | Public PDF/DOCX to Markdown route | not started (lane c wrote only review depth findings) | 4130f3382 (docs only) | none yet |
+| 12 | Per-run results and run_id/kind filters | done in tests, dark (lane b); never run on a stack | cc2596c7a, 4f2a1bc3c, b54aee4d5, f28aa71c1 | `QUARRY_EDGE__JOB_RESULTS` (off) |
+| 13 | Assess only: retry, run-finished webhooks, JSON export, abort | assessed (lane d); no code, nothing to build now | 97663255a (docs only) | none |
