@@ -91,7 +91,7 @@ Live proof (needs approval, not in this lane): side-by-side stack with MODEL_PLA
 - SDK regeneration not done.
 
 ## Commits
-(see git log --grep "INNH-8" on innh/lane-d)
+ab65682aa feat(quarry-edge): answer synthesis says why it is unavailable, include_answer status and metering (INNH-8a)
 
 ## Tests (counts)
 All in the lane container (`qtest-lane.sh d`), no host cargo. `quarry-edge --lib` 669 passed (new: answer_status 4, search_routes 4, config 1); `quarry-edge --bins` 655 passed (main binary compiles with the new wiring); `quarry-edge --test answer_provider_status` 12 passed (new; the Redis cache test returned early: no Redis in the container); `zdr_feature_matrix` 14, `zdr_claim_floor` 26, `zdr_tombstone` 29, `web_policy_routes` 11 passed; `quarry-core` zdr_matrix 6 passed (goldens regenerated with QUARRY_UPDATE_GOLDEN=1, CRLF restored, rerun without it); `quarry-runtime --lib answer` 34 passed (new: 1). rustfmt --check clean on the two new files. Node: `node --test scripts/tests/*.test.mjs` 51 pass, 0 fail, 12 todo (all todo before; 3 new docs-contract tests pass); openapi route coverage (allowlist entries removed, both routes documented), no-bare-null and internal-guard tests pass.
