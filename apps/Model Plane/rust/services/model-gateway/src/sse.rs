@@ -11389,12 +11389,15 @@ fn classify_agentic_run_outcome(status: &str) -> AgenticRunOutcome {
     }
 }
 
-/// The `run_parked` frame of a run the executor parked (WS03 S8-A), sent on the owner's turn
-/// stream: the run, this request, the status, the closed park reason and when the run can be
-/// resumed (`resume_after`, the executor's `resets_at`, RFC 3339, or `null` when it is not a
-/// readable time). Ids, a closed token and a timestamp only. `None` when the response names
-/// no park reason this build knows: the stream then answers as for an unknown status.
-fn run_parked_event(request_id: &str, run_id: &str, response: &RunAgentResponse) -> Option<Event> {
+/// The `run_parked` event of a run the executor parked (WS03 S8-A), for the owner's turn stream:
+/// the run, the closed park reason and when the run can be resumed (`resume_after`, the executor's
+/// `resets_at`, RFC 3339, or `null` when it is not a readable time). Ids, a closed token and a
+/// timestamp only. `None` when the response names no park reason this build knows: the stream then
+/// answers as for an unknown status.
+fn run_parked_event(
+    run_id: &str,
+    response: &RunAgentResponse,
+) -> Option<crate::sse_events::ChatEvent> {
     let reason = mp_contracts::loop_fold::ParkReason::parse(&response.park_reason)?;
     let resume_after = chrono::DateTime::parse_from_rfc3339(response.resets_at.trim())
         .ok()
@@ -11402,18 +11405,11 @@ fn run_parked_event(request_id: &str, run_id: &str, response: &RunAgentResponse)
             at.with_timezone(&Utc)
                 .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
         });
-    Some(
-        Event::default().event("run_parked").data(
-            json!({
-                "run_id": run_id,
-                "request_id": request_id,
-                "status": "parked",
-                "reason": reason.as_str(),
-                "resume_after": resume_after,
-            })
-            .to_string(),
-        ),
-    )
+    Some(crate::sse_events::ChatEvent::RunParked {
+        run_id: run_id.to_owned(),
+        reason,
+        resume_after,
+    })
 }
 
 /// Only these gRPC codes prove the remote execution boundary rejected the
@@ -12546,17 +12542,15 @@ fn agentic_run_stream(
             // A parked run (WS03 S8-A), for every turn: non-terminal, nothing appended, no
             // receipt. The run subject is told RUN_PARKED and the owner's stream gets the
             // `run_parked` frame. A park reason this build does not know is an unknown status.
-            AgenticRunOutcome::Parked
-                if run_parked_event(&request_id, &run.run_id, &response).is_some() =>
-            {
+            AgenticRunOutcome::Parked if run_parked_event(&run.run_id, &response).is_some() => {
                 let parked =
                     build_stream_envelope(&request_id, "RUN_PARKED", &org_id, &user_id, &model);
                 let _ = state
                     .publisher
                     .publish(&subjects::run_event_subject(&run.run_id), &parked)
                     .await;
-                if let Some(frame) = run_parked_event(&request_id, &run.run_id, &response) {
-                    let _ = tx.send(Ok(frame)).await;
+                if let Some(event) = run_parked_event(&run.run_id, &response) {
+                    let _ = tx.send(Ok(event.to_sse(&request_id))).await;
                 }
                 return;
             }
@@ -21836,9 +21830,9 @@ mod continue_run_tests {
             "upstream_unavailable",
             "reauth_required",
         ] {
-            let event = run_parked_event("req-1", "run-42", &parked_answer(reason, "2026-10-20T12:00:00Z"))
+            let event = run_parked_event("run-42", &parked_answer(reason, "2026-10-20T12:00:00Z"))
                 .unwrap_or_else(|| panic!("{reason} is a known park reason"));
-            let (name, frame) = frame_of(event).await;
+            let (name, frame) = frame_of(event.to_sse("req-1")).await;
             assert_eq!(name, "run_parked");
             assert_eq!(
                 frame,
@@ -21853,9 +21847,9 @@ mod continue_run_tests {
             );
         }
         // An unreadable time is null, never echoed.
-        let event = run_parked_event("req-1", "run-42", &parked_answer("provider_exhausted", "soon, maybe"))
+        let event = run_parked_event("run-42", &parked_answer("provider_exhausted", "soon, maybe"))
             .expect("a known reason");
-        let (_, frame) = frame_of(event).await;
+        let (_, frame) = frame_of(event.to_sse("req-1")).await;
         assert!(frame["resume_after"].is_null(), "{frame}");
     }
 
@@ -21865,14 +21859,14 @@ mod continue_run_tests {
     fn an_unknown_park_reason_is_agent_run_state_unknown() {
         for reason in ["", "Provider_Exhausted", "provider_exhausted ", "a sentence"] {
             assert!(
-                run_parked_event("req-1", "run-42", &parked_answer(reason, "")).is_none(),
+                run_parked_event("run-42", &parked_answer(reason, "")).is_none(),
                 "{reason:?}"
             );
         }
         let stream = squash(&stream_code());
         assert!(
             stream.contains(
-                "AgenticRunOutcome::Parked if run_parked_event(&request_id, &run.run_id, &response).is_some() =>"
+                "AgenticRunOutcome::Parked if run_parked_event(&run.run_id, &response).is_some() =>"
             ),
             "{stream}"
         );

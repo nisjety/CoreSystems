@@ -444,6 +444,16 @@ pub enum ChatEvent {
         layer: Option<&'static str>,
         state: Option<&'static str>,
     },
+    /// A parked run (WS03 S8-A): the executor stopped the run on a closed reason and it resumes
+    /// later. A control event, ungated: a client that never opted in still has to hear that its
+    /// answer is waiting. Ids, a closed token and a time only. The keys are the ones WS03 shipped
+    /// and the SPA reads, so this variant adds and renames none.
+    RunParked {
+        run_id: String,
+        reason: mp_contracts::loop_fold::ParkReason,
+        /// When the run can be resumed (RFC 3339, UTC), or `None` when that time is unreadable.
+        resume_after: Option<String>,
+    },
     // ---- end lifecycle (WS15) ----
     /// Terminal control: generation stopped/cancelled by the user.
     Stopped { reason: String },
@@ -525,7 +535,8 @@ impl ChatEvent {
             | ChatEvent::SubscriptionError { .. }
             // ---- lifecycle (WS15) ----
             | ChatEvent::Compaction { .. }
-            | ChatEvent::ContextChange { .. } => None,
+            | ChatEvent::ContextChange { .. }
+            | ChatEvent::RunParked { .. } => None,
         }
     }
 
@@ -563,6 +574,7 @@ impl ChatEvent {
             ChatEvent::RetryScheduled { .. } => "retry_scheduled",
             ChatEvent::Compaction { .. } => "compaction",
             ChatEvent::ContextChange { .. } => "context_change",
+            ChatEvent::RunParked { .. } => "run_parked",
             ChatEvent::Title { .. } => "title",
             ChatEvent::FollowUps { .. } => "follow_ups",
             ChatEvent::PlanProposed { .. } => "plan_proposed",
@@ -897,6 +909,18 @@ impl ChatEvent {
                 }
                 payload
             }
+            // The keys and their values are WS03's `run_parked` frame exactly, so the wire is unchanged.
+            ChatEvent::RunParked {
+                run_id,
+                reason,
+                resume_after,
+            } => json!({
+                "run_id": run_id,
+                "request_id": request_id,
+                "status": "parked",
+                "reason": reason.as_str(),
+                "resume_after": resume_after,
+            }),
             ChatEvent::Stopped { reason } => json!({ "reason": reason, "request_id": request_id }),
             ChatEvent::Error {
                 code,
@@ -1945,6 +1969,37 @@ mod tests {
     }
 
     #[test]
+    fn run_parked_is_a_control_event() {
+        // A park reaches a plain client, and its keys are the ones WS03 shipped and the SPA reads.
+        let no_features: Vec<String> = vec![];
+        let parked = ChatEvent::RunParked {
+            run_id: "run-42".into(),
+            reason: mp_contracts::loop_fold::ParkReason::ProviderExhausted,
+            resume_after: Some("2026-10-20T12:00:00Z".into()),
+        };
+        assert_eq!(parked.family(), None);
+        assert!(parked.should_emit(&no_features));
+        assert_eq!(parked.name(), "run_parked");
+        assert_eq!(
+            parked.payload("req-1"),
+            json!({
+                "run_id": "run-42",
+                "request_id": "req-1",
+                "status": "parked",
+                "reason": "provider_exhausted",
+                "resume_after": "2026-10-20T12:00:00Z",
+            })
+        );
+        // An unreadable time is null, not an omitted key.
+        let unreadable = ChatEvent::RunParked {
+            run_id: "run-42".into(),
+            reason: mp_contracts::loop_fold::ParkReason::CredentialWindow,
+            resume_after: None,
+        };
+        assert!(unreadable.payload("req-1")["resume_after"].is_null());
+    }
+
+    #[test]
     fn opt_in_unlocks_only_the_requested_families() {
         let feats = families(&["reasoning", "usage"]);
         assert!(ChatEvent::ReasoningDelta {
@@ -2937,6 +2992,7 @@ mod payload_contract {
         "RetryScheduled",
         "Compaction",
         "ContextChange",
+        "RunParked",
     ];
 
     /// The variant's name. No wildcard arm, so a new `ChatEvent` variant is a compile error here.
@@ -2970,6 +3026,7 @@ mod payload_contract {
             ChatEvent::RetryScheduled { .. } => "RetryScheduled",
             ChatEvent::Compaction { .. } => "Compaction",
             ChatEvent::ContextChange { .. } => "ContextChange",
+            ChatEvent::RunParked { .. } => "RunParked",
         }
     }
 
@@ -3320,6 +3377,16 @@ mod payload_contract {
                 skills_dropped: Some(0),
                 layer: Some("memory"),
                 state: Some("skipped_by_policy"),
+            },
+            ChatEvent::RunParked {
+                run_id: s("run-1"),
+                reason: mp_contracts::loop_fold::ParkReason::CredentialWindow,
+                resume_after: None,
+            },
+            ChatEvent::RunParked {
+                run_id: s("run-1"),
+                reason: mp_contracts::loop_fold::ParkReason::ProviderExhausted,
+                resume_after: Some(s("2026-10-20T12:00:00Z")),
             },
             ChatEvent::SubscriptionError {
                 code: s("rate_limited"),

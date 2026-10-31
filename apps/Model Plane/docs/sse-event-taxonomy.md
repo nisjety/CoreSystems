@@ -36,6 +36,7 @@ asserted, not just reported.
 | `result_receipt` | `usage` | `ChatEvent::ResultReceipt` | ✅ |
 | `retrieval_notice` | — (control) | `ChatEvent::RetrievalNotice` | ✅ |
 | `retry_scheduled` | `steps` | `ChatEvent::RetryScheduled` | ✅ |
+| `run_parked` | — (control) | `ChatEvent::RunParked` | ✅ |
 | `source_scope_applied` | `citations` | `ChatEvent::SourceScopeApplied` | ✅ |
 | `step_update` | `steps` | `ChatEvent::StepUpdate` | ✅ |
 | `stopped` | — (control) | `ChatEvent::Stopped` | ✅ |
@@ -73,7 +74,6 @@ literal `.event("...")` in production code (test modules are skipped), and the
 | `connected` | transport: stream opened, emitted by the SSE layer |
 | `done` | transport: terminal success frame |
 | `error` | shared with `ChatEvent::Error`; the run-events stream writes it directly when it cannot authorise or open the orchestration stream |
-| `run_parked` | parked agentic run on the owner's turn stream; the orchestration `RunParked` event shares the name |
 
 The run-events stream (`/v1/runs/:run_id/events`) carries the orchestration
 events. Tags are the proto field numbers. `run-console-client.ts` reads them;
