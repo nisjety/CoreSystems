@@ -2797,9 +2797,11 @@ pub async fn dispatch_tool(
     allow_paid_providers: bool,
     call: &ToolCall,
     ingestion_bearer: Option<&VerifiedIngestionBearer>,
-    // The delegated user bearer for sandbox-manager, present only on a
-    // Space-scoped turn (see `auth::VerifiedSandboxBearer`). Read by exactly
-    // one arm, `code_interpreter`, and only when `space_id` is set.
+    // The delegated user bearer for sandbox-manager: present on a Space-scoped
+    // turn, and on a non-ZDR personal turn while the thread workspace is switched
+    // on (see `auth::VerifiedSandboxBearer`). Read by exactly one arm,
+    // `code_interpreter`, which names a thread to execution-core only with it
+    // (WS22-S3).
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
     // The turn's Data Plane retrieval mode (`TurnPosture::data_plane_mode`): `ephemeral` for a ZDR turn,
     // `reject` for a waived one, none for a persistent one. Threaded rather than derived from `zdr`, which
@@ -3227,6 +3229,7 @@ async fn dispatch_tool_with_cost(
                 org_id,
                 user_id,
                 space_id,
+                thread_id,
                 zdr,
                 &language,
                 &code,
@@ -7379,8 +7382,9 @@ pub async fn run_tool_rounds(
     tools: Vec<ToolDefinition>,
     tool_choice: String,
     ingestion_bearer: Option<&VerifiedIngestionBearer>,
-    // Delegated user bearer for sandbox-manager, present only on a Space-scoped
-    // turn; threaded to `code_interpreter` alongside `space_id` above.
+    // Delegated user bearer for sandbox-manager, present on a Space-scoped turn and
+    // on a non-ZDR personal turn while the thread workspace is switched on (WS22-S3);
+    // threaded to `code_interpreter` alongside `space_id` above.
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
     sink: Option<&crate::sse_events::RichEventSink>,
 ) -> Result<ToolRounds, &'static str> {

@@ -230,16 +230,17 @@ pub(crate) fn is_space_scoped_turn(body: &Value) -> bool {
 }
 
 /// Mint the interactive `aud=sandbox-manager` token — the ninth delegated
-/// user bearer — for a Space-scoped turn only. sandbox-manager's `AcquireLease`
-/// binds the Space capability decision to the CALLER's verified identity,
-/// which must be the Space member the decision names, so execution-core
-/// cannot present its own service credential for that one call; it presents
-/// this instead, and this alone (every later lease RPC uses its own token).
-/// Best-effort like `data_plane_token`: a missing credential degrades one
-/// tool (`code_interpreter` in a Space) — execution-core refuses that step
-/// rather than falling back to an unscoped workspace — never the whole turn.
-/// Nothing is minted for a non-Space turn, so the common path pays no extra
-/// auth-core round-trip. See
+/// user bearer — for a Space-scoped turn, and for a personal turn that keeps
+/// content only while `SANDBOX_THREAD_WORKSPACE_ENABLED` is on (WS22-S3).
+/// sandbox-manager's `AcquireLease` binds the Space capability decision to the
+/// CALLER's verified identity, which must be the Space member the decision
+/// names, so execution-core cannot present its own service credential for that
+/// one call; it presents this instead, and this alone (every later lease RPC
+/// uses its own token). Best-effort like `data_plane_token`: a missing
+/// credential degrades one tool rather than the whole turn. In a Space,
+/// execution-core refuses that step rather than falling back to an unscoped
+/// workspace; a personal call runs in an ephemeral directory and says so. A
+/// zero-retention turn gets none, so it pays no auth-core round-trip. See
 /// apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
 /// §3.5 phase B.2.
 pub(crate) async fn sandbox_token(
@@ -248,7 +249,8 @@ pub(crate) async fn sandbox_token(
     headers: &HeaderMap,
     body: &Value,
 ) -> Option<String> {
-    if !is_space_scoped_turn(body) {
+    let zdr = crate::domains::ag_ui::turn_requests_zdr(headers, body);
+    if !sandbox_token_offered(sandbox_thread_workspace_enabled(), body, zdr) {
         return None;
     }
     get_model_service_token(
@@ -258,6 +260,28 @@ pub(crate) async fn sandbox_token(
         ModelServiceAudience::SandboxManager,
     )
     .await
+}
+
+/// Whether a turn may carry the sandbox-manager credential: every Space-scoped
+/// turn, as before, and a personal turn only while the thread workspace is
+/// switched on and the turn keeps no content (WS22-S3).
+fn sandbox_token_offered(switched_on: bool, body: &Value, zdr: bool) -> bool {
+    is_space_scoped_turn(body) || (switched_on && !zdr)
+}
+
+/// Whether the thread workspace is switched on for this gateway
+/// (`SANDBOX_THREAD_WORKSPACE_ENABLED`, WS22-S3). Read per turn and exact, like
+/// the browser switch: only the word `true` enables it.
+fn sandbox_thread_workspace_enabled() -> bool {
+    sandbox_thread_workspace_enabled_from(
+        std::env::var("SANDBOX_THREAD_WORKSPACE_ENABLED")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn sandbox_thread_workspace_enabled_from(value: Option<&str>) -> bool {
+    value == Some("true")
 }
 
 /// Whether the agent browser's Do tools are switched on for this gateway (`BROWSER_DO_ENABLED`,
@@ -701,7 +725,8 @@ async fn proxy_model_json_with_delegations(
     execution_bearer: Option<&str>,
     cost_bearer: Option<&str>,
     session_bearer: Option<&str>,
-    // Present only for a Space-scoped turn (see `sandbox_token`).
+    // Present for a Space-scoped turn, and for a personal turn while the thread workspace is
+    // switched on (see `sandbox_token`).
     sandbox_bearer: Option<&str>,
     request_timeout: Option<Duration>,
     user: &AuthenticatedUser,
@@ -802,7 +827,8 @@ mod tests {
         data_plane_authorization_value, delegated_auth_unavailable, dev_bypass_model_token,
         is_space_scoped_turn, normalized_model_body, proxy_model_json_with_data_plane,
         proxy_model_json_with_data_plane_request_timeout, proxy_model_json_with_session,
-        proxy_model_json_with_session_and_capability, sandbox_token,
+        proxy_model_json_with_session_and_capability, sandbox_thread_workspace_enabled_from,
+        sandbox_token, sandbox_token_offered,
     };
 
     fn test_state(allow_dev_auth_bypass: bool) -> AppState {
@@ -947,12 +973,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_sandbox_credential_is_minted_only_for_a_space_scoped_turn() {
+    async fn the_sandbox_credential_is_minted_only_for_a_space_scoped_turn_while_the_switch_is_off() {
         use wiremock::{
             matchers::{method, path},
             Mock, MockServer, ResponseTemplate,
         };
 
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let _switch = SandboxThreadSwitch::set(None);
         let auth_core = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/sandbox-manager/token"))
@@ -1009,6 +1037,109 @@ mod tests {
             .as_deref(),
             Some("sandbox-token")
         );
+    }
+
+    /// Sets `SANDBOX_THREAD_WORKSPACE_ENABLED` for one test and restores it after. Callers hold
+    /// `TEST_ENV_LOCK`.
+    struct SandboxThreadSwitch(Option<std::ffi::OsString>);
+
+    impl SandboxThreadSwitch {
+        fn set(value: Option<&str>) -> Self {
+            let previous = std::env::var_os("SANDBOX_THREAD_WORKSPACE_ENABLED");
+            match value {
+                Some(value) => std::env::set_var("SANDBOX_THREAD_WORKSPACE_ENABLED", value),
+                None => std::env::remove_var("SANDBOX_THREAD_WORKSPACE_ENABLED"),
+            }
+            Self(previous)
+        }
+    }
+
+    impl Drop for SandboxThreadSwitch {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("SANDBOX_THREAD_WORKSPACE_ENABLED", value),
+                None => std::env::remove_var("SANDBOX_THREAD_WORKSPACE_ENABLED"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_thread_workspace_switch_is_on_only_for_the_exact_word_true() {
+        assert!(sandbox_thread_workspace_enabled_from(Some("true")));
+        for value in [None, Some(""), Some("1"), Some("TRUE"), Some(" true")] {
+            assert!(!sandbox_thread_workspace_enabled_from(value), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn a_sandbox_credential_is_offered_to_a_personal_turn_only_while_switched_on_and_not_zdr() {
+        let personal = json!({"content": "hello"});
+        assert!(sandbox_token_offered(true, &personal, false));
+        for (switched_on, body, zdr) in [(false, &personal, false), (true, &personal, true)] {
+            assert!(
+                !sandbox_token_offered(switched_on, body, zdr),
+                "switched_on={switched_on} zdr={zdr}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bff_mints_sandbox_bearer_for_a_personal_turn_only_when_enabled_and_not_zdr() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let _switch = SandboxThreadSwitch::set(Some("true"));
+        let auth_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/sandbox-manager/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "token": "sandbox-token",
+                "expiresInSeconds": 300,
+            })))
+            .expect(1)
+            .mount(&auth_core)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = auth_core.uri();
+        let user = browser_test_user();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            "better-auth.session=verified".parse().expect("cookie"),
+        );
+        let personal = json!({"content": "hello"});
+
+        assert_eq!(
+            sandbox_token(&state, &user, &headers, &personal)
+                .await
+                .as_deref(),
+            Some("sandbox-token")
+        );
+        // A zero-retention turn gets no credential, whether the body or the header asks for it.
+        assert!(sandbox_token(
+            &state,
+            &user,
+            &headers,
+            &json!({"content": "hello", "zdr": true}),
+        )
+        .await
+        .is_none());
+        let mut zdr_headers = headers.clone();
+        zdr_headers.insert("x-zdr", "true".parse().expect("header"));
+        assert!(sandbox_token(&state, &user, &zdr_headers, &personal)
+            .await
+            .is_none());
+        // With the switch off, a personal turn gets none either.
+        {
+            let _off = SandboxThreadSwitch::set(None);
+            assert!(sandbox_token(&state, &user, &headers, &personal)
+                .await
+                .is_none());
+        }
     }
 
     /// Sets `BROWSER_DO_ENABLED` for one test and restores it after. Callers hold `TEST_ENV_LOCK`.
