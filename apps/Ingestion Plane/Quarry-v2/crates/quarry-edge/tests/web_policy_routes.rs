@@ -418,6 +418,8 @@ fn route_manifest() -> Vec<(&'static str, Gate)> {
         ("/v1/search/suggest", NoUrl),
         ("/v1/map", Gated),
         ("/v1/extract", Gated),
+        // INNH-11: the caller uploads the bytes; the route fetches nothing.
+        ("/v1/parse", NoUrl),
         // The pipeline fetches the pages its own search returned; no caller URL.
         ("/v1/answer", OtherPlane),
         ("/v1/answer/stream", OtherPlane),

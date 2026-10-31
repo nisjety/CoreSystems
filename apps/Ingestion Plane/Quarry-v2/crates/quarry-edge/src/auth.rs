@@ -726,6 +726,8 @@ pub async fn require_service_route_scope(req: Request, next: Next) -> Result<Res
         }
         "/v1/search" => claims.has_scope("search:read"),
         "/v1/extract" => claims.has_scope("extract:read"),
+        // INNH-11: parse an uploaded PDF/DOCX. Nothing is stored, but it spends CPU.
+        "/v1/parse" => claims.has_scope("parse:write"),
         // Reading one artifact by id is part of the scrape/agent contract, not a
         // separate capability: `/v1/scrape` answers with
         // `FormatRef{artifact_id,bytes}` and never inline page text, and agent

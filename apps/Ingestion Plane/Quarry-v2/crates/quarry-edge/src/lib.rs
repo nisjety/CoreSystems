@@ -28,6 +28,7 @@ pub mod job_lifecycle_routes;
 pub mod job_stream;
 pub mod limits;
 pub mod map_routes;
+pub mod parse_routes;
 pub mod metrics;
 pub mod policy_baseline;
 pub mod profile_guard;
