@@ -54,6 +54,7 @@ pub mod otel_zdr;
 pub mod zdr_log;
 pub mod zdr_refusal;
 pub mod web_policy_edge;
+pub mod webhook_subscription_routes;
 #[cfg(feature = "browser-agent")]
 pub mod agent_policy_gate;
 pub mod zdr_tombstone;

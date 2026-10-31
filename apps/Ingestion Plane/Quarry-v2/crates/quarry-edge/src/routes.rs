@@ -163,6 +163,30 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/crawl/:id/results", get(crate::job_results_routes::crawl_results))
         .route("/v1/batch/:id/results", get(crate::job_results_routes::batch_results))
         .route("/v1/jobs/:id/results", get(crate::job_results_routes::job_results))
+        // INNH-5: org-scoped webhook subscriptions (control owns them; the edge passes the
+        // verified org). Off unless QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS is on (501).
+        .route(
+            "/v1/webhook-subscriptions",
+            get(crate::webhook_subscription_routes::list).post(crate::webhook_subscription_routes::create),
+        )
+        .route(
+            "/v1/webhook-subscriptions/:id",
+            get(crate::webhook_subscription_routes::get)
+                .patch(crate::webhook_subscription_routes::patch)
+                .delete(crate::webhook_subscription_routes::delete),
+        )
+        .route(
+            "/v1/webhook-subscriptions/:id/rotate-secret",
+            post(crate::webhook_subscription_routes::rotate_secret),
+        )
+        .route(
+            "/v1/webhook-subscriptions/:id/deliveries",
+            get(crate::webhook_subscription_routes::deliveries),
+        )
+        .route(
+            "/v1/webhook-subscriptions/:id/deliveries/:did/retry",
+            post(crate::webhook_subscription_routes::retry_delivery),
+        )
         .route("/v1/batch/ongoing", get(crate::job_lifecycle_routes::ongoing_batch))
         .route("/v1/batch/:id", get(crate::job_lifecycle_routes::get_batch))
         .route("/v1/batch/:id/errors", get(crate::job_lifecycle_routes::batch_errors))

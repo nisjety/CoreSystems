@@ -422,6 +422,8 @@ const PENDING_FEATURES: &[&str] = &[
     "agent_attach",
     // INNH-12: a job results read names the URL and title of every page the job fetched.
     "job_result_urls",
+    // INNH-5: a webhook subscription pushes page URLs and fingerprints off-process; refused to create under ZDR.
+    "webhook_off_process",
 ];
 
 fn refusals_named_by_the_matrix() -> (BTreeSet<&'static str>, BTreeSet<&'static str>) {

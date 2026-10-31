@@ -393,6 +393,86 @@ pub struct JobResultsView {
 }
 
 // =============================================================================
+// Webhook subscriptions (INNH-5)
+// =============================================================================
+
+/// The last delivery attempt of a webhook subscription, as a summary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebhookLastDelivery {
+    /// `pending` | `in_flight` | `success` | `failed` | `dlq`.
+    pub status: String,
+    pub at: DateTime<Utc>,
+    pub event_id: String,
+}
+
+/// A webhook subscription of the caller's organization. It has no secret field: the HMAC
+/// secret is shown once, by [`WebhookSubscriptionCreated`] and [`WebhookSecretRotated`], and
+/// never read back. `secret_hint` is the last four characters, enough to tell two apart.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebhookSubscription {
+    pub id: String,
+    pub url: String,
+    /// Stored event types, e.g. `change_detected`.
+    pub events: Vec<String>,
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub secret_hint: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery: Option<WebhookLastDelivery>,
+}
+
+/// `POST /v1/webhook-subscriptions` answer: the subscription and its secret, once.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebhookSubscriptionCreated {
+    #[serde(flatten)]
+    pub subscription: WebhookSubscription,
+    pub secret: String,
+}
+
+/// `POST /v1/webhook-subscriptions/{id}/rotate-secret` answer: the new secret, once.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebhookSecretRotated {
+    pub id: String,
+    pub secret: String,
+    pub secret_hint: String,
+}
+
+/// `GET /v1/webhook-subscriptions`. `next_cursor` is absent on the last page.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebhookSubscriptionList {
+    pub items: Vec<WebhookSubscription>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+/// One delivery of an event to a subscription. No payload body: `last_error` is a closed
+/// token (`http_<code>`, `timeout`, `blocked_target`, `transport`, `inactive`, `error`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebhookDeliveryView {
+    pub id: String,
+    pub event_id: String,
+    pub event_type: String,
+    /// `pending` | `in_flight` | `success` | `failed` | `dlq`.
+    pub status: String,
+    pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_attempt_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `GET /v1/webhook-subscriptions/{id}/deliveries`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebhookDeliveryList {
+    pub items: Vec<WebhookDeliveryView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+// =============================================================================
 // RequestQueue — cycle 23 / cluster #4 part 2
 // =============================================================================
 

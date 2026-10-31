@@ -85,6 +85,7 @@ mod usage_attrs;
 mod zdr_log;
 mod zdr_refusal;
 mod web_policy_edge;
+mod webhook_subscription_routes;
 #[cfg(feature = "browser-agent")]
 mod agent_policy_gate;
 mod zdr_tombstone;

@@ -319,6 +319,28 @@ pub const ROWS: &[Row] = &[
         log: Log::Unverified,
     },
     Row {
+        id: "webhook_subscriptions",
+        routes: &[
+            "/v1/webhook-subscriptions",
+            "/v1/webhook-subscriptions/{id}",
+            "/v1/webhook-subscriptions/{id}/rotate-secret",
+            "/v1/webhook-subscriptions/{id}/deliveries",
+            "/v1/webhook-subscriptions/{id}/deliveries/{did}/retry",
+        ],
+        treatment: Treatment::Refused {
+            code: "FORBIDDEN",
+            feature: "webhook_off_process",
+        },
+        status: Status::Enforced,
+        enforced_by: &[
+            "webhook_subscriptions::a_zdr_token_cannot_create_patch_or_retry_and_control_is_not_called",
+            "webhook_subscriptions::flag_off_is_501_and_control_is_not_called",
+            "webhook_subscription_routes::tests::zdr_refuses_what_pushes_and_leaves_wind_down_open",
+        ],
+        basis: "webhook_subscription_routes::gate refuses create, patch and delivery retry for a caller whose token floor is ZDR before it asks Control Plane anything (403, details.reason webhook_off_process): a subscription pushes the page URL and fingerprints of every detected change to a third party. Reads, delete and secret rotation stay open so a ZDR organization can wind down what it holds. Dark behind QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS (501 off, which wins over the refusal); a service principal is refused 403 by the route scope and by the gate. Nothing is sent for a ZDR run in any case: emit_change_side_effects suppresses the change event and webhook for a declared zdr, so a subscription an organization made before it turned ZDR receives nothing from a ZDR check. Control keeps a subscription (URL and the HMAC secret, the secret stored in plaintext: see the owner decision in docs/RUNBOOKS.md) and each delivery row (the event payload) until delete, org erasure or the delivery retention sweep (default 14 days)",
+        log: Log::Unverified,
+    },
+    Row {
         id: "job_control",
         routes: &[
             "/v1/crawl/{id}/pause",
@@ -631,6 +653,7 @@ pub const MUST_STAY_REFUSED: &[&str] = &[
     "agent_resume",
     "scrape_record_read",
     "change_diff_read",
+    "webhook_subscriptions",
 ];
 
 fn normalize(path: &str) -> String {
