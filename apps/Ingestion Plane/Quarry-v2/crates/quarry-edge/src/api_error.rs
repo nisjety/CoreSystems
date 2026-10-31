@@ -42,6 +42,12 @@ impl ApiError {
         self
     }
 
+    /// Suggested client next steps (serialized as `next_actions`).
+    pub fn with_next_actions(mut self, actions: &[&str]) -> Self {
+        self.next_actions = actions.iter().map(|a| (*a).to_string()).collect();
+        self
+    }
+
     /// Build a `RATE_LIMITED` error carrying retry guidance + next actions.
     pub fn rate_limited(message: impl Into<String>, retry_after_seconds: u64) -> Self {
         Self {

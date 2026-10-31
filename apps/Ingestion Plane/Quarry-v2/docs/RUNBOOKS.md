@@ -1991,19 +1991,47 @@ This section corrects and extends "Profile owner and ACL check (WS17.P2, unit W2
 
 ## `/v1/extract` with a `prompt` (INNH-2, built, NOT run, 2026-10-31)
 
-`POST /v1/extract` now sends `prompt` to the model: with `schema` as extra instructions, alone as a free-form JSON object (`data`, status `ok`). The contract is `docs/CONTRACTS.md`, "`/v1/extract`: the `prompt` takes effect". This arm has no switch of its own: it runs when `MODEL_PLANE_URL` is set and the edge holds a model credential (`MODEL_PLANE_TOKEN`, or the Auth Core minted path). It calls the gateway's `/v1/invoke`, not the `/v1/ai/chat` lane of the scrape AI formats, so `QUARRY_EDGE__AI_FORMATS` does not gate it. On a deployed stack the lane is ungranted until WS16.S1 to S3 and decision X-7, so a call there fails per source with a `403`-derived error string; do not point a deployed edge at a gateway for this.
+`POST /v1/extract` now sends `prompt` to the model: with `schema` as extra instructions, alone as a free-form JSON object (`data`, status `ok`). The contract is `docs/CONTRACTS.md`, "`/v1/extract`: the `prompt` takes effect". This arm has no switch of its own: it runs when `MODEL_PLANE_URL` is set and the edge holds a model credential (`MODEL_PLANE_TOKEN`, or the Auth Core minted path). It calls the gateway's `/v1/invoke`, not the `/v1/ai/chat` lane of the scrape AI formats, so `QUARRY_EDGE__AI_FORMATS` does not gate it. On a deployed stack the lane is ungranted until WS16.S1 to S3 and decision X-7, so a call there is answered by the 501 "lane refused" of INNH-3 after one fetch (see "Enable structured extract and AI formats"); do not point a deployed edge at a gateway for this.
 
 What a caller sees:
 | Answer | Reason |
 |---|---|
 | 400 `BAD_REQUEST` with a `hint` | `prompt` empty after trimming, or more than 10000 characters; before any fetch, and the message never repeats the prompt |
-| 501 `UNSUPPORTED` | a `schema` or a `prompt` was sent and `MODEL_PLANE_URL` is unset (not for a ZDR request) |
+| 501 `UNSUPPORTED` | a `schema` or a `prompt` was sent and the Model Plane is not usable: no URL, no credential, or the gateway refused the first call (three texts, see "Enable structured extract and AI formats"; not for a ZDR request) |
 | 200, item `ok`, `schema_valid: false`, `schema_issues` | the model answered something that does not fit the schema; the data is returned, the caller decides |
 | 200, item `ok`, `truncated_input: true` | the page was cut at 20000 bytes before the model read it |
 | 200, item `error`, `ZDR_UNAVAILABLE: ...` | ZDR (body flag or the token's floor): no page text goes to a model; `structured` still comes back |
 | 200, item `error`, message names the "request time budget" | 50 s passed before the model read this source; send fewer URLs |
 
 Nothing in a log or a response carries the prompt text; log lines carry lengths only. To check by hand on a side-by-side stack: send a page with a schema and a prompt, read the request the gateway receives (the prompt before the `<<<PAGE-` line, the page inside), then repeat with `"zdr": true` and confirm the gateway sees no request. Not done here: no real gateway was called.
+
+## Enable structured extract and AI formats (INNH-3, built, NOT run, 2026-10-31)
+
+Read this before telling anyone to "turn extract on". Two Model Plane features share one URL and have different doors.
+
+| | `POST /v1/extract` with `schema` or `prompt` | `json`, `summary`, `question`, `highlights` in `formats` of `POST /v1/scrape` |
+|---|---|---|
+| Switch | none: it runs when the Model Plane URL is set and Quarry holds a model credential | `QUARRY_EDGE__AI_FORMATS` (off by default; see "Scrape AI formats" below) |
+| Gateway route | `/v1/invoke` (token-request row `model-invoke`) | `/v1/ai/chat`, with an `x-inference-authorization` header |
+| Credential | the Auth Core minted token (needs `QUARRY_EDGE__QUARRY_SERVICE_API_KEY`), or in development `QUARRY_EDGE__MODEL_PLANE_TOKEN` | `QUARRY_EDGE__MODEL_PLANE_TOKEN`, and optionally `QUARRY_EDGE__MODEL_PLANE_INFERENCE_TOKEN` (development only) |
+| Not ready | 501 `UNSUPPORTED`, three texts below | 501 `model_plane_unavailable` or `model_lane_not_granted`; 400 `feature_disabled` while the switch is off |
+
+`QUARRY_EDGE__AI_FORMATS` has never gated `/v1/extract`. The Innhenting audit (commit `14299e659`) and the 12-item brief say that extract needs `QUARRY_EDGE__AI_FORMATS=1`; that is wrong, and the old 501 hint that said to set `MODEL_PLANE_URL` alone was wrong too. Do not tell a user or an operator to set the AI formats switch for extract.
+
+**There is no production path today.** A deployed stack cannot run structured extract, and it cannot run the AI formats either. Both wait for the same two things: WS16.S1 to S3 (the metered service lane on the Model Plane gateway) and the owner decision X-7 (OD-1: the grant that lets Quarry call the Model Plane: audiences, retention, and the manifest rows set `granted: true`). Until then, in the committed files: the `model-invoke` row of `crates/quarry-runtime/contracts/cross-plane-token-requests.json` is `granted: false`, the Control Plane registry gives `quarry-edge` no `model-gateway` audience, and the gateway refuses a service principal on `/v1/invoke`. Setting `MODEL_PLANE_URL` on a deployed stack therefore enables nothing: it turns the first 501 below into the third, and it makes the edge refuse to boot unless `QUARRY_EDGE__QUARRY_SERVICE_API_KEY` is set. The live stack keeps `MODEL_PLANE_URL` unset. Do not set it.
+
+**The three 501s of `/v1/extract`.** They are decided before any further page is fetched, they share one body, `{"error", "code": "UNSUPPORTED", "hint", "next_actions"}` (no other key; `next_actions` has two entries), and they never name a URL, a host or a token. A request with neither `schema` nor `prompt` (cleaned markdown) and a ZDR request (each source answers `ZDR_UNAVAILABLE`) never get one.
+1. No Model Plane URL (`QUARRY_EDGE__MODEL_PLANE_URL` unset, empty or blank). `error`: `structured extraction needs the Model Plane, and QUARRY_EDGE__MODEL_PLANE_URL is not set on this deployment`. No page is fetched.
+2. A URL, but nothing to authenticate with (no service key and no development token). `error`: `structured extraction needs a granted Model Plane lane, and this deployment holds no model credential`. No page is fetched.
+3. A URL and a credential, but the gateway refuses the first model call (401 or 403, or Auth Core refuses to mint the token because the row is not granted). `error`: `structured extraction needs a granted Model Plane lane, and the Model Plane refused this service`. Exactly one page was fetched and one model call made; the other sources are not fetched and nothing is metered. Before INNH-3 this was a 200 in which every source (up to 25, fetched one after another) said `status: error`, and the fetches were paid. The stop applies only while no source has been extracted: a refusal after one source came back `ok` stays per source, and a timeout, a 5xx, a non-JSON answer or a 429 never stops the batch (429 keeps its own envelope).
+
+`hint` always starts with "omit `schema` and `prompt` to receive cleaned markdown" and ends with a pointer to this section; `next_actions[0]` is the same retry. A caller that gets a 501 can repeat the same request without `schema` and `prompt` and receive `status: fetched` markdown.
+
+**What works in development (a side-by-side or dev stack only; the owner decides).** Run the edge with the cross-plane auth dev bypass (`QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS=true`, refused in production). Set `QUARRY_EDGE__MODEL_PLANE_URL` to a gateway and `QUARRY_EDGE__MODEL_PLANE_TOKEN` to a token that gateway accepts on `/v1/invoke`. Leave `QUARRY_EDGE__QUARRY_SERVICE_API_KEY` unset: with a service key the minted path is used instead, and it is refused (state 3). Restart the edge; all of these are read at boot. The deploy compose forwards `MODEL_PLANE_URL` and `MODEL_PLANE_TOKEN`; the Ingestion compose forwards only `MODEL_PLANE_URL`, so give the container the token through an override file. Then `POST /v1/extract` with a `schema` returns `status: ok` with `data`. The AI formats of `/v1/scrape` additionally need `QUARRY_EDGE_AI_FORMATS=on` (compose spelling) and, for the chat route, the inference token; follow "Scrape AI formats" below.
+
+**For the Innhenting UI.** Show `error` as the reason. Offer the retry in `next_actions[0]`. Do not parse `hint` and do not tell a person to set a flag or a variable: they are for the operator, and no flag unlocks this on the live stack. The three states are told apart by the `error` text only (there is no `details`). The cross-plane asks are WS16.S1 to S3 and decision X-7.
+
+**Checks.** `cargo test -p quarry-edge --lib extract_routes` (unit tests for the three 501 bodies, the key set, zero fetches, the stop after one fetch and one model call, per-source isolation for 5xx, the refusal after an extracted source, ZDR); `node --test scripts/tests/docs-contract.test.mjs` (every `QUARRY_EDGE__` name in these docs, the openapi, the composes and the 501 texts is a setting the code reads, so no phantom variable). Not done: no real Model Plane gateway was called, and the Auth Core refusal of an ungranted row is read from the code, not exercised against Auth Core.
 
 ## Scrape `max_age`: enable, disable and what to look at (INNH-7, built, NOT run, 2026-10-31)
 

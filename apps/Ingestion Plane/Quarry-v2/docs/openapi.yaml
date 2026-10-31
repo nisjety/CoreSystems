@@ -1330,11 +1330,43 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
         '501':
-          description: A `schema` or a `prompt` was sent and no Model Plane is configured (not for a ZDR request)
+          description: >-
+            A `schema` or a `prompt` was sent and the Model Plane cannot be used (never for a ZDR
+            request, and never when neither field is sent). The body is `{error, code, hint,
+            next_actions}` with `code` `UNSUPPORTED`; the three cases differ in `error`. (1) No
+            Model Plane URL: `structured extraction needs the Model Plane, and
+            QUARRY_EDGE__MODEL_PLANE_URL is not set on this deployment`. (2) A URL but no model
+            credential: `structured extraction needs a granted Model Plane lane, and this
+            deployment holds no model credential`. (3) The gateway refused the first model call
+            (answered after one fetch and one model call, only while no source was extracted):
+            `structured extraction needs a granted Model Plane lane, and the Model Plane refused
+            this service`. The retry is the same request without `schema` and `prompt`
+            (cleaned markdown). A deployed stack gets one of these until WS16.S1 to S3 and
+            decision X-7 land; no flag unlocks it. See RUNBOOKS, "Enable structured extract and
+            AI formats".
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
+              examples:
+                no_model_plane_url:
+                  summary: No Model Plane URL
+                  value:
+                    error: structured extraction needs the Model Plane, and QUARRY_EDGE__MODEL_PLANE_URL is not set on this deployment
+                    code: UNSUPPORTED
+                    hint: 'omit `schema` and `prompt` to receive cleaned markdown. Operators: the URL QUARRY_EDGE__MODEL_PLANE_URL is missing, and setting it alone is not enough because the model lane must also be granted; see docs/RUNBOOKS.md, "Enable structured extract and AI formats"'
+                    next_actions:
+                    - retry without `schema` and `prompt` to receive cleaned markdown
+                    - 'operators: see docs/RUNBOOKS.md, "Enable structured extract and AI formats"'
+                model_lane_refused:
+                  summary: The Model Plane refused this service
+                  value:
+                    error: structured extraction needs a granted Model Plane lane, and the Model Plane refused this service
+                    code: UNSUPPORTED
+                    hint: 'omit `schema` and `prompt` to receive cleaned markdown. Operators: the model lane is not granted to this service (the gateway refused the first model call, so no further page was fetched); see docs/RUNBOOKS.md, "Enable structured extract and AI formats"'
+                    next_actions:
+                    - retry without `schema` and `prompt` to receive cleaned markdown
+                    - 'operators: see docs/RUNBOOKS.md, "Enable structured extract and AI formats"'
   /v1/artifacts:
     get:
       operationId: list_artifacts
@@ -6570,6 +6602,11 @@ components:
         hint:
           type: string
           nullable: true
+        next_actions:
+          type: array
+          description: Suggested client next steps; present on a 429 and on the 501 of `/v1/extract`.
+          items:
+            type: string
     RateLimitError:
       allOf:
       - $ref: '#/components/schemas/ErrorBody'

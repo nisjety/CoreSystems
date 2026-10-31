@@ -40,6 +40,25 @@ const REQUEST_BUDGET: std::time::Duration = std::time::Duration::from_secs(50);
 /// INNH-1: the request's privacy block (`credential_or_secret`, `zdr_ephemeral`) forbids a
 /// model hop, the same rule the AI scrape formats and the page-title hop follow.
 const PRIVACY_POLICY_MESSAGE: &str = "PRIVACY_POLICY: extraction with a schema or a prompt sends page text to a model, which the request's privacy classification does not allow";
+/// INNH-3: the three ways `/v1/extract` cannot reach a model, each a 501 `UNSUPPORTED` that says
+/// exactly what is missing. None of them echoes a URL, a host or a token detail: hints reach end
+/// users. Every `QUARRY_EDGE__` name in these strings must be a real setting (a test pins it).
+/// No Model Plane URL at all.
+const NO_MODEL_PLANE_ERROR: &str =
+    "structured extraction needs the Model Plane, and QUARRY_EDGE__MODEL_PLANE_URL is not set on this deployment";
+const NO_MODEL_PLANE_HINT: &str = "omit `schema` and `prompt` to receive cleaned markdown. Operators: the URL QUARRY_EDGE__MODEL_PLANE_URL is missing, and setting it alone is not enough because the model lane must also be granted; see docs/RUNBOOKS.md, \"Enable structured extract and AI formats\"";
+/// A URL, but nothing to authenticate with (no service token provider, no development token).
+const NO_MODEL_CREDENTIAL_ERROR: &str =
+    "structured extraction needs a granted Model Plane lane, and this deployment holds no model credential";
+const NO_MODEL_CREDENTIAL_HINT: &str = "omit `schema` and `prompt` to receive cleaned markdown. Operators: the Model Plane URL is set but Quarry has no credential for the model lane (a deployed stack has none until WS16.S1 to S3 and decision X-7 land; in development, QUARRY_EDGE__MODEL_PLANE_TOKEN under the auth dev bypass); see docs/RUNBOOKS.md, \"Enable structured extract and AI formats\"";
+/// The gateway answered 401 or 403 to the first model call of the request.
+const LANE_REFUSED_ERROR: &str =
+    "structured extraction needs a granted Model Plane lane, and the Model Plane refused this service";
+const LANE_REFUSED_HINT: &str = "omit `schema` and `prompt` to receive cleaned markdown. Operators: the model lane is not granted to this service (the gateway refused the first model call, so no further page was fetched); see docs/RUNBOOKS.md, \"Enable structured extract and AI formats\"";
+const UNSUPPORTED_NEXT_ACTIONS: [&str; 2] = [
+    "retry without `schema` and `prompt` to receive cleaned markdown",
+    "operators: see docs/RUNBOOKS.md, \"Enable structured extract and AI formats\"",
+];
 const BUDGET_EXHAUSTED_MESSAGE: &str =
     "the request time budget ran out before the model read this source; send fewer URLs per request";
 /// Default back-off window advertised on a 429 so callers can retry without
@@ -116,7 +135,14 @@ fn bad_request(message: impl Into<String>) -> ErrorBody {
 }
 
 fn unsupported(message: impl Into<String>, hint: impl Into<String>) -> ErrorBody {
-    ApiError::new("UNSUPPORTED", message).with_hint(hint)
+    ApiError::new("UNSUPPORTED", message)
+        .with_hint(hint)
+        .with_next_actions(&UNSUPPORTED_NEXT_ACTIONS)
+}
+
+/// The 501 of the model arm: `{error, code, hint, next_actions}`, nothing else.
+fn not_implemented(error: &str, hint: &str) -> axum::response::Response {
+    (StatusCode::NOT_IMPLEMENTED, Json(unsupported(error, hint))).into_response()
 }
 
 /// Validate + dedup + cap the target URL list (bounded fan-out). Drops
@@ -299,7 +325,7 @@ async fn run_extract(
 
     // Structured extraction needs Model Plane. Without it, fall back to
     // returning cleaned markdown (still useful), unless a schema or a prompt was requested.
-    let runner: Option<AiFormatRunner> = match state.model_plane_url.as_deref() {
+    let runner: Option<AiFormatRunner> = match state.model_plane_url.as_deref().map(str::trim) {
         Some(url) if !url.is_empty() => match ModelPlaneClient::new(url) {
             Ok(mut c) => {
                 if let Some(provider) = state.service_token_provider.clone() {
@@ -318,15 +344,20 @@ async fn run_extract(
 
     // A ZDR request never reaches the model arm (each source answers ZDR_UNAVAILABLE below), so
     // whether a Model Plane exists does not matter to it.
-    if wants_model && !zdr.is_active() && runner.is_none() {
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(unsupported(
-                "structured extraction requires a Model Plane",
-                "set MODEL_PLANE_URL, or omit `schema` and `prompt` to receive markdown",
-            )),
-        )
-            .into_response();
+    if wants_model && !zdr.is_active() {
+        if runner.is_none() {
+            return not_implemented(NO_MODEL_PLANE_ERROR, NO_MODEL_PLANE_HINT);
+        }
+        // A URL with nothing to authenticate with cannot pass the gateway: answer before any
+        // page is fetched, rather than N paid fetches that each end in a per-source error.
+        let has_credential = state.service_token_provider.is_some()
+            || state
+                .model_plane_token
+                .as_deref()
+                .is_some_and(|token| !token.trim().is_empty());
+        if !has_credential {
+            return not_implemented(NO_MODEL_CREDENTIAL_ERROR, NO_MODEL_CREDENTIAL_HINT);
+        }
     }
 
     // WS7.E: every target is gated before the first fetch. One denied URL refuses the whole
@@ -359,6 +390,7 @@ async fn run_extract(
     let signals = req.signals.unwrap_or_default();
     let mut results = Vec::with_capacity(targets.len());
     let mut rate_limited: Option<QuarryError> = None;
+    let mut lane_refused = false;
     for raw in &targets {
         let url = match Url::parse(raw) {
             Ok(u) => u,
@@ -480,6 +512,17 @@ async fn run_extract(
                                 ));
                                 break;
                             }
+                            // INNH-3: the gateway refused this service (401 or 403, or no token
+                            // could be minted). Every other source would be refused the same
+                            // way, so with nothing extracted yet stop here: one fetch and one
+                            // model call spent, not N. Other failures (timeouts, 5xx, bad
+                            // output) stay per source. ZDR never gets here (refused above).
+                            if e.code == ErrorCode::Forbidden
+                                && !results.iter().any(|item: &ExtractItem| item.status == "ok")
+                            {
+                                lane_refused = true;
+                                break;
+                            }
                             ExtractItem {
                                 url: raw.clone(),
                                 status: "error".into(),
@@ -508,6 +551,10 @@ async fn run_extract(
             }
         };
         results.push(item);
+    }
+
+    if lane_refused {
+        return not_implemented(LANE_REFUSED_ERROR, LANE_REFUSED_HINT);
     }
 
     if let Some(e) = rate_limited {
@@ -1012,11 +1059,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-        assert_eq!(body["code"], "UNSUPPORTED");
-        assert_eq!(
-            crate::test_support::json_keys(&body),
-            vec!["code", "error", "hint"]
-        );
+        assert_501_envelope(&body);
         assert!(body["hint"].as_str().unwrap().contains("`prompt`"));
         // No prompt and no schema: still the markdown route, no Model Plane needed.
         let (status, body) = call(
@@ -1324,5 +1367,272 @@ mod tests {
             assert_eq!(item["status"], "error");
             assert_eq!(item["error"], BUDGET_EXHAUSTED_MESSAGE);
         }
+    }
+
+    // ---- INNH-3: the 501 says exactly what is missing ---------------------------------------
+
+    /// Counts the pages it serves, so a test can prove how many fetches a refusal cost.
+    struct CountingDriver {
+        html: String,
+        fetches: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Driver for CountingDriver {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Static
+        }
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            self.fetches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(FetchResponse {
+                status: 200,
+                final_url: url.clone(),
+                headers: vec![],
+                body: self.html.clone().into_bytes(),
+                duration_ms: 1,
+                served_by: DriverKind::Static,
+                captures: None,
+            })
+        }
+    }
+
+    fn fetches(counter: &Arc<std::sync::atomic::AtomicUsize>) -> usize {
+        counter.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn counting_state(
+        model_plane_url: Option<String>,
+        token: Option<&str>,
+    ) -> (AppState, Arc<std::sync::atomic::AtomicUsize>) {
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut state = crate::test_support::test_state(Arc::new(CountingDriver {
+            html: PAGE.to_string(),
+            fetches: counter.clone(),
+        }));
+        state.model_plane_url = model_plane_url;
+        state.model_plane_token = token.map(str::to_string);
+        (state, counter)
+    }
+
+    /// The `QUARRY_EDGE__` names in `text`.
+    fn env_names_in(text: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut rest = text;
+        while let Some(at) = rest.find("QUARRY_EDGE__") {
+            let tail = &rest[at..];
+            let len = tail
+                .find(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+                .unwrap_or(tail.len());
+            names.push(tail[..len].trim_end_matches('_').to_string());
+            rest = &tail[len..];
+        }
+        names
+    }
+
+    /// `QUARRY_EDGE__MODEL_PLANE_URL` is a setting when `EdgeConfig` has a field `model_plane_url`
+    /// (the config crate maps the environment onto the field names).
+    fn is_an_edge_setting(name: &str) -> bool {
+        let field = name.trim_start_matches("QUARRY_EDGE__").to_ascii_lowercase();
+        include_str!("config.rs").contains(&format!("pub {field}:"))
+    }
+
+    /// The 501 body of the model arm: exactly `{code, error, hint, next_actions}`, and no
+    /// environment name in it that the edge does not read.
+    fn assert_501_envelope(body: &serde_json::Value) {
+        assert_eq!(body["code"], "UNSUPPORTED");
+        assert_eq!(
+            crate::test_support::json_keys(body),
+            vec!["code", "error", "hint", "next_actions"]
+        );
+        let actions = body["next_actions"].as_array().expect("next_actions is a list");
+        assert_eq!(actions.len(), 2);
+        let text = format!(
+            "{} {} {}",
+            body["error"].as_str().unwrap(),
+            body["hint"].as_str().unwrap(),
+            body["next_actions"]
+        );
+        for name in env_names_in(&text) {
+            assert!(
+                is_an_edge_setting(&name),
+                "the 501 names {name}, which EdgeConfig has no field for"
+            );
+        }
+        assert!(text.contains("Enable structured extract and AI formats"));
+        assert!(!text.contains("AI_FORMATS"), "the AI formats switch does not gate /v1/extract");
+    }
+
+    #[test]
+    fn the_checker_knows_a_real_setting_from_a_phantom() {
+        assert!(is_an_edge_setting("QUARRY_EDGE__MODEL_PLANE_URL"));
+        assert!(is_an_edge_setting("QUARRY_EDGE__MODEL_PLANE_TOKEN"));
+        assert!(!is_an_edge_setting("QUARRY_EDGE__EXTRACT_SCHEMA_ENABLED"));
+        assert_eq!(
+            env_names_in("set QUARRY_EDGE__MODEL_PLANE_URL, then QUARRY_EDGE__NOPE_ ."),
+            vec!["QUARRY_EDGE__MODEL_PLANE_URL", "QUARRY_EDGE__NOPE"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_schema_without_a_model_plane_is_the_exact_501_and_fetches_nothing() {
+        for url in [None, Some(String::new()), Some("   ".to_string())] {
+            let (state, counter) = counting_state(url, None);
+            let (status, body) = call(
+                state,
+                crate::test_support::claims_for_org("org_alpha"),
+                request(Some(plan_schema()), None),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+            assert_501_envelope(&body);
+            assert_eq!(body["error"], NO_MODEL_PLANE_ERROR);
+            assert_eq!(body["hint"], NO_MODEL_PLANE_HINT);
+            assert!(body["error"]
+                .as_str()
+                .unwrap()
+                .contains("QUARRY_EDGE__MODEL_PLANE_URL"));
+            assert_eq!(fetches(&counter), 0, "a refused request spends no fetch");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_model_plane_url_with_no_credential_is_the_lane_501_before_any_fetch() {
+        for token in [None, Some(""), Some("  ")] {
+            let (state, counter) =
+                counting_state(Some("http://model-plane.invalid:9".to_string()), token);
+            let (status, body) = call(
+                state,
+                crate::test_support::claims_for_org("org_alpha"),
+                request(Some(plan_schema()), Some("anything")),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+            assert_501_envelope(&body);
+            assert_eq!(body["error"], NO_MODEL_CREDENTIAL_ERROR);
+            assert_eq!(body["hint"], NO_MODEL_CREDENTIAL_HINT);
+            // The URL the operator set is not echoed to the caller.
+            assert!(!body.to_string().contains("model-plane.invalid"));
+            assert_eq!(fetches(&counter), 0, "a refused request spends no fetch");
+        }
+        // A request that asks for no model arm does not need the lane at all.
+        let (state, counter) = counting_state(Some("http://model-plane.invalid:9".to_string()), None);
+        let (status, body) = call(
+            state,
+            crate::test_support::claims_for_org("org_alpha"),
+            request(None, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["results"][0]["status"], "fetched");
+        assert_eq!(fetches(&counter), 1);
+    }
+
+    #[tokio::test]
+    async fn zdr_never_gets_the_501_for_a_missing_model_plane() {
+        let (state, _counter) = counting_state(None, None);
+        let mut req = request(Some(plan_schema()), Some("anything"));
+        req.zdr = Some(true);
+        let (status, body) = call(state, crate::test_support::claims_for_org("org_alpha"), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["results"][0]["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("ZDR_UNAVAILABLE"));
+    }
+
+    #[tokio::test]
+    async fn a_gateway_that_refuses_the_service_is_one_501_after_one_fetch_and_one_model_call() {
+        for refusal in [403_u16, 401] {
+            let model = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/invoke"))
+                .respond_with(ResponseTemplate::new(refusal))
+                .mount(&model)
+                .await;
+            let (mut state, counter) =
+                counting_state(Some(model.uri()), Some("model-plane-test-token"));
+            let usage = Arc::new(KeptEvents::default());
+            state.usage = usage.clone();
+            let mut req = request(Some(plan_schema()), None);
+            req.urls = vec![
+                "https://shop.example/1".into(),
+                "https://shop.example/2".into(),
+                "https://shop.example/3".into(),
+            ];
+            let (status, body) =
+                call(state, crate::test_support::claims_for_org("org_alpha"), req).await;
+            assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "gateway answered {refusal}");
+            assert_501_envelope(&body);
+            assert_eq!(body["error"], LANE_REFUSED_ERROR);
+            assert_eq!(body["hint"], LANE_REFUSED_HINT);
+            assert!(body.get("results").is_none());
+            assert_eq!(fetches(&counter), 1, "the other two pages are never fetched");
+            assert_eq!(sent_to_model(&model).await.len(), 1, "one model call");
+            assert!(
+                usage.0.lock().unwrap().is_empty(),
+                "a refused request meters nothing"
+            );
+            // The model double's address is not echoed.
+            assert!(!body.to_string().contains(&model.uri()));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_server_error_on_one_source_stays_that_sources_error() {
+        let model = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/invoke"))
+            .respond_with(ResponseTemplate::new(500))
+            .up_to_n_times(1)
+            .mount(&model)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/invoke"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(model_reply("{\"basic\": 12}")))
+            .mount(&model)
+            .await;
+        let (state, counter) = counting_state(Some(model.uri()), Some("model-plane-test-token"));
+        let mut req = request(Some(plan_schema()), None);
+        req.urls = vec![
+            "https://shop.example/1".into(),
+            "https://shop.example/2".into(),
+        ];
+        let (status, body) = call(state, crate::test_support::claims_for_org("org_alpha"), req).await;
+        assert_eq!(status, StatusCode::OK, "a 5xx is not a lane refusal");
+        assert_eq!(body["results"][0]["status"], "error");
+        assert_eq!(body["results"][1]["status"], "ok");
+        assert_eq!(body["results"][1]["data"]["basic"], 12);
+        assert_eq!(fetches(&counter), 2);
+        assert_eq!(sent_to_model(&model).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_after_a_source_was_extracted_stays_per_source() {
+        let model = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/invoke"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(model_reply("{\"basic\": 12}")))
+            .up_to_n_times(1)
+            .mount(&model)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/invoke"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&model)
+            .await;
+        let (state, _counter) = counting_state(Some(model.uri()), Some("model-plane-test-token"));
+        let mut req = request(Some(plan_schema()), None);
+        req.urls = vec![
+            "https://shop.example/1".into(),
+            "https://shop.example/2".into(),
+            "https://shop.example/3".into(),
+        ];
+        let (status, body) = call(state, crate::test_support::claims_for_org("org_alpha"), req).await;
+        // The first source was extracted and is owed to the caller, so this is no 501.
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["results"][0]["status"], "ok");
+        assert_eq!(body["results"][1]["status"], "error");
+        assert_eq!(body["results"][2]["status"], "error");
     }
 }

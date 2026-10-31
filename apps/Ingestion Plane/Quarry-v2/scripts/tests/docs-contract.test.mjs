@@ -20,7 +20,7 @@ import { parseYamlSubset } from "../yaml-subset.mjs";
 const OPTION_B =
   "option B (the Data Plane rerank wire and config) exists only as uncommitted edits in C:/dev/CoresSystem (branch main); see .plan-work/quarry-w1w2/depth/D-D-B3-openapi-sdk.md";
 const QB_T17 =
-  "QB-T17: answer synthesis, search suggest, audio and the AI formats of /v1/extract have no switch in config.rs and run whenever QUARRY_EDGE__MODEL_PLANE_URL is set, so the six switches this test pins include four that do not exist (the AI formats of /v1/scrape have theirs, QUARRY_EDGE__AI_FORMATS, pinned by its own test below). Stays pending until the QB-T17 gate lands (model_plane_gate.rs is not on this branch); see decision 3.12 in .plan-work/quarry-w1w2/DECISIONS-ROUND-2026-10-27.md";
+  "QB-T17: answer synthesis, search suggest, audio and structured extract (a schema or a prompt on /v1/extract) have no switch in config.rs and run whenever QUARRY_EDGE__MODEL_PLANE_URL is set, so the six switches this test pins include four that do not exist (the AI formats of /v1/scrape have theirs, QUARRY_EDGE__AI_FORMATS, pinned by its own test below; it never gated /v1/extract, see INNH-3). Stays pending until the QB-T17 gate lands (model_plane_gate.rs is not on this branch); see decision 3.12 in .plan-work/quarry-w1w2/DECISIONS-ROUND-2026-10-27.md";
 const pending = (name, reason, fn) => test(name, { todo: reason }, fn);
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -357,6 +357,140 @@ test("the runbook and the self-host guide document every name the AI formats rea
   for (const reason of ["model_plane_unavailable", "model_lane_not_granted", "extract_ai_scope_required", "unsupported_in_stream"]) {
     assert.ok(runbook.includes(reason), `RUNBOOKS names ${reason}`);
     assert.ok(read(join(quarry, "docs", "ERROR_REASONS.md")).includes(reason), `ERROR_REASONS names ${reason}`);
+  }
+});
+
+// ----------------------------------------------------------------------------- no phantom variables (INNH-3)
+
+// A name the docs and the 501 hints tell an operator to set must be one the code reads. The AI formats
+// switch was named for /v1/extract in an audit and in the brief, and it never gated it; this guard is
+// the one that would have caught a name like that.
+
+const rustFiles = (dir, out = []) => {
+  for (const name of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, name.name);
+    if (name.isDirectory()) {
+      if (name.name !== "target" && name.name !== "tests") rustFiles(path, out);
+    } else if (name.name.endsWith(".rs")) {
+      out.push(path);
+    }
+  }
+  return out;
+};
+
+// The names the code reads: every EdgeConfig field (the config crate maps QUARRY_EDGE__<FIELD> onto it) and
+// every QUARRY_EDGE__ string literal in the crates' sources (the switches read with std::env).
+const namesTheCodeReads = () => {
+  const names = new Set();
+  const config = read(paths.config).replace(/\r/g, "");
+  const struct = /pub struct EdgeConfig \{([\s\S]*?)\n\}/.exec(config);
+  assert.ok(struct, "config.rs defines EdgeConfig");
+  for (const field of struct[1].matchAll(/^\s*pub ([a-z0-9_]+):/gm)) names.add(`QUARRY_EDGE__${field[1].toUpperCase()}`);
+  for (const crate of readdirSync(join(quarry, "crates"))) {
+    const src = join(quarry, "crates", crate, "src");
+    if (!existsSync(src)) continue;
+    for (const file of rustFiles(src)) {
+      for (const literal of readFileSync(file, "utf8").matchAll(/"(QUARRY_EDGE__[A-Z0-9_]+)"/g)) names.add(literal[1]);
+    }
+  }
+  return names;
+};
+
+// The names a compose file interpolates (`${MODEL_PLANE_URL:-}`): the spelling an operator types for the stack.
+const composeVariables = (text) => new Set([...text.matchAll(/\$\{([A-Z][A-Z0-9_]*)/g)].map((m) => m[1]));
+
+// Names in `text` that the code does not read. `QUARRY_EDGE_X` (one underscore, the compose spelling) is folded to
+// `QUARRY_EDGE__X`. A bare MODEL_PLANE_URL / MODEL_PLANE_TOKEN / MODEL_PLANE_INFERENCE_TOKEN must be a compose variable.
+function phantomNames(text, readByCode, compose) {
+  const phantoms = new Set();
+  for (const match of text.matchAll(/\bQUARRY_EDGE_{1,2}[A-Z][A-Z0-9_]*/g)) {
+    const name = match[0].replace(/_+$/, "").replace(/^QUARRY_EDGE_{1,2}/, "QUARRY_EDGE__");
+    if (!readByCode.has(name)) phantoms.add(match[0]);
+  }
+  for (const match of text.matchAll(/(?<![A-Za-z0-9_])MODEL_PLANE_(?:URL|TOKEN|INFERENCE_TOKEN)(?![A-Za-z0-9_])/g)) {
+    if (!compose.has(match[0])) phantoms.add(match[0]);
+  }
+  return [...phantoms];
+}
+
+// The lines of a section: from the heading that matches to the next heading of the same or a higher level.
+function sectionOf(text, heading, level) {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.startsWith(`${level} `) && heading.test(line));
+  assert.notEqual(start, -1, `a "${level}" section matching ${heading} exists`);
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (new RegExp(`^#{1,${level.length}} `).test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  return lines.slice(start, end).join("\n");
+}
+
+const hintsOfExtract = () => {
+  const source = read(join(quarry, "crates", "quarry-edge", "src", "extract_routes.rs"));
+  const cut = source.indexOf("#[cfg(test)]");
+  assert.ok(cut > 0, "extract_routes.rs has a test module");
+  return source.slice(0, cut);
+};
+
+test("the phantom-name check tells a real setting from one the code does not read", () => {
+  const known = new Set(["QUARRY_EDGE__MODEL_PLANE_URL", "QUARRY_EDGE__AI_FORMATS"]);
+  const compose = new Set(["MODEL_PLANE_URL"]);
+  assert.deepEqual(phantomNames("set QUARRY_EDGE__MODEL_PLANE_URL and QUARRY_EDGE_AI_FORMATS, or MODEL_PLANE_URL", known, compose), []);
+  assert.deepEqual(phantomNames("set QUARRY_EDGE__EXTRACT_AI_FORMATS=1.", known, compose), ["QUARRY_EDGE__EXTRACT_AI_FORMATS"]);
+  assert.deepEqual(phantomNames("export MODEL_PLANE_TOKEN", known, compose), ["MODEL_PLANE_TOKEN"]);
+  assert.deepEqual(phantomNames("QUARRY_EDGE__AI_FORMATS_NOPE_ and QUARRY_EDGE_NOPE", known, compose).sort(), ["QUARRY_EDGE_NOPE", "QUARRY_EDGE__AI_FORMATS_NOPE_"]);
+});
+
+test("every variable the Model Plane docs, the openapi, the composes and the extract hints name is read by the code (INNH-3)", () => {
+  const readByCode = namesTheCodeReads();
+  assert.ok(readByCode.has("QUARRY_EDGE__MODEL_PLANE_URL") && readByCode.has("QUARRY_EDGE__MODEL_PLANE_TOKEN"), "the code reads the two Model Plane settings");
+  assert.ok(readByCode.has("QUARRY_EDGE__AI_FORMATS"), "the code reads the AI formats switch");
+  const deployCompose = join(quarry, "deploy", "compose", "docker-compose.yml");
+  const compose = new Set([...composeVariables(read(paths.compose)), ...composeVariables(read(deployCompose))]);
+  const runbooks = read(paths.runbooks);
+  // Whole files that carry no unrelated switch, and the sections of the long ones that are about the Model Plane. The
+  // composes are checked on the lines that name the Model Plane or the AI formats.
+  const composeLines = (path) =>
+    read(path)
+      .split(/\r?\n/)
+      .filter((line) => /MODEL_PLANE|AI_FORMATS/.test(line))
+      .join("\n");
+  const checked = [
+    ["extract_routes.rs (the 501 texts)", hintsOfExtract()],
+    ["docs/openapi.yaml", read(paths.openapi)],
+    ["docs/CONTRACTS.md", read(join(paths.docs, "CONTRACTS.md"))],
+    ["docs/ERROR_REASONS.md", read(join(paths.docs, "ERROR_REASONS.md"))],
+    ["deploy/compose/README.md", read(join(quarry, "deploy", "compose", "README.md"))],
+    ["RUNBOOKS: Enable structured extract and AI formats", sectionOf(runbooks, /Enable structured extract and AI formats/, "##")],
+    ["RUNBOOKS: Scrape AI formats", sectionOf(runbooks, /Scrape AI formats/, "##")],
+    ["RUNBOOKS: /v1/extract with a prompt", sectionOf(runbooks, /`\/v1\/extract` with a `prompt`/, "##")],
+    ["SELF_HOST: Quarry to Model Plane", sectionOf(read(paths.selfHost), /Quarry → Model Plane/, "###")],
+    ["Ingestion compose (Model Plane lines)", composeLines(paths.compose)],
+    ["deploy compose (Model Plane lines)", composeLines(deployCompose)],
+  ];
+  for (const [label, text] of checked) {
+    assert.deepEqual(phantomNames(text, readByCode, compose), [], `${label} names a variable the code does not read`);
+  }
+});
+
+test("the extract 501 texts name the real Model Plane URL setting and never the AI formats switch", () => {
+  const hints = hintsOfExtract();
+  assert.ok(hints.includes("QUARRY_EDGE__MODEL_PLANE_URL"), "the 501 names QUARRY_EDGE__MODEL_PLANE_URL");
+  assert.ok(hints.includes("Enable structured extract and AI formats"), "the 501 points at the RUNBOOKS section");
+  assert.ok(!hints.includes("AI_FORMATS"), "no AI formats switch is named by /v1/extract");
+  assert.ok(sectionOf(read(paths.runbooks), /Enable structured extract and AI formats/, "##").length > 500, "the RUNBOOKS section exists");
+});
+
+test("the RUNBOOKS section says there is no production path before WS16.S1 to S3 and decision X-7", () => {
+  const section = sectionOf(read(paths.runbooks), /Enable structured extract and AI formats/, "##");
+  assert.match(section, /no production path today/i);
+  assert.ok(section.includes("WS16.S1 to S3") && section.includes("X-7") && section.includes("OD-1"), "names WS16.S1 to S3, X-7 and OD-1");
+  assert.match(section, /has never gated `\/v1\/extract`/, "says the AI formats switch never gated extract");
+  for (const state of ["No Model Plane URL", "A URL, but nothing to authenticate with", "A URL and a credential, but the gateway refuses"]) {
+    assert.ok(section.includes(state), `the section describes the state: ${state}`);
   }
 });
 
