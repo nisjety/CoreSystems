@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use url::Url;
 
@@ -21,13 +22,15 @@ pub struct ListSnapshot {
     pub allowlist: Vec<String>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct DefaultEngine {
     host_blocklist: Arc<RwLock<HashSet<String>>>,
     host_allowlist: Arc<RwLock<HashSet<String>>>,
     allow_private_hosts: bool,
     /// When set, mutations auto-persist a snapshot to this path.
     persist_path: Option<PathBuf>,
+    /// Dot-suffix matching for the blocklist (D7 rule). Off unless set.
+    match_subdomains: bool,
 }
 
 impl DefaultEngine {
@@ -91,7 +94,7 @@ impl DefaultEngine {
     async fn maybe_persist(&self) {
         if let Some(p) = &self.persist_path {
             if let Err(e) = self.save_snapshot(p).await {
-                tracing::warn!(error = %e, path = %p.display(), "blocklist persist failed");
+                tracing::warn!(error_class = ?e.kind(), path = %p.display(), "blocklist persist failed");
             }
         }
     }
@@ -106,18 +109,135 @@ impl DefaultEngine {
         self.maybe_persist().await;
     }
 
-    async fn host_listed(&self, u: &Url, list: &Arc<RwLock<HashSet<String>>>) -> bool {
+    /// Set whether a blocklist entry also blocks its subdomains (dot-suffix
+    /// match). Off by default; the feed sync can name hosts whose subdomains
+    /// are unrelated (for example a shared hosting domain), so this is an
+    /// explicit operator opt-in.
+    pub fn with_subdomain_matching(mut self, on: bool) -> Self {
+        self.match_subdomains = on;
+        self
+    }
+
+    /// Entry counts of the two host lists. Counts only; no host name leaves.
+    pub async fn list_counts(&self) -> ListCounts {
+        ListCounts {
+            blocklist: self.host_blocklist.read().await.len(),
+            allowlist: self.host_allowlist.read().await.len(),
+        }
+    }
+
+    /// Replace both host lists from a snapshot file (hot reload). The file is
+    /// parsed before any lock is taken; on error the previous lists stay in
+    /// force. Both write guards are held across the swap so a preflight never
+    /// sees a new blocklist beside an old allowlist. preflight takes one list
+    /// at a time, so this lock order cannot deadlock.
+    pub async fn reload_snapshot(&self, path: &Path) -> std::io::Result<ListCounts> {
+        let snap = Self::load_snapshot(path).await?;
+        let block: HashSet<String> = snap.blocklist.into_iter().collect();
+        let allow: HashSet<String> = snap.allowlist.into_iter().collect();
+        let counts = ListCounts {
+            blocklist: block.len(),
+            allowlist: allow.len(),
+        };
+        let mut bl = self.host_blocklist.write().await;
+        let mut al = self.host_allowlist.write().await;
+        *bl = block;
+        *al = allow;
+        Ok(counts)
+    }
+
+    /// True when the URL host is on the blocklist, exactly or (when subdomain
+    /// matching is on) through a listed parent domain: `evil.example` also
+    /// blocks `a.b.evil.example`.
+    async fn blocklist_hit(&self, u: &Url) -> bool {
         let Some(h) = u.host_str() else {
             return false;
         };
-        list.read().await.contains(h)
+        let list = self.host_blocklist.read().await;
+        if list.contains(h) {
+            return true;
+        }
+        if !self.match_subdomains {
+            return false;
+        }
+        let mut rest = h;
+        while let Some(idx) = rest.find('.') {
+            rest = &rest[idx + 1..];
+            if list.contains(rest) {
+                return true;
+            }
+        }
+        false
     }
+}
+
+/// Entry counts of the two host lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ListCounts {
+    pub blocklist: usize,
+    pub allowlist: usize,
+}
+
+/// Watch the snapshot at `path` by modification time and hot-reload the
+/// engine's lists when it changes. The file is read once at boot before this
+/// is called, so the first mtime is taken at spawn and only a later change
+/// triggers a reload. A failed reload keeps the previous lists in force,
+/// reports the error kind to `on_reload`, and waits for the next change.
+/// The interval is clamped to at least one second.
+pub fn spawn_snapshot_watch<F>(
+    engine: &DefaultEngine,
+    path: impl Into<PathBuf>,
+    interval: Duration,
+    on_reload: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: Fn(Result<ListCounts, std::io::ErrorKind>) + Send + 'static,
+{
+    let path: PathBuf = path.into();
+    let engine = engine.clone();
+    let interval = interval.max(Duration::from_secs(1));
+    tokio::spawn(async move {
+        let mut last = file_mtime(&path).await;
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first tick completes at once; the first real check is one interval out.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let now = file_mtime(&path).await;
+            if now.is_none() || now == last {
+                continue;
+            }
+            last = now;
+            match engine.reload_snapshot(&path).await {
+                Ok(counts) => {
+                    tracing::info!(
+                        blocklist = counts.blocklist,
+                        allowlist = counts.allowlist,
+                        "reputation snapshot reloaded"
+                    );
+                    on_reload(Ok(counts));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error_class = ?error.kind(),
+                        "reputation snapshot reload failed; previous lists stay in force"
+                    );
+                    on_reload(Err(error.kind()));
+                }
+            }
+        }
+    })
+}
+
+async fn file_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    tokio::fs::metadata(path).await.ok()?.modified().ok()
 }
 
 #[async_trait]
 impl SecurityEngine for DefaultEngine {
     async fn preflight(&self, u: &Url) -> Verdict {
-        if self.host_listed(u, &self.host_blocklist).await {
+        if self.blocklist_hit(u).await {
             return Verdict::block(format!("host blocklisted: {}", u.host_str().unwrap_or("")));
         }
         if !heur::scheme_allowed(u) {

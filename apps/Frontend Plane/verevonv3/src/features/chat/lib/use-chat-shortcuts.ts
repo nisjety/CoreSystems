@@ -114,6 +114,73 @@ export function matchChatShortcut(
 }
 
 /**
+ * Keyboard-first approval card (E3.2-b, features/browser/approval). Only keys
+ * that arrive inside the card reach this matcher: the card listens on its own
+ * root element, so these combos never hijack the composer or the page.
+ *
+ *   - Cmd/Ctrl+Enter            -> approve (refused while redirect text is typed,
+ *                                  so a stray combo cannot discard the text).
+ *   - Cmd/Ctrl+Shift+Enter      -> reject; with redirect text it submits the
+ *                                  redirect (a reject that carries the text).
+ *   - Enter in the redirect box -> submit the redirect, when it has text.
+ *                                  Shift+Enter keeps its newline.
+ *   - Escape in the redirect box -> clear the redirect text.
+ *
+ * A bare Enter on a focused button keeps the button's own activation.
+ * IME composition (isComposing) is always ignored.
+ */
+
+export const APPROVAL_REDIRECT_SELECTOR = '.verevon-browser-approval__redirect'
+
+export type ApprovalShortcutEventLike = ChatShortcutEventLike & {
+  isComposing?: boolean
+}
+
+export type ApprovalShortcutAction =
+  | { type: 'approve' }
+  | { type: 'reject' }
+  | { type: 'submit-redirect' }
+  | { type: 'clear-redirect' }
+
+export type ApprovalShortcutContext = {
+  /** The redirect text currently typed in the card ('' when none). */
+  redirectText: string
+}
+
+export function isApprovalRedirectTarget(target: ChatShortcutTargetLike | null | undefined): boolean {
+  return Boolean(target?.classList?.contains('verevon-browser-approval__redirect'))
+}
+
+export function matchApprovalShortcut(
+  event: ApprovalShortcutEventLike,
+  target: ChatShortcutTargetLike | null | undefined,
+  context: ApprovalShortcutContext,
+): ApprovalShortcutAction | null {
+  if (event.isComposing || event.altKey) return null
+  const inRedirect = isApprovalRedirectTarget(target)
+  const hasText = context.redirectText.trim().length > 0
+  const mod = event.metaKey || event.ctrlKey
+
+  if (event.key === 'Escape') {
+    return inRedirect ? { type: 'clear-redirect' } : null
+  }
+
+  // Any other editable (a field outside the redirect box) keeps its keys.
+  if (isEditableTarget(target) && !inRedirect) return null
+
+  if (event.key !== 'Enter') return null
+
+  if (mod && event.shiftKey) {
+    return hasText ? { type: 'submit-redirect' } : { type: 'reject' }
+  }
+  if (mod) {
+    return hasText ? null : { type: 'approve' }
+  }
+  if (event.shiftKey) return null
+  return inRedirect && hasText ? { type: 'submit-redirect' } : null
+}
+
+/**
  * Picks the next thread id for a select-thread shortcut, given the sidebar's
  * own ordering (readChatThreadHistory returns newest-first) and the
  * currently active thread id. Exported for unit testing.

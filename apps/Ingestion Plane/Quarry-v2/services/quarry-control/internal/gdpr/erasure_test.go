@@ -173,3 +173,93 @@ func TestHandleErasure_IsIdempotentAcrossRedelivery(t *testing.T) {
 		t.Fatalf("purger.calls=%v want=[org_a org_a]", purger.calls)
 	}
 }
+
+// fakeEdge is an in-test EdgePurger: it records every org it was asked to purge
+// in quarry-edge and returns a canned result or error (WS17.E3).
+type fakeEdge struct {
+	calls  []string
+	result EdgePurgeResult
+	err    error
+}
+
+func (f *fakeEdge) PurgeEdgeOrg(orgID string) (EdgePurgeResult, error) {
+	f.calls = append(f.calls, orgID)
+	return f.result, f.err
+}
+
+func TestHandleErasureWithEdge_PurgesStoreThenEdge(t *testing.T) {
+	t.Parallel()
+	purger := &fakePurger{result: store.PurgeResult{JobsDeleted: 2}}
+	edge := &fakeEdge{result: EdgePurgeResult{Families: []EdgePurgeFamily{{Family: "profiles", RowsDeleted: 3, TombstonesDeleted: 1, CacheKeysDeleted: 4}}}}
+	payload := orgErasurePayload(t, "org_a", "system:org-core-purge-cron")
+
+	result, edgeResult, err := HandleErasureWithEdge(purger, edge, payload)
+	if err != nil {
+		t.Fatalf("HandleErasureWithEdge: %v", err)
+	}
+	if len(purger.calls) != 1 || purger.calls[0] != "org_a" {
+		t.Fatalf("store purger calls=%v want=[org_a]", purger.calls)
+	}
+	if len(edge.calls) != 1 || edge.calls[0] != "org_a" {
+		t.Fatalf("edge calls=%v want=[org_a]", edge.calls)
+	}
+	if result != purger.result {
+		t.Errorf("store result=%+v want=%+v", result, purger.result)
+	}
+	if edgeResult.Total() != 8 {
+		t.Errorf("edge Total()=%d want=8", edgeResult.Total())
+	}
+}
+
+func TestHandleErasureWithEdge_NilEdgeIsTheStoreOnly(t *testing.T) {
+	t.Parallel()
+	purger := &fakePurger{}
+	payload := orgErasurePayload(t, "org_a", "actor")
+
+	if _, edgeResult, err := HandleErasureWithEdge(purger, nil, payload); err != nil {
+		t.Fatalf("HandleErasureWithEdge(nil edge): %v", err)
+	} else if edgeResult.Total() != 0 {
+		t.Errorf("edge Total()=%d want=0 when the hop is off", edgeResult.Total())
+	}
+	if len(purger.calls) != 1 {
+		t.Fatalf("store calls=%v want one", purger.calls)
+	}
+}
+
+// An edge failure is an error, not a poison event: the subscriber must NAK it so
+// JetStream redelivers (a transient edge outage must not drop the erasure).
+func TestHandleErasureWithEdge_EdgeFailureIsRetryableNotPoison(t *testing.T) {
+	t.Parallel()
+	purger := &fakePurger{}
+	edge := &fakeEdge{err: errors.New("gdpr: edge purge call failed")}
+	payload := orgErasurePayload(t, "org_a", "actor")
+
+	_, _, err := HandleErasureWithEdge(purger, edge, payload)
+	if err == nil {
+		t.Fatal("edge failure returned nil error; the erasure would be acked and lost")
+	}
+	var poison *poisonEventError
+	if errors.As(err, &poison) {
+		t.Fatalf("edge failure classified as poison (%v); it must be retried", err)
+	}
+}
+
+func TestHandleErasureWithEdge_UserSubjectNeverReachesTheEdge(t *testing.T) {
+	t.Parallel()
+	purger := &fakePurger{}
+	edge := &fakeEdge{}
+	payload, err := json.Marshal(map[string]any{
+		"subject_type": "user",
+		"subject_id":   "user_a",
+		"org_id":       "org_a",
+	})
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	if _, _, err := HandleErasureWithEdge(purger, edge, payload); err != nil {
+		t.Fatalf("HandleErasureWithEdge: %v", err)
+	}
+	if len(edge.calls) != 0 {
+		t.Fatalf("edge calls=%v want none for a user subject", edge.calls)
+	}
+}

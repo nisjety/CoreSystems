@@ -12,3 +12,5 @@ type ValidateGrantRequest = mpv1.ValidateGrantRequest
 type ValidateGrantResponse = mpv1.ValidateGrantResponse
 type DeriveRunGrantRequest = mpv1.DeriveRunGrantRequest
 type DeriveRunGrantResponse = mpv1.DeriveRunGrantResponse
+type RenewGrantRequest = mpv1.RenewGrantRequest
+type RenewGrantResponse = mpv1.RenewGrantResponse

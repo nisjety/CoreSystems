@@ -52,7 +52,7 @@ impl TransportFallbackDriver {
                 warn!(
                     primary = self.primary_name,
                     fallback = self.fallback_name,
-                    error = %primary_err,
+                    error_class = primary_err.code.wire_name(),
                     "preferred transport failed, falling back"
                 );
                 match self.fallback.fetch_conditional(url, hints).await {
@@ -198,6 +198,7 @@ mod tests {
                     body: body.to_vec(),
                     duration_ms: 1,
                     served_by: self.kind,
+                    captures: None,
                 }),
                 StubOutcome::Err(code) => Err(QuarryError::new(code, "simulated failure")),
             }

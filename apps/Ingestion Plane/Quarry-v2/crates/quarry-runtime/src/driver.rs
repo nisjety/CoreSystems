@@ -4,6 +4,12 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use std::sync::Arc;
+use std::time::Duration;
+
+use quarry_core::scrape_actions::ValidatedActions;
+
+use quarry_core::capture::{CaptureLimits, CapturePlan};
 use quarry_core::output::DriverKind;
 use quarry_core::privacy::PrivacyPolicy;
 use quarry_core::QuarryResult;
@@ -60,6 +66,15 @@ pub struct FetchHints {
     /// Privacy policy for this fetch. Drivers consult this before using any
     /// third-party proxy, browser, unblocker, or managed provider.
     pub privacy: PrivacyPolicy,
+    /// Upper bound on the body bytes the static driver reads. `None` (default):
+    /// the body is read whole, as before. The read stops at the cap, it does not
+    /// read the whole body and then cut it. WS14.S4 (`robots.txt`: 512 KiB); WS5
+    /// slice 1 uses the same field.
+    pub max_body_bytes: Option<usize>,
+    /// What happens when the body is longer than `max_body_bytes`: `true` returns
+    /// the bytes read so far (a cut body, the status unchanged); `false`
+    /// (default) refuses the response with `ErrorCode::DriverFailed`.
+    pub truncate_at_cap: bool,
 }
 
 /// Browser-only render hints. Static fetch drivers ignore these.
@@ -76,12 +91,68 @@ pub struct RenderHints {
     /// Timeout for `wait_for_selector` in milliseconds. Falls back to a
     /// driver-defined default (typically 5000 ms) when unset.
     pub wait_for_timeout_ms: Option<u32>,
+    /// WS13.4b: what to capture from the page once it has settled (a
+    /// screenshot, a PDF). `None` (default): no capture. Only the browser
+    /// driver takes captures; any other driver refuses the request.
+    pub capture: Option<CapturePlan>,
+    /// The caps the captures run under. Never raised past the built-in values.
+    pub capture_limits: CaptureLimits,
+    /// Under ZDR, the inline cap for the capture bytes a response carries.
+    /// `None` uses `capture::DEFAULT_INLINE_CAPTURE_MAX_BYTES`.
+    pub capture_inline_max_bytes: Option<usize>,
+    /// WS13.5: the validated scrape-time actions to run on the settled page, after
+    /// the selector wait and before the page is read. `None` (default): no actions.
+    pub actions: Option<Arc<ValidatedActions>>,
+    /// WS13.5: how long the action run may take, counted from the start of the
+    /// run. `None` uses the built-in 115 s.
+    pub actions_deadline: Option<Duration>,
+}
+
+impl RenderHints {
+    /// Whether this render needs a browser: a capture or an action is asked for.
+    pub fn needs_browser(&self) -> bool {
+        self.capture.is_some() || self.actions.is_some()
+    }
+}
+
+/// What a driver can do for a scrape beyond a plain fetch. The default driver
+/// can do neither.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScrapeCapabilities {
+    /// Scrape-time actions (WS13.5): the driver runs them on the page a scrape opened.
+    pub actions: bool,
+    /// Scrape-time screenshots and PDFs (WS13.4b).
+    pub capture: bool,
 }
 
 #[async_trait]
 pub trait Driver: Send + Sync {
     fn kind(&self) -> DriverKind;
     async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse>;
+    /// Fetch with a transport-enforced decoded-body bound. Implementations
+    /// must stop reading before exceeding the bound, not truncate afterwards.
+    /// Unsupported drivers fail closed: discovery must never silently fall
+    /// back to an unbounded browser/provider fetch.
+    async fn fetch_bounded(&self, _url: &Url, _max_bytes: usize) -> QuarryResult<FetchResponse> {
+        Err(quarry_core::error::QuarryError::new(
+            quarry_core::error::ErrorCode::Unsupported,
+            "driver does not support bounded fetch",
+        ))
+    }
+    /// One credentialless bounded discovery hop. Never follow redirects here:
+    /// the discovery caller must validate and preflight every target first.
+    /// Unsupported drivers fail closed rather than inheriting an unknown
+    /// bounded transport's redirect, cookie, or proxy behaviour.
+    async fn fetch_discovery_hop(
+        &self,
+        _url: &Url,
+        _max_bytes: usize,
+    ) -> QuarryResult<FetchResponse> {
+        Err(quarry_core::error::QuarryError::new(
+            quarry_core::error::ErrorCode::Unsupported,
+            "driver does not support bounded discovery hops",
+        ))
+    }
     /// Conditional GET: send `If-None-Match` / `If-Modified-Since`
     /// when validators are provided. Default impl ignores the hints
     /// and delegates to `fetch` — backward-compatible for drivers
@@ -99,6 +170,16 @@ pub trait Driver: Send + Sync {
     }
     fn browser_meta(&self) -> Option<BrowserMeta> {
         None
+    }
+    /// The health of the local browser this driver fetches through (WS3.F),
+    /// for `/ready`. `None`: the driver has no browser.
+    async fn browser_health(&self) -> Option<quarry_browser::BrowserHealth> {
+        None
+    }
+    /// What this driver can do for a scrape beyond a plain fetch (WS13.4b).
+    /// Default: nothing.
+    fn scrape_capabilities(&self) -> ScrapeCapabilities {
+        ScrapeCapabilities::default()
     }
 }
 

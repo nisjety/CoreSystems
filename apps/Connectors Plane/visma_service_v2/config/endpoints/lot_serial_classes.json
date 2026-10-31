@@ -1,0 +1,31 @@
+{
+  "endpoint_name": "lot_serial_classes",
+  "bigquery_table": "visma_lot_serial_classes",
+  "primary_key": "id",
+  "source": "erp_rest",
+  "api_method": "get_lot_serial_classes",
+  "api_endpoint": "/v1/lotserialclass",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "id",
+    "description",
+    "trackingMethod",
+    "trackExpirationDate",
+    "autoGenerateNextNumber",
+    "lastModifiedDateTime"
+  ],
+  "datamart": {
+    "ready": false,
+    "query_file": "config/queries/lot_serial_class.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "erp_rest",
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    }
+  }
+}

@@ -63,6 +63,7 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
   const orgId = createMemo(() => session.activeOrg?.id?.trim() ?? '')
 
   const [name, setName] = createSignal(props.seedTitle)
+  const [goal, setGoal] = createSignal(props.seedGoal)
   const [presetId, setPresetId] = createSignal(firstPresetId())
   const [customExpr, setCustomExpr] = createSignal('')
   const [timezoneAdvanced, setTimezoneAdvanced] = createSignal(false)
@@ -80,6 +81,7 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
 
   function reset(): void {
     setName(props.seedTitle)
+    setGoal(props.seedGoal)
     setPresetId(firstPresetId())
     setCustomExpr('')
     setTimezoneAdvanced(false)
@@ -99,9 +101,11 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
     const id = orgId()
     const trimmedName = name().trim()
     const trimmedExpr = scheduleExpr()
-    if (!id || !trimmedName || !trimmedExpr || submitting()) {
+    if (!id || !trimmedName || !goal().trim() || !trimmedExpr || submitting()) {
       if (!trimmedName) {
         setErrorMessage(i18n.tr('Navn er påkrevd.', 'Name is required.'))
+      } else if (!goal().trim()) {
+        setErrorMessage(i18n.tr('Oppgave er påkrevd.', 'Task is required.'))
       } else if (!trimmedExpr) {
         setErrorMessage(i18n.tr('Cron-uttrykk er påkrevd.', 'A cron expression is required.'))
       }
@@ -116,7 +120,7 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
         name: trimmedName,
         scheduleExpr: trimmedExpr,
         timezone: timezone().trim() || DEFAULT_SCHEDULE_TIMEZONE,
-        goalText: props.seedGoal,
+        goalText: goal().trim(),
         threadOriginHint: props.threadOriginHint,
         contract:
           approvedTools.length > 0
@@ -172,6 +176,20 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
             disabled={submitting()}
           />
         </label>
+
+        <Show when={!props.seedGoal.trim()}>
+          <label class="verevon-schedule-dialog__field">
+            <span>{i18n.tr('Oppgave', 'Task')}</span>
+            <textarea
+              value={goal()}
+              maxlength={4000}
+              rows={3}
+              placeholder={i18n.tr('Beskriv hva Verevon skal undersøke eller oppsummere ved hver kjøring.', 'Describe what Verevon should investigate or summarize on each run.')}
+              onInput={(event) => setGoal(event.currentTarget.value)}
+              disabled={submitting()}
+            />
+          </label>
+        </Show>
 
         <label class="verevon-schedule-dialog__field">
           <span>{i18n.tr('Gjentakelse', 'Recurrence')}</span>
@@ -305,7 +323,7 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
           <button
             type="button"
             class="verevon-schedule-dialog__submit"
-            disabled={!name().trim() || !scheduleExpr() || submitting()}
+            disabled={!name().trim() || !goal().trim() || !scheduleExpr() || submitting()}
             onClick={() => void submit()}
           >
             {submitting() ? i18n.tr('Oppretter …', 'Creating…') : i18n.tr('Opprett plan', 'Create schedule')}

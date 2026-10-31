@@ -6,6 +6,9 @@
 
 Name | Type
 ------------ | -------------
+`timezone` | string
+`jitterS` | number
+`needsActivation` | boolean
 `scheduleId` | string
 `orgId` | string
 `name` | string
@@ -28,6 +31,9 @@ import type { ScheduleSummary } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
+  "timezone": null,
+  "jitterS": null,
+  "needsActivation": null,
   "scheduleId": null,
   "orgId": null,
   "name": null,

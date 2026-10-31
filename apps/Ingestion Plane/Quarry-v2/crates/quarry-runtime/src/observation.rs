@@ -15,7 +15,8 @@ use quarry_browser::{
 };
 use quarry_core::contracts::{
     ActionOutcome, AgentAction, AgentActionRequest, BrowserObservation, BrowserSnapshot,
-    BrowserTelemetry, ChallengeKind, ChallengeSignal, ConsoleLine, DomEvidenceDelta, DomSummary,
+    BrowserTelemetry, ChallengeSignal, ChallengeStrength, ConsoleLine, DomEvidenceDelta,
+    DomSummary,
     ElementClickTarget, ElementFingerprint, EvidenceDelta, ExtractionFieldResult,
     ExtractionProfile, ExtractionResult, ExtractionSource, InteractiveElement, NetworkEntry,
     NetworkEvidenceDelta, ObservationDelta, ProofBundle, ResolvedTargetProof, SemanticLocator,
@@ -24,11 +25,14 @@ use quarry_core::contracts::{
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::event::EventType;
 use quarry_core::ids::kinds::ArtifactKind;
+use quarry_core::redaction::{self, FieldKind, Tally, RULE_VERSION};
 use quarry_core::zdr::{self, WriteKind, ZdrMode};
 use serde_json::{json, Value};
 
 use crate::artifact_store::ArtifactStore;
+use crate::challenge::{self, BlockEpisodes, ChallengeConfig, ChallengeInput, ClassifierMode, EnforceMode};
 use crate::events::EventSink;
+use crate::observation_redaction::{self, Redactor, ScreenshotReport};
 use crate::vision::{VisualChangeArtifact, VisualObservationInput, VisualObservationProcessor};
 
 pub struct ObservationRunner {
@@ -43,6 +47,7 @@ pub struct ObservationRunner {
     pub org_id: String,
 }
 
+#[derive(Default)]
 pub struct ObservationContext {
     pub step: u32,
     pub current_url: String,
@@ -66,7 +71,30 @@ pub struct ObservationContext {
     /// Observation counters remain run-local. They deliberately reset on
     /// resume, matching the snapshot and prior-network lifecycle.
     pub observed_action_count: u32,
+    /// Strong challenge signals only; a login page or a rate limit is not
+    /// counted.
     pub challenge_observation_count: u32,
+    /// Per-host challenge bookkeeping for the one-recovery rule. In memory,
+    /// run-local, empty after a resume.
+    pub block_episodes: BlockEpisodes,
+    /// Hosts the run's web policy denies (WS7.G). Set once when the run starts. Every action
+    /// installs the run's egress policy again, so the deny list rides along: a sub-resource,
+    /// frame or redirect to one of these hosts is refused at the browser boundary. Empty
+    /// means the policy installed is exactly the one built from the run's allowed domains.
+    pub egress_denied: Vec<String>,
+    /// D2-019: the egress boundary the run was started under (its allow list narrowed by the
+    /// web policy, the open-web policy, the deny list). When set, every action installs
+    /// exactly this policy instead of rebuilding one from `constraints.allowed_domains`,
+    /// which would drop the narrowing and the open-web mode after the first step. `None`
+    /// (a context built outside `start_run`, the legacy agent loop) keeps the rebuild.
+    pub egress_policy: Option<BrowserEgressPolicy>,
+    /// D2-065: the kind of the control the keyboard focus is on, as far as this run
+    /// has seen it. `None` is "not known" and is the start state, after a resume, and
+    /// after any action that can move focus without the run seeing where. A key
+    /// press that types a character is masked by this kind when its receipt is
+    /// written (`receipt_field_kind`), and as a secret when it is `None`. In memory
+    /// only, run-local, like `active_snapshot`.
+    pub key_focus: Option<FieldKind>,
 }
 
 /// Page identity captured at observation time. Deliberately tiny so carrying
@@ -152,66 +180,27 @@ impl ObservationRunner {
     const MAX_DOWNLOAD_ARTIFACT_BYTES: usize = 25 * 1024 * 1024;
 
     /// Classify access/challenge pages without attempting to bypass them. The
-    /// signal is deliberately conservative and evidence-bearing so Model
-    /// Plane can decide whether to ask for a user handoff or use another
-    /// source. It is not a success/failure verdict for the business action.
+    /// signal is conservative and evidence-bearing so the Model Plane can decide
+    /// whether to ask for a user handoff or use another source; it is not a
+    /// success/failure verdict for the business action. A thin wrapper over
+    /// `challenge::classify` for a caller that has only text (no HTML, no
+    /// status): the runner itself passes both. `QUARRY_CHALLENGE_CLASSIFIER=
+    /// legacy` selects the old substring classifier.
     pub fn classify_challenge(
         url: &str,
         title: Option<&str>,
         text: Option<&str>,
     ) -> Option<ChallengeSignal> {
-        let haystack = format!(
-            "{} {} {}",
-            url,
-            title.unwrap_or_default(),
-            text.unwrap_or_default()
-        )
-        .to_ascii_lowercase();
-        let (kind, evidence) = if ["captcha", "recaptcha", "hcaptcha", "verify you are human"]
-            .iter()
-            .any(|needle| haystack.contains(needle))
-        {
-            (ChallengeKind::Captcha, vec!["captcha_marker".to_owned()])
-        } else if [
-            "access denied",
-            "forbidden",
-            "blocked by",
-            "status code 403",
-        ]
-        .iter()
-        .any(|needle| haystack.contains(needle))
-        {
-            (
-                ChallengeKind::AccessDenied,
-                vec!["access_denied_marker".to_owned()],
-            )
-        } else if ["sign in", "log in", "login required", "/login"]
-            .iter()
-            .any(|needle| haystack.contains(needle))
-        {
-            (ChallengeKind::Login, vec!["login_marker".to_owned()])
-        } else if ["cookie consent", "accept cookies", "consent required"]
-            .iter()
-            .any(|needle| haystack.contains(needle))
-        {
-            (ChallengeKind::Consent, vec!["consent_marker".to_owned()])
-        } else if ["too many requests", "rate limit", "status code 429"]
-            .iter()
-            .any(|needle| haystack.contains(needle))
-        {
-            (
-                ChallengeKind::RateLimit,
-                vec!["rate_limit_marker".to_owned()],
-            )
-        } else {
-            return None;
-        };
-        Some(ChallengeSignal {
-            kind,
-            confidence: 0.98,
-            evidence,
-            requires_escalation: true,
-        })
+        match ChallengeConfig::from_env().classifier {
+            ClassifierMode::Legacy => challenge::classify_legacy(url, title, text),
+            ClassifierMode::V2 => challenge::classify(&ChallengeInput {
+                url,
+                title,
+                html: None,
+                text_snippet: text,
+                main_doc_status: None,
+            }),
+        }
     }
 
     fn outcome_for_action(action: &AgentAction, current_url: &str) -> ActionOutcome {
@@ -258,7 +247,8 @@ impl ObservationRunner {
             | AgentAction::SelectSemantic { .. }
             | AgentAction::Evaluate { .. }
             | AgentAction::Back
-            | AgentAction::Forward => ActionOutcome::unknown(
+            | AgentAction::Forward
+            | AgentAction::Reload { .. } => ActionOutcome::unknown(
                 "postcondition_required",
                 "the browser operation completed, but its business effect was not verified",
             ),
@@ -339,6 +329,9 @@ impl ObservationRunner {
             },
             AgentAction::Back => Action::Back,
             AgentAction::Forward => Action::Forward,
+            AgentAction::Reload { ignore_cache } => Action::Reload {
+                ignore_cache: *ignore_cache,
+            },
             AgentAction::GetContent => Action::Navigate { url: String::new() },
         })
     }
@@ -355,12 +348,12 @@ impl ObservationRunner {
         // REST handler: browser WebSocket actions and any future internal
         // caller use the same run-scoped policy before a page can make an
         // effectful request.
-        self.browser
-            .configure_egress_policy(
-                session,
-                BrowserEgressPolicy::from_allowed_domains(&request.constraints.allowed_domains),
-            )
-            .await?;
+        let egress = match ctx.egress_policy.as_ref() {
+            Some(resolved) => resolved.clone(),
+            None => BrowserEgressPolicy::from_allowed_domains(&request.constraints.allowed_domains)
+                .with_denied_domains(&ctx.egress_denied),
+        };
+        self.browser.configure_egress_policy(session, egress).await?;
         if action_requires_atomic_target(&request.action)
             && !self.browser.capabilities().atomic_target_actions
         {
@@ -379,6 +372,34 @@ impl ObservationRunner {
                 "selected browser driver cannot produce governed full-fidelity visual evidence",
             ));
         }
+        // The one-recovery rule. A host that kept challenging after its one wait
+        // or reload gets no more navigation and no more interaction. Checked
+        // before anything touches the browser, so a refused action has no effect.
+        let current_host = challenge::host_of(&ctx.current_url).unwrap_or_default();
+        if let Err(error) =
+            ctx.block_episodes
+                .reject_if_exhausted(&request.action, &current_host, request.zdr)
+        {
+            match ctx.block_episodes.config().enforce {
+                EnforceMode::Enforce => return Err(error),
+                // Validation period: say what would have happened (a reason,
+                // never a host or URL) and let the action through.
+                EnforceMode::Log => {
+                    tracing::warn!(reason = "challenge_loop", "quarry.challenge.would_reject");
+                }
+            }
+        }
+        ctx.block_episodes
+            .note_recovery_action(&request.action, &ctx.current_url, request.zdr);
+
+        // WS12.S2: the field kind of the control a typing action goes to, read from the
+        // snapshot the action names; `ctx.active_snapshot` is replaced further down.
+        // D2-065: a key press is read against the control the run last focused.
+        let typed_kind = receipt_field_kind(ctx, &request.action);
+        // Where the keyboard focus is once this action has run. Unknown until it has: an
+        // action that fails, or returns early, leaves the focus unknown (fails closed).
+        let focus_after = key_focus_after(ctx, &request.action, typed_kind);
+        ctx.key_focus = None;
         let (effective_action, target_resolution, verified_target_action, transfer_target) = self
             .resolve_snapshot_action(&request.action, session, ctx)
             .await?;
@@ -389,17 +410,38 @@ impl ObservationRunner {
                     request.zdr,
                     run_id.clone(),
                     EventType::ActionStarted,
-                    json!({ "step": ctx.step, "action": serde_json::to_value(&request.action).ok() }),
+                    json!({
+                        "step": ctx.step,
+                        "action": observation_redaction::action_for_event(
+                            &request.action,
+                            typed_kind,
+                            // X-19: the event keeps what the stored receipt keeps.
+                            quarry_core::redaction::action::record_policy(),
+                            redaction::mode(),
+                            &mut Tally::new(),
+                        ),
+                    }),
                     format!("{}:action:{}:started", run_id, ctx.step),
                 )
                 .await;
         }
 
         let mut screenshot_artifact_id: Option<ArtifactKind> = None;
+        // WS12.S5: what the screenshot mask did (counts only), for the stamp.
+        let mut screenshot_report: Option<ScreenshotReport> = None;
         let mut visual_observation_artifact_id: Option<ArtifactKind> = None;
         let mut download_artifact_id: Option<ArtifactKind> = None;
         let policy_denials: Vec<String> = Vec::new();
         let mut current_screenshot: Option<Vec<u8>> = None;
+
+        // SC4 D1: an action that only reads the page observes the session as it is, also
+        // when it has no page yet (a run that never navigated, one resumed from a
+        // checkpoint with no URL): the driver gives it a tab on `about:blank`, navigated
+        // nowhere, instead of the step failing with `no_current_page`. An action that
+        // acts on a page still needs one.
+        if action_only_observes(&effective_action) {
+            self.browser.ensure_page(session).await?;
+        }
 
         if let Some(verified_target_action) = verified_target_action {
             self.browser
@@ -514,7 +556,15 @@ impl ObservationRunner {
                     );
                 }
                 AgentAction::Screenshot { full_page } => {
-                    let bytes = self.browser.screenshot(session, *full_page).await?;
+                    // WS12.S5: a withheld screenshot is a `SecurityBlocked` error
+                    // (403) with the same reason the observation note carries.
+                    let masked = self.browser.screenshot_masked(session, *full_page).await?;
+                    screenshot_report = Some(ScreenshotReport::of(&masked));
+                    let bytes = masked.bytes.ok_or_else(|| {
+                        quarry_browser::MaskedScreenshot::withheld_error(
+                            masked.note.unwrap_or("screenshot_withheld:sensitive_field_unresolved"),
+                        )
+                    })?;
                     let payload = bytes.to_vec();
                     screenshot_artifact_id = self
                         .put_artifact_if_allowed(
@@ -539,14 +589,20 @@ impl ObservationRunner {
                         )
                         .await?;
                 }
-                AgentAction::Evaluate { script } => {
-                    self.browser.evaluate(session, script).await?;
+                AgentAction::Evaluate { .. } => {
+                    // Raw script is refused before any driver call. The edge
+                    // gates it first; this keeps library callers (agent loop,
+                    // compiled procedures) from reaching the driver either.
+                    return Err(QuarryError::raw_script_denied());
                 }
                 AgentAction::Back => {
                     self.browser.back(session).await?;
                 }
                 AgentAction::Forward => {
                     self.browser.forward(session).await?;
+                }
+                AgentAction::Reload { ignore_cache } => {
+                    self.browser.reload(session, *ignore_cache).await?;
                 }
                 AgentAction::GetContent => {
                     let _content = self.browser.content(session).await?;
@@ -573,7 +629,16 @@ impl ObservationRunner {
             }
         }
 
-        let page_state = self.page_state(session).await;
+        ctx.key_focus = focus_after;
+
+        // SC4 T3: a page that did not answer one of the reads below in time does not
+        // answer the next one either (a load that still holds it, a renderer in a
+        // loop). Each read has its own deadline, so reading on made a step wait for
+        // their sum (page state + content + accessibility tree: 20 s at a 0.5 scale,
+        // where the tree's own deadline was 5 s). The first timeout ends the page
+        // reads, and the observation fails with it instead of the last one.
+        let mut stalled: Option<QuarryError> = None;
+        let page_state = self.page_state(session, &mut stalled).await;
         if let Some(url) = page_state.url.as_deref().filter(|url| !url.is_empty()) {
             ctx.current_url = url.to_owned();
         }
@@ -599,31 +664,58 @@ impl ObservationRunner {
             Err(error) if error.code == ErrorCode::Unsupported => Vec::new(),
             Err(error) => return Err(error),
         };
-        if let Some(last_receipt) = egress_receipts.last() {
-            ctx.last_egress_sequence = ctx.last_egress_sequence.max(last_receipt.sequence);
-        }
-        let dialogs = self.browser.dialogs(session).await.unwrap_or_default();
+        // The cursor moves only once the observation that carries these receipts is
+        // returned: a step that fails below leaves them for the next observation.
+        let next_egress_sequence = egress_receipts
+            .last()
+            .map_or(ctx.last_egress_sequence, |last_receipt| {
+                ctx.last_egress_sequence.max(last_receipt.sequence)
+            });
+        // WS12.S2: everything below that is returned to the caller passes the Live profile.
+        let mut redactor = Redactor::new();
+        let mut dialogs = self.browser.dialogs(session).await.unwrap_or_default();
+        redactor.dialogs(&mut dialogs);
 
-        let html_bytes = self.browser.content(session).await.ok();
+        let html_bytes = if stalled.is_some() {
+            None
+        } else {
+            match self.browser.content(session).await {
+                Ok(bytes) => Some(bytes),
+                Err(error) => {
+                    note_stalled_read(&mut stalled, error);
+                    None
+                }
+            }
+        };
+        if let Some(error) = stalled {
+            return Err(observation_read_error(&request.action, error));
+        }
         if let Some(bytes) = html_bytes.as_ref() {
             // Proof must identify the bytes actually observed, not the
             // synthetic run hash used before the first page is loaded.
             ctx.page_hash = format!("blake3:{}", blake3::hash(bytes).to_hex());
         }
 
-        let dom_summary = html_bytes.as_ref().map(|bytes| {
+        let mut dom_summary = html_bytes.as_ref().map(|bytes| {
             let html_str = String::from_utf8_lossy(bytes);
             build_dom_summary(&html_str)
         });
-        let native_projection = match self.browser.native_page_projection(session).await {
+        if let Some(summary) = dom_summary.as_mut() {
+            redactor.dom_summary(summary);
+        }
+        let mut native_projection = match self.browser.native_page_projection(session).await {
             Ok(projection) => Some(projection),
             // Older/read-only drivers can continue to expose the explicitly
             // marked compatibility snapshot. A driver that advertises native
             // browser operation must not silently downgrade because its AX
             // query failed mid-run.
             Err(error) if error.code == ErrorCode::Unsupported => None,
-            Err(error) => return Err(error),
+            Err(error) => return Err(observation_read_error(&request.action, error)),
         };
+        ctx.last_egress_sequence = next_egress_sequence;
+        if let Some(projection) = native_projection.as_mut() {
+            redactor.projection(projection);
+        }
         let active_snapshot = (dom_summary.is_some() || native_projection.is_some()).then(|| {
             build_active_snapshot(
                 run_id,
@@ -636,36 +728,53 @@ impl ObservationRunner {
         let snapshot = active_snapshot.as_ref().map(|state| state.snapshot.clone());
         ctx.active_snapshot = active_snapshot;
 
-        let title = page_state.title.or_else(|| {
+        let mut title = page_state.title.or_else(|| {
             html_bytes.as_ref().and_then(|bytes| {
                 let html_str = String::from_utf8_lossy(bytes);
                 extract_title(&html_str)
             })
         });
+        redactor.title(&mut title);
 
         let extraction_profile = request.extraction_profile.clone();
-        let extraction_result = extraction_profile.as_ref().and_then(|profile| {
+        let mut extraction_result = extraction_profile.as_ref().and_then(|profile| {
             html_bytes
                 .as_ref()
                 .and_then(|bytes| extract_profile(bytes, profile))
         });
+        if let Some(result) = extraction_result.as_mut() {
+            redactor.extraction(result);
+        }
 
         if screenshot_artifact_id.is_none() {
-            if let Ok(bytes) = self.browser.screenshot(session, false).await {
-                let payload = bytes.to_vec();
-                if let Ok(id) = self
-                    .put_artifact_if_allowed(
-                        request.zdr,
-                        run_id,
-                        &ctx.page_hash,
-                        "screenshot",
-                        payload.clone(),
-                    )
-                    .await
-                {
-                    screenshot_artifact_id = id;
+            if let Ok(masked) = self.browser.screenshot_masked(session, false).await {
+                screenshot_report = Some(ScreenshotReport::of(&masked));
+                if let Some(bytes) = masked.bytes {
+                    let payload = bytes.to_vec();
+                    if let Ok(id) = self
+                        .put_artifact_if_allowed(
+                            request.zdr,
+                            run_id,
+                            &ctx.page_hash,
+                            "screenshot",
+                            payload.clone(),
+                        )
+                        .await
+                    {
+                        screenshot_artifact_id = id;
+                    }
+                    current_screenshot = Some(payload);
+                } else {
+                    // WS12.S5: withheld (`screenshot_withheld:sensitive_field_unresolved`
+                    // and the other closed causes). No artifact, no sidecar input, and
+                    // no stale previous frame for the next step to diff against.
+                    ctx.previous_screenshot = None;
+                    // zdr-log-ok: a closed note string, no page-derived value
+                    tracing::info!(
+                        note = masked.note.unwrap_or("screenshot_withheld"),
+                        "quarry.screenshot.withheld"
+                    );
                 }
-                current_screenshot = Some(payload);
             }
         }
 
@@ -827,13 +936,13 @@ impl ObservationRunner {
                             {
                                 Ok(id) => visual_observation_artifact_id = id,
                                 Err(e) => tracing::warn!(
-                                    error = %e,
+                                    error_class = e.code.wire_name(),
                                     "visual observation artifact write failed"
                                 ),
                             }
                         }
                         Err(e) => tracing::warn!(
-                            error = %e,
+                            error_class = e.code.wire_name(),
                             "visual observation processor failed"
                         ),
                     }
@@ -896,19 +1005,45 @@ impl ObservationRunner {
             )
             .await
             .unwrap_or_else(|error| {
-                tracing::warn!(error = %error, "evidence delta artifact write failed");
+                tracing::warn!(error_class = error.code.wire_name(), "evidence delta artifact write failed");
                 None
             });
         let action_outcome = Self::outcome_for_action(&request.action, &ctx.current_url);
-        let challenge = Self::classify_challenge(
-            &ctx.current_url,
-            title.as_deref(),
-            dom_summary
-                .as_ref()
-                .and_then(|summary| summary.text_snippet.as_deref()),
-        );
+        let text_snippet = dom_summary
+            .as_ref()
+            .and_then(|summary| summary.text_snippet.as_deref());
+        let mut challenge = match ctx.block_episodes.config().classifier {
+            ClassifierMode::Legacy => {
+                challenge::classify_legacy(&ctx.current_url, title.as_deref(), text_snippet)
+            }
+            ClassifierMode::V2 => {
+                let page_html = html_bytes
+                    .as_ref()
+                    .map(|bytes| String::from_utf8_lossy(bytes));
+                let classified = challenge::classify(&ChallengeInput {
+                    url: &ctx.current_url,
+                    title: title.as_deref(),
+                    html: page_html.as_deref(),
+                    text_snippet,
+                    main_doc_status: challenge::main_document_status(
+                        &devtools_events,
+                        &ctx.current_url,
+                    ),
+                });
+                let host = challenge::host_of(&ctx.current_url).unwrap_or_default();
+                let fingerprint = ctx.page_hash.clone();
+                ctx.block_episodes
+                    .observe_after(&request.action, &host, request.zdr, classified, &fingerprint)
+            }
+        };
+        if let Some(signal) = challenge.as_mut() {
+            redactor.challenge(signal);
+        }
         ctx.observed_action_count = ctx.observed_action_count.saturating_add(1);
-        if challenge.is_some() {
+        if challenge
+            .as_ref()
+            .is_some_and(|signal| signal.strength == ChallengeStrength::Strong)
+        {
             ctx.challenge_observation_count = ctx.challenge_observation_count.saturating_add(1);
         }
         let driver_telemetry = match self.browser.telemetry(session).await {
@@ -917,7 +1052,7 @@ impl ObservationRunner {
                 // A telemetry sample must not turn a completed browser action
                 // into a retryable effect. Keep the unknown/default fields and
                 // retain the real execution outcome separately.
-                tracing::warn!(error = %error, "browser telemetry sample failed");
+                tracing::warn!(error_class = error.code.wire_name(), "browser telemetry sample failed");
                 BrowserTelemetry::default()
             }
         };
@@ -951,7 +1086,7 @@ impl ObservationRunner {
         }
         let proof_bundle = Some(ProofBundle {
             proof_id: format!("proof_{}_{}", run_id, ctx.step),
-            source_url: ctx.current_url.clone(),
+            source_url: redactor.live_url(&ctx.current_url),
             run_id: run_id.clone(),
             step: ctx.step,
             action_outcome: action_outcome.clone(),
@@ -960,19 +1095,37 @@ impl ObservationRunner {
             challenge: challenge.clone(),
             target_resolution: target_resolution.clone(),
             evidence_delta_artifact_id: evidence_delta_artifact_id.clone(),
+            redaction_rule_version: Some(RULE_VERSION.to_owned()),
             observed_at: Utc::now(),
         });
+        let observation_url = redactor.live_url(&ctx.current_url);
+        let mut console_summary = console_summary_from_devtools(&devtools_events);
+        redactor.console(&mut console_summary);
+        if let Some(report) = screenshot_report {
+            redactor.screenshot(report);
+        }
+        let redaction_stamp = redactor.stamp();
+        if redaction_stamp.values_masked > 0 {
+            // zdr-log-ok: counts and the process mode only, no page-derived value
+            tracing::info!(
+                values_masked = redaction_stamp.values_masked,
+                rule_count = redaction_stamp.by_rule.len(),
+                probe_ms = redaction_stamp.probe_ms,
+                shadow = redaction_stamp.mode == redaction::Mode::Shadow,
+                "quarry.redaction.observation"
+            );
+        }
         let observation = BrowserObservation {
             run_id: run_id.clone(),
             step: ctx.step,
-            url: ctx.current_url.clone(),
+            url: observation_url,
             title,
             snapshot,
             dom_summary,
             screenshot_artifact_id,
             visual_observation_artifact_id,
             evidence_delta_artifact_id,
-            console_summary: console_summary_from_devtools(&devtools_events),
+            console_summary,
             network_summary,
             egress_receipts,
             dialogs,
@@ -985,6 +1138,7 @@ impl ObservationRunner {
             proof_bundle,
             target_resolution,
             telemetry,
+            redaction: Some(redaction_stamp),
             observed_at: Utc::now(),
         };
 
@@ -1003,7 +1157,11 @@ impl ObservationRunner {
                     EventType::ObservationReady,
                     json!({
                         "step": ctx.step,
-                        "url": &observation.url,
+                        "url": observation_redaction::event_url(
+                            &observation.url,
+                            redaction::mode(),
+                            &mut Tally::new(),
+                        ),
                         "has_screenshot": observation.screenshot_artifact_id.is_some(),
                         "has_evidence_delta": observation.evidence_delta_artifact_id.is_some(),
                     }),
@@ -1453,7 +1611,12 @@ impl ObservationRunner {
         kind: &str,
         value: &T,
     ) -> QuarryResult<Option<ArtifactKind>> {
-        let body = serde_json::to_vec(value).map_err(|e| {
+        let body = observation_redaction::redact_json_artifact(
+            value,
+            redaction::mode(),
+            &mut Tally::new(),
+        )
+        .map_err(|e| {
             QuarryError::new(
                 ErrorCode::Internal,
                 format!("serialize visual artifact {kind}: {e}"),
@@ -1463,7 +1626,12 @@ impl ObservationRunner {
             .await
     }
 
-    async fn page_state(&self, session: &quarry_browser::BrowserSession) -> PageState {
+    /// The page's URL and title, or nothing. A timeout is recorded in `stalled`.
+    async fn page_state(
+        &self,
+        session: &quarry_browser::BrowserSession,
+        stalled: &mut Option<QuarryError>,
+    ) -> PageState {
         self.browser
             .evaluate(
                 session,
@@ -1473,6 +1641,7 @@ impl ObservationRunner {
                 }))()"#,
             )
             .await
+            .map_err(|error| note_stalled_read(stalled, error))
             .ok()
             .map(|value| PageState {
                 url: value
@@ -1509,6 +1678,22 @@ fn action_requires_atomic_target(action: &AgentAction) -> bool {
             | AgentAction::FrameUploadRef { .. }
             | AgentAction::DownloadRef { .. }
             | AgentAction::FrameDownloadRef { .. }
+    )
+}
+
+/// SC4 D1: the actions that only read the page as it is (a wait, a capture). They observe
+/// a session with no page yet on a blank tab (`BrowserDriver::ensure_page`). The edge's
+/// passive reads (`tab_ledger::is_passive`): a `wait_for` waits on that blank tab as on
+/// any page; its snapshot forms reach the runner here as a `WaitFor` (and need a snapshot,
+/// so a page, before that).
+fn action_only_observes(action: &AgentAction) -> bool {
+    matches!(
+        action,
+        AgentAction::Wait { .. }
+            | AgentAction::WaitFor { .. }
+            | AgentAction::Screenshot { .. }
+            | AgentAction::Pdf
+            | AgentAction::GetContent
     )
 }
 
@@ -1717,6 +1902,130 @@ fn native_target_fingerprint(target: &BrowserNativeTarget) -> ElementFingerprint
     }
 }
 
+/// WS12.S2 (D12-7): the field kind of the control a typing action goes to, read
+/// from the snapshot the action names. Call it before the action resolves:
+/// `execute` replaces `ctx.active_snapshot` with the post-action snapshot.
+///
+/// A native target carries the kind the field probe decided (`None` for a
+/// control that takes no typed text). A scanner target (a driver without a
+/// native projection) has no `type` attribute to read, so only its labels
+/// classify it; an input or textarea the labels do not explain is `Secret`,
+/// which fails closed. `None` for an action that does not type into a snapshot
+/// target, or when the snapshot does not hold the target.
+pub fn typed_field_kind(
+    snapshot: Option<&ActiveSnapshot>,
+    action: &AgentAction,
+) -> Option<FieldKind> {
+    let snapshot = snapshot?;
+    let ref_id = match action {
+        AgentAction::TypeRef { ref_id, .. } | AgentAction::FrameTypeRef { ref_id, .. } => {
+            ref_id.clone()
+        }
+        AgentAction::TypeSemantic { locator, .. } => resolve_semantic_ref(snapshot, locator).ok()?,
+        _ => return None,
+    };
+    held_target_kind(snapshot, &ref_id, false)
+}
+
+/// The field kind of a held snapshot target. `for_click` is a click: a target that
+/// is not a text control then has no kind (`None`: a click on a button says nothing
+/// about where the keyboard focus is), where a typing action treats it as an
+/// ordinary control.
+fn held_target_kind(
+    snapshot: &ActiveSnapshot,
+    ref_id: &str,
+    for_click: bool,
+) -> Option<FieldKind> {
+    let held = snapshot.targets.get(ref_id)?;
+    if let Some(native) = &held.native_target {
+        return native.field_kind;
+    }
+    let target = &held.target;
+    let facts = quarry_core::redaction::FieldFacts {
+        placeholder: target.placeholder.clone(),
+        accessible_name: target.name.clone().or_else(|| target.text.clone()),
+        ..Default::default()
+    };
+    let kind = quarry_core::redaction::classify_field(&facts);
+    if kind.is_sensitive() {
+        return Some(kind);
+    }
+    if matches!(target.tag.as_str(), "input" | "textarea") {
+        return Some(FieldKind::Secret);
+    }
+    (!for_click).then_some(FieldKind::Unknown)
+}
+
+/// D2-065: the field kind a stored receipt (and the `ActionStarted` event) masks
+/// this action's text by. A typing action reads the control it names from the
+/// snapshot (`typed_field_kind`). A key press reads the control the run last
+/// focused (`ObservationContext::key_focus`); `None` when the run cannot say.
+/// Call it before `execute`, which moves both.
+#[must_use]
+pub fn receipt_field_kind(ctx: &ObservationContext, action: &AgentAction) -> Option<FieldKind> {
+    match action {
+        AgentAction::Press { .. } => ctx.key_focus,
+        _ => typed_field_kind(ctx.active_snapshot.as_ref(), action),
+    }
+}
+
+/// D2-065: where the keyboard focus is once `action` has run, as far as the run can
+/// tell; `None` when it cannot. `typed` is [`receipt_field_kind`] for the action.
+///
+/// Typing into a control, or clicking a text control, puts focus there (a raw
+/// selector only counts when its own words name a sensitive control). A key press
+/// that edits or moves inside the control, and a wait or a scroll, leave focus where
+/// it was. Everything else may move it (a click on a link, a navigation, `Tab`,
+/// `Enter`, a script on the page) and the answer is "unknown".
+fn key_focus_after(
+    ctx: &ObservationContext,
+    action: &AgentAction,
+    typed: Option<FieldKind>,
+) -> Option<FieldKind> {
+    let selector_focus = |selector: &str| {
+        let kind = quarry_core::redaction::action::selector_kind(selector);
+        kind.is_sensitive().then_some(kind)
+    };
+    match action {
+        AgentAction::TypeRef { .. }
+        | AgentAction::FrameTypeRef { .. }
+        | AgentAction::TypeSemantic { .. } => typed,
+        AgentAction::Type { selector, .. } | AgentAction::Click { selector } => {
+            selector_focus(selector)
+        }
+        AgentAction::ClickRef { ref_id, .. } | AgentAction::FrameClickRef { ref_id, .. } => ctx
+            .active_snapshot
+            .as_ref()
+            .and_then(|snapshot| held_target_kind(snapshot, ref_id, true)),
+        AgentAction::ClickSemantic { locator, .. } => {
+            let snapshot = ctx.active_snapshot.as_ref()?;
+            let ref_id = resolve_semantic_ref(snapshot, locator).ok()?;
+            held_target_kind(snapshot, &ref_id, true)
+        }
+        AgentAction::Press { key } => {
+            let last = key.rsplit('+').find(|part| !part.is_empty()).unwrap_or(key);
+            let lower = last.trim().to_ascii_lowercase();
+            let moves_focus = matches!(lower.as_str(), "tab" | "enter" | "return" | "escape" | "esc")
+                || (lower.len() >= 2
+                    && lower.starts_with('f')
+                    && lower[1..].bytes().all(|b| b.is_ascii_digit()));
+            if moves_focus {
+                None
+            } else {
+                ctx.key_focus
+            }
+        }
+        AgentAction::Wait { .. }
+        | AgentAction::WaitFor { .. }
+        | AgentAction::WaitForRef { .. }
+        | AgentAction::FrameWaitForRef { .. }
+        | AgentAction::WaitForSemantic { .. }
+        | AgentAction::Scroll { .. }
+        | AgentAction::MouseWheel { .. } => ctx.key_focus,
+        _ => None,
+    }
+}
+
 fn resolve_semantic_ref(
     snapshot: &ActiveSnapshot,
     locator: &SemanticLocator,
@@ -1818,6 +2127,42 @@ fn attach_related(
 struct PageState {
     url: Option<String>,
     title: Option<String>,
+}
+
+/// Keep the first page read that timed out (SC4 T3). Any other failure of an
+/// optional read is dropped, as before.
+fn note_stalled_read(stalled: &mut Option<QuarryError>, error: QuarryError) {
+    if error.code == ErrorCode::Timeout && stalled.is_none() {
+        *stalled = Some(error);
+    }
+}
+
+/// The step's error for an observation read that timed out after `action` ran. The
+/// read itself changed nothing, but the step did whatever its action did: after an
+/// action that only reads or waits nothing changed and the step may be repeated;
+/// after any other (a click that landed, a navigation) the effect is unknown and a
+/// blind retry could act twice. Other errors pass through.
+fn observation_read_error(action: &AgentAction, mut error: QuarryError) -> QuarryError {
+    if error.code != ErrorCode::Timeout {
+        return error;
+    }
+    let only_reads = matches!(
+        action,
+        AgentAction::Wait { .. }
+            | AgentAction::WaitFor { .. }
+            | AgentAction::WaitForRef { .. }
+            | AgentAction::FrameWaitForRef { .. }
+            | AgentAction::WaitForSemantic { .. }
+            | AgentAction::Screenshot { .. }
+            | AgentAction::Pdf
+            | AgentAction::GetContent
+    );
+    let effect = if only_reads { "none" } else { "unknown" };
+    error.retryable = only_reads;
+    if let Some(Value::Object(details)) = error.details.as_mut() {
+        details.insert("effect".to_owned(), Value::from(effect));
+    }
+    error
 }
 
 fn console_summary_from_devtools(events: &[BrowserDevtoolsEvent]) -> Vec<ConsoleLine> {
@@ -2137,11 +2482,7 @@ pub fn build_dom_summary(html: &str) -> DomSummary {
             let body = &html[body_start..];
             let stripped = strip_tags(body);
             let trimmed = stripped.trim();
-            if trimmed.len() > 500 {
-                format!("{}...", &trimmed[..500])
-            } else {
-                trimmed.to_string()
-            }
+            text_snippet_of(trimmed)
         })
         .filter(|s| !s.is_empty());
 
@@ -2435,6 +2776,21 @@ fn extract_label_for(html: &str, control_id: &str) -> Option<String> {
     None
 }
 
+/// The first 500 bytes of the visible text, cut on a character boundary. Slicing
+/// at byte 500 panics when a multi-byte character straddles it (any CJK, accented
+/// or emoji text), which took down the request for a page in that language.
+fn text_snippet_of(trimmed: &str) -> String {
+    const MAX_BYTES: usize = 500;
+    if trimmed.len() <= MAX_BYTES {
+        return trimmed.to_string();
+    }
+    let mut end = MAX_BYTES;
+    while !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &trimmed[..end])
+}
+
 fn strip_tags(html: &str) -> String {
     let mut out = String::with_capacity(html.len() / 2);
     let mut in_tag = false;
@@ -2457,9 +2813,10 @@ mod tests {
         VisualObservationArtifact, VisualObservationResult, VisualPreprocessInput,
         VisualPreprocessResult, VisualRegion,
     };
+    use crate::challenge::ChallengeConfig;
     use bytes::Bytes;
     use quarry_browser::BrowserDriver;
-    use quarry_core::contracts::AgentConstraints;
+    use quarry_core::contracts::{AgentConstraints, ChallengeKind};
     use quarry_core::ids::kinds::RunKind;
     use quarry_core::ids::Id;
     use quarry_core::lease::{BrowserLease, ProxyAffinity};
@@ -2512,15 +2869,22 @@ mod tests {
 
     #[test]
     fn challenge_classifier_requires_escalation_and_preserves_evidence() {
+        // The text-only wrapper: a title asking for proof of humanity on a
+        // short page is two markers (a title hit counts twice).
         let signal = ObservationRunner::classify_challenge(
             "https://example.test/challenge",
             Some("Verify you are human"),
             Some("captcha required"),
         )
-        .expect("captcha should be classified");
+        .expect("a human check should be classified");
         assert_eq!(signal.kind, ChallengeKind::Captcha);
+        assert_eq!(signal.strength, ChallengeStrength::Strong);
         assert!(signal.requires_escalation);
-        assert!(signal.confidence > 0.9);
+        assert_eq!(
+            signal.block_reason,
+            Some(quarry_core::contracts::BlockReason::UnexpectedBotError)
+        );
+        assert!(signal.confidence >= 0.85);
         assert!(!signal.evidence.is_empty());
     }
 
@@ -2532,6 +2896,416 @@ mod tests {
             Some("A normal page with source text"),
         )
         .is_none());
+    }
+
+    #[test]
+    fn a_login_page_through_the_wrapper_is_not_an_escalation() {
+        let signal = ObservationRunner::classify_challenge(
+            "https://example.test/login",
+            Some("Sign in"),
+            Some("Sign in to your account"),
+        );
+        assert!(signal.is_none_or(|s| !s.requires_escalation));
+    }
+
+    const TURNSTILE_HTML: &[u8] = b"<html><head><title>Just a moment...</title></head><body><div class=\"cf-turnstile\"></div><script src=\"https://challenges.cloudflare.com/turnstile/v0/api.js\"></script></body></html>";
+    const LEGACY_HTML: &[u8] = b"<html><head><title>Verify you are human</title></head><body>captcha</body></html>";
+    const LOGIN_HTML: &[u8] = b"<html><head><title>Sign in</title></head><body><form><input type=\"password\" name=\"p\"></form></body></html>";
+
+    fn challenge_lease() -> BrowserLease {
+        BrowserLease {
+            lease_id: Id::new(),
+            profile_id: Id::new(),
+            session_affinity_key: "test".into(),
+            proxy_affinity: ProxyAffinity {
+                pool: String::new(),
+                sticky_key: None,
+            },
+            ttl_s: 60,
+            capabilities: vec![],
+            artifact_bucket: String::new(),
+            persist_profile: false,
+            viewport: None,
+            org_id: "org".into(),
+        }
+    }
+
+    fn challenge_request(lease: &BrowserLease, action: AgentAction, zdr: ZdrMode) -> AgentActionRequest {
+        AgentActionRequest {
+            run_id: Id::new(),
+            lease_id: lease.lease_id.clone(),
+            action,
+            instruction: None,
+            constraints: AgentConstraints {
+                max_steps: 10,
+                allowed_domains: vec![],
+                max_runtime_s: None,
+                max_cost_usd: None,
+            },
+            zdr,
+            extraction_profile: None,
+        }
+    }
+
+    fn challenge_runner(driver: &Arc<ContentDriver>) -> ObservationRunner {
+        ObservationRunner {
+            browser: driver.clone(),
+            artifacts: None,
+            events: None,
+            visual_processor: None,
+            org_id: "org".into(),
+        }
+    }
+
+    fn challenge_ctx(config: ChallengeConfig) -> ObservationContext {
+        ObservationContext {
+            block_episodes: BlockEpisodes::new(config),
+            ..Default::default()
+        }
+    }
+
+    /// Every way the planner can act on a page or navigate to it, snapshot-ref
+    /// and semantic forms included: all of them are refused on an exhausted host.
+    fn refused_on_an_exhausted_page() -> Vec<AgentAction> {
+        let snapshot = || "snap".to_owned();
+        let locator = || quarry_core::contracts::SemanticLocator::Text { text: "go".into(), exact: false };
+        vec![
+            AgentAction::Navigate { url: "https://blocked.example/other".into() },
+            AgentAction::Navigate { url: "https://blocked.example/page".into() },
+            AgentAction::Click { selector: "#go".into() },
+            AgentAction::ClickPoint { x: 1.0, y: 2.0 },
+            AgentAction::ClickRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into() },
+            AgentAction::FrameClickRef { snapshot_id: snapshot(), generation: 1, frame_id: "f1".into(), ref_id: "e1".into() },
+            AgentAction::ClickSemantic { snapshot_id: snapshot(), generation: 1, locator: locator() },
+            AgentAction::Type { selector: "#q".into(), text: "x".into() },
+            AgentAction::TypeRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into(), text: "x".into() },
+            AgentAction::FrameTypeRef { snapshot_id: snapshot(), generation: 1, frame_id: "f1".into(), ref_id: "e1".into(), text: "x".into() },
+            AgentAction::TypeSemantic { snapshot_id: snapshot(), generation: 1, locator: locator(), text: "x".into() },
+            AgentAction::Press { key: "Enter".into() },
+            AgentAction::Select { selector: "#s".into(), value: "v".into() },
+            AgentAction::SelectRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into(), value: "v".into() },
+            AgentAction::FrameSelectRef { snapshot_id: snapshot(), generation: 1, frame_id: "f1".into(), ref_id: "e1".into(), value: "v".into() },
+            AgentAction::SelectSemantic { snapshot_id: snapshot(), generation: 1, locator: locator(), value: "v".into() },
+            AgentAction::UploadRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into(), artifact_id: Id::new(), approval_grant_id: "g".into() },
+            AgentAction::DownloadRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into(), approval_grant_id: "g".into() },
+            // Raw script is denied anyway; on an exhausted host the rule answers first.
+            AgentAction::Evaluate { script: "document.forms[0].submit()".into() },
+        ]
+    }
+
+    /// Collects tracing events as text, for the thread that installs it.
+    #[derive(Clone, Default)]
+    struct EventLog(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl EventLog {
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+
+        fn count(&self, message: &str) -> usize {
+            self.lines().iter().filter(|line| line.contains(message)).count()
+        }
+    }
+
+    impl tracing::Subscriber for EventLog {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Fields(String);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                    if !self.0.is_empty() {
+                        self.0.push(' ');
+                    }
+                    self.0.push_str(&format!("{}={:?}", field.name(), value));
+                }
+            }
+            let mut fields = Fields(String::new());
+            event.record(&mut fields);
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("{} {}", event.metadata().level(), fields.0));
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[tokio::test]
+    async fn a_same_url_navigate_alone_spends_the_recovery_at_the_runner() {
+        let driver = Arc::new(ContentDriver { html: TURNSTILE_HTML, atomic_targets: true, ..Default::default() });
+        let runner = challenge_runner(&driver);
+        let lease = challenge_lease();
+        let session = driver.acquire(&lease).await.unwrap();
+        let mut ctx = challenge_ctx(ChallengeConfig::enforcing());
+        let go = |url: &str| challenge_request(&lease, AgentAction::Navigate { url: url.into() }, ZdrMode::Off);
+
+        let first = runner
+            .execute(&go("https://blocked.example/page"), &session, &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.challenge.expect("challenge").recovery,
+            quarry_core::contracts::ChallengeRecovery::Available
+        );
+        // The only recovery here is a reload of the page the browser is on (a
+        // fragment does not make it another page). No wait anywhere.
+        let reload = runner
+            .execute(&go("https://blocked.example/page#again"), &session, &mut ctx)
+            .await
+            .expect("a reload of the same URL is allowed once");
+        let signal = reload.challenge.expect("still challenged");
+        assert_eq!(signal.block_reason, Some(quarry_core::contracts::BlockReason::ChallengeLoop));
+        assert_eq!(signal.recovery, quarry_core::contracts::ChallengeRecovery::Exhausted);
+
+        let reached_before = driver.calls();
+        for action in refused_on_an_exhausted_page() {
+            let error = runner
+                .execute(&challenge_request(&lease, action, ZdrMode::Off), &session, &mut ctx)
+                .await
+                .expect_err("an exhausted host must refuse");
+            assert_eq!(error.code, ErrorCode::ChallengeDetected);
+        }
+        assert_eq!(driver.calls(), reached_before);
+    }
+
+    /// The runner, not the episode table, decides which host a step is on: after
+    /// `Back` it is the landing page's host (read from the page), so an exhausted
+    /// host stays refused when the history step lands on it.
+    #[tokio::test]
+    async fn a_history_step_onto_an_exhausted_host_leaves_every_interaction_refused() {
+        async fn run(landing: &'static str) -> (usize, usize, Result<(), ErrorCode>) {
+            let driver = Arc::new(ContentDriver {
+                html: TURNSTILE_HTML,
+                atomic_targets: true,
+                back_lands_on: Some(landing),
+                ..Default::default()
+            });
+            let runner = challenge_runner(&driver);
+            let lease = challenge_lease();
+            let session = driver.acquire(&lease).await.unwrap();
+            let mut ctx = challenge_ctx(ChallengeConfig::enforcing());
+            let step = |action: AgentAction| challenge_request(&lease, action, ZdrMode::Off);
+            // blocked.example: a wall, then the one reload that is still a wall.
+            for url in ["https://blocked.example/page", "https://blocked.example/page#again"] {
+                runner
+                    .execute(&step(AgentAction::Navigate { url: url.into() }), &session, &mut ctx)
+                    .await
+                    .unwrap();
+            }
+            // Leave it for another host, then step back in history.
+            runner
+                .execute(&step(AgentAction::Navigate { url: "https://elsewhere.example/".into() }), &session, &mut ctx)
+                .await
+                .expect("another host is still reachable");
+            runner
+                .execute(&step(AgentAction::Back), &session, &mut ctx)
+                .await
+                .expect("a history step is the way off a wall and is never refused");
+            let before = driver.calls();
+            let click = runner
+                .execute(&step(AgentAction::Click { selector: "#go".into() }), &session, &mut ctx)
+                .await;
+            let after = driver.calls();
+            (before, after, click.map(|_| ()).map_err(|e| e.code))
+        }
+
+        // Landing on the exhausted host: refused, and the browser never saw the click.
+        let (before, after, click) = run("https://blocked.example/page").await;
+        assert_eq!(click, Err(ErrorCode::ChallengeDetected));
+        assert_eq!(after, before, "a refused click never reaches the browser");
+
+        // Landing on a host that is not exhausted: the click reaches the browser
+        // (the test driver then reports the click as unsupported, which is not a refusal).
+        let (before, after, click) = run("https://elsewhere.example/").await;
+        assert_eq!(click, Err(ErrorCode::Unsupported));
+        assert_eq!(after, before + 1, "a click on an open host reaches the browser");
+    }
+
+    #[tokio::test]
+    async fn the_log_phase_reports_but_does_not_reject() {
+        let events = EventLog::default();
+        let _installed = tracing::subscriber::set_default(events.clone());
+        let driver = Arc::new(ContentDriver { html: TURNSTILE_HTML, atomic_targets: true, ..Default::default() });
+        let runner = challenge_runner(&driver);
+        let lease = challenge_lease();
+        let session = driver.acquire(&lease).await.unwrap();
+        let go = challenge_request(&lease, AgentAction::Navigate { url: "https://blocked.example/page".into() }, ZdrMode::Off);
+        let wait = challenge_request(&lease, AgentAction::Wait { ms: 0 }, ZdrMode::Off);
+
+        // The same sequence under both settings: navigate, wait, navigate again.
+        let mut log_ctx = challenge_ctx(ChallengeConfig::from_values(None, Some("log")));
+        runner.execute(&go, &session, &mut log_ctx).await.unwrap();
+        let second = runner.execute(&wait, &session, &mut log_ctx).await.unwrap();
+        // The precondition: the loop is real.
+        assert_eq!(
+            second.challenge.expect("still challenged").block_reason,
+            Some(quarry_core::contracts::BlockReason::ChallengeLoop)
+        );
+        assert_eq!(events.count("quarry.challenge.would_reject"), 0, "nothing was refused yet");
+        let reached_before = driver.calls();
+        runner
+            .execute(&go, &session, &mut log_ctx)
+            .await
+            .expect("log mode lets the navigation through");
+        assert_eq!(driver.calls(), reached_before + 1, "the navigation reached the browser");
+        assert_eq!(events.count("quarry.challenge.would_reject"), 1, "{:?}", events.lines());
+        assert!(
+            events.lines().iter().all(|line| !line.contains("blocked.example")),
+            "no event may carry the host: {:?}",
+            events.lines()
+        );
+
+        // Enforce mode refuses the very same sequence, before the browser, and
+        // logs no would_reject.
+        let mut enforce_ctx = challenge_ctx(ChallengeConfig::enforcing());
+        runner.execute(&go, &session, &mut enforce_ctx).await.unwrap();
+        runner.execute(&wait, &session, &mut enforce_ctx).await.unwrap();
+        let reached_before = driver.calls();
+        let error = runner
+            .execute(&go, &session, &mut enforce_ctx)
+            .await
+            .expect_err("enforce mode refuses");
+        assert_eq!(error.code, ErrorCode::ChallengeDetected);
+        assert_eq!(driver.calls(), reached_before, "a refused navigation never reaches the browser");
+        assert_eq!(events.count("quarry.challenge.would_reject"), 1, "enforce mode logs no would_reject");
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_same_host_navigation_after_challenge_loop() {
+        let driver = Arc::new(ContentDriver { html: TURNSTILE_HTML, atomic_targets: true, ..Default::default() });
+        let runner = challenge_runner(&driver);
+        let lease = challenge_lease();
+        let session = driver.acquire(&lease).await.unwrap();
+        let mut ctx = challenge_ctx(ChallengeConfig::enforcing());
+        let go = |url: &str| challenge_request(&lease, AgentAction::Navigate { url: url.into() }, ZdrMode::Off);
+
+        // First hit: a strong signal, and the one recovery is still there.
+        let first = runner
+            .execute(&go("https://blocked.example/page"), &session, &mut ctx)
+            .await
+            .expect("the first navigation is allowed");
+        let signal = first.challenge.expect("the turnstile page is a challenge");
+        assert_eq!(signal.strength, ChallengeStrength::Strong);
+        assert_eq!(signal.recovery, quarry_core::contracts::ChallengeRecovery::Available);
+        assert!(signal.requires_escalation);
+        assert_eq!(first.telemetry.challenge_observation_count, 1);
+
+        // The recovery: one wait. The page is still the challenge, so this is a loop.
+        let second = runner
+            .execute(&challenge_request(&lease, AgentAction::Wait { ms: 0 }, ZdrMode::Off), &session, &mut ctx)
+            .await
+            .expect("a wait is always allowed");
+        let signal = second.challenge.expect("still challenged");
+        assert_eq!(signal.block_reason, Some(quarry_core::contracts::BlockReason::ChallengeLoop));
+        assert_eq!(signal.recovery, quarry_core::contracts::ChallengeRecovery::Exhausted);
+        assert_eq!(second.telemetry.challenge_observation_count, 2);
+
+        // Now the same host refuses navigation and interaction ...
+        let reached_before = driver.calls();
+        for action in refused_on_an_exhausted_page() {
+            let error = runner
+                .execute(&challenge_request(&lease, action, ZdrMode::Off), &session, &mut ctx)
+                .await
+                .expect_err("an exhausted host must refuse");
+            assert_eq!(error.code, ErrorCode::ChallengeDetected);
+            assert_eq!(error.code.http_status(), 403);
+            let details = error.details.expect("details");
+            assert_eq!(details["recovery"], "exhausted");
+            assert_eq!(details["host"], "blocked.example");
+            assert_eq!(details["next"], "user_takeover_or_other_source");
+        }
+        assert_eq!(
+            driver.calls(),
+            reached_before,
+            "a refused action must not reach the browser"
+        );
+
+        // ... and still lets the planner look and report.
+        runner
+            .execute(&challenge_request(&lease, AgentAction::GetContent, ZdrMode::Off), &session, &mut ctx)
+            .await
+            .expect("reading the page is allowed");
+        runner
+            .execute(&challenge_request(&lease, AgentAction::Wait { ms: 0 }, ZdrMode::Off), &session, &mut ctx)
+            .await
+            .expect("waiting is allowed");
+
+        // Another host is a fresh start ...
+        let elsewhere = runner
+            .execute(&go("https://other.example/"), &session, &mut ctx)
+            .await
+            .expect("another host is allowed");
+        assert_eq!(
+            elsewhere.challenge.expect("this fixture challenges everywhere").recovery,
+            quarry_core::contracts::ChallengeRecovery::Available
+        );
+        // ... but the exhausted host stays closed from there.
+        let error = runner
+            .execute(&go("https://blocked.example/page"), &session, &mut ctx)
+            .await
+            .expect_err("back to the exhausted host");
+        assert_eq!(error.code, ErrorCode::ChallengeDetected);
+    }
+
+    #[tokio::test]
+    async fn the_legacy_classifier_is_not_subject_to_the_rule() {
+        let driver = Arc::new(ContentDriver { html: LEGACY_HTML, ..Default::default() });
+        let runner = challenge_runner(&driver);
+        let lease = challenge_lease();
+        let session = driver.acquire(&lease).await.unwrap();
+        let mut ctx = challenge_ctx(ChallengeConfig::from_values(Some("legacy"), None));
+        let go = challenge_request(&lease, AgentAction::Navigate { url: "https://blocked.example/page".into() }, ZdrMode::Off);
+        for _ in 0..4 {
+            let observation = runner.execute(&go, &session, &mut ctx).await.unwrap();
+            let signal = observation.challenge.expect("legacy matches the title text");
+            assert_eq!(signal.block_reason, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_login_page_is_reported_without_escalation_and_is_not_counted() {
+        let driver = Arc::new(ContentDriver { html: LOGIN_HTML, ..Default::default() });
+        let runner = challenge_runner(&driver);
+        let lease = challenge_lease();
+        let session = driver.acquire(&lease).await.unwrap();
+        let mut ctx = challenge_ctx(ChallengeConfig::enforcing());
+        let request = challenge_request(&lease, AgentAction::Navigate { url: "https://example.com/login".into() }, ZdrMode::Off);
+        let observation = runner.execute(&request, &session, &mut ctx).await.unwrap();
+        let signal = observation.challenge.expect("a login page is named");
+        assert_eq!(signal.kind, ChallengeKind::Login);
+        assert_eq!(signal.strength, ChallengeStrength::NonSignal);
+        assert!(!signal.requires_escalation);
+        assert_eq!(observation.telemetry.challenge_observation_count, 0);
+        assert_eq!(observation.telemetry.challenge_rate_per_mille, 0);
+        // Repeated visits never exhaust anything: it is not a block.
+        for _ in 0..4 {
+            runner.execute(&request, &session, &mut ctx).await.expect("login stays reachable");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_zdr_run_leaves_the_host_out_of_the_rejection() {
+        let driver = Arc::new(ContentDriver { html: TURNSTILE_HTML, atomic_targets: true, ..Default::default() });
+        let runner = challenge_runner(&driver);
+        let lease = challenge_lease();
+        let session = driver.acquire(&lease).await.unwrap();
+        let mut ctx = challenge_ctx(ChallengeConfig::enforcing());
+        let go = challenge_request(&lease, AgentAction::Navigate { url: "https://blocked.example/page".into() }, ZdrMode::On);
+        runner.execute(&go, &session, &mut ctx).await.unwrap();
+        runner
+            .execute(&challenge_request(&lease, AgentAction::Wait { ms: 0 }, ZdrMode::On), &session, &mut ctx)
+            .await
+            .unwrap();
+        let error = runner.execute(&go, &session, &mut ctx).await.expect_err("refused");
+        assert_eq!(error.code, ErrorCode::ChallengeDetected);
+        assert!(error.details.expect("details").get("host").is_none());
     }
 
     #[test]
@@ -2821,8 +3595,56 @@ mod tests {
             .any(|element| element.tag == "a" && element.text.as_deref() == Some("Real")));
     }
 
+    /// Serves fixed HTML. `calls` counts every call that would move or act on
+    /// the page (goto, click, click_point, type, press, select), so a test can
+    /// show that a refused action never reached the browser.
+    #[derive(Default)]
     struct ContentDriver {
         html: &'static [u8],
+        calls: std::sync::atomic::AtomicUsize,
+        /// Claims atomic snapshot-target actions, so that ref and semantic
+        /// actions get past the capability gate and reach what a test is about.
+        atomic_targets: bool,
+        /// When set, `back` succeeds and the page then reports this URL.
+        back_lands_on: Option<&'static str>,
+        landed: std::sync::atomic::AtomicBool,
+        /// WS12.S5: what `screenshot_masked` reports; unset means an unscanned image.
+        masked_screenshot: Option<quarry_browser::MaskedScreenshot>,
+        /// Claims governed full-fidelity visual evidence, so an explicit screenshot
+        /// action gets past the capability gate and reaches the withheld-image path.
+        visual_fidelity: bool,
+        /// D2-019: every egress policy the runner installed, in order.
+        egress_seen: std::sync::Mutex<Vec<BrowserEgressPolicy>>,
+        /// SC4 T3: the page read (`evaluate` or `content`) that times out.
+        stalls_at: Option<&'static str>,
+        /// SC4 T3: every `content` and `native_page_projection` call.
+        reads: std::sync::atomic::AtomicUsize,
+        /// The egress receipts the driver holds, by sequence; none means the driver
+        /// has no receipt authority.
+        egress_sequences: &'static [u64],
+        /// SC4 D1: every `ensure_page` call.
+        ensured: std::sync::atomic::AtomicUsize,
+    }
+
+    /// The typed timeout the chromiumoxide driver returns for `op`.
+    fn driver_timeout(op: &str, effect: &str) -> QuarryError {
+        let mut error = QuarryError::new(
+            ErrorCode::Timeout,
+            format!("browser operation {op} timed out"),
+        )
+        .with_details(serde_json::json!({ "op": op, "deadline_ms": 7500, "effect": effect }));
+        error.retryable = effect == "none";
+        error
+    }
+
+    impl ContentDriver {
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn touch(&self) {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     #[async_trait::async_trait]
@@ -2830,9 +3652,17 @@ mod tests {
         async fn configure_egress_policy(
             &self,
             _session: &quarry_browser::BrowserSession,
-            _policy: BrowserEgressPolicy,
+            policy: BrowserEgressPolicy,
         ) -> QuarryResult<()> {
+            self.egress_seen.lock().unwrap().push(policy);
             Ok(())
+        }
+        fn capabilities(&self) -> quarry_browser::BrowserDriverCapabilities {
+            quarry_browser::BrowserDriverCapabilities {
+                atomic_target_actions: self.atomic_targets,
+                full_visual_fidelity: self.visual_fidelity,
+                ..Default::default()
+            }
         }
         async fn acquire(
             &self,
@@ -2840,6 +3670,7 @@ mod tests {
         ) -> QuarryResult<quarry_browser::BrowserSession> {
             Ok(quarry_browser::BrowserSession {
                 lease: lease.clone(),
+                tab_pin: None,
                 inner: Arc::new(tokio::sync::Mutex::new(
                     quarry_browser::SessionInner::default(),
                 )),
@@ -2853,10 +3684,94 @@ mod tests {
             _session: &quarry_browser::BrowserSession,
             _url: &str,
         ) -> QuarryResult<()> {
+            self.touch();
             Ok(())
         }
+        async fn ensure_page(&self, _session: &quarry_browser::BrowserSession) -> QuarryResult<()> {
+            self.ensured
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        async fn click(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+            _selector: &str,
+        ) -> QuarryResult<()> {
+            self.touch();
+            Err(QuarryError::unsupported_action("click"))
+        }
+        async fn click_point(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+            _x: f64,
+            _y: f64,
+        ) -> QuarryResult<()> {
+            self.touch();
+            Err(QuarryError::unsupported_action("click_point"))
+        }
+        async fn type_text(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+            _selector: &str,
+            _text: &str,
+        ) -> QuarryResult<()> {
+            self.touch();
+            Err(QuarryError::unsupported_action("type"))
+        }
+        async fn press(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+            _key: &str,
+        ) -> QuarryResult<()> {
+            self.touch();
+            Err(QuarryError::unsupported_action("press"))
+        }
+        async fn select(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+            _selector: &str,
+            _value: &str,
+        ) -> QuarryResult<()> {
+            self.touch();
+            Err(QuarryError::unsupported_action("select"))
+        }
+        async fn egress_receipts(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+            after_sequence: u64,
+            _limit: usize,
+        ) -> QuarryResult<Vec<quarry_core::contracts::BrowserEgressReceipt>> {
+            if self.egress_sequences.is_empty() {
+                return Err(QuarryError::unsupported_action("egress_receipts"));
+            }
+            Ok(self
+                .egress_sequences
+                .iter()
+                .filter(|sequence| **sequence > after_sequence)
+                .map(|sequence| quarry_core::contracts::BrowserEgressReceipt {
+                    sequence: *sequence,
+                    tab_id: None,
+                    method: "GET".into(),
+                    url: "https://example.com/".into(),
+                    decision: quarry_core::contracts::BrowserEgressDecision::Allow,
+                    policy: "url_dns_public".into(),
+                    timestamp_ms: 0,
+                })
+                .collect())
+        }
         async fn content(&self, _session: &quarry_browser::BrowserSession) -> QuarryResult<Bytes> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.stalls_at == Some("content") {
+                return Err(driver_timeout("content", "none"));
+            }
             Ok(Bytes::from_static(self.html))
+        }
+        async fn native_page_projection(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+        ) -> QuarryResult<quarry_browser::BrowserNativeProjection> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(QuarryError::unsupported_action("native_page_projection"))
         }
         async fn screenshot(
             &self,
@@ -2865,9 +3780,567 @@ mod tests {
         ) -> QuarryResult<Bytes> {
             Ok(Bytes::new())
         }
+        async fn screenshot_masked(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+            _full_page: bool,
+        ) -> QuarryResult<quarry_browser::MaskedScreenshot> {
+            Ok(match &self.masked_screenshot {
+                Some(masked) => masked.clone(),
+                None => quarry_browser::MaskedScreenshot::unmasked(Bytes::new()),
+            })
+        }
         async fn pdf(&self, _session: &quarry_browser::BrowserSession) -> QuarryResult<Bytes> {
             Ok(Bytes::new())
         }
+        async fn back(&self, _session: &quarry_browser::BrowserSession) -> QuarryResult<()> {
+            match self.back_lands_on {
+                Some(_) => {
+                    self.landed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                }
+                None => Err(QuarryError::unsupported_action("back")),
+            }
+        }
+        async fn evaluate(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+            _script: &str,
+        ) -> QuarryResult<serde_json::Value> {
+            if self.stalls_at == Some("evaluate") {
+                return Err(driver_timeout("evaluate", "unknown"));
+            }
+            match self.back_lands_on {
+                Some(url) if self.landed.load(std::sync::atomic::Ordering::SeqCst) => {
+                    Ok(serde_json::json!({ "url": url, "title": null }))
+                }
+                _ => Err(QuarryError::unsupported_action("evaluate")),
+            }
+        }
+    }
+
+    async fn observe_a_wait(driver: Arc<ContentDriver>) -> QuarryResult<BrowserObservation> {
+        observe(
+            driver,
+            AgentAction::Wait { ms: 0 },
+            &mut ObservationContext::default(),
+        )
+        .await
+    }
+
+    async fn observe(
+        driver: Arc<ContentDriver>,
+        action: AgentAction,
+        ctx: &mut ObservationContext,
+    ) -> QuarryResult<BrowserObservation> {
+        let runner = ObservationRunner {
+            browser: driver.clone(),
+            artifacts: None,
+            events: None,
+            visual_processor: None,
+            org_id: "org".into(),
+        };
+        let lease = BrowserLease {
+            lease_id: Id::new(),
+            profile_id: Id::new(),
+            session_affinity_key: "test".into(),
+            proxy_affinity: ProxyAffinity {
+                pool: String::new(),
+                sticky_key: None,
+            },
+            ttl_s: 60,
+            capabilities: vec![],
+            artifact_bucket: String::new(),
+            persist_profile: false,
+            viewport: None,
+            org_id: "org".into(),
+        };
+        let session = driver.acquire(&lease).await.unwrap();
+        let request = AgentActionRequest {
+            run_id: Id::new(),
+            lease_id: lease.lease_id.clone(),
+            action,
+            instruction: None,
+            constraints: AgentConstraints {
+                max_steps: 3,
+                allowed_domains: vec![],
+                max_runtime_s: None,
+                max_cost_usd: None,
+            },
+            zdr: ZdrMode::Off,
+            extraction_profile: None,
+        };
+        runner.execute(&request, &session, ctx).await
+    }
+
+    /// SC4 T3: the page state read timed out, so the content and accessibility reads are
+    /// not made (each would wait out its own deadline on the same held page), and the
+    /// step fails with that first timeout. The step only waited, so nothing changed and
+    /// it may be retried, whatever a generic `evaluate` has to assume.
+    #[tokio::test]
+    async fn a_page_state_timeout_ends_the_page_reads_with_a_read_timeout() {
+        let driver = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            stalls_at: Some("evaluate"),
+            ..Default::default()
+        });
+        let error = observe_a_wait(driver.clone()).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert!(error.retryable, "the page state script only reads");
+        let details = error.details.expect("details");
+        assert_eq!(details["op"], "evaluate");
+        assert_eq!(details["effect"], "none");
+        assert_eq!(
+            driver.reads.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no read after the first timeout"
+        );
+    }
+
+    /// SC4 T3: a content timeout fails the step at once; the accessibility read is not made.
+    #[tokio::test]
+    async fn a_content_timeout_ends_the_page_reads() {
+        let driver = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            stalls_at: Some("content"),
+            ..Default::default()
+        });
+        let error = observe_a_wait(driver.clone()).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert_eq!(error.details.expect("details")["op"], "content");
+        assert_eq!(
+            driver.reads.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "only the content read was made"
+        );
+    }
+
+    /// SC4 D1: an action that only reads the page asks the driver for a page first, so a
+    /// session with none yet is observed on a blank tab; an action that moves or acts on
+    /// the page does not (a navigation opens its own tab, a click needs a real page).
+    #[tokio::test]
+    async fn only_an_observing_action_asks_the_driver_for_a_page() {
+        let ensured =
+            |driver: &ContentDriver| driver.ensured.load(std::sync::atomic::Ordering::SeqCst);
+        for action in [AgentAction::Wait { ms: 0 }, AgentAction::GetContent] {
+            let driver = Arc::new(ContentDriver {
+                html: b"<html><body><p>hello</p></body></html>",
+                ..Default::default()
+            });
+            observe(
+                driver.clone(),
+                action.clone(),
+                &mut ObservationContext::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{action:?}: {error:?}"));
+            assert_eq!(ensured(&driver), 1, "{action:?}");
+        }
+        // A `wait_for` is a read too (this driver cannot wait, so the step itself fails
+        // after the page is given).
+        let driver = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            ..Default::default()
+        });
+        let _ = observe(
+            driver.clone(),
+            AgentAction::WaitFor {
+                selector: "body".into(),
+                timeout_ms: 0,
+            },
+            &mut ObservationContext::default(),
+        )
+        .await;
+        assert_eq!(ensured(&driver), 1, "wait_for");
+        for action in [
+            AgentAction::Navigate {
+                url: "https://example.com/".into(),
+            },
+            AgentAction::Click {
+                selector: "#go".into(),
+            },
+        ] {
+            let driver = Arc::new(ContentDriver {
+                html: b"<html><body><p>hello</p></body></html>",
+                ..Default::default()
+            });
+            let _ = observe(
+                driver.clone(),
+                action.clone(),
+                &mut ObservationContext::default(),
+            )
+            .await;
+            assert_eq!(ensured(&driver), 0, "{action:?}");
+        }
+    }
+
+    /// SC4 T3: the same stalled read after an action that can change the page (here a
+    /// navigation that went through) is no read timeout: the step's effect is unknown
+    /// and it must not be retried blindly.
+    #[tokio::test]
+    async fn a_stalled_read_after_an_effectful_action_keeps_its_effect_unknown() {
+        for stalls_at in ["evaluate", "content"] {
+            let driver = Arc::new(ContentDriver {
+                html: b"<html><body><p>hello</p></body></html>",
+                stalls_at: Some(stalls_at),
+                ..Default::default()
+            });
+            let navigate = AgentAction::Navigate {
+                url: "https://example.com/".into(),
+            };
+            let error = observe(driver, navigate, &mut ObservationContext::default())
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::Timeout, "{stalls_at}");
+            assert!(!error.retryable, "{stalls_at}");
+            assert_eq!(
+                error.details.expect("details")["effect"],
+                "unknown",
+                "{stalls_at}"
+            );
+        }
+    }
+
+    /// A step whose observation fails leaves the egress cursor where it was: the
+    /// receipts it read go out with the next observation instead of being skipped.
+    #[tokio::test]
+    async fn a_failed_observation_leaves_its_egress_receipts_for_the_next_one() {
+        let mut ctx = ObservationContext::default();
+        let stalled = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            stalls_at: Some("content"),
+            egress_sequences: &[1, 2],
+            ..Default::default()
+        });
+        observe(stalled, AgentAction::Wait { ms: 0 }, &mut ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(ctx.last_egress_sequence, 0);
+
+        let answering = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            egress_sequences: &[1, 2],
+            ..Default::default()
+        });
+        observe(answering, AgentAction::Wait { ms: 0 }, &mut ctx)
+            .await
+            .expect("observation");
+        assert_eq!(ctx.last_egress_sequence, 2);
+    }
+
+    /// A page that answers keeps the old path: every read is made and an optional
+    /// read that fails for another reason (here `evaluate` is unsupported) is dropped.
+    #[tokio::test]
+    async fn a_page_that_answers_is_read_in_full() {
+        let driver = Arc::new(ContentDriver {
+            html: b"<html><head><title>hi</title></head><body><p>hello</p></body></html>",
+            ..Default::default()
+        });
+        let observation = observe_a_wait(driver.clone()).await.expect("observation");
+        assert_eq!(
+            driver.reads.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "content and the accessibility tree"
+        );
+        assert!(observation.snapshot.is_some());
+    }
+
+    /// D2-019: a run that carries its resolved egress keeps it on every action. Before the
+    /// fix, step 2 rebuilt the policy from `constraints.allowed_domains` and lost the
+    /// narrowing and the open-web mode that `start_run` had installed.
+    #[tokio::test]
+    async fn the_run_carried_egress_is_installed_on_every_action_not_rebuilt_from_constraints() {
+        let driver = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            ..Default::default()
+        });
+        let runner = ObservationRunner {
+            browser: driver.clone(),
+            artifacts: None,
+            events: None,
+            visual_processor: None,
+            org_id: "org".into(),
+        };
+        let lease = BrowserLease {
+            lease_id: Id::new(),
+            profile_id: Id::new(),
+            session_affinity_key: "test".into(),
+            proxy_affinity: ProxyAffinity {
+                pool: String::new(),
+                sticky_key: None,
+            },
+            ttl_s: 60,
+            capabilities: vec![],
+            artifact_bucket: String::new(),
+            persist_profile: false,
+            viewport: None,
+            org_id: "org".into(),
+        };
+        let session = driver.acquire(&lease).await.unwrap();
+        let request = AgentActionRequest {
+            run_id: Id::new(),
+            lease_id: lease.lease_id.clone(),
+            action: AgentAction::Evaluate {
+                script: "document.title = 'x'".into(),
+            },
+            instruction: None,
+            constraints: AgentConstraints {
+                max_steps: 3,
+                // The grant's own list is wider than what the web policy narrowed it to.
+                allowed_domains: vec!["example.com".into(), "other.test".into()],
+                max_runtime_s: None,
+                max_cost_usd: None,
+            },
+            zdr: ZdrMode::Off,
+            extraction_profile: None,
+        };
+
+        // A narrowed allow list: only a.example.com stays reachable.
+        let narrowed = BrowserEgressPolicy::from_allowed_domains(&["a.example.com".to_string()]);
+        let mut ctx = ObservationContext {
+            egress_policy: Some(narrowed.clone()),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let _ = runner.execute(&request, &session, &mut ctx).await;
+        }
+        {
+            let seen = driver.egress_seen.lock().unwrap();
+            assert_eq!(seen.len(), 2, "one install per action");
+            assert_eq!(seen[0], narrowed, "step 1 installs the resolved policy");
+            assert_eq!(seen[1], narrowed, "step 2 installs the same resolved policy");
+            assert!(!seen[1].allows_url("https://other.test/x"), "narrowing survives step 2");
+        }
+
+        // The open-web mode and its denied list survive too.
+        driver.egress_seen.lock().unwrap().clear();
+        let open = BrowserEgressPolicy::open_web(&["blocked.test".to_string()]);
+        let mut open_ctx = ObservationContext {
+            egress_policy: Some(open.clone()),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let _ = runner.execute(&request, &session, &mut open_ctx).await;
+        }
+        let seen = driver.egress_seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(seen.iter().all(|policy| *policy == open));
+        assert!(seen[1].allows_url("https://anywhere.test/x"));
+        assert!(!seen[1].allows_url("https://blocked.test/x"), "denied list survives step 2");
+    }
+
+    /// Without a carried policy the old behaviour stands: the policy is built from the
+    /// request's allowed domains and the context's deny list.
+    #[tokio::test]
+    async fn a_context_without_a_carried_egress_builds_it_from_the_constraints() {
+        let driver = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            ..Default::default()
+        });
+        let runner = ObservationRunner {
+            browser: driver.clone(),
+            artifacts: None,
+            events: None,
+            visual_processor: None,
+            org_id: "org".into(),
+        };
+        let lease = BrowserLease {
+            lease_id: Id::new(),
+            profile_id: Id::new(),
+            session_affinity_key: "test".into(),
+            proxy_affinity: ProxyAffinity {
+                pool: String::new(),
+                sticky_key: None,
+            },
+            ttl_s: 60,
+            capabilities: vec![],
+            artifact_bucket: String::new(),
+            persist_profile: false,
+            viewport: None,
+            org_id: "org".into(),
+        };
+        let session = driver.acquire(&lease).await.unwrap();
+        let request = AgentActionRequest {
+            run_id: Id::new(),
+            lease_id: lease.lease_id.clone(),
+            action: AgentAction::Evaluate {
+                script: "document.title = 'x'".into(),
+            },
+            instruction: None,
+            constraints: AgentConstraints {
+                max_steps: 3,
+                allowed_domains: vec!["example.com".into()],
+                max_runtime_s: None,
+                max_cost_usd: None,
+            },
+            zdr: ZdrMode::Off,
+            extraction_profile: None,
+        };
+        let mut ctx = ObservationContext::default();
+        let _ = runner.execute(&request, &session, &mut ctx).await;
+        let seen = driver.egress_seen.lock().unwrap();
+        assert_eq!(
+            seen[0],
+            BrowserEgressPolicy::from_allowed_domains(&["example.com".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_action_is_refused_without_calling_the_driver() {
+        // ContentDriver does not implement `evaluate`, so a driver call would
+        // surface as `Unsupported`. `Forbidden` proves the refusal came first.
+        let driver = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            ..Default::default()
+        });
+        let runner = ObservationRunner {
+            browser: driver.clone(),
+            artifacts: None,
+            events: None,
+            visual_processor: None,
+            org_id: "org".into(),
+        };
+        let lease = BrowserLease {
+            lease_id: Id::new(),
+            profile_id: Id::new(),
+            session_affinity_key: "test".into(),
+            proxy_affinity: ProxyAffinity {
+                pool: String::new(),
+                sticky_key: None,
+            },
+            ttl_s: 60,
+            capabilities: vec![],
+            artifact_bucket: String::new(),
+            persist_profile: false,
+            viewport: None,
+            org_id: "org".into(),
+        };
+        let session = driver.acquire(&lease).await.unwrap();
+        let mut ctx = ObservationContext {
+            step: 1,
+            current_url: "https://example.test".into(),
+            page_hash: "blake3:page".into(),
+            previous_screenshot: None,
+            previous_observation: None,
+            previous_network_keys: vec![],
+            last_egress_sequence: 0,
+            active_snapshot: None,
+            observed_action_count: 0,
+            challenge_observation_count: 0,
+            ..Default::default()
+        };
+        let request = AgentActionRequest {
+            run_id: Id::new(),
+            lease_id: lease.lease_id.clone(),
+            action: AgentAction::Evaluate {
+                script: "document.title = 'x'".into(),
+            },
+            instruction: None,
+            constraints: AgentConstraints {
+                max_steps: 3,
+                allowed_domains: vec![],
+                max_runtime_s: None,
+                max_cost_usd: None,
+            },
+            zdr: ZdrMode::Off,
+            extraction_profile: None,
+        };
+        let error = runner
+            .execute(&request, &session, &mut ctx)
+            .await
+            .expect_err("evaluate must be refused");
+        assert_eq!(error.code, ErrorCode::Forbidden);
+        assert_eq!(error.details.unwrap()["reason"], "raw_script_denied");
+    }
+
+    /// D2-065: the keyboard focus the run tracks decides how a key press is masked.
+    #[test]
+    fn the_key_focus_follows_clicks_and_typing_and_fails_closed() {
+        let html = "<html><body><input id='pw' type='password' placeholder='Password'>\
+                    <button id='go'>Go</button></body></html>";
+        let run_id: RunKind = Id::new();
+        let summary = build_dom_summary(html);
+        let active = build_active_snapshot(&run_id, 1, "blake3:page", Some(&summary), None);
+        let snapshot_id = active.snapshot.snapshot_id.clone();
+        let ref_of = |needle: &str| {
+            active
+                .snapshot
+                .targets
+                .iter()
+                .find(|t| t.tag == needle)
+                .map(|t| t.ref_id.clone())
+                .unwrap_or_else(|| panic!("no target {needle}"))
+        };
+        let (password, button) = (ref_of("input"), ref_of("button"));
+        let click = |ref_id: &str| AgentAction::ClickRef {
+            snapshot_id: snapshot_id.clone(),
+            generation: 1,
+            ref_id: ref_id.to_owned(),
+        };
+        let press = |key: &str| AgentAction::Press { key: key.to_owned() };
+        let mut ctx = ObservationContext {
+            active_snapshot: Some(active.clone()),
+            ..Default::default()
+        };
+        // Start state: no known focus, so a character key is masked as a secret.
+        assert_eq!(receipt_field_kind(&ctx, &press("a")), None);
+
+        // A click on the password control puts the focus there.
+        let typed = receipt_field_kind(&ctx, &click(&password));
+        assert_eq!(typed, None, "a click is not a typing action");
+        ctx.key_focus = key_focus_after(&ctx, &click(&password), typed);
+        assert_eq!(ctx.key_focus, Some(FieldKind::Password));
+        assert_eq!(receipt_field_kind(&ctx, &press("s")), Some(FieldKind::Password));
+
+        // Characters, Backspace, a shortcut and a wait leave it where it was.
+        for action in [
+            press("s"),
+            press("Backspace"),
+            press("Control+a"),
+            AgentAction::Wait { ms: 10 },
+            AgentAction::Scroll { target: "#x".to_owned() },
+        ] {
+            ctx.key_focus = key_focus_after(&ctx, &action, None);
+            assert_eq!(ctx.key_focus, Some(FieldKind::Password), "{action:?}");
+        }
+
+        // Tab, Enter, a click on a button, a navigation and a snapshot-less click: unknown.
+        for action in [
+            press("Tab"),
+            press("Enter"),
+            press("Shift+Tab"),
+            press("F5"),
+            click(&button),
+            AgentAction::Navigate { url: "https://example.test/".to_owned() },
+            AgentAction::Back,
+            AgentAction::ClickPoint { x: 1.0, y: 2.0 },
+        ] {
+            let mut moved = ObservationContext {
+                active_snapshot: Some(active.clone()),
+                key_focus: Some(FieldKind::Password),
+                ..Default::default()
+            };
+            moved.key_focus = key_focus_after(&moved, &action, None);
+            assert_eq!(moved.key_focus, None, "{action:?}");
+        }
+
+        // Typing into a control sets the focus from the snapshot, and a raw selector only
+        // counts when its own words name a sensitive control.
+        let type_ref = AgentAction::TypeRef {
+            snapshot_id: snapshot_id.clone(),
+            generation: 1,
+            ref_id: password,
+            text: "x".to_owned(),
+        };
+        let typed = receipt_field_kind(&ctx, &type_ref);
+        assert_eq!(typed, Some(FieldKind::Password));
+        assert_eq!(key_focus_after(&ctx, &type_ref, typed), Some(FieldKind::Password));
+        let raw = |selector: &str| AgentAction::Type {
+            selector: selector.to_owned(),
+            text: "x".to_owned(),
+        };
+        assert_eq!(key_focus_after(&ctx, &raw("input[type=password]"), None), Some(FieldKind::Password));
+        assert_eq!(key_focus_after(&ctx, &raw("#q"), None), None);
     }
 
     #[tokio::test]
@@ -2880,6 +4353,7 @@ mod tests {
         let snapshot_id = active_snapshot.snapshot.snapshot_id.clone();
         let driver = Arc::new(ContentDriver {
             html: b"<html><body><button data-testid='continue'>Changed</button></body></html>",
+            ..Default::default()
         });
         let runner = ObservationRunner {
             browser: driver.clone(),
@@ -2915,6 +4389,7 @@ mod tests {
             observed_action_count: 0,
             challenge_observation_count: 0,
             active_snapshot: Some(active_snapshot),
+            ..Default::default()
         };
         let error = runner
             .resolve_snapshot_action(
@@ -2988,6 +4463,17 @@ mod tests {
     }
 
     #[test]
+    fn text_snippet_cuts_on_a_character_boundary() {
+        // A three-byte character covering bytes 498..501 used to panic at [..500].
+        let text = format!("{}文{}", "a".repeat(498), "b".repeat(50));
+        let snippet = text_snippet_of(&text);
+        assert_eq!(snippet, format!("{}...", "a".repeat(498)));
+        assert_eq!(text_snippet_of("short"), "short");
+        let exact = "x".repeat(500);
+        assert_eq!(text_snippet_of(&exact), exact);
+    }
+
+    #[test]
     fn strip_tags_works() {
         assert_eq!(strip_tags("<b>bold</b> text"), "bold text");
     }
@@ -3009,6 +4495,15 @@ mod tests {
         let browser_action =
             ObservationRunner::agent_action_to_browser_action(&AgentAction::Forward).unwrap();
         assert!(matches!(browser_action, Action::Forward));
+    }
+
+    #[test]
+    fn reload_action_converts_to_browser_reload() {
+        let browser_action = ObservationRunner::agent_action_to_browser_action(&AgentAction::Reload {
+            ignore_cache: true,
+        })
+        .unwrap();
+        assert!(matches!(browser_action, Action::Reload { ignore_cache: true }));
     }
 
     #[tokio::test]
@@ -3177,6 +4672,7 @@ mod tests {
             active_snapshot: None,
             observed_action_count: 0,
             challenge_observation_count: 0,
+            ..Default::default()
         };
 
         let observation = runner.execute(&request, &session, &mut ctx).await.unwrap();
@@ -3210,5 +4706,175 @@ mod tests {
         assert!(artifact.change_artifact_id.is_some());
         assert!(artifact.related_artifacts.contains_key("visual_change"));
         assert!(artifact.related_artifacts.contains_key("rendered_palette"));
+    }
+
+    fn mask_test_lease() -> BrowserLease {
+        BrowserLease {
+            lease_id: Id::new(),
+            profile_id: Id::new(),
+            session_affinity_key: "test".into(),
+            proxy_affinity: ProxyAffinity {
+                pool: "default".into(),
+                sticky_key: None,
+            },
+            ttl_s: 60,
+            capabilities: vec![],
+            artifact_bucket: "test".into(),
+            persist_profile: false,
+            viewport: None,
+            org_id: "org_a".into(),
+        }
+    }
+
+    fn mask_test_request(lease: &BrowserLease, action: AgentAction) -> AgentActionRequest {
+        AgentActionRequest {
+            run_id: Id::new(),
+            lease_id: lease.lease_id.clone(),
+            action,
+            instruction: None,
+            constraints: AgentConstraints {
+                max_steps: 3,
+                allowed_domains: vec![],
+                max_runtime_s: None,
+                max_cost_usd: None,
+            },
+            zdr: ZdrMode::Off,
+            extraction_profile: None,
+        }
+    }
+
+    fn mask_test_ctx() -> ObservationContext {
+        ObservationContext {
+            step: 1,
+            current_url: "https://example.com".into(),
+            page_hash: "blake3:page".into(),
+            previous_screenshot: Some(b"previous".to_vec()),
+            previous_observation: None,
+            previous_network_keys: vec![],
+            last_egress_sequence: 0,
+            active_snapshot: None,
+            observed_action_count: 0,
+            challenge_observation_count: 0,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn withheld_screenshot_writes_no_artifact_and_skips_the_sidecar() {
+        let store = Arc::new(InMemoryStore::new());
+        let browser = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            masked_screenshot: Some(quarry_browser::MaskedScreenshot::withheld(
+                quarry_browser::screenshot_mask::Withheld::SensitiveFieldUnresolved,
+                1,
+                7,
+            )),
+            ..Default::default()
+        });
+        let runner = ObservationRunner {
+            browser: browser.clone(),
+            artifacts: Some(store.clone()),
+            events: None,
+            visual_processor: Some(Arc::new(MockVisualProcessor)),
+            org_id: "org_a".into(),
+        };
+        let lease = mask_test_lease();
+        let session = browser.acquire(&lease).await.unwrap();
+        let request = mask_test_request(&lease, AgentAction::Wait { ms: 0 });
+        let mut ctx = mask_test_ctx();
+
+        let observation = runner.execute(&request, &session, &mut ctx).await.unwrap();
+
+        assert!(observation.screenshot_artifact_id.is_none());
+        assert!(observation.visual_observation_artifact_id.is_none());
+        let stamp = observation.redaction.expect("a redaction stamp");
+        assert_eq!(stamp.screenshot, quarry_core::redaction::ScreenshotState::Withheld);
+        assert_eq!((stamp.rects, stamp.oopif_frames, stamp.mask_ms), (0, 1, 7));
+        assert!(
+            ctx.previous_screenshot.is_none(),
+            "a withheld frame leaves no stale previous frame"
+        );
+        let listed = store
+            .list("org_a", &quarry_core::pagination::ListFilter::default())
+            .await
+            .unwrap();
+        for item in &listed.items {
+            assert!(
+                !item.kind.as_str().starts_with("screenshot")
+                    && item.kind.as_str() != "visual_observation"
+                    && item.kind.as_str() != "page_image_clean",
+                "a withheld screenshot left an artifact of kind {}",
+                item.kind.as_str()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_masked_screenshot_is_stored_and_stamped() {
+        let store = Arc::new(InMemoryStore::new());
+        let mut masked = quarry_browser::MaskedScreenshot::unmasked(Bytes::from_static(b"png"));
+        masked.state = quarry_core::redaction::ScreenshotState::Masked;
+        masked.rects = vec![
+            quarry_browser::screenshot_mask::PixelRect { x: 1, y: 2, w: 3, h: 4 },
+            quarry_browser::screenshot_mask::PixelRect { x: 5, y: 6, w: 7, h: 8 },
+        ];
+        masked.mask_ms = 9;
+        let browser = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            masked_screenshot: Some(masked),
+            ..Default::default()
+        });
+        let runner = ObservationRunner {
+            browser: browser.clone(),
+            artifacts: Some(store.clone()),
+            events: None,
+            visual_processor: None,
+            org_id: "org_a".into(),
+        };
+        let lease = mask_test_lease();
+        let session = browser.acquire(&lease).await.unwrap();
+        let request = mask_test_request(&lease, AgentAction::Wait { ms: 0 });
+        let mut ctx = mask_test_ctx();
+
+        let observation = runner.execute(&request, &session, &mut ctx).await.unwrap();
+
+        assert!(observation.screenshot_artifact_id.is_some());
+        let stamp = observation.redaction.expect("a redaction stamp");
+        assert_eq!(stamp.screenshot, quarry_core::redaction::ScreenshotState::Masked);
+        assert_eq!((stamp.rects, stamp.mask_ms), (2, 9));
+    }
+
+    #[tokio::test]
+    async fn an_explicit_screenshot_action_is_refused_when_the_image_is_withheld() {
+        let browser = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            masked_screenshot: Some(quarry_browser::MaskedScreenshot::withheld(
+                quarry_browser::screenshot_mask::Withheld::SensitiveFieldUnresolved,
+                0,
+                1,
+            )),
+            visual_fidelity: true,
+            ..Default::default()
+        });
+        let runner = ObservationRunner {
+            browser: browser.clone(),
+            artifacts: None,
+            events: None,
+            visual_processor: None,
+            org_id: "org_a".into(),
+        };
+        let lease = mask_test_lease();
+        let session = browser.acquire(&lease).await.unwrap();
+        let request = mask_test_request(&lease, AgentAction::Screenshot { full_page: false });
+        let mut ctx = mask_test_ctx();
+
+        let error = runner
+            .execute(&request, &session, &mut ctx)
+            .await
+            .expect_err("a withheld screenshot is an error");
+
+        assert_eq!(error.code, ErrorCode::SecurityBlocked);
+        let reason = error.details.as_ref().and_then(|d| d["reason"].as_str());
+        assert_eq!(reason, Some("screenshot_withheld:sensitive_field_unresolved"));
     }
 }

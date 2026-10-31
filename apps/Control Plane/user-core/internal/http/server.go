@@ -47,7 +47,7 @@ type Server struct {
 	authMembershipService    string
 	authMembershipToken      string
 	authInternalCredential   clients.AuthInternalClientCredential
-	// publisher emits aqencia.controlplane.acl.resource_grants.changed on
+	// publisher emits controlplane.acl.resource_grants.changed on
 	// grant/revoke so the Data Plane retrieval visibility cache evicts the
 	// affected (subject_id, org_id) immediately (TTL is the backstop). May be nil.
 	publisher *nats.SharedPublisher

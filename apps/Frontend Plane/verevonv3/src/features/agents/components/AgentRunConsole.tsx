@@ -1,11 +1,4 @@
-import {
-  createEffect,
-  createMemo,
-  createSignal,
-  For,
-  onCleanup,
-  Show,
-} from 'solid-js'
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import { createStore } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -39,6 +32,7 @@ import {
 } from '@/shared/icons'
 import { Button } from '@/shared/ui/Button'
 import { cn } from '@/shared/lib/cn'
+import { isZdrCode, zdrRefusalPresentation } from '@/shared/api/zdr-refusals'
 import { agentBlueprints } from '@/features/agents/lib/verevon-agent-blueprints'
 import type { AgentBlueprint } from '@/features/agents/lib/verevon-agent-page-types'
 import { controlFocusClass } from '@/features/agents/lib/verevon-agent-page-styles'
@@ -773,7 +767,7 @@ export default function AgentRunConsole() {
         // the durable run is still gated on a human decision.
         setState((s) => { s.status = s.status === 'running' ? 'done' : s.status })
       },
-      onError: ({ message }) => {
+      onError: (failure) => {
         // The agentic stream can close early in a sparse dev stack; only flip to
         // failed if we never produced an answer, so a graceful fallback (direct
         // inference after ~25s) still reads as a completed run.
@@ -782,8 +776,14 @@ export default function AgentRunConsole() {
           setState((s) => { s.status = s.status === 'running' ? 'done' : s.status })
           return
         }
+        // A zero-retention refusal reads in the reader's language, with its next step: the
+        // server's own text for it is English operator wording. Any other failure keeps its message.
+        const refusal = isZdrCode(failure.code) ? zdrRefusalPresentation(failure.code, failure.feature, i18n.tr) : null
+        const text = refusal === null
+          ? failure.message
+          : refusal.next === null ? refusal.message : `${refusal.message} ${refusal.next}`
         setState((s) => { s.status = 'failed' })
-        setState((s) => { s.error = message })
+        setState((s) => { s.error = text })
       },
     }
 

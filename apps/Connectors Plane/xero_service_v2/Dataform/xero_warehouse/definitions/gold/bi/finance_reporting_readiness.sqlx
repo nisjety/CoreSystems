@@ -1,0 +1,47 @@
+config {
+  type: "table",
+  schema: "xero_datamart",
+  description: "Tenant-level consumer control for finance reporting. It keeps source-native account classification, finance-governed chart mapping, and FX-to-NOK conversion readiness as separate decisions.",
+  assertions: {
+    nonNull: ["tenant_id", "finance_reporting_readiness_state"],
+    uniqueKey: ["tenant_id"]
+  }
+}
+
+SELECT
+  mapping.company_key,
+  mapping.tenant_id,
+  mapping.organisation_name,
+  mapping.base_currency,
+  mapping.account_mapping_readiness_state,
+  mapping.is_native_financial_classification_complete,
+  mapping.is_group_chart_mapping_ready,
+  COALESCE(fx.nok_conversion_readiness_state, 'missing_nok_conversion_readiness')
+    AS nok_conversion_readiness_state,
+  COALESCE(fx.is_functional_currency_nok, FALSE) AS is_functional_currency_nok,
+  COALESCE(fx.is_external_fx_feed_available, FALSE) AS is_external_fx_feed_available,
+  COALESCE(fx.is_nok_conversion_ready, FALSE) AS is_nok_conversion_ready,
+  COALESCE(mapping.is_native_financial_classification_complete, FALSE)
+    AS is_source_native_finance_reporting_ready,
+  COALESCE(mapping.is_group_chart_mapping_ready, FALSE)
+    AND COALESCE(fx.is_nok_conversion_ready, FALSE) AS is_finance_reporting_ready,
+  CASE
+    WHEN mapping.tenant_id IS NULL THEN 'missing_account_mapping_readiness'
+    WHEN fx.tenant_id IS NULL THEN 'missing_nok_conversion_readiness'
+    WHEN NOT COALESCE(mapping.is_native_financial_classification_complete, FALSE)
+      THEN 'native_account_classification_incomplete'
+    WHEN NOT COALESCE(mapping.is_group_chart_mapping_ready, FALSE)
+      AND NOT COALESCE(fx.is_nok_conversion_ready, FALSE)
+      THEN 'group_chart_mapping_and_nok_conversion_pending'
+    WHEN NOT COALESCE(mapping.is_group_chart_mapping_ready, FALSE)
+      THEN 'group_chart_mapping_pending'
+    WHEN NOT COALESCE(fx.is_nok_conversion_ready, FALSE)
+      THEN 'nok_conversion_pending'
+    ELSE 'ready'
+  END AS finance_reporting_readiness_state,
+  mapping.latest_account_observed_at,
+  fx.latest_source_rate_observed_at,
+  'xero' AS source_system
+FROM ${ref("xero_gold_finance", "audit_account_mapping_readiness")} AS mapping
+LEFT JOIN ${ref("xero_gold_finance", "audit_nok_conversion_readiness")} AS fx
+  USING (tenant_id)

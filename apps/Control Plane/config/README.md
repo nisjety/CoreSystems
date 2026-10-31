@@ -282,6 +282,26 @@ verify is provisioned by the central bootstrap (`ensure_event_keypair graph`,
 `scripts/bootstrap_runtime_environment.sh`), not by this launcher; production keys
 come from the secret manager at an absolute path, never `.secrets/event-keys`.
 
+### Browser grant validation: `quarry-edge` on `browser-broker` (principal bundle P2)
+
+Quarry's agent routes ask the BrowserBroker whether a run's grant is valid, on
+behalf of the run's organization (plan WS1.A2, decision X-1). The registry grants
+exactly that and nothing wider:
+
+| principal | audience | scope | retention | credential |
+| --- | --- | --- | --- | --- |
+| `quarry-edge` | `browser-broker` | `browser:read`, new, beside its `data-plane` lane | `zdr` | `QUARRY_SERVICE_API_KEY` (unchanged) |
+
+`browser:read` is what the broker's `ValidateGrant` requires. Acquiring, revoking
+and deriving grants need `browser:write`, which **no principal holds on any
+audience** (the Model Plane mints grants as a user, never as a service); the P2
+spec pins that. The lane is `zdr` because validation carries no content, and the
+token a mint returns is org-scoped (the directory check runs at every mint). The
+principal's top-level `scopes` is the union of its lanes, so it now lists
+`browser:read` first. The vendored Quarry manifest row that names this lane
+(`browser-grant-validate`) lands with Quarry's `browser-broker` audience; deploy
+Auth Core with this registry before a quarry-edge that mints for it.
+
 ### Mail-to-task principals (dark)
 
 Two principals exist so switching mail-to-task on needs no policy change. Nothing

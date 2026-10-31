@@ -94,6 +94,8 @@ pub fn extract(html: &str, content_type: Option<String>) -> PageMetadata {
         canonical_url,
         og_image,
         robots,
+        content_kind: None,
+        content_kind_source: None,
     }
 }
 

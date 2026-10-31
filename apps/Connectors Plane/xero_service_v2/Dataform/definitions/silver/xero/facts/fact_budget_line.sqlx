@@ -1,0 +1,34 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  name: "fact_budget_line",
+  description: "Silver: current Xero budget balance per account and period. Grain: one row per tenant, budget, account, and period.",
+  tags: ["silver", "xero", "fact"]
+}
+
+WITH current_budgets AS (
+  SELECT tenant_id, record_id, synced_at, budget_id
+  FROM ${ref("dw_staging_xero", "budgets")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, record_id
+    ORDER BY synced_at DESC
+  ) = 1
+)
+
+SELECT
+  s.tenant_id,
+  s.synced_at,
+  COALESCE(s.budget_id, h.budget_id) AS budget_id,
+  s.account_id,
+  s.account_code,
+  TIMESTAMP(SAFE_CAST(s.period_date_local AS DATE)) AS period,
+  SAFE_CAST(s.period_date_local AS DATE) AS period_date_local,
+  SAFE_CAST(s.amount AS FLOAT64) AS amount,
+  SAFE_CAST(s.unit_amount AS FLOAT64) AS unit_amount,
+  s.notes,
+  'xero' AS _source
+FROM ${ref("dw_staging_xero", "budget_balance_snapshots")} AS s
+JOIN current_budgets AS h
+  ON s.tenant_id = h.tenant_id
+ AND s.record_id = h.record_id
+ AND s.synced_at = h.synced_at

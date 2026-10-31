@@ -67,7 +67,7 @@ func TestDeriveRunGrant_RejectsMalformedRequestsBeforeTouchingGrants(t *testing.
 		"no org":           {func(r *DeriveRunGrantRequest) { r.OrgId = "" }, codes.InvalidArgument},
 		"other org":        {func(r *DeriveRunGrantRequest) { r.OrgId = "org2" }, codes.PermissionDenied},
 		"no purpose":       {func(r *DeriveRunGrantRequest) { r.Purpose = "" }, codes.InvalidArgument},
-		"other purpose":    {func(r *DeriveRunGrantRequest) { r.Purpose = "attach" }, codes.InvalidArgument},
+		"other purpose":    {func(r *DeriveRunGrantRequest) { r.Purpose = "bogus" }, codes.InvalidArgument},
 		"negative ttl":     {func(r *DeriveRunGrantRequest) { r.TtlSeconds = -1 }, codes.InvalidArgument},
 		"ttl under 30 s":   {func(r *DeriveRunGrantRequest) { r.TtlSeconds = 29 }, codes.InvalidArgument},
 		"wildcard host":    {func(r *DeriveRunGrantRequest) { r.AllowedDomains = []string{"*.example.com"} }, codes.InvalidArgument},

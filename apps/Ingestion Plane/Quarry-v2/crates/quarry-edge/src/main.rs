@@ -27,7 +27,10 @@ mod agent_routes;
 mod fleet_routes;
 mod answer_routes;
 mod api_error;
+mod budget;
 mod audio_routes;
+mod audit_page;
+mod audit_seo;
 mod auth;
 mod cache;
 mod canary;
@@ -38,20 +41,51 @@ mod change_routes;
 #[cfg(feature = "postgres-queue")]
 mod change_webhook;
 mod config;
+mod control_client;
+mod drain;
 mod experiments;
 mod extract_routes;
 mod graphql;
+mod grant_boot;
 mod handoff;
 mod internal_auth;
+mod internal_routes;
+mod job_lifecycle_routes;
+mod job_stream;
+mod crawl_policy;
+mod crawl_request;
+mod batch_check;
+mod limits;
 mod map_routes;
+mod metrics;
+mod model_plane_gate;
+mod policy_baseline;
+mod profile_encryption;
+mod profile_guard;
 mod profile_routes;
 mod queue_routes;
+mod redaction_boot;
+mod request_id;
 mod resource_routes;
+mod retry_after;
 mod routes;
+mod run_limits;
+mod schedule_preflight;
 mod schedule_routes;
+mod scrape_actions;
+mod scrape_contract;
+mod scrape_routes;
 mod search_routes;
 mod source_registrar;
 mod state;
+mod trace_config;
+mod usage_attrs;
+mod zdr_log;
+mod zdr_refusal;
+mod web_policy_edge;
+#[cfg(feature = "browser-agent")]
+mod agent_policy_gate;
+mod zdr_tombstone;
 #[cfg(test)]
 mod test_support;
 mod telemetry;
@@ -73,6 +107,7 @@ const LOCAL_INDEX_RETENTION_INTERVAL: Duration = Duration::from_secs(3_600);
 /// Upper bound on how long shutdown waits for the final commit.
 const LOCAL_INDEX_SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(20);
 
+// zdr-log-ok-begin: process boot and shutdown (shutdown_signal, main, run): no request span exists here; every url field is an operator-configured upstream and every error text is a startup or background failure, never a caller's data
 /// Resolves when the process is asked to stop: Ctrl-C anywhere, or SIGTERM on
 /// unix (what Kubernetes and `docker stop` send).
 ///
@@ -109,12 +144,31 @@ async fn shutdown_signal() {
         _ = ctrl_c => tracing::info!("shutdown: Ctrl-C received"),
         _ = terminate => tracing::info!("shutdown: SIGTERM received"),
     }
+    // From here the edge takes no new runs, crawls or batches and `/ready`
+    // says so; requests already in flight finish (see `drain`).
+    drain::begin();
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Entry point. The hidden `--doc-parse <pdf|docx>` argument turns this binary
+/// into the document-parser child (see `quarry_runtime::content_route`): it
+/// answers before any configuration, socket, artifact store or async runtime
+/// exists, so the process the limits are applied to holds nothing else.
+fn main() -> anyhow::Result<()> {
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some(quarry_runtime::content_route::CHILD_ARG) {
+        std::process::exit(quarry_runtime::content_route::run_child(args.next().as_deref()));
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     telemetry::init_telemetry();
+    // Choose (and log) how documents are parsed before the first one arrives.
+    quarry_runtime::content_route::parse_backend();
 
     // Production safety net: `QUARRY_EDGE_AUTH_DEV_BYPASS=1` accepts any
     // bearer without verifying it against auth-core's JWKS. That's fine
@@ -128,10 +182,13 @@ async fn main() -> anyhow::Result<()> {
             .or_else(|_| std::env::var("APP_ENV"))
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let bypass = std::env::var("QUARRY_EDGE_AUTH_DEV_BYPASS")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
-            .unwrap_or(false);
-        if bypass && (env_name == "prod" || env_name == "production") {
+        // One parse for the refusal and for the runtime reader
+        // (`auth::dev_bypass_flag_value`): they must never disagree.
+        let raw_bypass = std::env::var("QUARRY_EDGE_AUTH_DEV_BYPASS").ok();
+        let bypass = raw_bypass
+            .as_deref()
+            .is_some_and(auth::dev_bypass_flag_value);
+        if auth::production_with_dev_bypass(&env_name, raw_bypass.as_deref()) {
             tracing::error!(
                 env = %env_name,
                 "REFUSING TO START: QUARRY_EDGE_AUTH_DEV_BYPASS=1 is enabled but \
@@ -153,6 +210,85 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let cfg = config::EdgeConfig::from_env()?;
+    // A crawl bound that cannot be read must stop the process here, naming the
+    // variable, rather than silently become "no bound" later.
+    limits::CrawlLimits::from_env().map_err(|e| anyhow::anyhow!("crawl limits: {e}"))?;
+    // WS14.S3: an unparsable QUARRY_EDGE__CRAWL_SCOPE_MODE fails boot.
+    let crawl_scope = crawl_policy::CrawlScopeSwitch::from_env()
+        .map_err(|e| anyhow::anyhow!("crawl scope: {e}"))?;
+    tracing::info!(mode = crawl_scope.label(), "crawl scope: boot");
+    // WS14.S4: an unparsable robots setting (QUARRY_EDGE__CRAWL_ROBOTS and the four
+    // QUARRY_ROBOTS_* / QUARRY_CRAWL_DELAY_MAX_S values) fails boot.
+    let robots_config = quarry_runtime::RobotsGateConfig::from_env()
+        .map_err(|e| anyhow::anyhow!("robots gate: {e}"))?;
+    tracing::info!(
+        mode = robots_config.mode.as_str(),
+        unreachable_disallows = (robots_config.unreachable == quarry_runtime::UnreachablePolicy::Disallow),
+        crawl_delay_max_s = robots_config.crawl_delay_max.as_secs(),
+        cache_max_entries = robots_config.cache_max_entries,
+        "robots gate: boot"
+    );
+    // WS14.S5: an unparsable QUARRY_EDGE__CRAWL_BATCH_MAX_URLS fails boot.
+    let batch_cap = quarry_edge::batch_check::check_boot()
+        .map_err(|e| anyhow::anyhow!("crawl batch cap: {e}"))?;
+    tracing::info!(max_urls = batch_cap, "crawl batch cap: boot");
+    // WS10.S3: the agent event replay ring bounds (env-only; an unparsable value aborts boot).
+    let trace_ring = trace_config::TraceConfig::from_env()
+        .map_err(|e| anyhow::anyhow!("trace: {e}"))?
+        .ring;
+    quarry_runtime::DocRouting::from_env().map_err(|e| anyhow::anyhow!("doc routing: {e}"))?;
+    // Whether an agent action is refused while a person holds the browser. A typo
+    // stops the edge here, naming the variable, rather than leaving it off.
+    let takeover_enforced = run_limits::parse_takeover_enforcement(
+        std::env::var(run_limits::ENV_TAKEOVER_ENFORCEMENT).ok().as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("takeover enforcement: {e}"))?;
+    tracing::info!(takeover_enforced, "agent takeover enforcement");
+    // Caps on live runs and the sweeper's lifetimes. The browser driver's own
+    // backstops (idle 3600 s, max age 21600 s) must sit above every run limit.
+    let run_limit_config = run_limits::RunLimits::from_env()
+        .map_err(|e| anyhow::anyhow!("run limits: {e}"))?;
+    tracing::info!("run limits: {run_limit_config}");
+    for warning in run_limit_config.ordering_warnings(3600, 21_600) {
+        tracing::warn!("run limits: {warning}");
+    }
+    // R-26 (WARN-only until the Chromium RSS is recorded): the driver's session
+    // cap must exceed the run cap plus the heavy lane.
+    #[cfg(feature = "browser-agent")]
+    for warning in quarry_browser::slots::session_cap_warnings(
+        quarry_browser::slots::BrowserPoolConfig::from_env().max_sessions,
+        run_limit_config.max_concurrent_runs as usize,
+        quarry_browser::slots::HEAVY_LANE_BUDGET,
+    ) {
+        tracing::warn!("browser capacity: {warning}");
+    }
+    // Agent-run budgets: an unreadable mode or limit stops the edge here, naming
+    // the variable, rather than silently becoming "no budget".
+    let budget_mode = budget::BudgetMode::from_env().map_err(|e| anyhow::anyhow!("budget: {e}"))?;
+    budget::BudgetLimits::from_env(|name| std::env::var(name).ok())
+        .map_err(|e| anyhow::anyhow!("budget: {e}"))?;
+    tracing::info!(mode = budget_mode.label(), "agent run budget enforcement");
+    // Whether a broker grant's budget claim tightens the run it backs (WS6.E).
+    let claim_mode = budget::ClaimMode::from_env().map_err(|e| anyhow::anyhow!("budget: {e}"))?;
+    tracing::info!(mode = claim_mode.label(), "grant budget claim");
+    // How much of a browser pool one organization may hold (0 = no cap).
+    let pool_org_max = quarry_runtime::lease_pool::org_max_permits_from_env(|name| {
+        std::env::var(name).ok()
+    })
+    .map_err(|e| anyhow::anyhow!("lease pool: {e}"))?;
+    if pool_org_max > 0 {
+        tracing::info!(pool_org_max, "per-organization browser pool cap");
+    }
+    // How long a shutdown waits for in-flight requests before closing the rest.
+    let drain_deadline = drain::deadline_from_env(|name| std::env::var(name).ok())
+        .map_err(|e| anyhow::anyhow!("drain: {e}"))?;
+    // WS7.C: the web-policy baseline and enforcement mode. An unparsable value fails the boot.
+    let web_policy = policy_baseline::PolicyBaseline::from_env()
+        .map_err(|e| anyhow::anyhow!("web policy: {e}"))?;
+    tracing::info!(
+        enforcement = web_policy.enforcement().as_str(),
+        "web policy baseline loaded"
+    );
     let environment = std::env::var("ENVIRONMENT")
         .or_else(|_| std::env::var("APP_ENV"))
         .unwrap_or_default()
@@ -170,33 +306,72 @@ async fn main() -> anyhow::Result<()> {
         })?;
     }
 
+    // WS12.S2: the secret-redaction mode. `shadow` and `off` are development and staging
+    // modes; production refuses to boot with either, and so does an unparsable value.
+    redaction_boot::init_from_env(matches!(environment.as_str(), "prod" | "production"))
+        .map_err(|e| anyhow::anyhow!("secret redaction: {e}"))?;
+
     if cfg.cross_plane_auth_dev_bypass && matches!(environment.as_str(), "prod" | "production") {
         anyhow::bail!(
             "QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS must never be enabled in production"
         );
     }
+    // WS17.P0: with the flag off, a ZDR organization is served on every profile route and only
+    // logged (zdr.would_refuse). Say so at boot in production.
+    if matches!(environment.as_str(), "prod" | "production") && !cfg.zdr_refuse_durable_resources {
+        tracing::warn!(
+            "QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES is off in production: ZDR organizations are served on durable resources (profiles, schedules, change monitors) and only observed"
+        );
+    }
+    // Metrics are opt-in. An unreadable setting, or an enabled listener in
+    // production without a usable token, stops the edge here rather than
+    // starting an open or unusable endpoint.
+    let metrics_cfg = metrics::MetricsConfig::from_env(|name| std::env::var(name).ok())
+        .map_err(|e| anyhow::anyhow!("metrics: {e}"))?;
+    metrics_cfg
+        .validate(matches!(environment.as_str(), "prod" | "production"))
+        .map_err(|e| anyhow::anyhow!("metrics: {e}"))?;
+    let metrics_handle = if metrics_cfg.enabled {
+        Some(metrics::install()?)
+    } else {
+        None
+    };
     let durability_required = matches!(environment.as_str(), "prod" | "production")
         || std::env::var("QUARRY_EDGE__REQUIRE_DURABLE_RUNTIME")
             .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes"))
             .unwrap_or(false);
     let require_browser_grants =
         cfg.require_browser_grants || matches!(environment.as_str(), "prod" | "production");
-    let browser_grant_http_configured = cfg
-        .browser_grant_validator_url
-        .as_deref()
-        .is_some_and(|url| !url.trim().is_empty());
-    let browser_grant_grpc_configured = cfg
-        .browser_grant_validator_grpc_url
-        .as_deref()
-        .is_some_and(|url| !url.trim().is_empty());
-    #[cfg(not(feature = "grpc"))]
-    if browser_grant_grpc_configured {
-        anyhow::bail!("QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL requires the grpc feature");
-    }
-    if require_browser_grants && !browser_grant_http_configured && !browser_grant_grpc_configured {
-        anyhow::bail!(
-            "browser grants are required but no BrowserBroker validation endpoint is configured"
-        );
+    // Which grant validator this environment calls for, or why the edge must not
+    // start (grant_boot.rs): production needs the gRPC validator and the service
+    // credential that mints its per-organization tokens.
+    let grant_validator_choice = grant_boot::decide(grant_boot::GrantBootInputs {
+        production: matches!(environment.as_str(), "prod" | "production"),
+        require_grants: require_browser_grants,
+        http_configured: cfg
+            .browser_grant_validator_url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty()),
+        grpc_configured: cfg
+            .browser_grant_validator_grpc_url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty()),
+        grpc_compiled: cfg!(feature = "grpc"),
+        service_tokens_configured: cfg
+            .quarry_service_api_key
+            .as_deref()
+            .is_some_and(|credential| !credential.trim().is_empty()),
+        dev_bypass: cfg.cross_plane_auth_dev_bypass,
+    })
+    .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+    match grant_validator_choice {
+        grant_boot::ValidatorChoice::Grpc => {}
+        grant_boot::ValidatorChoice::Http => tracing::warn!(
+            "browser grants are validated through the HTTP compatibility shim (not production)"
+        ),
+        grant_boot::ValidatorChoice::Noop => tracing::warn!(
+            "no BrowserBroker validator is configured: browser grants are not enforced (not production)"
+        ),
     }
     if durability_required
         && matches!(
@@ -239,6 +414,16 @@ async fn main() -> anyhow::Result<()> {
             "QUARRY_EDGE__QUARRY_SERVICE_API_KEY is required when Data or Model Plane is configured"
         );
     }
+
+    // QB-T17: the Model Plane features. Each is off unless its switch is on AND a model path exists.
+    // A switch that is on without one stays off, and boot logs an error that names it.
+    let model_plane_decision = model_plane_gate::decide(
+        &cfg,
+        cross_plane_tokens.is_some(),
+        &model_plane_gate::manifest_granted,
+    );
+    model_plane_gate::log_refusals(&model_plane_decision.refusals);
+    let mp = model_plane_decision.features;
 
     let redis = if let Some(url) = &cfg.redis_url {
         let client = redis::Client::open(url.as_str())?;
@@ -309,7 +494,8 @@ async fn main() -> anyhow::Result<()> {
             recording: false,
         };
         let bb_driver = Arc::new(BrowserbaseDriver::new(bb_config));
-        let pool = Arc::new(RuntimeLeasePool::new(4));
+        let pool = Arc::new(RuntimeLeasePool::new(4).with_org_max_permits(pool_org_max));
+        metrics::register_pool("browserbase", (*pool).clone());
         let processor_id = std::env::var("QUARRY_BROWSERBASE_PROCESSOR_ID")
             .unwrap_or_else(|_| "browserbase".into());
         let adapter = BrowserDriverAdapter::managed_provider(bb_driver, pool, processor_id);
@@ -323,10 +509,15 @@ async fn main() -> anyhow::Result<()> {
             quarry_browser::chromiumoxide::ChromiumoxideDriver::new()
                 .with_pinned_egress_proxy(browser_egress_proxy.clone()),
         );
-        let pool = Arc::new(RuntimeLeasePool::new(2));
+        let pool = Arc::new(RuntimeLeasePool::new(2).with_org_max_permits(pool_org_max));
+        metrics::register_pool("chromium", (*pool).clone());
         let adapter = BrowserDriverAdapter::new(browser_driver, pool);
+        tracing::info!(
+            session_isolation = adapter.session_isolation(),
+            heavy_permits = adapter.heavy_permits_available(),
+            "browser driver registered (local chromiumoxide)"
+        );
         drivers.register(Arc::new(adapter));
-        tracing::info!("browser driver registered (local chromiumoxide)");
     }
 
     let default_driver = drivers
@@ -355,11 +546,51 @@ async fn main() -> anyhow::Result<()> {
     } else {
         DefaultEngine::new()
     };
-    let artifacts_durable = matches!(
-        cfg.artifact_backend.trim().to_ascii_lowercase().as_str(),
-        "fs" | "filesystem" | "s3"
-    );
-    let artifacts: Arc<dyn ArtifactStore> = match cfg.artifact_backend.as_str() {
+    // W3-B3-01 (E3.8.6): reputation hot reload. Dark by default: the watcher
+    // starts only when QUARRY_EDGE__SECURITY_SNAPSHOT_WATCH_S is a positive
+    // number of seconds and a snapshot path is configured. Subdomain matching
+    // is a separate opt-in (QUARRY_EDGE__SECURITY_SNAPSHOT_SUBDOMAINS).
+    let security = security.with_subdomain_matching(env_flag(
+        "QUARRY_EDGE__SECURITY_SNAPSHOT_SUBDOMAINS",
+    ));
+    let reputation_watch_s = std::env::var("QUARRY_EDGE__SECURITY_SNAPSHOT_WATCH_S")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0);
+    if let (Some(path), Some(secs)) = (
+        cfg.security_snapshot_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty()),
+        reputation_watch_s,
+    ) {
+        let boot = security.list_counts().await;
+        ::metrics::gauge!("quarry_security_reputation_entries", "list" => "blocklist")
+            .set(boot.blocklist as f64);
+        ::metrics::gauge!("quarry_security_reputation_entries", "list" => "allowlist")
+            .set(boot.allowlist as f64);
+        tracing::info!(interval_s = secs, "reputation snapshot hot reload enabled");
+        let _reputation_watch = quarry_security::preflight::spawn_snapshot_watch(
+            &security,
+            path,
+            Duration::from_secs(secs),
+            |result| {
+                if let Ok(counts) = result {
+                    ::metrics::gauge!("quarry_security_reputation_entries", "list" => "blocklist")
+                        .set(counts.blocklist as f64);
+                    ::metrics::gauge!("quarry_security_reputation_entries", "list" => "allowlist")
+                        .set(counts.allowlist as f64);
+                }
+            },
+        );
+    }
+    // Normalise ONCE and use the result for both the durability flag and the
+    // selection below. The flag used to lowercase while the `match` did not, so
+    // `ARTIFACT_BACKEND=S3` counted as durable (production gate passes) yet fell
+    // through to the in-memory store.
+    let artifact_backend = config::normalize_artifact_backend(&cfg.artifact_backend);
+    let artifacts_durable = matches!(artifact_backend.as_str(), "fs" | "filesystem" | "s3");
+    let artifacts: Arc<dyn ArtifactStore> = match artifact_backend.as_str() {
         "fs" | "filesystem" => {
             tracing::info!(root = %cfg.artifact_root, "artifact backend: filesystem");
             Arc::new(FilesystemStore::new(&cfg.artifact_root)?)
@@ -378,17 +609,47 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // D2 / cluster #14 — HMAC signer for cross-plane forwards to control.
+    // None when the secret env is unset → unsigned requests (dev posture only;
+    // control MUST require signatures in prod). Built before the event publisher
+    // because that, too, posts to control and control rejects an unsigned request
+    // once QUARRY_INTERNAL_HMAC_REQUIRED=1.
+    let internal_signer: Option<std::sync::Arc<internal_auth::InternalSigner>> = cfg
+        .internal_secret
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(|s| match internal_auth::InternalSigner::new(s) {
+            Ok(signer) => {
+                tracing::info!("HMAC signer wired for control-plane forwards");
+                Some(std::sync::Arc::new(signer))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "internal_secret too short; HMAC signing disabled");
+                None
+            }
+        });
+
     // Event publisher: edge → control-plane event stream.
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
     let publisher_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
-    let publisher = quarry_runtime::EventPublisher::new(
+    let mut publisher = quarry_runtime::EventPublisher::new(
         event_rx,
         publisher_client,
         cfg.control_base_url.clone(),
         cfg.control_api_key.clone(),
     );
+    if let Some(signer) = internal_signer.clone() {
+        publisher = publisher.with_signer(std::sync::Arc::new(move |method, path, body| {
+            let signed = internal_auth::apply_to_request(&signer, method, path, body);
+            vec![
+                (internal_auth::HEADER_SIG, signed.signature),
+                (internal_auth::HEADER_TS, signed.timestamp),
+                (internal_auth::HEADER_NONCE, signed.nonce),
+            ]
+        }));
+    }
     tokio::spawn(async move { publisher.run().await });
 
     // P1 / cluster #nats — optional NATS JetStream fan-out. When
@@ -397,7 +658,7 @@ async fn main() -> anyhow::Result<()> {
     // (autocomplete-core, model-plane, org-core) see them on a durable
     // subject. Connection failure is non-fatal: we log and fall back to
     // the mpsc-only sink so the service still boots.
-    let event_sink = quarry_runtime::EventSink::new(event_tx);
+    let event_sink = quarry_runtime::EventSink::new(event_tx).with_ring_limits(trace_ring);
     // The NatsEventBus also seeds the P3 billing meter. Keep it as an
     // `Option<NatsEventBus>` so we can derive a `NatsUsageMeter` from
     // the same connection below.
@@ -437,7 +698,7 @@ async fn main() -> anyhow::Result<()> {
     // usage meter. When NATS is up we publish to `usage.>` subjects;
     // otherwise we noop so dev / offline boots silently. Billing-core's
     // HTTP recovery endpoint covers any gap if NATS drops mid-flight.
-    let usage: Arc<dyn quarry_runtime::UsageMeter> = match shared_nats_bus.as_ref() {
+    let inner_usage: Arc<dyn quarry_runtime::UsageMeter> = match shared_nats_bus.as_ref() {
         Some(bus) => {
             tracing::info!("usage meter: NATS (publishes to usage.>)");
             Arc::new(quarry_runtime::NatsUsageMeter::from_bus(bus))
@@ -447,6 +708,27 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(quarry_runtime::NoopUsageMeter)
         }
     };
+    // WS6.C-e: the gate in front of the meter applies QUARRY_EDGE__USAGE_BROWSER_METRICS to the
+    // seven browser metrics (default off); every other event passes through unchanged.
+    let browser_metrics = usage_attrs::browser_metrics_mode_from_env();
+    tracing::info!(mode = browser_metrics.label(), "usage browser metrics mode");
+    let usage: Arc<dyn quarry_runtime::UsageMeter> = Arc::new(usage_attrs::ShadowMeter::new(
+        inner_usage,
+        browser_metrics,
+    ));
+
+    // WS6.D-s: the organization limits resolver. Only the static source is built; a misspelt
+    // source or fail mode, or the unbuilt `billing_core`, stops the edge here, naming the variable.
+    let limits_config =
+        limits::LimitsConfig::from_env().map_err(|e| anyhow::anyhow!("limits: {e}"))?;
+    let org_limits = limits_config
+        .build()
+        .map_err(|e| anyhow::anyhow!("limits: {e}"))?;
+    tracing::info!(
+        source = limits_config.source.label(),
+        fail_mode = limits_config.fail_mode.label(),
+        "limits resolver"
+    );
 
     let cache = redis
         .as_ref()
@@ -544,6 +826,17 @@ async fn main() -> anyhow::Result<()> {
     // Otherwise the dev-default `InMemoryProfileStore` runs. Either
     // backend can be wrapped with Redis hot-cache via
     // `cached_profile_store::maybe_cache`.
+    // WS17.E1: profile envelope encryption. Validated before any profile store is built.
+    let profile_plan = profile_encryption::plan_from_settings(
+        &cfg.profile_encryption,
+        cfg.profile_encryption_required,
+        &cfg.profile_key_provider,
+        std::env::var(profile_encryption::MASTER_KEYS_ENV).ok().as_deref(),
+        std::env::var(profile_encryption::MASTER_KEY_ACTIVE_ENV).ok().as_deref(),
+    )?;
+    #[allow(unused_mut)]
+    let mut profile_blobs: Option<Arc<dyn quarry_runtime::profile_blob_store::ProfileBlobStore>> =
+        None;
     #[allow(unused_mut)]
     let mut profiles_durable = false;
     let inner_profiles: Arc<dyn quarry_browser::session::ProfileStore> = {
@@ -557,9 +850,20 @@ async fn main() -> anyhow::Result<()> {
                     Ok(pool) => {
                         profiles_durable = true;
                         tracing::info!("ProfileStore: PostgresProfileStore (durable)");
-                        Arc::new(
-                            quarry_runtime::postgres_profile_store::PostgresProfileStore::new(pool),
-                        )
+                        let store =
+                            quarry_runtime::postgres_profile_store::PostgresProfileStore::new(pool);
+                        // WS17.P1: hourly sweep of expired profile deletion tombstones.
+                        let _tombstone_sweeper =
+                            quarry_runtime::postgres_profile_store::spawn_tombstone_sweeper(
+                                store.clone(),
+                            );
+                        // WS17.E1: the same table, as a blob store for the envelope layer.
+                        profile_blobs = Some(Arc::new(
+                            quarry_runtime::postgres_profile_store::PostgresProfileBlobStore::new(
+                                store.clone(),
+                            ),
+                        ));
+                        Arc::new(store)
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "PgPool connect failed; falling back to InMemoryProfileStore");
@@ -583,11 +887,44 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(quarry_browser::session::InMemoryProfileStore::new())
         }
     };
+    // WS17.E3: keep the Postgres blob store for the erasure families (any mode).
+    let erasure_blobs = profile_blobs.clone();
     // Optional Redis read-through cache (1h TTL by default).
-    let profiles =
-        quarry_runtime::cached_profile_store::maybe_cache(inner_profiles, cfg.redis_url.as_deref())
-            .await;
+    let profiles = match (profile_plan.mode, profile_plan.keys.clone()) {
+        (quarry_runtime::envelope_profile_store::EncryptionMode::Off, _) | (_, None) => {
+            quarry_runtime::cached_profile_store::maybe_cache(inner_profiles, cfg.redis_url.as_deref())
+                .await
+        }
+        (mode, Some(keys)) => match profile_blobs {
+            Some(blobs) => {
+                quarry_runtime::envelope_profile_store::wire(
+                    mode,
+                    blobs,
+                    keys,
+                    cfg.redis_url.as_deref(),
+                )
+                .await
+            }
+            None => anyhow::bail!(
+                "profile_encryption={} requires profile_store_kind=postgres and a database_url",
+                mode.as_str()
+            ),
+        },
+    };
 
+    // WS17.E3: the erasure families the internal purge route walks. Profiles first;
+    // the rows live in the durable table, so this needs the Postgres blob store.
+    let org_erasables: Vec<Arc<dyn quarry_runtime::org_erasure::OrgErasable>> = match erasure_blobs {
+        Some(blobs) => vec![Arc::new(
+            quarry_runtime::org_erasure::ProfileErasure::connect(
+                blobs,
+                profile_plan.keys.clone(),
+                cfg.redis_url.as_deref(),
+            )
+            .await,
+        )],
+        None => Vec::new(),
+    };
     // P0 action proof. A production agent must not report readiness while
     // receipts would disappear with the edge process. The durable store uses
     // the same migration set as the queue/history stores and enforces org_id
@@ -652,14 +989,18 @@ async fn main() -> anyhow::Result<()> {
             .as_deref()
             .filter(|url| !url.trim().is_empty())
         {
-            let validator = quarry_runtime::grpc::GrpcGrantValidator::connect(url).await?;
-            let validator = match cfg.model_plane_token.as_deref() {
-                Some(token) if cfg.cross_plane_auth_dev_bypass => {
-                    validator.with_bearer_token(token.to_owned())
-                }
-                _ => validator,
-            };
-            Arc::new(validator)
+            // Fails at boot, not on the first run, when the broker cannot be
+            // reached or the manifest row the validator mints against is invalid;
+            // tests/browser_grants_prod.rs builds its validator with this function.
+            Arc::new(
+                grant_boot::build_grpc_validator(
+                    url,
+                    cross_plane_tokens.clone(),
+                    cfg.model_plane_token.as_deref(),
+                    cfg.cross_plane_auth_dev_bypass,
+                )
+                .await?,
+            )
         } else {
             browser_grant_http_validator(&cfg)?
         }
@@ -970,7 +1311,7 @@ async fn main() -> anyhow::Result<()> {
     // dedupes hot keys for 60 minutes. Any failure or timeout in the LLM
     // call silently falls back to `QueryIntent::Default` — the search
     // path is never blocked by the Model Plane.
-    if cfg.llm_classify_intent {
+    if mp.intent_classifier {
         if let Some(mp_url) = cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()) {
             match build_model_client(mp_url) {
                 Ok(mp) => {
@@ -1008,7 +1349,7 @@ async fn main() -> anyhow::Result<()> {
     // queries. Same gating as the intent classifier: requires the flag AND a
     // Model Plane URL. The rewriter is degrade-safe (original query on any
     // failure), so this never blocks search.
-    if cfg.autoprompt {
+    if mp.autoprompt {
         if let Some(mp_url) = cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()) {
             match build_model_client(mp_url) {
                 Ok(mp) => {
@@ -1047,29 +1388,58 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Build the Data Plane vector index once (when DATA_PLANE_URL is set). It is
-    // shared by the hybrid search provider below AND retained in AppState for
-    // the find-similar route (`POST /v1/search/similar`), which queries it
-    // directly rather than going through the lexical/SERP chain.
-    let vector_index: Option<Arc<dyn quarry_runtime::vector_index::VectorIndex>> = cfg
+    // Build the Data Plane vector index once, behind its kill switch
+    // (QUARRY_EDGE__VECTOR_RETRIEVAL, off by default). It is shared by the hybrid
+    // search provider below AND retained in AppState for the find-similar route
+    // (`POST /v1/search/similar`), which queries it directly rather than going
+    // through the lexical/SERP chain. Without the switch, or without DATA_PLANE_URL,
+    // there is no vector leg: search is lexical-only and find-similar answers 501.
+    let vector_index: Option<Arc<dyn quarry_runtime::vector_index::VectorIndex>> = match cfg
         .data_plane_url
         .as_deref()
         .filter(|s| !s.is_empty())
-        .map(|dp_url| {
-            let mut vidx = quarry_runtime::DataPlaneVectorIndex::new(dp_url);
-            if let Some(provider) = cross_plane_tokens.clone() {
-                vidx = vidx.with_token_provider(provider);
-            } else if cfg.cross_plane_auth_dev_bypass {
-                if let Some(key) = cfg
-                    .data_plane_service_token
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                {
-                    vidx = vidx.with_api_key(key);
+    {
+        Some(dp_url) if cfg.vector_retrieval => {
+            let dev_key = cfg
+                .data_plane_service_token
+                .as_deref()
+                .filter(|s| !s.is_empty());
+            // A vector call needs a service identity. Without one the Data Plane
+            // would refuse every call, so the leg stays off and boot says why.
+            let identity = cross_plane_tokens.is_some()
+                || (cfg.cross_plane_auth_dev_bypass && dev_key.is_some());
+            if identity {
+                let mut vidx = quarry_runtime::DataPlaneVectorIndex::new(dp_url)?
+                    .with_sovereign_posture(cfg.zero_saas_search)
+                    .with_hourly_budget(cfg.vector_retrieval_per_org_hourly_budget);
+                if let Some(provider) = cross_plane_tokens.clone() {
+                    vidx = vidx.with_token_provider(provider);
+                } else if cfg.cross_plane_auth_dev_bypass {
+                    if let Some(key) = dev_key {
+                        vidx = vidx.with_api_key(key);
+                    }
                 }
+                tracing::info!(
+                    sovereign = cfg.zero_saas_search,
+                    per_org_hourly_budget = cfg.vector_retrieval_per_org_hourly_budget,
+                    "vector retrieval on: the Data Plane vector leg is wired"
+                );
+                Some(Arc::new(vidx) as Arc<dyn quarry_runtime::vector_index::VectorIndex>)
+            } else {
+                tracing::error!(
+                        "vector retrieval is on but no service identity is configured (cross-plane tokens or the dev bypass key); the vector leg stays off"
+                    );
+                None
             }
-            Arc::new(vidx) as Arc<dyn quarry_runtime::vector_index::VectorIndex>
-        });
+        }
+        Some(_) => {
+            tracing::info!(
+                    "vector retrieval off (QUARRY_EDGE__VECTOR_RETRIEVAL unset): search is lexical-only and find-similar answers 501"
+                );
+            None
+        }
+        None => None,
+    };
 
     // OSS-parity P0 1C: hybrid search (Path A). When the vector index is
     // configured, wrap the lexical/SERP router in a HybridSearchProvider that
@@ -1088,52 +1458,77 @@ async fn main() -> anyhow::Result<()> {
             (other, _) => other,
         };
 
-    // Exa-style semantic rerank — when enabled AND a Model Plane URL is set,
-    // wrap the search provider so the top-N merged results are reordered by
-    // query relevance with a short highlight attached per result. Degrade-safe
-    // inside the reranker (original order on any failure). Wrapping here means
-    // both /v1/search and the AnswerPipeline read reranked results, and the edge
-    // cache stores the reranked output (no repeat LLM cost on cache hits).
+    // Semantic rerank (Quarry option B). When on AND the Data Plane is configured with
+    // cross-plane tokens, its POST /v1/rerank orders the top-N merged results by a
+    // cross-encoder score. The wrapper sits here so both /v1/search and the AnswerPipeline
+    // read reranked results, and the edge cache stores the outcome. No Model Plane is
+    // involved. Degrade-safe: any failure keeps the original order.
+    if cfg.rerank_shadow && !cfg.semantic_rerank {
+        tracing::warn!(
+            "QUARRY_EDGE__RERANK_SHADOW has no effect while QUARRY_EDGE__SEMANTIC_RERANK is off"
+        );
+    }
     let search: Option<Arc<dyn quarry_runtime::serp::SearchProvider>> = match (
         search,
         cfg.semantic_rerank,
-        cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()),
     ) {
-        (Some(inner), true, Some(mp_url)) => match build_model_client(mp_url) {
-            Ok(mp) => {
-                let mut reranker = quarry_runtime::ModelPlaneSearchReranker::new(Arc::new(mp));
-                if let Some(m) = cfg
-                    .semantic_rerank_model
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                {
-                    reranker = reranker.with_model(m);
+        (Some(inner), true) => {
+            let dp_url = cfg.data_plane_url.as_deref().filter(|s| !s.is_empty());
+            match (dp_url, cross_plane_tokens.clone()) {
+                (Some(dp_url), Some(tokens)) => {
+                    match quarry_runtime::DataPlaneSearchReranker::new(dp_url, tokens) {
+                        Ok(reranker) => {
+                            let top_n = cfg
+                                .semantic_rerank_top_n
+                                .unwrap_or(quarry_runtime::rerank::DEFAULT_RERANK_TOP_N)
+                                .clamp(1, quarry_runtime::rerank::MAX_RERANK_DOCUMENTS);
+                            tracing::info!(
+                                top_n,
+                                deadline_ms = cfg.rerank_deadline().as_millis() as u64,
+                                shadow = cfg.rerank_shadow,
+                                sovereign = cfg.zero_saas_search,
+                                "semantic rerank: enabled (Data Plane /v1/rerank)"
+                            );
+                            Some(Arc::new(
+                                quarry_runtime::RerankingSearchProvider::new(
+                                    inner,
+                                    Arc::new(reranker),
+                                    top_n,
+                                )
+                                .with_deadline(cfg.rerank_deadline())
+                                .with_sovereign_posture(cfg.zero_saas_search)
+                                .with_shadow(cfg.rerank_shadow),
+                            )
+                                as Arc<dyn quarry_runtime::serp::SearchProvider>)
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "semantic rerank: the Data Plane client could not be built; rerank disabled"
+                            );
+                            Some(inner)
+                        }
+                    }
                 }
-                let top_n = cfg.semantic_rerank_top_n.unwrap_or(10);
-                tracing::info!(top_n, "semantic rerank: enabled");
-                Some(Arc::new(quarry_runtime::RerankingSearchProvider::new(
-                    inner,
-                    Arc::new(reranker),
-                    top_n,
-                ))
-                    as Arc<dyn quarry_runtime::serp::SearchProvider>)
+                _ => {
+                    tracing::error!(
+                            "semantic rerank is on but DATA_PLANE_URL or the cross-plane tokens are not set; rerank disabled"
+                        );
+                    Some(inner)
+                }
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "semantic rerank: MP client init failed; disabled");
-                Some(inner)
-            }
-        },
-        (other, _, _) => other,
+        }
+        (other, _) => other,
     };
 
     // Cycle 19 / cluster #18: AnswerPipeline (Tavily replacement).
-    // Requires BOTH a SearchProvider AND a Model Plane URL. When either
-    // is missing, /v1/answer returns 501 Unsupported with a hint.
+    // Requires QUARRY_EDGE__ANSWER_SYNTHESIS on (QB-T17), a SearchProvider and a model path.
+    // When any is missing, /v1/answer returns 501 Unsupported with a hint.
     let answer_pipeline: Option<Arc<quarry_runtime::answer::AnswerPipeline>> = match (
         &search,
         cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()),
     ) {
-        (Some(search_arc), Some(mp_url)) => {
+        (Some(search_arc), Some(mp_url)) if mp.answer_synthesis => {
             match build_model_client(mp_url) {
                 Ok(mp_client) => {
                     let mp_arc = Arc::new(mp_client);
@@ -1164,7 +1559,15 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         _ => {
-            tracing::info!("answer pipeline disabled (search or model_plane_url unset)");
+            if mp.answer_synthesis && search.is_none() {
+                tracing::error!(
+                    "QUARRY_EDGE__ANSWER_SYNTHESIS is on but no SearchProvider is configured: answer synthesis stays OFF"
+                );
+            } else {
+                tracing::info!(
+                    "answer pipeline off (QUARRY_EDGE__ANSWER_SYNTHESIS is not on, or no SearchProvider)"
+                );
+            }
             None
         }
     };
@@ -1214,7 +1617,7 @@ async fn main() -> anyhow::Result<()> {
             .with_profile_store(profiles.clone()),
     );
     #[cfg(feature = "browser-agent")]
-    let agent_runs = agent_routes::new_runs();
+    let agent_runs = agent_routes::new_runs_with(run_limit_config);
 
     let visual_processor: Option<Arc<dyn quarry_runtime::vision::VisualObservationProcessor>> = {
         let visual_feature_requested = cfg.visual_diff_enabled
@@ -1319,8 +1722,10 @@ async fn main() -> anyhow::Result<()> {
     // as the other Model Plane consumers above. Absence of a Model Plane URL
     // simply leaves `title_source` at `html`/`host`.
     let page_title_enricher: Option<Arc<quarry_runtime::page_extract::PageTitleEnricher>> =
-        if !cfg.page_title_enrich.unwrap_or(true) {
-            tracing::info!("page-title enrichment disabled by QUARRY_EDGE__PAGE_TITLE_ENRICH=false");
+        if !mp.page_title {
+            tracing::info!(
+                "page-title enrichment off (QUARRY_EDGE__PAGE_TITLE_ENRICH is not on, or no model path)"
+            );
             None
         } else {
             match cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()) {
@@ -1348,6 +1753,32 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
+    // WS4.J: the ZDR run tombstone emitter. Off unless QUARRY_EDGE__ZDR_TOMBSTONE is on
+    // AND control and the signer are configured; counsel review gates turning it on.
+    let tombstones: Option<std::sync::Arc<zdr_tombstone::TombstoneEmitter>> = if cfg.zdr_tombstone {
+        match (cfg.control_base_url.is_empty(), internal_signer.clone()) {
+            (false, Some(signer)) => zdr_tombstone::HttpSink::new(&cfg.control_base_url, signer).map(|sink| {
+                tracing::warn!("ZDR run tombstones are ENABLED: metadata-only records of ZDR runs go to quarry-control");
+                std::sync::Arc::new(zdr_tombstone::TombstoneEmitter::new(std::sync::Arc::new(sink)))
+            }),
+            _ => {
+                tracing::warn!("QUARRY_EDGE__ZDR_TOMBSTONE is on but control_base_url or the internal secret is missing: tombstones stay off");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    // WS14.S4: the robots.txt gate goes through the guarded default driver chain.
+    let robots = (robots_config.mode != quarry_runtime::RobotsEnforceMode::Off).then(|| {
+        std::sync::Arc::new(quarry_runtime::RobotsGate::new(
+            default_driver.clone(),
+            robots_config.clone(),
+        ))
+    });
+    if let Some(gate) = robots.clone() {
+        metrics::register_robots(gate);
+    }
     let app_state = state::AppState {
         readiness: state::ReadinessState {
             durable: durable_ready,
@@ -1357,6 +1788,9 @@ async fn main() -> anyhow::Result<()> {
         receipts,
         grant_validator,
         require_browser_grants,
+        zdr_refuse_durable_resources: cfg.zdr_refuse_durable_resources,
+        profile_owner_enforce: cfg.profile_owner_enforce,
+        org_erasables,
         driver: default_driver,
         drivers,
         http3: http3_driver,
@@ -1385,36 +1819,22 @@ async fn main() -> anyhow::Result<()> {
         page_title_enricher,
         service_token_provider: cross_plane_tokens.clone(),
         answer_pipeline,
+        model_plane: mp,
         local_index,
         usage,
+        limits: org_limits,
         #[cfg(feature = "postgres-queue")]
         event_history,
         #[cfg(feature = "postgres-queue")]
         queue_pool,
         #[cfg(feature = "postgres-queue")]
         baseline_store,
-        // D2 / cluster #14 — HMAC signer for cross-plane forwards.
-        // None when the secret env is unset → unsigned requests (dev
-        // posture only; control plane MUST require signatures in prod).
-        internal_signer: cfg
-            .internal_secret
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .and_then(|s| match internal_auth::InternalSigner::new(s) {
-                Ok(signer) => {
-                    tracing::info!("HMAC signer wired for control-plane forwards");
-                    Some(std::sync::Arc::new(signer))
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "internal_secret too short; HMAC signing disabled");
-                    None
-                }
-            }),
-        // Cycle 21 / cluster #2 — best-effort policy by default.
-        // Operators wanting `strict` reproducibility set
-        // `QUARRY_EDGE__RUN_POLICY=strict` (future config wiring; for
-        // now the runtime knob lives at code level).
-        policy: quarry_runtime::RunPolicy::default(),
+        internal_signer,
+        tombstones,
+        // WS7.C — web policy baseline and enforcement (see `policy_baseline`).
+        // Each run's RunPolicy is derived from its resolved web policy per request.
+        policy: web_policy,
+        robots,
         // Cycle 21 / cluster #3 — single shared HostScheduler with
         // default AIMD config. Cheap to share via Arc; per-host state
         // lives behind a tokio::Mutex<HashMap<host, slot>>.
@@ -1432,14 +1852,120 @@ async fn main() -> anyhow::Result<()> {
         fleets: quarry_edge::fleet_routes::new_fleet_state(),
     };
 
+    // What the shutdown drain ends and releases (WS6.J), and the meter it flushes last.
+    #[cfg(feature = "browser-agent")]
+    let drain_state = app_state.clone();
+    let usage_meter = app_state.usage.clone();
+
+    // Releases the browsers of runs nobody is using any more.
+    #[cfg(feature = "browser-agent")]
+    let run_sweeper = agent_routes::spawn_run_sweeper(app_state.clone());
+
+    // WS6.I: the live-run counts the metrics sampler publishes as gauges.
+    #[cfg(feature = "browser-agent")]
+    {
+        let runs = app_state.agent_runs.clone();
+        metrics::register_run_stats(move || {
+            let stats = runs.stats();
+            metrics::RunStats {
+                interactive: stats.interactive,
+                agent: stats.agent,
+                pending: stats.pending,
+            }
+        });
+    }
+
     let app = routes::router(app_state);
+    // Outermost, so a request refused by an auth layer is still counted.
+    let app = if metrics_handle.is_some() {
+        app.layer(axum::middleware::from_fn(metrics::http_middleware))
+    } else {
+        app
+    };
+    if let Some(handle) = metrics_handle {
+        // A separate, internal listener: the public router never serves /metrics.
+        let listener = TcpListener::bind(&metrics_cfg.addr).await?;
+        let router = metrics::router(handle, metrics_cfg.token.as_deref());
+        tracing::info!(addr = %metrics_cfg.addr, authenticated = metrics_cfg.token.is_some(), "metrics listening");
+        tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, router.into_make_service()).await {
+                tracing::error!(%error, "metrics listener stopped");
+            }
+        });
+        metrics::spawn_sampler();
+    }
 
     let addr = format!("0.0.0.0:{}", cfg.port);
     tracing::info!(%addr, "quarry-edge-rs listening");
     let listener = TcpListener::bind(&addr).await?;
-    axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // WS6.J: the moment draining begins, end the live runs (each writes its last usage
+    // segment, emits `agent.expired` with reason `shutdown` and releases its browser), and
+    // only then ask the open streams to end, so a viewer sees why the run ended and graceful
+    // shutdown can finish with a viewer connected.
+    #[cfg(feature = "browser-agent")]
+    let early_drain = {
+        let state = drain_state.clone();
+        tokio::spawn(async move {
+            drain::started().await;
+            let report =
+                agent_routes::drain_runs_for_shutdown(&state, std::time::Duration::from_secs(5))
+                    .await;
+            tracing::info!(
+                released = report.released,
+                failed = report.failed,
+                in_use = report.in_use,
+                "drain: runs ended"
+            );
+            drain::close_streams();
+        })
+    };
+    // Graceful shutdown waits for every open connection, and an SSE stream or
+    // a WebSocket never ends on its own, so cap the wait: once draining has
+    // begun, in-flight requests get `drain_deadline` and the rest are closed.
+    let serve = std::future::IntoFuture::into_future(
+        axum::serve(listener, app.into_make_service()).with_graceful_shutdown(shutdown_signal()),
+    );
+    tokio::select! {
+        result = serve => result?,
+        _ = async {
+            drain::started().await;
+            tokio::time::sleep(drain_deadline).await;
+        } => {
+            tracing::warn!(
+                deadline_s = drain_deadline.as_secs(),
+                "drain: deadline reached with connections still open; closing them"
+            );
+        }
+    }
+
+    #[cfg(feature = "browser-agent")]
+    run_sweeper.abort();
+
+    // The server is down. Release every live browser session instead of dying
+    // with them; a non-ZDR run's checkpoint stays Active, so it can be resumed.
+    #[cfg(feature = "browser-agent")]
+    {
+        // The early drain has normally finished; wait for it, then catch any run it missed.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(20), early_drain).await;
+        let report = agent_routes::drain_runs_for_shutdown(
+            &drain_state,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        let driver = drain_state.agent_driver.clone();
+        tracing::info!(
+            released = report.released,
+            failed = report.failed,
+            in_use = report.in_use,
+            "drain: browser sessions released"
+        );
+        // Stop the browser itself and remove its profile directories while this task can
+        // wait for it, instead of leaving that to the driver's Drop at process exit.
+        driver.shutdown().await;
+    }
+
+    // WS6.J: the usage events the drain just wrote leave the process before it does.
+    usage_meter.flush(std::time::Duration::from_secs(5)).await;
 
     // Serve returned, so no new requests can add to the corpus. Signal the
     // maintenance task and wait for its final commit — dropping straight out
@@ -1458,6 +1984,7 @@ async fn main() -> anyhow::Result<()> {
     }
     Ok(())
 }
+// zdr-log-ok-end
 
 fn env_flag(name: &str) -> bool {
     std::env::var(name)

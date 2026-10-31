@@ -21,7 +21,7 @@ import (
 // is the only code path allowed to create/update/delete JetStream
 // consumers on the shared broker.
 const (
-	controlSharedStream     = "AQENCIA_CONTROLPLANE"
+	controlSharedStream     = "CONTROLPLANE"
 	durableConsumerName     = "data-orchestrator-org-erasure"
 	durableDeliverySubject  = "_VEREVON.CONTROL.SHARED.DELIVER.data.data-orchestrator.org-erasure"
 	erasureDLQSubject       = "verevon.gdpr.erasure.dlq.data-orchestrator-org-purge"

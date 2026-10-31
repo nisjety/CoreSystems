@@ -47,6 +47,12 @@ const LOCAL_BASE_URL = process.env.LOCAL_E2E_BASE_URL || 'http://localhost:5173'
 const LOCAL_STORAGE_STATE = 'tests/e2e/.auth/local-state.json'
 const BROWSER_WORKSPACE_SPECS = /browser-workspace-.*\.spec\.ts/
 /**
+ * The production-mode browser grant contract (L2): API legs against a stack with
+ * quarry-edge in production posture. Run by scripts/tests/browser-grant-prod-contract.sh
+ * on the `local` project; it skips itself without BROWSER_GRANT_PROD_CONTRACT=1.
+ */
+const BROWSER_GRANT_PROD_SPEC = /browser-grants-prod-contract\.spec\.ts/
+/**
  * The chat-workspace suite (phase 10 evaluation suites 1 and 12) runs against
  * the same dockerized DEV stack as the browser-workspace family, for the same
  * reason: that is the stack this checkout actually runs, and `local@verevon.dev`
@@ -70,6 +76,8 @@ const capture = productCaptureSettings(process.env.PRODUCT_RECORDING_MODE || (pr
   JSON.parse(readFileSync(new URL('./apps/verevon-web/plans/product-recordings/manifest.json', import.meta.url), 'utf8')),
   process.env.PRODUCT_RECORDING_OUTPUT, resolve(fileURLToPath(new URL('.', import.meta.url)), '../../..'))
 const RECORD_PRODUCT_MEDIA = Boolean(capture)
+const STUDIO_DEMO_BASE_URL = process.env.STUDIO_DEMO_BASE_URL || 'http://127.0.0.1:5174'
+const STUDIO_DEMO_SPECS = /studio-demo\.spec\.ts/
 
 export default defineConfig({
   testDir: 'tests/e2e',
@@ -96,7 +104,7 @@ export default defineConfig({
     {
       name: 'e2e',
       testMatch: /.*\.spec\.ts/,
-      testIgnore: [BROWSER_WORKSPACE_SPECS, CHAT_WORKSPACE_SPECS, PRODUCT_READINESS_SPECS, PRODUCT_RECORDING_SPEC, CHUNK_RECOVERY_SPEC],
+      testIgnore: [BROWSER_WORKSPACE_SPECS, BROWSER_GRANT_PROD_SPEC, CHAT_WORKSPACE_SPECS, PRODUCT_READINESS_SPECS, PRODUCT_RECORDING_SPEC, CHUNK_RECOVERY_SPEC, STUDIO_DEMO_SPECS],
       dependencies: ['setup'],
       use: { ...devices['Desktop Chrome'], storageState: STORAGE_STATE },
     },
@@ -107,7 +115,7 @@ export default defineConfig({
     },
     {
       name: 'local',
-      testMatch: BROWSER_WORKSPACE_SPECS,
+      testMatch: [BROWSER_WORKSPACE_SPECS, BROWSER_GRANT_PROD_SPEC],
       dependencies: ['local-setup'],
       use: { ...devices['Desktop Chrome'], baseURL: LOCAL_BASE_URL, storageState: LOCAL_STORAGE_STATE },
     },
@@ -139,6 +147,11 @@ export default defineConfig({
       timeout: capture ? 300_000 : 240_000,
       use: { ...devices['Desktop Chrome'], baseURL: LOCAL_BASE_URL, storageState: LOCAL_STORAGE_STATE, viewport: { width: 1440, height: RECORD_PRODUCT_MEDIA ? 900 : 1000 }, actionTimeout: 15_000,
         video: RECORD_PRODUCT_MEDIA ? { mode: 'on', size: { width: 1440, height: 900 } } : 'off' },
+    },
+    {
+      name: 'studio-demo',
+      testMatch: STUDIO_DEMO_SPECS,
+      use: { ...devices['Desktop Chrome'], baseURL: STUDIO_DEMO_BASE_URL },
     },
   ],
 })

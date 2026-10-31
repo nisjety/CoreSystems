@@ -16,6 +16,9 @@
 //     (005_cycle23.sql) — response_body can carry org-specific cached
 //     payload bytes. Same placeholder status as quarry_benchmarks; included
 //     for the same reason.
+//   - zdr_run_tombstones       org_id NOT NULL (015_zdr_run_tombstones.sql,
+//     WS4.J) — the metadata-only ZDR run records. Included so erasure of an
+//     org leaves no trace that it ran under ZDR either.
 //
 // Deliberately NOT touched — none of these carry an org_id column in the
 // actual schema, so a `WHERE org_id = $1` predicate against them would
@@ -48,11 +51,12 @@ type PurgeResult struct {
 	SourcesDeleted         int64 `json:"sources_deleted"`
 	BenchmarksDeleted      int64 `json:"benchmarks_deleted"`
 	IdempotencyKeysDeleted int64 `json:"idempotency_keys_deleted"`
+	ZdrTombstonesDeleted   int64 `json:"zdr_tombstones_deleted"`
 }
 
 // Total sums every deleted-row count. Convenience for logging and tests.
 func (r PurgeResult) Total() int64 {
-	return r.JobsDeleted + r.SchedulesDeleted + r.SourcesDeleted + r.BenchmarksDeleted + r.IdempotencyKeysDeleted
+	return r.JobsDeleted + r.SchedulesDeleted + r.SourcesDeleted + r.BenchmarksDeleted + r.IdempotencyKeysDeleted + r.ZdrTombstonesDeleted
 }
 
 // PurgeOrg hard-deletes every row this in-memory store holds for orgID
@@ -70,10 +74,12 @@ func (d *memDB) PurgeOrg(orgID string) (PurgeResult, error) {
 	jobsDeleted := d.jobs.purgeByOrg(orgID, func(j Job) string { return j.OrgID })
 	schedulesDeleted := d.schedules.purgeByOrg(orgID, func(s Schedule) string { return s.OrgID })
 	sourcesDeleted := d.sources.PurgeByOrg(orgID)
+	tombstonesDeleted := d.zdrTombs.purgeByOrg(orgID)
 	return PurgeResult{
-		JobsDeleted:      int64(jobsDeleted),
-		SchedulesDeleted: int64(schedulesDeleted),
-		SourcesDeleted:   int64(sourcesDeleted),
+		JobsDeleted:          int64(jobsDeleted),
+		SchedulesDeleted:     int64(schedulesDeleted),
+		SourcesDeleted:       int64(sourcesDeleted),
+		ZdrTombstonesDeleted: tombstonesDeleted,
 	}, nil
 }
 

@@ -19,8 +19,9 @@ use quarry_runtime::artifact_store::InMemoryStore;
 use quarry_runtime::driver::{Driver, FetchHints};
 use quarry_runtime::driver_registry::DriverRegistry;
 use quarry_runtime::fetch::FetchResponse;
-use quarry_runtime::{EventSink, NoopUsageMeter, RunPolicy};
+use quarry_runtime::{EventSink, NoopUsageMeter};
 
+use crate::agent_routes::{LaneRef, LaneState, LaneSummary};
 use crate::auth::Claims;
 use crate::state::AppState;
 
@@ -78,6 +79,7 @@ impl Driver for StubDriver {
                 body: b"<html><body>plain text, no anchors</body></html>".to_vec(),
                 duration_ms: 1,
                 served_by: DriverKind::Static,
+                captures: None,
             }),
         }
     }
@@ -101,6 +103,9 @@ pub fn test_state(static_driver: Arc<dyn Driver>) -> AppState {
         receipts: Arc::new(quarry_runtime::InMemoryStepReceiptStore::new()),
         grant_validator: Arc::new(quarry_runtime::NoopGrantValidator),
         require_browser_grants: false,
+        zdr_refuse_durable_resources: false,
+        profile_owner_enforce: crate::profile_guard::OwnerEnforce::Observe,
+        org_erasables: Vec::new(),
         driver: static_driver,
         drivers,
         http3: None,
@@ -123,11 +128,15 @@ pub fn test_state(static_driver: Arc<dyn Driver>) -> AppState {
         page_title_enricher: None,
         service_token_provider: None,
         answer_pipeline: None,
+        model_plane: Default::default(),
         local_index: None,
         usage: Arc::new(NoopUsageMeter),
-        policy: RunPolicy::default(),
+        limits: Arc::new(crate::limits::StaticFloor),
+        policy: crate::policy_baseline::PolicyBaseline::default(),
+        robots: None,
         scheduler: None,
         internal_signer: None,
+        tombstones: None,
         page_renderer: None,
         visual_processor: None,
         #[cfg(feature = "postgres-queue")]
@@ -147,9 +156,26 @@ pub fn test_state(static_driver: Arc<dyn Driver>) -> AppState {
     }
 }
 
+/// [`test_state`] with a grant validator and the production posture switch:
+/// `require` is the edge's `require_browser_grants` (true under
+/// `ENVIRONMENT=production`), so a test states the one thing it varies instead
+/// of overwriting two fields after the fact.
+pub fn test_state_with_grants(
+    static_driver: Arc<dyn Driver>,
+    grant_validator: Arc<dyn quarry_runtime::GrantValidator>,
+    require: bool,
+) -> AppState {
+    AppState {
+        grant_validator,
+        require_browser_grants: require,
+        ..test_state(static_driver)
+    }
+}
+
 /// Verified-looking JWT claims scoped to `org_id` (dev-bypass equivalent).
 pub fn claims_for_org(org_id: &str) -> Claims {
     Claims {
+        web_policy: None,
         sub: "u1".into(),
         iss: "auth-core".into(),
         exp: i64::MAX,
@@ -180,6 +206,83 @@ pub fn json_keys(value: &serde_json::Value) -> Vec<&str> {
     keys
 }
 
+/// Insert a live agent run owned by `claims` into the registry and return its
+/// handle, so a handler-level test never builds a `RunEntry` literal of its own
+/// (every field a later slice adds is defaulted here, in one place).
+///
+/// The run is an agent-controlled, ephemeral, ungranted run with a five-step
+/// bound and no domain allow-list; a test that needs more sets fields on the
+/// entry through `handle.entry.lock().await`.
+#[cfg(feature = "browser-agent")]
+pub fn insert_live_run(state: &AppState, claims: &Claims) -> crate::agent_routes::RunHandle {
+    use quarry_browser::{BrowserSession, SessionInner};
+    use quarry_core::contracts::AgentConstraints;
+    use quarry_core::ids::Id;
+    use quarry_core::lease::BrowserLease;
+    use quarry_core::zdr::ZdrMode;
+    use quarry_runtime::step_receipts::{BrowserControlMode, BrowserProfileScope};
+
+    use crate::agent_routes::{BrowserExecutionTier, RunEntry, RunHandle, RunLive};
+
+    let lease = BrowserLease {
+        lease_id: Id::new(),
+        profile_id: Id::new(),
+        session_affinity_key: "test".into(),
+        proxy_affinity: Default::default(),
+        ttl_s: 60,
+        capabilities: vec![],
+        artifact_bucket: String::new(),
+        persist_profile: false,
+        viewport: None,
+        org_id: claims.org_id.clone(),
+    };
+    let entry = RunEntry {
+        run_id: Id::new(),
+        org_id: claims.org_id.clone(),
+        actor_id: claims.actor_id().to_string(),
+        session: BrowserSession {
+            lease: lease.clone(),
+            tab_pin: None,
+            inner: Arc::new(tokio::sync::Mutex::new(SessionInner::default())),
+        },
+        human_lane: LaneRef::new(LaneState::default()),
+        summary: LaneSummary::default(),
+        lease,
+        constraints: AgentConstraints {
+            max_steps: 5,
+            allowed_domains: vec![],
+            max_runtime_s: None,
+            max_cost_usd: None,
+        },
+        zdr: ZdrMode::Off,
+        grant_id: None,
+        control_mode: BrowserControlMode::AgentControl,
+        control_epoch: 0,
+        profile_scope: BrowserProfileScope::Ephemeral,
+        execution_tier: BrowserExecutionTier::Chromium,
+        used_sensitive_approval_grants: Default::default(),
+        budget: None,
+        closed: false,
+        last_rejected_epoch: None,
+        tab_origins: Default::default(),
+        nav_policy: crate::agent_routes::human_browse::RunNavPolicy::Allowlist,
+    };
+    let run_id = entry.run_id.to_string();
+    let live = RunLive::new(
+        entry.org_id.clone(),
+        entry.actor_id.clone(),
+        entry.control_mode,
+        entry.control_epoch,
+    );
+    let handle = RunHandle::new(entry, live);
+    state
+        .agent_runs
+        .lock()
+        .expect("agent_runs mutex")
+        .insert(run_id, handle.clone());
+    handle
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +291,29 @@ mod tests {
     fn json_keys_are_sorted() {
         let v = serde_json::json!({ "zeta": 1, "alpha": 2 });
         assert_eq!(json_keys(&v), vec!["alpha", "zeta"]);
+    }
+
+    #[tokio::test]
+    async fn test_state_with_grants_carries_the_validator_and_the_posture() {
+        struct Denying;
+        #[async_trait]
+        impl quarry_runtime::GrantValidator for Denying {
+            async fn validate(
+                &self,
+                _grant_id: &str,
+            ) -> QuarryResult<quarry_runtime::GrantValidation> {
+                Err(QuarryError::new(ErrorCode::Forbidden, "denied by the test validator"))
+            }
+        }
+        let state = test_state_with_grants(StubDriver::ok(), Arc::new(Denying), true);
+        assert!(state.require_browser_grants);
+        // The org-aware call reaches the injected validator (its default body).
+        let refused = state
+            .grant_validator
+            .validate_for_org("org-1", "grant-1")
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Forbidden);
+        assert!(!test_state(StubDriver::ok()).require_browser_grants);
     }
 }

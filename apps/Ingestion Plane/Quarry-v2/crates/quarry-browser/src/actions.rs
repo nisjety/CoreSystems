@@ -51,6 +51,11 @@ pub enum Action {
     },
     Back,
     Forward,
+    /// Reload the page; `ignore_cache` bypasses the HTTP cache (WS9.B).
+    Reload {
+        #[serde(default)]
+        ignore_cache: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -33,6 +33,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
+	"github.com/triodelab/quarry-v2/pkg/quarryotel"
 	temporalclient "github.com/triodelab/quarry-v2/services/quarry-control/internal/temporal"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/httpx"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
@@ -82,6 +83,11 @@ type sourceCreateBody struct {
 	Monitor bool           `json:"monitor,omitempty"`
 	Preset  string         `json:"preset,omitempty"` // hourly|daily|weekly when Monitor
 	Config  map[string]any `json:"config,omitempty"`
+	// Zdr is the caller's ZDR posture, stamped by the EDGE from verified
+	// claims and consumed only when Monitor is true (it becomes the
+	// schedule's stamp, WS4.H). Never client-supplied: the edge's own
+	// request type has no such field.
+	Zdr *bool `json:"zdr,omitempty"`
 }
 
 var validSourceKinds = map[string]bool{"crawl": true, "scrape": true, "search": true}
@@ -188,6 +194,10 @@ func createSourceHandler(db store.DB) http.HandlerFunc {
 		// Only on the newly-inserted branch — an idempotent repeat
 		// registration (e.g. the crawl pipeline's per-page calls) must not
 		// spin up a duplicate schedule every time.
+		// WS10.S8: a ZDR posture parsed after the request span started drops that trace from export.
+		if body.Zdr != nil && *body.Zdr {
+			quarryotel.MarkZDR(r.Context())
+		}
 		if body.Monitor && created {
 			preset := strings.TrimSpace(body.Preset)
 			if preset == "" {
@@ -199,6 +209,7 @@ func createSourceHandler(db store.DB) http.HandlerFunc {
 				TargetRef:  body.URL,
 				Enabled:    true,
 				Preset:     preset,
+				Zdr:        body.Zdr,
 			}
 			if err := sched.Validate(); err != nil {
 				httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "monitor: "+err.Error(), nil)
@@ -300,7 +311,12 @@ func scheduleTrigger(db store.DB, tc temporalclient.Client) http.HandlerFunc {
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
 			return
 		}
-		sched, ok := db.Schedules().Get(id)
+		org := orgFromQuery(r)
+		if org == "" {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "org_id required", nil)
+			return
+		}
+		sched, ok := db.Schedules().GetByOrg(id, org)
 		if !ok {
 			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
 			return
@@ -335,7 +351,12 @@ func scheduleBackfill(db store.DB, tc temporalclient.Client) http.HandlerFunc {
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
 			return
 		}
-		sched, ok := db.Schedules().Get(id)
+		org := orgFromQuery(r)
+		if org == "" {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "org_id required", nil)
+			return
+		}
+		sched, ok := db.Schedules().GetByOrg(id, org)
 		if !ok {
 			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
 			return
@@ -400,13 +421,13 @@ func MountJobsByKind(r chi.Router, db store.DB) {
 			if limit <= 0 {
 				limit = 25
 			}
-			raw, next := db.Jobs().ListByKind(orgID, kind, limit, r.URL.Query().Get("cursor"))
-			items := make([]jobWire, 0, len(raw))
-			for _, j := range raw {
-				if wire, ok := toJobWire(j); ok {
-					items = append(items, wire)
-				}
+			statuses, ok := jobStatusFilter(r.URL.Query().Get("status"))
+			if !ok {
+				httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "status must be a comma-separated list of job statuses", nil)
+				return
 			}
+			raw, next := db.Jobs().ListByKindStatus(orgID, kind, statuses, limit, r.URL.Query().Get("cursor"))
+			items := jobWires(db, raw)
 			var nextPtr *string
 			if next != "" {
 				nextPtr = &next

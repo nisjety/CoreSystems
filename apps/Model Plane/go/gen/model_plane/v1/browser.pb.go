@@ -65,6 +65,12 @@ type AcquireGrantRequest struct {
 	// Stamped by the broker when the claim is stored; a request that sets it
 	// is refused.
 	BudgetMintedAtUnix int64 `protobuf:"varint,44,opt,name=budget_minted_at_unix,json=budgetMintedAtUnix,proto3" json:"budget_minted_at_unix,omitempty"`
+	// Grant kind (WS8.C, field numbers 50-59 are the WS8 ledger entry of R-6).
+	// "" is the ordinary session or sensitive-approval path; "human_browse"
+	// asks for an open-web grant for a person's own browsing. Eligibility is
+	// server-decided: a human_browse request needs a user principal, carries no
+	// allowed_domains, and is refused when the broker's policy has it off.
+	GrantKind string `protobuf:"bytes,50,opt,name=grant_kind,json=grantKind,proto3" json:"grant_kind,omitempty"`
 	// The Space the run belongs to (WS21-S8). The site policy reads the Space
 	// floor from it; empty outside a Space. Tag 11 (R-6 allocates 10 to zdr).
 	SpaceId string `protobuf:"bytes,11,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
@@ -214,6 +220,13 @@ func (x *AcquireGrantRequest) GetBudgetMintedAtUnix() int64 {
 	return 0
 }
 
+func (x *AcquireGrantRequest) GetGrantKind() string {
+	if x != nil {
+		return x.GrantKind
+	}
+	return ""
+}
+
 func (x *AcquireGrantRequest) GetSpaceId() string {
 	if x != nil {
 		return x.SpaceId
@@ -272,12 +285,21 @@ type AcquireGrantResponse struct {
 	// Stamped by the broker when the claim is stored; a request that sets it
 	// is refused.
 	BudgetMintedAtUnix int64 `protobuf:"varint,44,opt,name=budget_minted_at_unix,json=budgetMintedAtUnix,proto3" json:"budget_minted_at_unix,omitempty"`
+	// Navigation policy mode (WS8.C): "allowlist" (allowed_domains is the whole
+	// policy) or "open_web" (a human_browse grant: every public host except
+	// denied_domains). Never an empty value from a WS8.C broker.
+	PolicyMode string `protobuf:"bytes,50,opt,name=policy_mode,json=policyMode,proto3" json:"policy_mode,omitempty"`
+	// Hosts this grant may never reach. For an open_web grant: the host suffixes
+	// it is fenced off (internal namespaces and metadata names). For an allowlist
+	// grant: the requested hosts the site policy dropped (WS21-S4), at most nine;
+	// empty when the policy is off or nothing was dropped.
+	DeniedDomains []string `protobuf:"bytes,51,rep,name=denied_domains,json=deniedDomains,proto3" json:"denied_domains,omitempty"`
+	// The hard backstop a renewal can never pass. Equals expires_at for a kind
+	// that is not renewable.
+	AbsoluteExpiresAt *timestamppb.Timestamp `protobuf:"bytes,52,opt,name=absolute_expires_at,json=absoluteExpiresAt,proto3" json:"absolute_expires_at,omitempty"`
 	// True when the grant is read-only (WS21-S4). Quarry must refuse a mutating
 	// action on it.
-	ReadOnly bool `protobuf:"varint,12,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
-	// Hosts the site policy dropped from the request (WS21-S4), at most nine.
-	// Empty when the policy is off or nothing was dropped.
-	DeniedDomains []string `protobuf:"bytes,13,rep,name=denied_domains,json=deniedDomains,proto3" json:"denied_domains,omitempty"`
+	ReadOnly      bool `protobuf:"varint,12,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -424,11 +446,11 @@ func (x *AcquireGrantResponse) GetBudgetMintedAtUnix() int64 {
 	return 0
 }
 
-func (x *AcquireGrantResponse) GetReadOnly() bool {
+func (x *AcquireGrantResponse) GetPolicyMode() string {
 	if x != nil {
-		return x.ReadOnly
+		return x.PolicyMode
 	}
-	return false
+	return ""
 }
 
 func (x *AcquireGrantResponse) GetDeniedDomains() []string {
@@ -436,6 +458,20 @@ func (x *AcquireGrantResponse) GetDeniedDomains() []string {
 		return x.DeniedDomains
 	}
 	return nil
+}
+
+func (x *AcquireGrantResponse) GetAbsoluteExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.AbsoluteExpiresAt
+	}
+	return nil
+}
+
+func (x *AcquireGrantResponse) GetReadOnly() bool {
+	if x != nil {
+		return x.ReadOnly
+	}
+	return false
 }
 
 type RevokeGrantRequest struct {
@@ -704,9 +740,22 @@ type ValidateGrantResponse struct {
 	// Stamped by the broker when the claim is stored; a request that sets it
 	// is refused.
 	BudgetMintedAtUnix int64 `protobuf:"varint,44,opt,name=budget_minted_at_unix,json=budgetMintedAtUnix,proto3" json:"budget_minted_at_unix,omitempty"`
+	// Same values as AcquireGrantResponse (WS8.C).
+	PolicyMode        string                 `protobuf:"bytes,50,opt,name=policy_mode,json=policyMode,proto3" json:"policy_mode,omitempty"`
+	DeniedDomains     []string               `protobuf:"bytes,51,rep,name=denied_domains,json=deniedDomains,proto3" json:"denied_domains,omitempty"`
+	AbsoluteExpiresAt *timestamppb.Timestamp `protobuf:"bytes,52,opt,name=absolute_expires_at,json=absoluteExpiresAt,proto3" json:"absolute_expires_at,omitempty"`
+	// The run an "attach" grant is bound to; empty for every other kind.
+	ResourceId string `protobuf:"bytes,53,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`
+	// The key the grant was issued under: the session key of a session grant,
+	// and for a run grant the idempotency key of the one run it was derived for
+	// (the same value as DeriveRunGrantRequest.session_key). A consumer can bind
+	// a presented run grant to that run: a run grant must not back a different
+	// run. Empty for a grant issued without one. Field 13 with the grant's base
+	// fields: 54-59 stay reserved for the WS8.C follow-ons of the R-6 ledger.
+	SessionKey string `protobuf:"bytes,13,opt,name=session_key,json=sessionKey,proto3" json:"session_key,omitempty"`
 	// True when the grant is read-only (WS21-S4). Consumers must refuse a
-	// mutating action on it.
-	ReadOnly      bool `protobuf:"varint,13,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
+	// mutating action on it. Field 14: 13 is session_key.
+	ReadOnly      bool `protobuf:"varint,14,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -860,6 +909,41 @@ func (x *ValidateGrantResponse) GetBudgetMintedAtUnix() int64 {
 	return 0
 }
 
+func (x *ValidateGrantResponse) GetPolicyMode() string {
+	if x != nil {
+		return x.PolicyMode
+	}
+	return ""
+}
+
+func (x *ValidateGrantResponse) GetDeniedDomains() []string {
+	if x != nil {
+		return x.DeniedDomains
+	}
+	return nil
+}
+
+func (x *ValidateGrantResponse) GetAbsoluteExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.AbsoluteExpiresAt
+	}
+	return nil
+}
+
+func (x *ValidateGrantResponse) GetResourceId() string {
+	if x != nil {
+		return x.ResourceId
+	}
+	return ""
+}
+
+func (x *ValidateGrantResponse) GetSessionKey() string {
+	if x != nil {
+		return x.SessionKey
+	}
+	return ""
+}
+
 func (x *ValidateGrantResponse) GetReadOnly() bool {
 	if x != nil {
 		return x.ReadOnly
@@ -881,7 +965,8 @@ type DeriveRunGrantRequest struct {
 	// parent holds more than the broker's run-domain bound); otherwise every
 	// host must equal or be a subdomain of a parent host.
 	AllowedDomains []string `protobuf:"bytes,4,rep,name=allowed_domains,json=allowedDomains,proto3" json:"allowed_domains,omitempty"`
-	// Why the run grant is derived. Only "ai_run" is accepted today.
+	// Why the run grant is derived: "ai_run", or "attach" (WS8.C) for a child of
+	// a session or human_browse grant bound to one run.
 	Purpose string `protobuf:"bytes,5,opt,name=purpose,proto3" json:"purpose,omitempty"`
 	// Requested lifetime in seconds; 0 uses the broker default. The expiry is
 	// never later than the parent's.
@@ -903,8 +988,11 @@ type DeriveRunGrantRequest struct {
 	// Stamped by the broker when the claim is stored; a request that sets it
 	// is refused.
 	BudgetMintedAtUnix int64 `protobuf:"varint,44,opt,name=budget_minted_at_unix,json=budgetMintedAtUnix,proto3" json:"budget_minted_at_unix,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// The run an "attach" grant is bound to (WS8.C); required for purpose
+	// "attach", refused for "ai_run".
+	ResourceId    string `protobuf:"bytes,50,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DeriveRunGrantRequest) Reset() {
@@ -1014,6 +1102,13 @@ func (x *DeriveRunGrantRequest) GetBudgetMintedAtUnix() int64 {
 	return 0
 }
 
+func (x *DeriveRunGrantRequest) GetResourceId() string {
+	if x != nil {
+		return x.ResourceId
+	}
+	return ""
+}
+
 type DeriveRunGrantResponse struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	GrantId   string                 `protobuf:"bytes,1,opt,name=grant_id,json=grantId,proto3" json:"grant_id,omitempty"`
@@ -1022,7 +1117,7 @@ type DeriveRunGrantResponse struct {
 	// Canonical hosts of the run grant.
 	AllowedDomains []string `protobuf:"bytes,4,rep,name=allowed_domains,json=allowedDomains,proto3" json:"allowed_domains,omitempty"`
 	ParentGrantId  string   `protobuf:"bytes,5,opt,name=parent_grant_id,json=parentGrantId,proto3" json:"parent_grant_id,omitempty"`
-	// Always "run".
+	// "run" for purpose ai_run, "attach" for purpose attach.
 	Kind string `protobuf:"bytes,6,opt,name=kind,proto3" json:"kind,omitempty"`
 	// Inherited from the parent; never lower than the parent's.
 	Zdr bool `protobuf:"varint,7,opt,name=zdr,proto3" json:"zdr,omitempty"`
@@ -1043,8 +1138,10 @@ type DeriveRunGrantResponse struct {
 	// Stamped by the broker when the claim is stored; a request that sets it
 	// is refused.
 	BudgetMintedAtUnix int64 `protobuf:"varint,44,opt,name=budget_minted_at_unix,json=budgetMintedAtUnix,proto3" json:"budget_minted_at_unix,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Echo of the bound run for an "attach" grant; empty for an ai_run grant.
+	ResourceId    string `protobuf:"bytes,50,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DeriveRunGrantResponse) Reset() {
@@ -1161,11 +1258,126 @@ func (x *DeriveRunGrantResponse) GetBudgetMintedAtUnix() int64 {
 	return 0
 }
 
+func (x *DeriveRunGrantResponse) GetResourceId() string {
+	if x != nil {
+		return x.ResourceId
+	}
+	return ""
+}
+
+type RenewGrantRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The grant to extend: kind "session" or "human_browse", owned by the caller.
+	GrantId string `protobuf:"bytes,1,opt,name=grant_id,json=grantId,proto3" json:"grant_id,omitempty"`
+	// Tenant identifier; must equal the verified token's organization.
+	OrgId         string `protobuf:"bytes,2,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RenewGrantRequest) Reset() {
+	*x = RenewGrantRequest{}
+	mi := &file_model_plane_v1_browser_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RenewGrantRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenewGrantRequest) ProtoMessage() {}
+
+func (x *RenewGrantRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_browser_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenewGrantRequest.ProtoReflect.Descriptor instead.
+func (*RenewGrantRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *RenewGrantRequest) GetGrantId() string {
+	if x != nil {
+		return x.GrantId
+	}
+	return ""
+}
+
+func (x *RenewGrantRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+type RenewGrantResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The new expiry: min(now + the broker TTL, absolute_expires_at).
+	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// The hard backstop; a renewal at the cap is FAILED_PRECONDITION.
+	AbsoluteExpiresAt *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=absolute_expires_at,json=absoluteExpiresAt,proto3" json:"absolute_expires_at,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *RenewGrantResponse) Reset() {
+	*x = RenewGrantResponse{}
+	mi := &file_model_plane_v1_browser_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RenewGrantResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenewGrantResponse) ProtoMessage() {}
+
+func (x *RenewGrantResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_browser_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenewGrantResponse.ProtoReflect.Descriptor instead.
+func (*RenewGrantResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *RenewGrantResponse) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+func (x *RenewGrantResponse) GetAbsoluteExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.AbsoluteExpiresAt
+	}
+	return nil
+}
+
 var File_model_plane_v1_browser_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\n" +
-	"\x1cmodel_plane/v1/browser.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xaf\x05\n" +
+	"\x1cmodel_plane/v1/browser.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xce\x05\n" +
 	"\x13AcquireGrantRequest\x12\x1f\n" +
 	"\vsession_key\x18\x01 \x01(\tR\n" +
 	"sessionKey\x12\x12\n" +
@@ -1183,11 +1395,13 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x10budget_max_steps\x18) \x01(\x05R\x0ebudgetMaxSteps\x12/\n" +
 	"\x14budget_max_runtime_s\x18* \x01(\x05R\x11budgetMaxRuntimeS\x12#\n" +
 	"\rbudget_source\x18+ \x01(\tR\fbudgetSource\x121\n" +
-	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\x12\x19\n" +
+	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\x12\x1d\n" +
+	"\n" +
+	"grant_kind\x182 \x01(\tR\tgrantKind\x12\x19\n" +
 	"\bspace_id\x18\v \x01(\tR\aspaceId\x12\x1b\n" +
 	"\tread_only\x18\f \x01(\bR\breadOnly\x12\x1f\n" +
 	"\vttl_seconds\x18\r \x01(\x05R\n" +
-	"ttlSeconds\"\xd5\x05\n" +
+	"ttlSeconds\"\xc8\x06\n" +
 	"\x14AcquireGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x129\n" +
@@ -1206,9 +1420,12 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x10budget_max_steps\x18) \x01(\x05R\x0ebudgetMaxSteps\x12/\n" +
 	"\x14budget_max_runtime_s\x18* \x01(\x05R\x11budgetMaxRuntimeS\x12#\n" +
 	"\rbudget_source\x18+ \x01(\tR\fbudgetSource\x121\n" +
-	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\x12\x1b\n" +
-	"\tread_only\x18\f \x01(\bR\breadOnly\x12%\n" +
-	"\x0edenied_domains\x18\r \x03(\tR\rdeniedDomains\"G\n" +
+	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\x12\x1f\n" +
+	"\vpolicy_mode\x182 \x01(\tR\n" +
+	"policyMode\x12%\n" +
+	"\x0edenied_domains\x183 \x03(\tR\rdeniedDomains\x12J\n" +
+	"\x13absolute_expires_at\x184 \x01(\v2\x1a.google.protobuf.TimestampR\x11absoluteExpiresAt\x12\x1b\n" +
+	"\tread_only\x18\f \x01(\bR\breadOnlyJ\x04\b\r\x10\x0e\"G\n" +
 	"\x12RevokeGrantRequest\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"/\n" +
@@ -1218,7 +1435,7 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x15BrowserHealthResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\"1\n" +
 	"\x14ValidateGrantRequest\x12\x19\n" +
-	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\xc6\x05\n" +
+	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\x9c\a\n" +
 	"\x15ValidateGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x16\n" +
 	"\x06active\x18\x02 \x01(\bR\x06active\x129\n" +
@@ -1238,8 +1455,16 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x10budget_max_steps\x18) \x01(\x05R\x0ebudgetMaxSteps\x12/\n" +
 	"\x14budget_max_runtime_s\x18* \x01(\x05R\x11budgetMaxRuntimeS\x12#\n" +
 	"\rbudget_source\x18+ \x01(\tR\fbudgetSource\x121\n" +
-	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\x12\x1b\n" +
-	"\tread_only\x18\r \x01(\bR\breadOnly\"\xb8\x03\n" +
+	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\x12\x1f\n" +
+	"\vpolicy_mode\x182 \x01(\tR\n" +
+	"policyMode\x12%\n" +
+	"\x0edenied_domains\x183 \x03(\tR\rdeniedDomains\x12J\n" +
+	"\x13absolute_expires_at\x184 \x01(\v2\x1a.google.protobuf.TimestampR\x11absoluteExpiresAt\x12\x1f\n" +
+	"\vresource_id\x185 \x01(\tR\n" +
+	"resourceId\x12\x1f\n" +
+	"\vsession_key\x18\r \x01(\tR\n" +
+	"sessionKey\x12\x1b\n" +
+	"\tread_only\x18\x0e \x01(\bR\breadOnly\"\xd9\x03\n" +
 	"\x15DeriveRunGrantRequest\x12&\n" +
 	"\x0fparent_grant_id\x18\x01 \x01(\tR\rparentGrantId\x12\x1f\n" +
 	"\vsession_key\x18\x02 \x01(\tR\n" +
@@ -1253,7 +1478,9 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x10budget_max_steps\x18) \x01(\x05R\x0ebudgetMaxSteps\x12/\n" +
 	"\x14budget_max_runtime_s\x18* \x01(\x05R\x11budgetMaxRuntimeS\x12#\n" +
 	"\rbudget_source\x18+ \x01(\tR\fbudgetSource\x121\n" +
-	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\"\xde\x03\n" +
+	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\x12\x1f\n" +
+	"\vresource_id\x182 \x01(\tR\n" +
+	"resourceId\"\xff\x03\n" +
 	"\x16DeriveRunGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x129\n" +
@@ -1267,12 +1494,23 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x10budget_max_steps\x18) \x01(\x05R\x0ebudgetMaxSteps\x12/\n" +
 	"\x14budget_max_runtime_s\x18* \x01(\x05R\x11budgetMaxRuntimeS\x12#\n" +
 	"\rbudget_source\x18+ \x01(\tR\fbudgetSource\x121\n" +
-	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix2\xd8\x03\n" +
+	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\x12\x1f\n" +
+	"\vresource_id\x182 \x01(\tR\n" +
+	"resourceId\"E\n" +
+	"\x11RenewGrantRequest\x12\x19\n" +
+	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x15\n" +
+	"\x06org_id\x18\x02 \x01(\tR\x05orgId\"\x9b\x01\n" +
+	"\x12RenewGrantResponse\x129\n" +
+	"\n" +
+	"expires_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12J\n" +
+	"\x13absolute_expires_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x11absoluteExpiresAt2\xad\x04\n" +
 	"\rBrowserBroker\x12Y\n" +
 	"\fAcquireGrant\x12#.model_plane.v1.AcquireGrantRequest\x1a$.model_plane.v1.AcquireGrantResponse\x12V\n" +
 	"\vRevokeGrant\x12\".model_plane.v1.RevokeGrantRequest\x1a#.model_plane.v1.RevokeGrantResponse\x12\\\n" +
 	"\rValidateGrant\x12$.model_plane.v1.ValidateGrantRequest\x1a%.model_plane.v1.ValidateGrantResponse\x12_\n" +
-	"\x0eDeriveRunGrant\x12%.model_plane.v1.DeriveRunGrantRequest\x1a&.model_plane.v1.DeriveRunGrantResponse\x12U\n" +
+	"\x0eDeriveRunGrant\x12%.model_plane.v1.DeriveRunGrantRequest\x1a&.model_plane.v1.DeriveRunGrantResponse\x12S\n" +
+	"\n" +
+	"RenewGrant\x12!.model_plane.v1.RenewGrantRequest\x1a\".model_plane.v1.RenewGrantResponse\x12U\n" +
 	"\x06Health\x12$.model_plane.v1.BrowserHealthRequest\x1a%.model_plane.v1.BrowserHealthResponseB\xb4\x01\n" +
 	"\x12com.model_plane.v1B\fBrowserProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
@@ -1288,7 +1526,7 @@ func file_model_plane_v1_browser_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_browser_proto_rawDescData
 }
 
-var file_model_plane_v1_browser_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_model_plane_v1_browser_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_model_plane_v1_browser_proto_goTypes = []any{
 	(*AcquireGrantRequest)(nil),    // 0: model_plane.v1.AcquireGrantRequest
 	(*AcquireGrantResponse)(nil),   // 1: model_plane.v1.AcquireGrantResponse
@@ -1300,27 +1538,35 @@ var file_model_plane_v1_browser_proto_goTypes = []any{
 	(*ValidateGrantResponse)(nil),  // 7: model_plane.v1.ValidateGrantResponse
 	(*DeriveRunGrantRequest)(nil),  // 8: model_plane.v1.DeriveRunGrantRequest
 	(*DeriveRunGrantResponse)(nil), // 9: model_plane.v1.DeriveRunGrantResponse
-	(*timestamppb.Timestamp)(nil),  // 10: google.protobuf.Timestamp
+	(*RenewGrantRequest)(nil),      // 10: model_plane.v1.RenewGrantRequest
+	(*RenewGrantResponse)(nil),     // 11: model_plane.v1.RenewGrantResponse
+	(*timestamppb.Timestamp)(nil),  // 12: google.protobuf.Timestamp
 }
 var file_model_plane_v1_browser_proto_depIdxs = []int32{
-	10, // 0: model_plane.v1.AcquireGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
-	10, // 1: model_plane.v1.ValidateGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
-	10, // 2: model_plane.v1.DeriveRunGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
-	0,  // 3: model_plane.v1.BrowserBroker.AcquireGrant:input_type -> model_plane.v1.AcquireGrantRequest
-	2,  // 4: model_plane.v1.BrowserBroker.RevokeGrant:input_type -> model_plane.v1.RevokeGrantRequest
-	6,  // 5: model_plane.v1.BrowserBroker.ValidateGrant:input_type -> model_plane.v1.ValidateGrantRequest
-	8,  // 6: model_plane.v1.BrowserBroker.DeriveRunGrant:input_type -> model_plane.v1.DeriveRunGrantRequest
-	4,  // 7: model_plane.v1.BrowserBroker.Health:input_type -> model_plane.v1.BrowserHealthRequest
-	1,  // 8: model_plane.v1.BrowserBroker.AcquireGrant:output_type -> model_plane.v1.AcquireGrantResponse
-	3,  // 9: model_plane.v1.BrowserBroker.RevokeGrant:output_type -> model_plane.v1.RevokeGrantResponse
-	7,  // 10: model_plane.v1.BrowserBroker.ValidateGrant:output_type -> model_plane.v1.ValidateGrantResponse
-	9,  // 11: model_plane.v1.BrowserBroker.DeriveRunGrant:output_type -> model_plane.v1.DeriveRunGrantResponse
-	5,  // 12: model_plane.v1.BrowserBroker.Health:output_type -> model_plane.v1.BrowserHealthResponse
-	8,  // [8:13] is the sub-list for method output_type
-	3,  // [3:8] is the sub-list for method input_type
-	3,  // [3:3] is the sub-list for extension type_name
-	3,  // [3:3] is the sub-list for extension extendee
-	0,  // [0:3] is the sub-list for field type_name
+	12, // 0: model_plane.v1.AcquireGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
+	12, // 1: model_plane.v1.AcquireGrantResponse.absolute_expires_at:type_name -> google.protobuf.Timestamp
+	12, // 2: model_plane.v1.ValidateGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
+	12, // 3: model_plane.v1.ValidateGrantResponse.absolute_expires_at:type_name -> google.protobuf.Timestamp
+	12, // 4: model_plane.v1.DeriveRunGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
+	12, // 5: model_plane.v1.RenewGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
+	12, // 6: model_plane.v1.RenewGrantResponse.absolute_expires_at:type_name -> google.protobuf.Timestamp
+	0,  // 7: model_plane.v1.BrowserBroker.AcquireGrant:input_type -> model_plane.v1.AcquireGrantRequest
+	2,  // 8: model_plane.v1.BrowserBroker.RevokeGrant:input_type -> model_plane.v1.RevokeGrantRequest
+	6,  // 9: model_plane.v1.BrowserBroker.ValidateGrant:input_type -> model_plane.v1.ValidateGrantRequest
+	8,  // 10: model_plane.v1.BrowserBroker.DeriveRunGrant:input_type -> model_plane.v1.DeriveRunGrantRequest
+	10, // 11: model_plane.v1.BrowserBroker.RenewGrant:input_type -> model_plane.v1.RenewGrantRequest
+	4,  // 12: model_plane.v1.BrowserBroker.Health:input_type -> model_plane.v1.BrowserHealthRequest
+	1,  // 13: model_plane.v1.BrowserBroker.AcquireGrant:output_type -> model_plane.v1.AcquireGrantResponse
+	3,  // 14: model_plane.v1.BrowserBroker.RevokeGrant:output_type -> model_plane.v1.RevokeGrantResponse
+	7,  // 15: model_plane.v1.BrowserBroker.ValidateGrant:output_type -> model_plane.v1.ValidateGrantResponse
+	9,  // 16: model_plane.v1.BrowserBroker.DeriveRunGrant:output_type -> model_plane.v1.DeriveRunGrantResponse
+	11, // 17: model_plane.v1.BrowserBroker.RenewGrant:output_type -> model_plane.v1.RenewGrantResponse
+	5,  // 18: model_plane.v1.BrowserBroker.Health:output_type -> model_plane.v1.BrowserHealthResponse
+	13, // [13:19] is the sub-list for method output_type
+	7,  // [7:13] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_browser_proto_init() }
@@ -1334,7 +1580,7 @@ func file_model_plane_v1_browser_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_browser_proto_rawDesc), len(file_model_plane_v1_browser_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -1,0 +1,7 @@
+config {
+  type: "declaration",
+  schema: "dw_staging_currency",
+  name: "HistoryratesPowerBI",
+  description: "Bronze: Historical Currency reference data from Norges Bank API."
+}
+

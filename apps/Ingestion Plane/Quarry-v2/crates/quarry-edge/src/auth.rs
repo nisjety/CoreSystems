@@ -53,6 +53,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{error, warn};
 
+use quarry_core::web_policy::PolicyDenial;
 use quarry_core::zdr::ZdrMode;
 
 /// Claims extracted from a verified JWT. Every token requires `org_id` plus
@@ -88,6 +89,11 @@ pub struct Claims {
     /// the principal; go through [`Claims::zdr_floor`] / [`Claims::effective_zdr`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zdr: Option<bool>,
+    /// WS7.J: the org web-policy claim, as the issuer wrote it. Untyped on purpose: a malformed
+    /// claim must not fail authentication. [`Claims::web_policy_claim`] reads it where a route
+    /// decides, and an unreadable claim fails closed there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_policy: Option<serde_json::Value>,
 }
 
 impl Claims {
@@ -127,7 +133,12 @@ impl Claims {
     /// a ZDR decision takes it from here, so there is one rule.
     #[must_use]
     pub fn effective_zdr(&self, requested: bool) -> bool {
-        requested || self.zdr_floor()
+        let zdr = requested || self.zdr_floor();
+        // The one place every route learns its posture: mark the request span so
+        // the log filter (see `crate::zdr_log`) drops URL-bearing events from
+        // here on. A no-op off ZDR and outside a request span.
+        ZdrMode::from(zdr).mark_current_span();
+        zdr
     }
 
     /// [`Claims::effective_zdr`] for the optional `zdr` field most request
@@ -191,6 +202,159 @@ impl Claims {
             Err(StatusCode::FORBIDDEN)
         }
     }
+}
+
+/// WS7.J: the org web-policy claim as the edge reads it.
+///
+/// `rev` is the issuer's revision as a number (the claim carries up to 12 hex digits, or
+/// `"0"` for no policy). `unknown_keys` counts the capability keys and top-level fields this
+/// build does not know: they are ignored, never applied, and counted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebPolicyClaim {
+    pub layer: quarry_core::web_policy::PolicyLayer,
+    pub rev: u64,
+    pub unknown_keys: usize,
+}
+
+/// The only claim version this build reads. Any other version fails closed.
+/// WS13.5: the scope a service principal needs to send scrape-time `actions[]`.
+/// The check lives in the scrape handler (`scrape_actions::check_principal`), like
+/// `scrape:write` for ingest; a user token does not need it.
+pub const SCOPE_SCRAPE_INTERACT: &str = "scrape:interact";
+
+pub const WEB_POLICY_CLAIM_VERSION: u64 = 1;
+
+/// The top-level fields of a version 1 claim. Anything else is an unknown key.
+const KNOWN_CLAIM_FIELDS: [&str; 6] = ["v", "rev", "caps", "robots_max", "proxy_max", "domains"];
+
+impl Claims {
+    /// The org web-policy layer this token carries (WS7.J).
+    ///
+    /// `Ok(None)` when the claim is absent (a token from an issuer that does not mint it yet).
+    /// What absence means is the caller's decision (see `PolicyBaseline::org_input`).
+    /// `Err(PolicyUnreadable)` when the claim is present but cannot be read: malformed JSON
+    /// shape, a version other than 1, or a rule a layer may not state. Such a claim fails
+    /// closed under `enforce`. The `web_policy` field is untyped so that none of this can fail
+    /// authentication itself.
+    pub fn web_policy_claim(&self) -> Result<Option<WebPolicyClaim>, PolicyDenial> {
+        let Some(raw) = &self.web_policy else {
+            return Ok(None);
+        };
+        let claim = parse_web_policy_claim(raw).map_err(|()| {
+            metrics::counter!("web_policy_claim_unreadable_total").increment(1);
+            PolicyDenial::PolicyUnreadable
+        })?;
+        if claim.unknown_keys > 0 {
+            metrics::counter!("web_policy_claim_unknown_key_total")
+                .increment(claim.unknown_keys as u64);
+        }
+        Ok(Some(claim))
+    }
+}
+
+/// Parse a version 1 claim. `Err(())` for anything this build will not apply. The error
+/// carries no detail on purpose: the caller counts it and refuses, and the claim is
+/// never logged.
+fn parse_web_policy_claim(raw: &serde_json::Value) -> Result<WebPolicyClaim, ()> {
+    use quarry_core::web_policy::{CapKey, Mode, PolicyLayer, ProxyMax, RobotsMax};
+    use serde_json::Value;
+
+    let obj = raw.as_object().ok_or(())?;
+    if obj.get("v").and_then(Value::as_u64) != Some(WEB_POLICY_CLAIM_VERSION) {
+        return Err(());
+    }
+    let rev = parse_claim_rev(obj.get("rev").and_then(Value::as_str).ok_or(())?)?;
+    let mut unknown_keys = obj
+        .keys()
+        .filter(|key| !KNOWN_CLAIM_FIELDS.contains(&key.as_str()))
+        .count();
+
+    let mut robots: Option<RobotsMax> = match obj.get("robots_max") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(parse_ceiling(value)?),
+    };
+    let mut proxy: Option<ProxyMax> = match obj.get("proxy_max") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(parse_ceiling(value)?),
+    };
+    let mut modes = std::collections::BTreeMap::new();
+    if let Some(caps) = obj.get("caps") {
+        let caps = caps.as_object().ok_or(())?;
+        for (name, value) in caps {
+            match CapKey::parse(name) {
+                // A key this build does not know: ignored and counted (forward compatibility).
+                None => unknown_keys += 1,
+                Some(CapKey::RobotsMaxMode) => robots = tighter(robots, Some(parse_ceiling(value)?)),
+                Some(CapKey::ProxyMaxTier) => proxy = tighter(proxy, Some(parse_ceiling(value)?)),
+                // Domain rules travel in `domains`, never in `caps`.
+                Some(CapKey::DomainsAllow | CapKey::DomainsDeny) => return Err(()),
+                Some(key) => {
+                    let mode: Mode = serde_json::from_value(value.clone()).map_err(|_| ())?;
+                    modes.insert(key, mode);
+                }
+            }
+        }
+    }
+
+    let (allow, deny) = match obj.get("domains") {
+        None | Some(Value::Null) => (None, Vec::new()),
+        Some(domains) => {
+            let domains = domains.as_object().ok_or(())?;
+            unknown_keys += domains
+                .keys()
+                .filter(|key| !matches!(key.as_str(), "allow" | "deny"))
+                .count();
+            let allow = match domains.get("allow") {
+                None | Some(Value::Null) => None,
+                // The claim lists only non-baseline entries, so an empty allow list
+                // means no allow rule, not "allow nothing".
+                Some(list) => Some(string_list(list)?).filter(|hosts| !hosts.is_empty()),
+            };
+            let deny = match domains.get("deny") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(list) => string_list(list)?,
+            };
+            (allow, deny)
+        }
+    };
+
+    let layer = PolicyLayer::new(modes, robots, proxy, allow, deny).map_err(|_| ())?;
+    Ok(WebPolicyClaim {
+        layer,
+        rev,
+        unknown_keys,
+    })
+}
+
+/// The claim `rev`: `"0"` or 1 to 12 hex digits.
+fn parse_claim_rev(raw: &str) -> Result<u64, ()> {
+    if raw.is_empty() || raw.len() > 12 || !raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(());
+    }
+    u64::from_str_radix(raw, 16).map_err(|_| ())
+}
+
+/// A robots or proxy ceiling, read from its wire name (`respect`, `none`, ...).
+fn parse_ceiling<T: serde::de::DeserializeOwned>(value: &serde_json::Value) -> Result<T, ()> {
+    serde_json::from_value(value.clone()).map_err(|_| ())
+}
+
+/// The more restrictive of two optional ceilings (the lower, since ceilings order least
+/// permissive first).
+fn tighter<T: Ord + Copy>(a: Option<T>, b: Option<T>) -> Option<T> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (x, None) => x,
+        (None, y) => y,
+    }
+}
+
+fn string_list(list: &serde_json::Value) -> Result<Vec<String>, ()> {
+    list.as_array()
+        .ok_or(())?
+        .iter()
+        .map(|item| item.as_str().map(str::to_owned).ok_or(()))
+        .collect()
 }
 
 struct CachedJwks {
@@ -257,8 +421,33 @@ fn dev_bypass_enabled() -> bool {
 
 fn read_dev_bypass_from_env() -> bool {
     std::env::var("QUARRY_EDGE_AUTH_DEV_BYPASS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .map(|v| dev_bypass_flag_value(&v))
         .unwrap_or(false)
+}
+
+/// Whether a `QUARRY_EDGE_AUTH_DEV_BYPASS` value turns the bypass on.
+///
+/// The ONE parse behind both the runtime reader and the production start-up
+/// refusal ([`production_with_dev_bypass`]). They used to disagree: the refusal
+/// matched `"1" | "true" | "TRUE" | "yes"` exactly while the reader accepted
+/// any case of `true`, so `QUARRY_EDGE_AUTH_DEV_BYPASS=True` passed the
+/// refusal and still enabled a bypass that accepts any bearer.
+pub fn dev_bypass_flag_value(raw: &str) -> bool {
+    let value = raw.trim();
+    value == "1"
+        || ["true", "yes", "on"]
+            .iter()
+            .any(|word| value.eq_ignore_ascii_case(word))
+}
+
+/// True when the process is in a production environment (`prod` or
+/// `production`, any case) AND the dev bypass is on: the combination the edge
+/// must refuse to start with.
+pub fn production_with_dev_bypass(env_name: &str, raw_bypass: Option<&str>) -> bool {
+    let env_name = env_name.trim();
+    let production =
+        env_name.eq_ignore_ascii_case("prod") || env_name.eq_ignore_ascii_case("production");
+    production && raw_bypass.is_some_and(dev_bypass_flag_value)
 }
 
 async fn fetch_jwks() -> Result<JwkSet, StatusCode> {
@@ -267,10 +456,12 @@ async fn fetch_jwks() -> Result<JwkSet, StatusCode> {
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let resp = reqwest::get(&url).await.map_err(|e| {
+        // zdr-log-ok: runs inside require_auth, before the claims exist and before mark_floor can mark the span, so the filter cannot see a ZDR posture here; the text is a JWT or JWKS error, never caller data, and the url is the operator-set JWKS endpoint
         error!(error = %e, url = %url, "failed to fetch JWKS");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let jwks: JwkSet = resp.json().await.map_err(|e| {
+        // zdr-log-ok: runs inside require_auth, before the claims exist and before mark_floor can mark the span, so the filter cannot see a ZDR posture here; the text is a JWT or JWKS error, never caller data
         error!(error = %e, "failed to parse JWKS JSON");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -309,6 +500,7 @@ async fn get_jwks(force_refresh: bool) -> Result<JwkSet, StatusCode> {
 ///   unset without `AUTH_CORE_AUDIENCE_OPTIONAL=1`.
 async fn verify_jwt_bearer(token: &str) -> Result<Claims, StatusCode> {
     let jwt_header = decode_header(token).map_err(|e| {
+        // zdr-log-ok: runs inside require_auth, before the claims exist and before mark_floor can mark the span, so the filter cannot see a ZDR posture here; the text is a JWT or JWKS error, never caller data
         warn!(error = %e, "failed to decode JWT header");
         StatusCode::UNAUTHORIZED
     })?;
@@ -338,6 +530,7 @@ async fn verify_jwt_bearer(token: &str) -> Result<Claims, StatusCode> {
     };
 
     let decoding_key = DecodingKey::from_jwk(&jwk).map_err(|e| {
+        // zdr-log-ok: runs inside require_auth, before the claims exist and before mark_floor can mark the span, so the filter cannot see a ZDR posture here; the text is a JWT or JWKS error, never caller data
         error!(error = %e, "failed to build decoding key from JWK");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -374,6 +567,7 @@ async fn verify_jwt_bearer(token: &str) -> Result<Claims, StatusCode> {
     }
 
     let mut token_data = decode::<Claims>(token, &decoding_key, &validation).map_err(|e| {
+        // zdr-log-ok: runs inside require_auth, before the claims exist and before mark_floor can mark the span, so the filter cannot see a ZDR posture here; the text is a JWT or JWKS error, never caller data
         warn!(error = %e, "JWT validation failed");
         StatusCode::UNAUTHORIZED
     })?;
@@ -395,6 +589,7 @@ async fn verify_jwt_bearer(token: &str) -> Result<Claims, StatusCode> {
 /// NEVER used for a bearer that verifies successfully — see [`require_auth`].
 fn dev_bypass_stub_claims() -> Claims {
     Claims {
+        web_policy: None,
         sub: "user_placeholder".to_owned(),
         iss: "dev".to_owned(),
         exp: i64::MAX,
@@ -404,7 +599,9 @@ fn dev_bypass_stub_claims() -> Claims {
         service_id: None,
         nbf: None,
         aud: None,
-        scopes: Vec::new(),
+        // WS17.P0: the dev stub carries the profile import scope so a local run and the edge
+        // tests can save a profile. The bypass is refused in production, so no real token does.
+        scopes: vec![crate::profile_guard::IMPORT_SCOPE.to_owned()],
         // The dev stub asserts no posture: it can only ever run on the body flag.
         zdr: None,
     }
@@ -512,7 +709,17 @@ pub async fn require_service_route_scope(req: Request, next: Next) -> Result<Res
     let path = req.uri().path();
     let permitted = match path {
         "/v1/scrape" => claims.has_scope("scrape:read") || claims.has_scope("scrape:write"),
+        // Reading back one scrape record by id. Not the stream route, and not a
+        // nested path.
+        _ if path
+            .strip_prefix("/v1/scrape/")
+            .is_some_and(|rest| rest != "stream" && !rest.contains('/')) =>
+        {
+            claims.has_scope("scrape:read") || claims.has_scope("scrape:write")
+        }
+        "/v1/audit/page" => claims.has_scope("scrape:read"),
         "/v1/search" => claims.has_scope("search:read"),
+        "/v1/map" => claims.has_scope("map:read"),
         "/v1/extract" => claims.has_scope("extract:read"),
         // Reading one artifact by id is part of the scrape/agent contract, not a
         // separate capability: `/v1/scrape` answers with
@@ -572,8 +779,53 @@ mod tests {
     }
 
     #[test]
+    fn dev_bypass_flag_is_case_insensitive_and_trimmed() {
+        for on in [
+            "1", "true", "True", "TRUE", "tRuE", "yes", "YES", "on", "On", " 1 ", "true ",
+        ] {
+            assert!(dev_bypass_flag_value(on), "{on:?} must read as on");
+        }
+        for off in [
+            "", "0", "false", "False", "no", "off", "2", "enabled", "truee",
+        ] {
+            assert!(!dev_bypass_flag_value(off), "{off:?} must read as off");
+        }
+    }
+
+    #[test]
+    fn prod_refuses_dev_bypass_in_any_case() {
+        for env_name in ["prod", "PROD", "production", "Production", " production "] {
+            for raw in ["1", "true", "True", "TRUE", "yes", "Yes", "on"] {
+                assert!(
+                    production_with_dev_bypass(env_name, Some(raw)),
+                    "ENVIRONMENT={env_name:?} with bypass={raw:?} must be refused"
+                );
+            }
+            // Off or unset is not a refusal.
+            assert!(!production_with_dev_bypass(env_name, None));
+            assert!(!production_with_dev_bypass(env_name, Some("0")));
+            assert!(!production_with_dev_bypass(env_name, Some("false")));
+        }
+    }
+
+    #[test]
+    fn non_prod_dev_bypass_still_boots() {
+        for env_name in ["dev", "development", "test", "staging", ""] {
+            assert!(
+                !production_with_dev_bypass(env_name, Some("1")),
+                "{env_name:?}"
+            );
+            assert!(
+                !production_with_dev_bypass(env_name, Some("True")),
+                "{env_name:?}"
+            );
+        }
+    }
+
+    #[test]
     fn claims_serde_roundtrip_default_fields_omitted() {
         let c = Claims {
+            web_policy: None,
             sub: "u1".into(),
             iss: "auth-core".into(),
             exp: 1_700_000_000,
@@ -599,6 +851,7 @@ mod tests {
     #[test]
     fn claims_has_scope_and_require_org() {
         let c = Claims {
+            web_policy: None,
             sub: "u1".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,
@@ -620,6 +873,7 @@ mod tests {
     #[test]
     fn canonical_service_principal_derives_actor_from_signed_service_id() {
         let mut claims = Claims {
+            web_policy: None,
             sub: "service:model-gateway".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,
@@ -660,6 +914,7 @@ mod tests {
     #[test]
     fn ambiguous_service_principal_is_rejected() {
         let mut claims = Claims {
+            web_policy: None,
             sub: "service:model-gateway".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,
@@ -681,16 +936,22 @@ mod tests {
         }
         Router::new()
             .route("/v1/search", get(ok_handler))
+            .route("/v1/map", get(ok_handler))
+            .route("/v1/audit/page", get(ok_handler))
             .route("/v1/extract", get(ok_handler))
             .route("/v1/other", get(ok_handler))
             .route("/v1/artifacts", get(ok_handler))
             .route("/v1/artifacts/:id", get(ok_handler))
+            .route("/v1/scrape/stream", get(ok_handler))
+            .route("/v1/scrape/:id", get(ok_handler))
+            .route("/v1/scrape/:id/extra", get(ok_handler))
             .layer(middleware::from_fn(require_service_route_scope))
             .layer(Extension(claims))
     }
 
     fn service_claims(scopes: &[&str]) -> Claims {
         Claims {
+            web_policy: None,
             sub: "service:model-gateway".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,
@@ -702,6 +963,25 @@ mod tests {
             aud: Some("quarry".into()),
             scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
             zdr: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_audit_capture_requires_scrape_read_not_map_or_write() {
+        assert_eq!(
+            status_for(service_claims(&["scrape:read"]), "/v1/audit/page").await,
+            StatusCode::OK
+        );
+        for scopes in [
+            &[][..],
+            &["map:read"][..],
+            &["scrape:write"][..],
+            &["browser:execute"][..],
+        ] {
+            assert_eq!(
+                status_for(service_claims(scopes), "/v1/audit/page").await,
+                StatusCode::FORBIDDEN
+            );
         }
     }
 
@@ -731,6 +1011,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_scrape_scoped_service_can_read_a_scrape_record_and_nothing_wider() {
+        for scope in ["scrape:read", "scrape:write"] {
+            assert_eq!(
+                status_for(service_claims(&[scope]), "/v1/scrape/art_01ABC").await,
+                StatusCode::OK,
+                "{scope}"
+            );
+        }
+        // Not a producing scope, the stream route, or a nested path.
+        assert_eq!(
+            status_for(service_claims(&["search:read"]), "/v1/scrape/art_01ABC").await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_for(service_claims(&["scrape:read"]), "/v1/scrape/stream").await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_for(service_claims(&["scrape:read"]), "/v1/scrape/art_01ABC/extra").await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
     async fn artifact_read_stays_closed_without_a_producing_scope() {
         assert_eq!(
             status_for(service_claims(&["search:read"]), "/v1/artifacts/art_01ABC").await,
@@ -745,8 +1049,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn map_service_scope_is_explicit_and_does_not_grant_other_routes() {
+        assert_eq!(
+            status_for(service_claims(&["map:read"]), "/v1/map").await,
+            StatusCode::OK
+        );
+        for scope in ["search:read", "scrape:read", "extract:read", "crawl:write"] {
+            assert_eq!(
+                status_for(service_claims(&[scope]), "/v1/map").await,
+                StatusCode::FORBIDDEN
+            );
+        }
+        for path in [
+            "/v1/search",
+            "/v1/extract",
+            "/v1/artifacts/art_01ABC",
+            "/v1/other",
+        ] {
+            assert_eq!(
+                status_for(service_claims(&["map:read"]), path).await,
+                StatusCode::FORBIDDEN
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn service_route_scope_is_least_privilege_and_unknown_routes_fail_closed() {
         let claims = Claims {
+            web_policy: None,
             sub: "service:model-gateway".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,
@@ -789,6 +1119,7 @@ mod tests {
     #[tokio::test]
     async fn service_scope_middleware_preserves_interactive_user_routes() {
         let claims = Claims {
+            web_policy: None,
             sub: "user-1".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,
@@ -981,6 +1312,7 @@ mod tests {
         std::env::set_var("AUTH_CORE_JWKS_URL", format!("{}/jwks", server.uri()));
 
         let claims = Claims {
+            web_policy: None,
             sub: "user-real".into(),
             iss: "auth-core".into(),
             exp: now_secs() + 3600,
@@ -1032,6 +1364,7 @@ mod tests {
         // Signed with a kid the JWKS mock never advertises — verification
         // must fail (no matching JWK even after a forced refresh).
         let claims = Claims {
+            web_policy: None,
             sub: "user-real".into(),
             iss: "auth-core".into(),
             exp: now_secs() + 3600,
@@ -1071,6 +1404,7 @@ mod tests {
     fn claims_with(principal_type: Option<&str>, zdr: Option<bool>) -> Claims {
         let service = principal_type == Some("service");
         Claims {
+            web_policy: None,
             sub: if service {
                 "service:model-gateway".into()
             } else {

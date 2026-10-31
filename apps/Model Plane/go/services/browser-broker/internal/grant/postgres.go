@@ -153,7 +153,8 @@ const grantColumns = `id, kind, org_id, owner_id, session_key, scope_url, allowe
 	allowed_actions, allowed_frame_ids, allowed_dialog_ids, allowed_artifact_ids,
 	COALESCE(parent_grant_id, ''), expires_at, revoked_at IS NOT NULL, COALESCE(revoked_reason, ''),
 	COALESCE(budget_micro_usd, 0), COALESCE(budget_max_steps, 0), COALESCE(budget_max_runtime_s, 0),
-	COALESCE(budget_source, ''), COALESCE(budget_minted_at_unix, 0)`
+	COALESCE(budget_source, ''), COALESCE(budget_minted_at_unix, 0),
+	policy_mode, denied_domains, COALESCE(resource_id, ''), absolute_expires_at`
 
 // fetch reads one grant; lock is "", " FOR SHARE" or " FOR UPDATE". A
 // missing row is ErrGrantNotFound.
@@ -165,6 +166,7 @@ func (s *PgStore) fetch(ctx context.Context, q querier, op, id, lock string) (*G
 		&g.AllowedActions, &g.AllowedFrameIDs, &g.AllowedDialogIDs, &g.AllowedArtifactIDs,
 		&g.ParentGrantID, &g.ExpiresAt, &g.Revoked, &g.RevokedReason,
 		&g.Budget.MicroUSD, &g.Budget.MaxSteps, &g.Budget.MaxRuntimeS, &g.Budget.Source, &g.Budget.MintedAtUnix,
+		&g.PolicyMode, &g.DeniedDomains, &g.ResourceID, &g.AbsoluteExpiresAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrGrantNotFound
@@ -245,16 +247,27 @@ func nonNil(values []string) []string {
 const insertGrant = `INSERT INTO browser_grants (id, kind, org_id, owner_id, session_key, scope_url,
 	allowed_domains, allowed_actions, allowed_frame_ids, allowed_dialog_ids, allowed_artifact_ids,
 	parent_grant_id, expires_at, absolute_expires_at,
-	budget_micro_usd, budget_max_steps, budget_max_runtime_s, budget_source, budget_minted_at_unix)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, ''), $13, $13,
-	NULLIF($14::bigint, 0), NULLIF($15::int, 0), NULLIF($16::int, 0), NULLIF($17::text, ''), NULLIF($18::bigint, 0))`
+	budget_micro_usd, budget_max_steps, budget_max_runtime_s, budget_source, budget_minted_at_unix,
+	policy_mode, denied_domains, resource_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, ''), $13, $19,
+	NULLIF($14::bigint, 0), NULLIF($15::int, 0), NULLIF($16::int, 0), NULLIF($17::text, ''), NULLIF($18::bigint, 0),
+	$20, $21, NULLIF($22::text, ''))`
 
 func insertArgs(g *Grant) []any {
+	absolute := g.AbsoluteExpiresAt
+	if absolute.IsZero() {
+		absolute = g.ExpiresAt
+	}
+	mode := g.PolicyMode
+	if mode == "" {
+		mode = PolicyModeAllowlist
+	}
 	return []any{
 		g.ID, string(g.Kind), g.OrgID, g.OwnerID, g.SessionKey, g.ScopeURL,
 		nonNil(g.AllowedDomains), nonNil(g.AllowedActions), nonNil(g.AllowedFrameIDs),
 		nonNil(g.AllowedDialogIDs), nonNil(g.AllowedArtifactIDs), g.ParentGrantID, g.ExpiresAt,
 		g.Budget.MicroUSD, g.Budget.MaxSteps, g.Budget.MaxRuntimeS, g.Budget.Source, g.Budget.MintedAtUnix,
+		absolute, mode, nonNil(g.DeniedDomains), g.ResourceID,
 	}
 }
 
@@ -287,7 +300,9 @@ func (s *PgStore) CreateSession(ctx context.Context, p CreateSessionParams) (*Gr
 	g := &Grant{
 		ID: id, Kind: KindSession, OrgID: p.OrgID, OwnerID: p.OwnerID, SessionKey: p.SessionKey,
 		ScopeURL: p.ScopeURL, AllowedDomains: domains, Budget: budget, ExpiresAt: now.Add(p.TTL),
+		PolicyMode: PolicyModeAllowlist,
 	}
+	g.AbsoluteExpiresAt = g.ExpiresAt
 	err = s.inTx(ctx, "create_session", func(tx pgx.Tx) error {
 		if p.MaxActivePerOwner > 0 {
 			if err := s.advisoryLock(ctx, tx, "create_session", lockNsOwnerSessions, p.OrgID+":"+p.OwnerID); err != nil {
@@ -295,7 +310,7 @@ func (s *PgStore) CreateSession(ctx context.Context, p CreateSessionParams) (*Gr
 			}
 			var active int
 			if err := tx.QueryRow(ctx, `SELECT count(*) FROM browser_grants
-				WHERE org_id = $1 AND owner_id = $2 AND kind = 'session'
+				WHERE org_id = $1 AND owner_id = $2 AND kind IN ('session', 'human_browse')
 				  AND revoked_at IS NULL AND expires_at >= $3`,
 				p.OrgID, p.OwnerID, now).Scan(&active); err != nil {
 				return s.dbErr(ctx, "create_session", err)
@@ -395,7 +410,8 @@ func (s *PgStore) CreateScopedSensitiveApproval(ctx context.Context, p ApprovalP
 			SessionKey: p.SessionKey, ScopeURL: p.ScopeURL, AllowedDomains: domains,
 			AllowedActions: scopes.actions, AllowedFrameIDs: scopes.frames,
 			AllowedDialogIDs: scopes.dialogs, AllowedArtifactIDs: scopes.artifacts,
-			ParentGrantID: p.ParentGrantID, ExpiresAt: expires,
+			ParentGrantID: p.ParentGrantID, ExpiresAt: expires, AbsoluteExpiresAt: expires,
+			PolicyMode: PolicyModeAllowlist,
 		}
 		if _, err := tx.Exec(ctx, insertGrant, insertArgs(g)...); err != nil {
 			return s.dbErr(ctx, "create_approval", err)
@@ -442,31 +458,9 @@ func (s *PgStore) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 		if s.afterParentLock != nil {
 			s.afterParentLock()
 		}
-		policy, ok := derivableParents[parent.Kind]
-		if !ok || len(parent.AllowedActions) != 0 {
-			return ErrParentNotDerivable
-		}
-		// A persisted parent is never ZDR, so a ZDR caller would obtain a
-		// grant whose run may be retained.
-		if p.PrincipalZdr {
-			return ErrZdrPostureChanged
-		}
-		maxRun := p.MaxRunDomains
-		if maxRun <= 0 {
-			maxRun = DefaultMaxRunDomains
-		}
-		domains, err := deriveDomains(parent.AllowedDomains, p.RunDomains, maxRun, policy.explicitHosts)
+		plan, err := planDerive(ctx, p, parent)
 		if err != nil {
 			return err
-		}
-		requestedBudget, err := NormalizeBudget(p.Budget)
-		if err != nil {
-			return err
-		}
-		if p.Policy != nil {
-			if err := p.Policy.CheckSession(ctx, p.OrgID, domains); err != nil {
-				return err
-			}
 		}
 		if err := s.advisoryLock(ctx, tx, "derive", lockNsParentRuns, parent.ID); err != nil {
 			return err
@@ -476,12 +470,12 @@ func (s *PgStore) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 		if now.After(parent.ExpiresAt) {
 			return ErrGrantExpired
 		}
-		budget, err := tightenBudget(parent.Budget, requestedBudget, now.Unix())
+		budget, err := tightenBudget(parent.Budget, plan.requestedBudget, now.Unix())
 		if err != nil {
 			return err
 		}
 		replay := func() error {
-			existing, err := s.existingRun(ctx, tx, parent.ID, parent.OrgID, p.SessionKey)
+			existing, err := s.existingChild(ctx, tx, plan.kind, parent.ID, parent.OrgID, p.SessionKey)
 			if err != nil || existing == nil {
 				return err
 			}
@@ -490,7 +484,8 @@ func (s *PgStore) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 				return ErrGrantRevoked
 			case now.After(existing.ExpiresAt):
 				return ErrGrantExpired
-			case !equalStrings(existing.AllowedDomains, domains), !sameDeriveBudget(requestedBudget, existing.Budget, budget):
+			case !equalStrings(existing.AllowedDomains, plan.domains), existing.ResourceID != plan.resourceID,
+				!sameDeriveBudget(plan.requestedBudget, existing.Budget, budget):
 				return ErrDeriveConflict
 			}
 			out = existing
@@ -499,7 +494,7 @@ func (s *PgStore) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 		if err := replay(); err != nil || out != nil {
 			return err
 		}
-		expires := now.Add(p.TTL)
+		expires := now.Add(plan.ttl)
 		if parent.ExpiresAt.Before(expires) {
 			expires = parent.ExpiresAt
 		}
@@ -512,9 +507,9 @@ func (s *PgStore) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 		}
 		var active int
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM browser_grants
-			WHERE parent_grant_id = $1 AND org_id = $2 AND kind = 'run'
-			  AND revoked_at IS NULL AND expires_at >= $3`,
-			parent.ID, parent.OrgID, now).Scan(&active); err != nil {
+			WHERE parent_grant_id = $1 AND org_id = $2 AND kind = $4
+				  AND revoked_at IS NULL AND expires_at >= $3`,
+			parent.ID, parent.OrgID, now, string(plan.kind)).Scan(&active); err != nil {
 			return s.dbErr(ctx, "derive", err)
 		}
 		if active >= maxRuns {
@@ -525,14 +520,16 @@ func (s *PgStore) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 			return err
 		}
 		g := &Grant{
-			ID: id, Kind: KindRun, OrgID: parent.OrgID, OwnerID: parent.OwnerID,
-			SessionKey: p.SessionKey, ScopeURL: parent.ScopeURL, AllowedDomains: domains,
-			Budget: budget, ParentGrantID: parent.ID, ExpiresAt: expires,
+			ID: id, Kind: plan.kind, OrgID: parent.OrgID, OwnerID: parent.OwnerID,
+			SessionKey: p.SessionKey, ScopeURL: parent.ScopeURL, AllowedDomains: plan.domains,
+			Budget: budget, ParentGrantID: parent.ID, ExpiresAt: expires, AbsoluteExpiresAt: expires,
+			PolicyMode: PolicyModeAllowlist, ResourceID: plan.resourceID,
 		}
 		var inserted string
+		// The idempotency index is partial per kind: 'run' (0001) and 'attach' (0004).
 		err = tx.QueryRow(ctx, insertGrant+`
-			ON CONFLICT (parent_grant_id, session_key) WHERE kind = 'run' DO NOTHING
-			RETURNING id`, insertArgs(g)...).Scan(&inserted)
+				ON CONFLICT (parent_grant_id, session_key) WHERE kind = '`+string(plan.kind)+`' DO NOTHING
+				RETURNING id`, insertArgs(g)...).Scan(&inserted)
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Another derive with the same key won; the advisory lock makes
 			// this unreachable, but the replay rules still hold if it is not.
@@ -556,11 +553,13 @@ func (s *PgStore) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 	return clone(out), nil
 }
 
-func (s *PgStore) existingRun(ctx context.Context, q querier, parentID, orgID, sessionKey string) (*Grant, error) {
+// existingChild returns the run or attach grant already derived from parentID
+// under sessionKey, or nil.
+func (s *PgStore) existingChild(ctx context.Context, q querier, kind Kind, parentID, orgID, sessionKey string) (*Grant, error) {
 	var id string
 	err := q.QueryRow(ctx, `SELECT id FROM browser_grants
-		WHERE parent_grant_id = $1 AND session_key = $2 AND kind = 'run' AND org_id = $3`,
-		parentID, sessionKey, orgID).Scan(&id)
+		WHERE parent_grant_id = $1 AND session_key = $2 AND kind = $4 AND org_id = $3`,
+		parentID, sessionKey, orgID, string(kind)).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

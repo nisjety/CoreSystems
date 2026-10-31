@@ -51,6 +51,12 @@ impl DriverRegistry {
     pub fn has(&self, kind: DriverKind) -> bool {
         self.drivers.contains_key(&kind)
     }
+
+    /// The health of the registered browser driver's local browser, if it
+    /// runs one (the scrape path's browser, which `/ready` reports).
+    pub async fn browser_health(&self) -> Option<quarry_browser::BrowserHealth> {
+        self.drivers.get(&DriverKind::Browser)?.browser_health().await
+    }
 }
 
 #[cfg(test)]
@@ -76,6 +82,7 @@ mod tests {
                 body: format!("from {:?}", self.0).into_bytes(),
                 duration_ms: 1,
                 served_by: self.0,
+                captures: None,
             })
         }
     }

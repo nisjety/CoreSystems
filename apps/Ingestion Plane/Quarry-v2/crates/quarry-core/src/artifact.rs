@@ -24,6 +24,12 @@ pub enum ArtifactKind {
     LogoCandidate,
     RenderedPalette,
     Meta,
+    /// The normalized output and effective options of a non-ZDR scrape, read
+    /// back by `GET /v1/scrape/{id}`. Never holds inline page text.
+    ScrapeRecord,
+    /// WS13.3: a JPEG screenshot (a screenshot with `quality` set). Its own kind, so
+    /// the PNG `Screenshot` kind keeps meaning PNG.
+    ScreenshotJpeg,
 }
 
 impl ArtifactKind {
@@ -48,6 +54,8 @@ impl ArtifactKind {
             Self::LogoCandidate => "png",
             Self::RenderedPalette => "json",
             Self::Meta => "meta.json",
+            Self::ScrapeRecord => "scrape.json",
+            Self::ScreenshotJpeg => "jpg",
         }
     }
 }
@@ -81,6 +89,8 @@ fn kind_stem(kind: ArtifactKind) -> &'static str {
         ArtifactKind::LogoCandidate => "logo_candidate",
         ArtifactKind::RenderedPalette => "rendered_palette",
         ArtifactKind::Meta => "meta",
+        ArtifactKind::ScrapeRecord => "scrape_record",
+        ArtifactKind::ScreenshotJpeg => "screenshot_jpeg",
     }
 }
 
@@ -120,6 +130,8 @@ pub fn content_type_for_key(key: &str) -> &'static str {
     match file.rsplit_once('.').map(|(_, ext)| ext) {
         Some("png") => "image/png",
         Some("pdf") => "application/pdf",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
         Some("json") => "application/json",
         Some("html") => "text/html",
         Some("md") => "text/markdown",
@@ -167,11 +179,20 @@ mod content_type_tests {
             ArtifactKind::LogoCandidate,
             ArtifactKind::RenderedPalette,
             ArtifactKind::Meta,
+            ArtifactKind::ScrapeRecord,
+            ArtifactKind::ScreenshotJpeg,
         ] {
             let key = object_key("acme", "run_1", "page_1", kind);
             let declared = content_type_for_key(&key);
             assert!(!declared.is_empty(), "{kind:?} produced no content type");
         }
+    }
+
+    #[test]
+    fn a_scrape_record_is_json_and_its_key_names_the_kind() {
+        let key = object_key("acme", "run_1", "page_1", ArtifactKind::ScrapeRecord);
+        assert!(key.ends_with("/scrape_record.scrape.json"), "{key}");
+        assert_eq!(content_type_for_key(&key), "application/json");
     }
 
     /// Compound extensions must resolve on the LAST segment, not the first.
@@ -200,6 +221,18 @@ mod content_type_tests {
         ] {
             assert_eq!(content_type_for_key(key), "application/octet-stream", "{key}");
         }
+    }
+
+    /// WS13.3: a JPEG screenshot keeps its own kind, its own extension and the JPEG type.
+    #[test]
+    fn jpeg_screenshot_has_jpg_extension_and_image_jpeg_type() {
+        let key = object_key("acme", "run_1", "page_1", ArtifactKind::ScreenshotJpeg);
+        assert!(key.ends_with("/screenshot_jpeg.jpg"), "{key}");
+        assert_eq!(content_type_for_key(&key), "image/jpeg");
+        assert_ne!(
+            key,
+            object_key("acme", "run_1", "page_1", ArtifactKind::Screenshot)
+        );
     }
 
     /// A key whose *directory* contains a dot must not be mistaken for the

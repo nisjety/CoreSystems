@@ -32,6 +32,8 @@ pub enum CrawlDenialReason {
     ContentTypeRejected { content_type: String },
     /// URL points to a backward (fragment, mailto, tel) destination not crawlable.
     NotCrawlable { reason: String },
+    /// robots.txt for the host could not be fetched, so its links are not followed (WS14.S2).
+    RobotsUnreachable { host: String },
 }
 
 impl CrawlDenialReason {
@@ -49,6 +51,7 @@ impl CrawlDenialReason {
             Self::ExcludePatternHit { .. } => "exclude_pattern_hit",
             Self::ContentTypeRejected { .. } => "content_type_rejected",
             Self::NotCrawlable { .. } => "not_crawlable",
+            Self::RobotsUnreachable { .. } => "robots_unreachable",
         }
     }
 
@@ -78,6 +81,43 @@ impl CrawlDenialReason {
                 format!("content-type '{content_type}' is in the rejection list")
             }
             Self::NotCrawlable { reason } => format!("URL is not crawlable: {reason}"),
+            Self::RobotsUnreachable { host } => format!(
+                "robots.txt for host '{host}' could not be fetched; its links are not followed"
+            ),
+        }
+    }
+
+    /// What an operator can change to get the URL crawled, when there is one.
+    /// Denials that no setting can lift (duplicates, security rejections,
+    /// malformed links) return `None`.
+    pub fn remedy(&self) -> Option<&'static str> {
+        match self {
+            Self::OutOfScope { .. } => {
+                Some("Enable allow_subdomains to follow subdomains of the seed host.")
+            }
+            Self::RobotsDisallowed { .. } => {
+                Some("The site's robots.txt disallows this path. Crawl a permitted URL instead.")
+            }
+            Self::DepthExceeded { .. } => Some("Raise max_depth for this crawl."),
+            Self::MaxPagesReached { .. } => {
+                Some("Raise max_pages within the organization limit.")
+            }
+            Self::ExternalHostDisabled { .. } => {
+                Some("Enable allow_external_links to follow links to other hosts.")
+            }
+            Self::IncludePatternMiss => {
+                Some("Add a matching include_paths entry, or remove include_paths.")
+            }
+            Self::ExcludePatternHit { .. } => Some("Remove the matching exclude_paths entry."),
+            Self::ContentTypeRejected { .. } => {
+                Some("Remove the extension from deny_extensions to allow it.")
+            }
+            Self::RobotsUnreachable { .. } => {
+                Some("robots.txt could not be fetched. Retry the crawl later.")
+            }
+            Self::Duplicate
+            | Self::SecurityRejected { .. }
+            | Self::NotCrawlable { .. } => None,
         }
     }
 }
@@ -107,6 +147,7 @@ mod tests {
                 content_type: "ct".into(),
             },
             CrawlDenialReason::NotCrawlable { reason: "r".into() },
+            CrawlDenialReason::RobotsUnreachable { host: "h".into() },
         ];
         let codes: Vec<&'static str> = reasons.iter().map(|r| r.code()).collect();
         let mut sorted = codes.clone();
@@ -137,5 +178,35 @@ mod tests {
         let restored: CrawlDenialReason = serde_json::from_str(&json).unwrap();
         assert_eq!(reason, restored);
         assert!(json.contains("\"code\":\"robots_disallowed\""));
+    }
+
+    #[test]
+    fn robots_unreachable_has_its_own_code_and_names_the_host() {
+        let reason = CrawlDenialReason::RobotsUnreachable {
+            host: "example.test".into(),
+        };
+        assert_eq!(reason.code(), "robots_unreachable");
+        assert!(reason.message().contains("example.test"));
+        assert!(reason.remedy().is_some());
+        let json = serde_json::to_string(&reason).unwrap();
+        assert!(json.contains("\"code\":\"robots_unreachable\""));
+    }
+
+    #[test]
+    fn remedy_is_absent_only_where_no_setting_lifts_the_denial() {
+        assert!(CrawlDenialReason::Duplicate.remedy().is_none());
+        assert!(CrawlDenialReason::NotCrawlable {
+            reason: "scheme".into()
+        }
+        .remedy()
+        .is_none());
+        assert!(CrawlDenialReason::SecurityRejected {
+            reason: "r".into()
+        }
+        .remedy()
+        .is_none());
+        assert!(CrawlDenialReason::ExternalHostDisabled { host: "h".into() }
+            .remedy()
+            .is_some());
     }
 }

@@ -8,7 +8,11 @@ import { SEARCH_DEBOUNCE_MS } from './ChatSearchResults'
 
 const { searchChatThreads } = vi.hoisted(() => ({ searchChatThreads: vi.fn() }))
 vi.mock('@/shared/api/chat-client', () => ({ searchChatThreads }))
-vi.mock('@/shared/i18n', () => ({ useI18n: () => ({ tr: (_no: string, en: string) => en }) }))
+// The real error copy seam (translateApiError, LocalizedError); only the hook is faked.
+vi.mock('@/shared/i18n', async () => ({
+  ...(await vi.importActual<typeof import('@/shared/i18n/errors')>('@/shared/i18n/errors')),
+  useI18n: () => ({ tr: (_no: string, en: string) => en }),
+}))
 vi.mock('@/shared/session/session-store', () => ({ getSession: () => ({ user: { id: 'user-test' }, activeOrg: { id: 'org-test' } }) }))
 
 const key = chatOrganizationStorageKey('user-test', 'org-test')!
@@ -143,6 +147,22 @@ describe('chat organizer interactions', () => {
     expect(readChatOrganization(key).projects).toEqual([])
     expect(readChatOrganization(key).assignments).toEqual({})
     expect(screen.getByRole('button', { name: 'Move Planning' })).toBeTruthy()
+  })
+
+  it('tells the person why a project could not be saved: a duplicate name is not the generic "Could not save."', async () => {
+    seedProjects()
+    mount()
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'New project' }))
+    flush()
+    const input = await screen.findByRole('textbox', { name: 'Project name' })
+    fireEvent.input(input, { target: { value: ' work ' } })
+    flush()
+    fireEvent.submit(input.closest('form')!)
+    flush()
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toBe('A project with this name already exists.')
+    expect(readChatOrganization(key).projects).toHaveLength(2)
   })
 
   it('drags a chat into a collapsed project and back to an empty Recent group', () => {

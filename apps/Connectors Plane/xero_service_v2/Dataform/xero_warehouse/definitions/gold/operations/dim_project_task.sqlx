@@ -1,0 +1,68 @@
+config {
+  type: "table",
+  schema: "xero_gold_operations",
+  description: "Conformed Xero Project task dimension, retaining source-native billing and time estimates without treating them as ledger amounts.",
+  assertions: {
+    nonNull: ["tenant_id", "project_id", "task_id", "project_task_key", "project_key", "company_key"],
+    uniqueKey: ["project_task_key"]
+  }
+}
+
+WITH direct_detail AS (
+  SELECT
+    tenant_id,
+    project_id,
+    task_id,
+    direct_detail_observed_at,
+    direct_detail_source_run_id,
+    direct_detail_source_version_id,
+    is_direct_detail_reconciled
+  FROM ${ref("dw_1_silver_xero", "audit_project_task_direct_detail_reconciliation")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, project_id, task_id
+    ORDER BY direct_detail_observed_at DESC, direct_detail_source_run_id DESC,
+             direct_detail_source_version_id DESC
+  ) = 1
+)
+SELECT
+  FARM_FINGERPRINT(CONCAT(task.tenant_id, '|', task.project_id, '|', task.task_id)) AS project_task_key,
+  FARM_FINGERPRINT(CONCAT(task.tenant_id, '|', task.project_id)) AS project_key,
+  FARM_FINGERPRINT(task.tenant_id) AS company_key,
+  task.tenant_id,
+  task.project_id,
+  task.task_id,
+  task.task_name,
+  task.task_status,
+  task.charge_type,
+  task.rate_amount,
+  task.rate_currency_code,
+  task.total_amount,
+  task.total_currency_code,
+  task.amount_invoiced,
+  task.amount_invoiced_currency_code,
+  task.amount_to_be_invoiced,
+  task.amount_to_be_invoiced_currency_code,
+  task.fixed_minutes,
+  task.total_minutes,
+  task.minutes_invoiced,
+  task.minutes_to_be_invoiced,
+  task.non_chargeable_minutes,
+  task.is_current,
+  task.is_removed,
+  task.removed_in_run_id,
+  task.removed_observed_at,
+  task.record_state,
+  task.first_seen_at,
+  task.last_seen_at,
+  task.project_observed_at,
+  task.source_run_id,
+  direct_detail.task_id IS NOT NULL AS has_direct_detail_evidence,
+  direct_detail.is_direct_detail_reconciled,
+  direct_detail.direct_detail_observed_at,
+  direct_detail.direct_detail_source_run_id,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_project_task")} AS task
+LEFT JOIN direct_detail
+  ON task.tenant_id = direct_detail.tenant_id
+ AND task.project_id = direct_detail.project_id
+ AND task.task_id = direct_detail.task_id

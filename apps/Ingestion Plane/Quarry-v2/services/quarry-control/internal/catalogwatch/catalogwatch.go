@@ -15,6 +15,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/egress"
 )
 
 const (
@@ -61,7 +63,7 @@ type Client struct {
 
 func NewClient(httpClient *http.Client, endpoint string) *Client {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+		httpClient = egress.SafeClient(egress.ClientConfig{RequestTimeout: 30 * time.Second}) // E3.5-2: egress guard on the fallback client
 	}
 	if strings.TrimSpace(endpoint) == "" {
 		endpoint = DefaultSPARQLEndpoint

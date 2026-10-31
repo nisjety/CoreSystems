@@ -22,7 +22,7 @@ import {
   type UserPreferences,
   type UserProfile,
 } from '@/shared/api/settings-client'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError } from '@/shared/i18n'
 import { getSession } from '@/shared/session/session-store'
 
 type FormState = {
@@ -126,7 +126,7 @@ export default function AccountSettingsPage() {
     } catch (error) {
       setLoadState({
         type: 'error',
-        message: error instanceof Error ? error.message : i18n.tr('Kunne ikke laste profilen.', 'Could not load profile.'),
+        message: translateApiError(error, i18n.tr, { no: 'Kunne ikke laste profilen.', en: 'Could not load profile.' }),
       })
     }
   }
@@ -176,7 +176,7 @@ export default function AccountSettingsPage() {
     } catch (error) {
       setLoadState({
         type: 'error',
-        message: error instanceof Error ? error.message : i18n.tr('Kunne ikke lagre profilen.', 'Could not save profile.'),
+        message: translateApiError(error, i18n.tr, { no: 'Kunne ikke lagre profilen.', en: 'Could not save profile.' }),
       })
     }
   }

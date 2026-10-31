@@ -62,7 +62,11 @@ func NewServerWithConfig(grants grant.Repository, cfg Config) *Server {
 		baseURL = "https://browser-broker.local"
 	}
 	if cfg.Policy == nil {
-		cfg.Policy = grant.StaticPolicy{MaxDomains: cfg.MaxSessionDomains}
+		cfg.Policy = grant.StaticPolicy{
+			MaxDomains:         cfg.MaxSessionDomains,
+			HumanBrowseEnabled: cfg.HumanBrowseEnabled,
+			DeniedSuffixes:     cfg.DenySuffixes,
+		}
 	}
 	return &Server{grants: grants, cfg: cfg, baseURL: baseURL, principal: authz.Principal}
 }
@@ -89,6 +93,20 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	scopeURL, err := scopeURLForMode(req.GetMode())
 	if err != nil {
 		return nil, err
+	}
+	// grant_kind (WS8.C): "" is the ordinary path below; human_browse is a
+	// different grant with its own rules; anything else is refused.
+	switch req.GetGrantKind() {
+	case "":
+	case grantKindHumanBrowse:
+		// The human_browse path has no read level (WS21-S4 narrows only allowlist
+		// grants), so a read-only ask is refused rather than silently widened.
+		if req.GetReadOnly() {
+			return nil, status.Error(codes.InvalidArgument, "a human_browse grant cannot be read-only")
+		}
+		return s.acquireHumanBrowse(ctx, req, scopeURL, principal)
+	default:
+		return nil, status.Error(codes.InvalidArgument, "grant_kind must be empty or human_browse")
 	}
 	allowedDomains, err := grant.NormalizeAllowedDomains(req.GetAllowedDomains())
 	if err != nil {
@@ -182,26 +200,12 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	}
 	telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "created")))
 	logGrantIssued(ctx, g)
-	return &AcquireGrantResponse{
-		GrantId:            g.ID,
-		Endpoint:           s.baseURL + "/grants/" + g.ID,
-		ExpiresAt:          timestamppb.New(g.ExpiresAt),
-		AllowedDomains:     append([]string(nil), g.AllowedDomains...),
-		AllowedActions:     append([]string(nil), g.AllowedActions...),
-		AllowedFrameIds:    append([]string(nil), g.AllowedFrameIDs...),
-		AllowedDialogIds:   append([]string(nil), g.AllowedDialogIDs...),
-		AllowedArtifactIds: append([]string(nil), g.AllowedArtifactIDs...),
-		ParentGrantId:      g.ParentGrantID,
-		Kind:               string(g.Kind),
-		Zdr:                g.Zdr,
-		BudgetMicroUsd:     g.Budget.MicroUSD,
-		BudgetMaxSteps:     g.Budget.MaxSteps,
-		BudgetMaxRuntimeS:  g.Budget.MaxRuntimeS,
-		BudgetSource:       g.Budget.Source,
-		BudgetMintedAtUnix: g.Budget.MintedAtUnix,
-		ReadOnly:           g.ReadOnly,
-		DeniedDomains:      deniedDomains,
-	}, nil
+	resp := s.acquireResponse(g)
+	resp.ReadOnly = g.ReadOnly
+	// An allowlist grant has no deny suffixes of its own, so the hosts the site
+	// policy dropped (WS21-S4) are the hosts it may never reach.
+	resp.DeniedDomains = append(resp.DeniedDomains, deniedDomains...)
+	return resp, nil
 }
 
 // RevokeGrant marks an existing grant as revoked.
@@ -259,12 +263,17 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 		BudgetMaxRuntimeS:  g.Budget.MaxRuntimeS,
 		BudgetSource:       g.Budget.Source,
 		BudgetMintedAtUnix: g.Budget.MintedAtUnix,
+		PolicyMode:         policyModeOf(g),
+		DeniedDomains:      append([]string(nil), g.DeniedDomains...),
+		AbsoluteExpiresAt:  timestamppb.New(absoluteOf(g)),
+		ResourceId:         g.ResourceID,
+		SessionKey:         g.SessionKey,
 		ReadOnly:           g.ReadOnly,
 	}, nil
 }
 
-// derivePurposeAIRun is the only DeriveRunGrant purpose accepted today. A new
-// purpose (attach, WS8.C) is an explicit addition, never an accidental pass.
+// derivePurposeAIRun and derivePurposeAttach are the only DeriveRunGrant
+// purposes. A new purpose is an explicit addition, never an accidental pass.
 const derivePurposeAIRun = "ai_run"
 
 // maxSessionKeyBytes bounds a run's idempotency key.
@@ -292,8 +301,23 @@ func (s *Server) DeriveRunGrant(ctx context.Context, req *DeriveRunGrantRequest)
 	if req.GetOrgId() != principal.OrganizationID {
 		return nil, status.Error(codes.PermissionDenied, "organization does not match verified identity")
 	}
-	if req.GetPurpose() != derivePurposeAIRun {
-		return nil, status.Error(codes.InvalidArgument, "purpose must be ai_run")
+	purpose := req.GetPurpose()
+	if purpose != derivePurposeAIRun && purpose != derivePurposeAttach {
+		return nil, status.Error(codes.InvalidArgument, "purpose must be ai_run or attach")
+	}
+	maxHosts := s.cfg.MaxRunDomains
+	if purpose == derivePurposeAttach {
+		// An attach grant is lent to an agent for one run: only the person who
+		// holds the parent may attach, the run is named, and the hosts are few.
+		if principal.PrincipalType != "user" {
+			return nil, status.Error(codes.PermissionDenied, "an attach grant is derived by a signed-in user only")
+		}
+		if strings.TrimSpace(req.GetResourceId()) == "" {
+			return nil, status.Error(codes.InvalidArgument, "resource_id is required for an attach grant")
+		}
+		maxHosts = s.cfg.MaxAttachDomains
+	} else if req.GetResourceId() != "" {
+		return nil, status.Error(codes.InvalidArgument, "resource_id is only for an attach grant")
 	}
 	ttl, err := s.deriveTTL(req.GetTtlSeconds())
 	if err != nil {
@@ -315,7 +339,9 @@ func (s *Server) DeriveRunGrant(ctx context.Context, req *DeriveRunGrantRequest)
 		TTL:           ttl,
 		PrincipalZdr:  principal.ZeroDataRetention,
 		Budget:        budget,
-		MaxRunDomains: s.cfg.MaxRunDomains,
+		Purpose:       purpose,
+		ResourceID:    req.GetResourceId(),
+		MaxRunDomains: maxHosts,
 		Policy:        s.cfg.Policy,
 	})
 	if err != nil {
@@ -331,6 +357,7 @@ func (s *Server) DeriveRunGrant(ctx context.Context, req *DeriveRunGrantRequest)
 		ParentGrantId:  g.ParentGrantID,
 		Kind:           string(g.Kind),
 		Zdr:            g.Zdr,
+		ResourceId:     g.ResourceID,
 		// The run grant's claim as stored: the request's, tightened by the
 		// parent's, or the parent's when the request set none.
 		BudgetMicroUsd:     g.Budget.MicroUSD,

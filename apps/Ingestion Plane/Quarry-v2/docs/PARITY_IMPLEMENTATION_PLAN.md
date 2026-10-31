@@ -98,12 +98,14 @@ AIMD (`record_ok` +1 to max, `record_overload` halve to min) via pure `next_targ
 `acquire()` permits. Dep-free (no sysinfo; core-count + backpressure signals). Layers above per-host
 `HostScheduler`. 6 tests. **WIRED** into `PageRunner` fetch path (`global_autoscale()` permit per fetch + AIMD by outcome).
 
-### 2D — Fingerprint/session auto-rotation on block  ·  M  ·  rust-patterns — ✅ SHIPPED
+### 2D — Fingerprint/session auto-rotation on block  ·  M  ·  rust-patterns — ⚠ REMOVED (WS3.E)
+_The rotator below had no caller and was deleted; only `is_block_status` and the fallback-chain fall-through remain._
 `quarry-runtime/src/fingerprint_rotation.rs`: `is_block_status` (401/403/407/429/503),
 `FingerprintRotator` (round-robin over impersonation profiles, bounded `max_rotations`, `on_block()`
 → next profile or None when exhausted), pure `next_index`. Dep-free, 4 tests. **WIRED** into
 `FallbackDriver`: a block STATUS (403/429/503) now falls through to the next (different-fingerprint)
 driver in the chain; exhausted rotation surfaces the block response. +2 driver rotation tests.
+_Superseded for `QUARRY_BLOCK_ESCALATION=honest` by WS3.I (ADR-5): a block status no longer selects the next driver or another proxy; the fall-through above is the `legacy` behaviour._
 
 **CYCLE 2 (P1) COMPLETE** — 2A `/v1/extract`, 2B crawl globs, 2C AutoscaledPool, 2D fingerprint
 rotation, 2E highlight/facets. All green, 0 warnings.
@@ -129,6 +131,7 @@ facets deferred — need enriched results carrying those fields.)
 - **3C DOCX parsing** (S) — ✅ SHIPPED: `transform/src/docx.rs` — `extract_text(bytes)` unzips
   `word/document.xml` (added `zip` dep, deflate-only) + pure `strip_wordml` (runs→text, `</w:p>`/
   `<w:br>`→newline, entity unescape, blank-line collapse). 5 tests incl. in-memory zip round-trip.
+  Correction 2026-10-18: the parser had no production caller until WS5.B (2026-10-16). `/v1/scrape` parses DOCX only with `QUARRY_EDGE__DOC_ROUTING=on`, which defaults to `shadow`. See GAP.md.
 - **3D Structured rate-limit envelope** (S, api-design) — ✅ SHIPPED: `quarry-edge/src/api_error.rs`
   `ApiError{error,code,hint?,window?,retry_after_seconds?,next_actions[]}` + `humanize_secs` +
   `rate_limited()` builder; wired into `/v1/search` 429 path. 3 tests. (Other routes adopt the

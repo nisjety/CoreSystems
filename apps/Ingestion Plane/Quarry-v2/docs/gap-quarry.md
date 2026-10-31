@@ -216,7 +216,7 @@ Events (✅ all 7 defined in `quarry-core/src/event.rs`):
 
 Rules:
 
-- Quarry enforces SSRF, robots, allowed domains, browser lease TTL, ZDR, and artifact persistence.
+- Quarry enforces SSRF, browser lease TTL, ZDR, and artifact persistence. robots.txt is enforced only by `/v1/map`; the crawl and batch paths do not check it (WS14, open; corrected 2026-10-23, see `docs/CRAWL_SCOPE_ROBOTS.md`).
 - Model Plane never bypasses Quarry browser runtime policy.
 
 ### 6.3 Quarry -> Model Plane structured extraction

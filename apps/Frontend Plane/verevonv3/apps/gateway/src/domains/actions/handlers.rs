@@ -9,8 +9,11 @@ use serde_json::Value;
 
 use crate::{config::AppState, envelope::error, middleware::AuthenticatedUser};
 
+use super::browser_omnibox::{dispatch_browser_omnibox_search, dispatch_browser_omnibox_suggest};
+
 use super::dispatchers::{
-    dispatch_audio_dictate, dispatch_audio_transcribe, dispatch_browser_close_session,
+    dispatch_audio_dictate, dispatch_audio_transcribe, dispatch_browser_blocked_try_other_source,
+    dispatch_browser_close_session, dispatch_browser_keepalive_session,
     dispatch_browser_close_tab, dispatch_browser_create_profile, dispatch_browser_create_session,
     dispatch_browser_create_tab, dispatch_browser_delete_profile,
     dispatch_browser_probe_profile_restore, dispatch_browser_rename_profile,
@@ -383,10 +386,14 @@ pub(super) async fn execute_action(
             dispatch_orchestration_cancel_run(&state, &user, &headers, &body.input).await
         }
         "browser_run.start" => {
-            dispatch_browser_run_start(&state, &user, &headers, &body.input).await
+            dispatch_browser_run_start(&state, &user, &headers, &body.input, &body.idempotency_key)
+                .await
         }
         "browser_run.control" => {
             dispatch_browser_run_control(&state, &user, &headers, &body.input).await
+        }
+        "browser.blocked.try_other_source" => {
+            dispatch_browser_blocked_try_other_source(&state, &user, &headers, &body.input).await
         }
         "router_policy.update" => dispatch_router_policy_update(&state, &user, &body.input).await,
         "browser_session.create" => {
@@ -394,6 +401,9 @@ pub(super) async fn execute_action(
         }
         "browser_session.close" => {
             dispatch_browser_close_session(&state, &user, &headers, &body.input).await
+        }
+        "browser_session.keepalive" => {
+            dispatch_browser_keepalive_session(&state, &user, &headers, &body.input).await
         }
         "browser_tab.create" => {
             dispatch_browser_create_tab(&state, &user, &headers, &body.input).await
@@ -412,6 +422,15 @@ pub(super) async fn execute_action(
         }
         "browser_action.suggest" => {
             dispatch_browser_suggest_action(&state, &user, &headers, &body.input).await
+        }
+        "browser_omnibox.search" => {
+            dispatch_browser_omnibox_search(&state, &user, &headers, &body.input).await
+        }
+        "browser_omnibox.suggest" => {
+            dispatch_browser_omnibox_suggest(&state, &user, &headers, &body.input).await
+        }
+        "browser_evidence.compile_procedure" => {
+            crate::domains::browser_evidence::dispatch_compile_procedure(&state, &user, &headers, &body.input).await
         }
         "browser_profile.create" => {
             dispatch_browser_create_profile(&state, &user, &headers, &body.input).await

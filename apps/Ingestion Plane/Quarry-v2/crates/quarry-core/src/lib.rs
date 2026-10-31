@@ -7,9 +7,11 @@
 pub mod artifact;
 pub mod benchmark;
 pub mod cache;
+pub mod capture;
 pub mod change_history;
 pub mod contracts;
 pub mod crawl_denial;
+pub mod crawl_scope;
 pub mod driver_meta;
 pub mod envelope;
 pub mod error;
@@ -24,8 +26,13 @@ pub mod pagination;
 pub mod policy;
 pub mod presets;
 pub mod privacy;
+pub mod redaction;
 pub mod resources;
+pub mod scrape;
+pub mod scrape_actions;
 pub mod tracked_snapshot;
+pub mod web_policy;
 pub mod zdr;
+pub mod zdr_matrix;
 
 pub use error::{ErrorCode, QuarryError, QuarryResult};

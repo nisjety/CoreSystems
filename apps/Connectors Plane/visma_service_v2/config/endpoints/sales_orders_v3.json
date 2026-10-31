@@ -1,0 +1,41 @@
+{
+  "endpoint_name": "sales_orders_v3",
+  "bigquery_table": "visma_sales_orders_v3",
+  "primary_key": [
+    "type",
+    "orderId"
+  ],
+  "source": "erp_rest",
+  "api_method": "get_sales_orders",
+  "api_endpoint": "https://salesorder.visma.net/api/v3/SalesOrders",
+  "pagination_profile": "salesorder_page_index",
+  "page_size": 100,
+  "default_query": {
+    "expand": [
+      "All",
+      "LineFees"
+    ]
+  },
+  "modified_field": "lastModified",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "type",
+    "orderId",
+    "lastModified"
+  ],
+  "datamart": {
+    "ready": false,
+    "pilot_override": false,
+    "query_file": "config/queries/sales_order.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_sales_order",
+    "fallback_source": "erp_rest",
+    "root_field": "salesOrders",
+    "type_name": "SalesOrder"
+  },
+  "tier": 1,
+  "notes": "Key is (type, orderId): orderId alone is NOT unique. A full fetch returns 22,022 orders (= the API's totalCount) but only 21,468 distinct orderIds, because 24 order types (IO, SO, S1, I1, S2, ...) number independently, so 554 orders would overwrite each other under the old single-field key. expand=All returns every header section (billing, shipping, freight, owner, origin, note, payments, discounts, commissions, tax, customFields, attachments, paymentSettings) and the line allocations; LineFees adds the per-line `fees` that All leaves out. On this tenant 21,991 orders have lines and all have tax, while payments, discounts, rotRut and commissions are empty on every order, so the /SalesOrders/{type}/{orderId}/... child endpoints add nothing. Page size 100 is the documented maximum with any expand (about 1s per page). pageIndex is zero-based. modified_field is `lastModified`; the checkpoint used to ignore it and hard-code lastModifiedDateTime, so no watermark was ever stored and every sync re-fetched all orders (fixed in executor.rs derive_checkpoint_from_values)."
+}

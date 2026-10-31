@@ -1,9 +1,14 @@
-//! Run + domain policy. Mirrors CONTRACTS §7.
+//! Job-level policy (WS7.F): the policy a job or preset stamps, the wire shape
+//! that `docs/CONTRACTS.md` §7 describes. The type was `RunPolicy` here; it is
+//! `JobPolicy` now so the name no longer collides with quarry-runtime's
+//! `RunPolicy`, the bag the pipeline enforces per run. Serde shape is unchanged.
+//! The three layers are `JobPolicy` (stamped on the job), `ResolvedPolicy`
+//! (the web-policy decision, `web_policy`) and the runtime `RunPolicy`.
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunPolicy {
+pub struct JobPolicy {
     pub concurrency: Concurrency,
     pub delay: Delay,
     pub retry: Retry,
@@ -115,7 +120,7 @@ pub enum Determinism {
     Off,
 }
 
-impl Default for RunPolicy {
+impl Default for JobPolicy {
     fn default() -> Self {
         Self {
             concurrency: Concurrency {

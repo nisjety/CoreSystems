@@ -1,0 +1,181 @@
+diff --git a/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs b/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs
+index 9f9c2645..0203e7b0 100644
+--- a/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs	
++++ b/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs	
+@@ -6612,6 +6612,176 @@ mod tests {
+         )
+     }
+ 
++    // ---- WS8.A spike (throwaway, scratch worktree only, never merged) ----
++    // Each test prints one `SPIKE ...` line on stderr. They are ignored and
++    // gated on CHROMIUMOXIDE_TEST=1 (live_enabled). They assert nothing about
++    // the target design: the spike measures what the driver does today.
++
++    async fn spike_active_tab(driver: &ChromiumoxideDriver, session: &BrowserSession) -> Option<String> {
++        driver
++            .list_tabs(session)
++            .await
++            .expect("list tabs")
++            .into_iter()
++            .find(|tab| tab.active)
++            .map(|tab| tab.tab_id)
++    }
++
++    async fn spike_tab_page(driver: &ChromiumoxideDriver, session: &BrowserSession, tab_id: &str) -> Page {
++        let key = ChromiumoxideDriver::session_key(session);
++        let pages = driver.pages.lock().await;
++        pages
++            .get(&key)
++            .and_then(|session_pages| session_pages.tabs.iter().find(|tab| tab.tab_id == tab_id))
++            .map(|tab| tab.page.clone())
++            .expect("tab page")
++    }
++
++    /// Opening a second tab: does the active tab move? Expected today: yes,
++    /// because open_tab_page sets active_tab_id to the new tab.
++    #[tokio::test]
++    #[ignore = "WS8.A spike: needs Chromium; prints whether new_tab moves the active tab"]
++    async fn background_tab_does_not_change_active_tab() {
++        if !live_enabled() {
++            return;
++        }
++        let driver = live_driver();
++        let session = live_session(&driver, "spike-background-active").await;
++        let first = driver.new_tab(&session, None).await.expect("first tab");
++        let before = spike_active_tab(&driver, &session).await;
++        let second = driver.new_tab(&session, None).await.expect("second tab");
++        let after = spike_active_tab(&driver, &session).await;
++        eprintln!(
++            "SPIKE background_tab first={} second={} active_before={before:?} active_after={after:?} active_changed={}",
++            first.tab_id,
++            second.tab_id,
++            before != after
++        );
++        driver.release(session).await.expect("release");
++    }
++
++    /// Pin approximation with today's API: the only tab addressing is
++    /// select_tab, so a "pinned" tab is reachable only by making it active.
++    #[tokio::test]
++    #[ignore = "WS8.A spike: needs Chromium; shows actions reach only the active tab"]
++    async fn pinned_session_acts_on_pinned_tab_while_other_tab_is_active() {
++        if !live_enabled() {
++            return;
++        }
++        let driver = live_driver();
++        let session = live_session(&driver, "spike-pinned-tab").await;
++        let pinned = driver.new_tab(&session, None).await.expect("pinned tab");
++        let other = driver.new_tab(&session, None).await.expect("other tab");
++        driver
++            .select_tab(&session, &pinned.tab_id)
++            .await
++            .expect("select pinned");
++        let page = spike_tab_page(&driver, &session, &pinned.tab_id).await;
++        page.set_content("<html><body><p id=\"pin\">pinned</p></body></html>")
++            .await
++            .expect("inject pinned marker");
++        driver
++            .select_tab(&session, &other.tab_id)
++            .await
++            .expect("select other");
++        let active = spike_active_tab(&driver, &session).await;
++        let marker = eval_string(
++            &driver,
++            &session,
++            "document.getElementById('pin') ? 'pinned' : 'other'",
++        )
++        .await;
++        eprintln!(
++            "SPIKE pinned_tab active={active:?} other={} active_page_marker={marker} reaches_pinned_without_select={}",
++            other.tab_id,
++            marker == "pinned"
++        );
++        driver.release(session).await.expect("release");
++    }
++
++    /// Per-tab policy: configure_egress_policy takes a session only, and the
++    /// network guard reads the policy by session key. Records tab count and
++    /// the API shape; the F3 block count is measured in the stack lane, not here.
++    #[tokio::test]
++    #[ignore = "WS8.A spike: needs Chromium; records that the egress policy is session-scoped"]
++    async fn per_tab_policy_blocks_in_agent_tab_only() {
++        if !live_enabled() {
++            return;
++        }
++        let driver = live_driver();
++        let session = live_session(&driver, "spike-per-tab-policy").await;
++        let agent_tab = driver.new_tab(&session, None).await.expect("agent tab");
++        let human_tab = driver.new_tab(&session, None).await.expect("human tab");
++        let tabs = driver.list_tabs(&session).await.expect("list tabs").len();
++        eprintln!(
++            "SPIKE per_tab_policy api_scope=session tabs={tabs} agent_tab={} human_tab={} per_tab_policy_expressible=false",
++            agent_tab.tab_id, human_tab.tab_id
++        );
++        driver.release(session).await.expect("release");
++    }
++
++    /// Background throttling: a non-active tab, counting timer ticks for two
++    /// seconds. Unthrottled is roughly 20 ticks at 100 ms.
++    #[tokio::test]
++    #[ignore = "WS8.A spike: needs Chromium; counts timer ticks in a background tab"]
++    async fn background_tab_is_not_throttled() {
++        if !live_enabled() {
++            return;
++        }
++        let driver = live_driver();
++        let session = live_session(&driver, "spike-background-throttle").await;
++        let background = driver.new_tab(&session, None).await.expect("background tab");
++        let _foreground = driver.new_tab(&session, None).await.expect("foreground tab");
++        let page = spike_tab_page(&driver, &session, &background.tab_id).await;
++        page.set_content(
++            "<html><body><script>window.__ticks = 0; setInterval(function () { window.__ticks++; }, 100);</script></body></html>",
++        )
++        .await
++        .expect("inject ticker");
++        tokio::time::sleep(Duration::from_secs(2)).await;
++        let visibility = page
++            .evaluate("document.visibilityState")
++            .await
++            .expect("visibility")
++            .into_value::<String>()
++            .expect("visibility string");
++        let ticks = page
++            .evaluate("window.__ticks")
++            .await
++            .expect("ticks")
++            .into_value::<i64>()
++            .expect("tick number");
++        eprintln!("SPIKE background_throttle visibility={visibility} ticks_in_2s={ticks} unthrottled_expected_about=20");
++        driver.release(session).await.expect("release");
++    }
++
++    /// Chromium RSS with two tabs open on one session (measurement).
++    #[tokio::test]
++    #[ignore = "measurement: needs Chromium and CHROMIUMOXIDE_MEASURE=1; prints SPIKE rss lines"]
++    async fn measure_two_tab_rss() {
++        if std::env::var("CHROMIUMOXIDE_TEST").ok().as_deref() != Some("1")
++            || std::env::var("CHROMIUMOXIDE_MEASURE").ok().as_deref() != Some("1")
++        {
++            eprintln!("skipping: set CHROMIUMOXIDE_TEST=1 and CHROMIUMOXIDE_MEASURE=1");
++            return;
++        }
++        let driver = live_driver();
++        let session = live_session(&driver, "spike-two-tab-rss").await;
++        let (processes_before, pss_before, _) = chromium_memory_kib();
++        driver.new_tab(&session, None).await.expect("tab one");
++        driver.new_tab(&session, None).await.expect("tab two");
++        tokio::time::sleep(Duration::from_secs(3)).await;
++        let (processes_after, pss_after, rss_after) = chromium_memory_kib();
++        eprintln!(
++            "SPIKE two_tab_rss processes_before={processes_before} processes_after={processes_after} pss_mib_before={} pss_mib_after={} rss_mib_after={}",
++            pss_before / 1024,
++            pss_after / 1024,
++            rss_after / 1024
++        );
++        driver.release(session).await.expect("release");
++    }
++
++
+     /// Measurement, not a regression test: prints Chromium memory with 1, 8, 16
+     /// and 32 sessions open, one tab each, on `synthetic_page`. The edge's
+     /// default run caps (`QUARRY_EDGE__MAX_CONCURRENT_RUNS` and friends) are

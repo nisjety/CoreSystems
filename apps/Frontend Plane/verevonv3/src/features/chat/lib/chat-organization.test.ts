@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
+import { translateApiError } from '@/shared/i18n/errors'
 import { applyChatOrganizationAction as apply, chatDateGroup, chatOrganizationStorageKey, emptyChatOrganization, readChatOrganization, saveChatOrganization, selectOrganizedChats } from './chat-organization'
 import type { ChatThreadHistoryItem } from './chat-thread-history'
 
@@ -39,6 +40,33 @@ describe('personal chat organization', () => {
     expect(() => apply(pinned, { type: 'project.create', id: 'duplicate', name: ' research ' })).toThrow('already exists')
     expect(() => apply(pinned, { type: 'project.rename', id: 'missing', name: 'Something' })).toThrow('not found')
     expect(() => apply(pinned, { type: 'project.rename', id: 'work', name: ' ' })).toThrow()
+  })
+
+  it('raises its refusals as localized copy, so a catch site with its own fallback still shows the reason', () => {
+    const state = apply(emptyChatOrganization(), { type: 'project.create', id: 'work', name: 'Work' })
+    const fallback = { no: 'Kunne ikke lagre.', en: 'Could not save.' }
+    const refusals = [
+      () => apply(state, { type: 'project.create', id: 'other', name: 'work' }),
+      () => apply(state, { type: 'project.rename', id: 'missing', name: 'Something' }),
+      () => apply(state, { type: 'thread.move', threadId: 'a', projectId: 'missing' }),
+      () => apply(state, { type: 'project.create', id: 'work', name: 'Another' }),
+    ]
+    const shown = refusals.map((run) => {
+      try { run() } catch (reason) { return [translateApiError(reason, (no) => no, fallback), translateApiError(reason, (_no, en) => en, fallback)] }
+      return ['did not throw', '']
+    })
+    expect(shown[0]).toEqual(['Du har allerede et prosjekt med dette navnet. Velg et annet navn.', 'A project with this name already exists.'])
+    expect(shown[1]![1]).toBe('Project not found.')
+    expect(shown[2]![1]).toBe('Project not found.')
+    expect(shown[3]![1]).toBe('Project already exists.')
+    for (const [no] of shown) expect(no).not.toBe('Kunne ikke lagre.')
+    const limit = Array.from({ length: 100 }, (_, i) => i).reduce(
+      (current, i) => apply(current, { type: 'project.create', id: 'p' + i, name: 'Project ' + i }), emptyChatOrganization())
+    let refused: unknown
+    try { apply(limit, { type: 'project.create', id: 'p100', name: 'One more' }) } catch (reason) { refused = reason }
+    expect(refused, 'the 101st project is refused').toBeInstanceOf(Error)
+    expect(translateApiError(refused, (_no, en) => en, fallback)).toBe('The preview supports up to 100 projects.')
+    expect(translateApiError(refused, (no) => no, fallback)).toContain('100 prosjekter')
   })
 
   it('moves and unassigns chats, and removes a project without altering conversations or other projects', () => {

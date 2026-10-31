@@ -1047,7 +1047,9 @@ async fn verify_delegated_service_inference_bearer(
         || claims.sub != model_claims.sub
         || claims.service_id != model_claims.service_id
         || claims.org_id != model_claims.org_id
-        || !claims.has_scope(SERVICE_SCOPE_MODELS_INVOKE)
+        // Downstream authority belongs to Inference Core's audience. The
+        // separate gateway credential still requires `models:invoke` below.
+        || !claims.has_scope(SERVICE_SCOPE_INFERENCE_INVOKE)
     {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -1381,6 +1383,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
 }
 
 const SERVICE_SCOPE_MODELS_INVOKE: &str = "models:invoke";
+const SERVICE_SCOPE_INFERENCE_INVOKE: &str = "inference:invoke";
 const SERVICE_SCOPE_MODEL_SPACE_DELETE: &str = "model:space-delete";
 const CONTROL_SPACE_DELETION_SERVICE: &str = "service:control-space-deletion";
 /// Delegated-identity design, Gap B (§2.4(ii)): the ONLY caller allowed to
@@ -2060,6 +2063,102 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        clear_env();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delegated_service_inference_bearer_requires_its_own_scope_and_identity() {
+        clear_env();
+        reset_jwks_cache_for_test().await;
+        let kid = "test-kid-service-inference-scope";
+        let server = start_jwks_mock(kid).await;
+        std::env::set_var(
+            "AUTH_CORE_JWKS_URL",
+            format!("{}/.well-known/jwks.json", server.uri()),
+        );
+        std::env::set_var("AUTH_CORE_ISSUER", "auth-core");
+        std::env::set_var("INFERENCE_CORE_AUTH_AUDIENCE", "inference-core");
+
+        let model_claims = Claims {
+            sub: "service:studio-worker".into(),
+            user_id: String::new(),
+            principal_type: Some("service".into()),
+            service_id: Some("service:studio-worker".into()),
+            reason: Some("analyze approved Studio evidence".into()),
+            scopes: vec!["models:invoke".into()],
+            ..base_claims()
+        };
+        let inference_claims = Claims {
+            aud: Some("inference-core".into()),
+            scopes: vec!["inference:invoke".into()],
+            ..model_claims.clone()
+        };
+
+        let mut headers = HeaderMap::new();
+        let token = sign_jwt(&inference_claims, kid);
+        headers.insert(
+            "x-inference-authorization",
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        let verified = verify_delegated_service_inference_bearer(&headers, &model_claims)
+            .await
+            .expect("the inference audience's invoke scope must be accepted")
+            .expect("the delegated bearer is present");
+        assert_eq!(verified.as_str(), token);
+
+        let invalid = [
+            (
+                Claims {
+                    scopes: vec!["models:invoke".into()],
+                    ..inference_claims.clone()
+                },
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Claims {
+                    scopes: vec![],
+                    ..inference_claims.clone()
+                },
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Claims {
+                    org_id: "other-org".into(),
+                    ..inference_claims.clone()
+                },
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Claims {
+                    sub: "service:other-worker".into(),
+                    service_id: Some("service:other-worker".into()),
+                    ..inference_claims.clone()
+                },
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Claims {
+                    aud: Some("model-gateway".into()),
+                    ..inference_claims.clone()
+                },
+                StatusCode::UNAUTHORIZED,
+            ),
+        ];
+        for (claims, expected) in invalid {
+            headers.insert(
+                "x-inference-authorization",
+                format!("Bearer {}", sign_jwt(&claims, kid))
+                    .parse()
+                    .unwrap(),
+            );
+            assert_eq!(
+                verify_delegated_service_inference_bearer(&headers, &model_claims)
+                    .await
+                    .unwrap_err(),
+                expected,
+            );
+        }
         clear_env();
     }
 

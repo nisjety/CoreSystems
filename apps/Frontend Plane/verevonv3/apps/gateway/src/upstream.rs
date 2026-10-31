@@ -973,6 +973,7 @@ fn session_service_headers(
     actor: &ActionActor,
     timestamp: DateTime<Utc>,
     nonce: &str,
+    org_id: Option<&str>,
 ) -> BTreeMap<String, String> {
     service_delegation_headers(
         service_token,
@@ -982,7 +983,7 @@ fn session_service_headers(
         url,
         body,
         actor,
-        None,
+        org_id,
         "",
         timestamp,
         "v2",
@@ -996,6 +997,7 @@ pub(crate) async fn proxy_session_json(
     url: &str,
     body: Option<Value>,
     actor: Option<&ActionActor>,
+    org_id: Option<&str>,
 ) -> (StatusCode, Json<Value>) {
     let actor = actor_with_defaults(actor);
     let body_bytes = body
@@ -1013,6 +1015,7 @@ pub(crate) async fn proxy_session_json(
         &actor,
         now,
         &delegation_nonce(now),
+        org_id,
     );
     proxy_json_with_headers(state, method, url, body, headers, None).await
 }
@@ -1077,12 +1080,12 @@ async fn proxy_json_with_client_and_headers(
             // connect-refused from timeout from a malformed response. Discarding
             // it turned a one-line diagnosis into hours of inference.
             tracing::error!(
-                error = %err,
+                error_class = crate::zdr_log::class_reqwest(&err),
                 is_connect = err.is_connect(),
                 is_timeout = err.is_timeout(),
                 is_request = err.is_request(),
                 is_body = err.is_body(),
-                url = %url,
+                upstream = %crate::zdr_log::upstream_origin(&url),
                 "upstream request failed before a response was received"
             );
             (
@@ -1094,6 +1097,89 @@ async fn proxy_json_with_client_and_headers(
             )
         }
     }
+}
+
+/// Forwards one call to the anbud core (tender matching) with the gateway's own key for it and the
+/// organisation the session is in. The core judges the call by that key, that organisation and the user who acts.
+/// All three come from the session, never from the browser. Its answer passes through, except in two cases. A 401 or 403 from the core
+/// means the gateway's key is wrong, and the browser reads a 401 as an expired session and signs the user
+/// out, so it is reported as the service being misconfigured. A call that outlasts the client's timeout is
+/// `timeout`, not an unreachable service.
+pub(crate) async fn proxy_anbud_json(
+    client: &reqwest::Client,
+    api_key_header: &str,
+    api_key: &str,
+    url: &str,
+    org_id: &str,
+    user_id: &str,
+    body: &Value,
+) -> (StatusCode, Json<Value>) {
+    let request = client
+        .post(url)
+        .header(api_key_header, api_key)
+        .header("x-org-id", org_id)
+        .header("x-user-id", user_id)
+        .json(body);
+    match send_with_retry(request).await {
+        Ok(response) => {
+            let status =
+                StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let answer = response.json::<Value>().await.unwrap_or(Value::Null);
+            anbud_answer(status, answer)
+        }
+        Err(err) if err.is_timeout() => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(error(
+                "timeout",
+                "The tender search took too long. Try again.",
+            )),
+        ),
+        Err(err) => {
+            tracing::error!(
+                error_class = crate::zdr_log::class_reqwest(&err),
+                is_connect = err.is_connect(),
+                is_timeout = err.is_timeout(),
+                is_request = err.is_request(),
+                is_body = err.is_body(),
+                upstream = %crate::zdr_log::upstream_origin(&url),
+                "tender service call failed before a response"
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error(
+                    "upstream_unavailable",
+                    "The tender service is unavailable.",
+                )),
+            )
+        }
+    }
+}
+
+/// The core's answer as the browser sees it; see [`proxy_anbud_json`].
+fn anbud_answer(status: StatusCode, answer: Value) -> (StatusCode, Json<Value>) {
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "tender_service_misconfigured",
+                "The tender service did not accept the gateway's credentials.",
+            )),
+        );
+    }
+    let empty = answer.is_null() || answer.as_object().is_some_and(|object| object.is_empty());
+    if !status.is_success() && empty {
+        return (
+            status,
+            Json(error(
+                "upstream_error",
+                format!("Upstream returned {}", status.as_u16()),
+            )),
+        );
+    }
+    (
+        status,
+        Json(if answer.is_null() { json!({}) } else { answer }),
+    )
 }
 
 async fn proxy_json_bytes_with_client_and_headers(
@@ -1143,12 +1229,12 @@ async fn proxy_json_bytes_with_client_and_headers(
             // connect-refused from timeout from a malformed response. Discarding
             // it turned a one-line diagnosis into hours of inference.
             tracing::error!(
-                error = %err,
+                error_class = crate::zdr_log::class_reqwest(&err),
                 is_connect = err.is_connect(),
                 is_timeout = err.is_timeout(),
                 is_request = err.is_request(),
                 is_body = err.is_body(),
-                url = %url,
+                upstream = %crate::zdr_log::upstream_origin(&url),
                 "upstream request failed before a response was received"
             );
             (
@@ -1235,12 +1321,12 @@ pub(crate) async fn proxy_auth_with_headers(
         }
         Err(err) => {
             tracing::error!(
-                error = %err,
+                error_class = crate::zdr_log::class_reqwest(&err),
                 is_connect = err.is_connect(),
                 is_timeout = err.is_timeout(),
                 is_request = err.is_request(),
                 is_body = err.is_body(),
-                url = %url,
+                upstream = %crate::zdr_log::upstream_origin(&url),
                 "upstream request failed before a response was received"
             );
             (
@@ -1573,10 +1659,63 @@ pub(crate) async fn proxy_bearer_json_with_headers(
     user_id: &str,
     extra_headers: &[(String, String)],
 ) -> (StatusCode, Json<Value>) {
+    proxy_bearer_json_with_headers_and_timeout(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        user_id,
+        extra_headers,
+        None,
+    )
+    .await
+}
+
+/// As `proxy_bearer_json`, with a per-request ceiling in place of the standard
+/// client's 25 s. For the one upstream call that is meant to run longer (a scrape
+/// that drives the browser); every other caller keeps the client default.
+pub(crate) async fn proxy_bearer_json_with_timeout(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    user_id: &str,
+    timeout: Duration,
+) -> (StatusCode, Json<Value>) {
+    proxy_bearer_json_with_headers_and_timeout(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        user_id,
+        &[],
+        Some(timeout),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)] // the shared tail of the two public wrappers above
+async fn proxy_bearer_json_with_headers_and_timeout(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    user_id: &str,
+    extra_headers: &[(String, String)],
+    timeout: Option<Duration>,
+) -> (StatusCode, Json<Value>) {
     let mut req = state
         .client
         .request(method, url)
         .header("x-user-id", user_id);
+    req = crate::request_id::apply(req);
+    if let Some(timeout) = timeout {
+        req = req.timeout(timeout);
+    }
 
     for (name, value) in extra_headers {
         req = req.header(name, value);
@@ -1602,12 +1741,12 @@ pub(crate) async fn proxy_bearer_json_with_headers(
             // connect-refused from timeout from a malformed response. Discarding
             // it turned a one-line diagnosis into hours of inference.
             tracing::error!(
-                error = %err,
+                error_class = crate::zdr_log::class_reqwest(&err),
                 is_connect = err.is_connect(),
                 is_timeout = err.is_timeout(),
                 is_request = err.is_request(),
                 is_body = err.is_body(),
-                url = %url,
+                upstream = %crate::zdr_log::upstream_origin(&url),
                 "upstream request failed before a response was received"
             );
             (
@@ -1840,6 +1979,7 @@ pub(crate) async fn proxy_sse_stream_with_browser(
         req = req.header("x-browser-authorization", format!("Bearer {token}"));
     }
 
+    req = crate::request_id::apply(req);
     if let Some((user_id, org_id)) = actor {
         req = req.header("x-user-id", user_id);
         if !org_id.trim().is_empty() {
@@ -1907,12 +2047,12 @@ pub(crate) async fn proxy_sse_stream_with_browser(
         }
         Err(err) => {
             tracing::error!(
-                error = %err,
+                error_class = crate::zdr_log::class_reqwest(&err),
                 is_connect = err.is_connect(),
                 is_timeout = err.is_timeout(),
                 is_request = err.is_request(),
                 is_body = err.is_body(),
-                url = %url,
+                upstream = %crate::zdr_log::upstream_origin(&url),
                 "upstream request failed before a response was received"
             );
             (
@@ -2660,6 +2800,7 @@ mod tests {
             &actor,
             timestamp,
             "nonce-fixed-vector-000000001",
+            None,
         );
 
         assert_eq!(
@@ -3025,7 +3166,7 @@ pub(crate) async fn proxy_artifact_bytes(
     bearer_token: Option<&str>,
     user_id: &str,
 ) -> Response {
-    let mut req = state.client.get(url).header("x-user-id", user_id);
+    let mut req = crate::request_id::apply(state.client.get(url)).header("x-user-id", user_id);
     if let Some(token) = bearer_token {
         req = req.bearer_auth(token);
     }
@@ -3033,7 +3174,11 @@ pub(crate) async fn proxy_artifact_bytes(
     let resp = match send_with_retry(req).await {
         Ok(resp) => resp,
         Err(err) => {
-            tracing::warn!(error = %err, %url, "artifact relay upstream request failed");
+            tracing::warn!(
+                error_class = crate::zdr_log::class_reqwest(&err),
+                upstream = %crate::zdr_log::upstream_origin(url),
+                "artifact relay upstream request failed"
+            );
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(error(
@@ -3070,7 +3215,11 @@ pub(crate) async fn proxy_artifact_bytes(
     let bytes = match resp.bytes().await {
         Ok(bytes) => bytes,
         Err(err) => {
-            tracing::warn!(error = %err, %url, "artifact relay body read failed");
+            tracing::warn!(
+                error_class = crate::zdr_log::class_reqwest(&err),
+                upstream = %crate::zdr_log::upstream_origin(url),
+                "artifact relay body read failed"
+            );
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(error(

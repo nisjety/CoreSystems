@@ -27,8 +27,11 @@ fn main() {
         includes.push(wkt);
     }
 
+    // The server half is generated so the tests (this crate's and the edge's)
+    // can stand up a fake BrowserBroker and prove the validator against a real
+    // gRPC peer. Nothing in the shipped binary constructs a server.
     tonic_build::configure()
-        .build_server(false)
+        .build_server(true)
         .build_client(true)
         .out_dir(&out_dir)
         .compile_protos(&protos, &includes)

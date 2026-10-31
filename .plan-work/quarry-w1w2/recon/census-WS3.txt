@@ -1,0 +1,89 @@
+UNIT census-WS3 (read-only census of W1 slices WS3.A, B, C, D, E, F, H, I, J)
+Worktree: C:/dev/CoresSystem/.claude/worktrees/vigorous-perlman-e7ae5b, branch quarryv2-next, HEAD 473d0a78, taken 2026-10-21 12:24Z.
+No repository file was edited and no commit was made. This file is the only write.
+
+Method. Plan text: docs/plans/quarry-browser-build-plan-2026-10-14.md (slice details at lines 827-915, ledger rows 24-43 and 55-69, round notes 73-83, X-15 at 414-425). Commit log: git log --grep / git show --stat. Code: grep and reads of the named tests. Mechanical scans: scratchpad census-WS3/scan_cdp.py and scan_ancestors.py (production code of chromiumoxide.rs, lines 1-4583, before the test module at 4584).
+
+1. Deadline wrapper scan (WS3.D DoD "no page.execute/evaluate call lacks a wrapper").
+   - 80 CDP-call matches in production code. 48 are inside a deadline wrapper by an ancestor (with_deadline, read_with_retry, best_effort, tokio::time::timeout(deadline(..))).
+   - Not wrapped at the call, but wrapped by the caller: execute_native_target_action (2174-2270, callers 3122 and 3383 under NativeAction); capture_snapshot (2695, 2716, caller 1555 under ProfileCapture); apply_page_hygiene (2859-2882, caller 1282 under TabAttach); upload_staged_file_to_target (3241-3296, with_deadline(NativeAction) at 3202, unindented body).
+   - False positives: 1245 (builder), 3144 and 3147 (JS string), 4362 (test-only).
+   - Unwrapped, no wrapper at call or caller (13 call sites, 8 functions):
+     update_tab_metadata page.url() 1416 (callers 3063, 3641);
+     install_network_guard Fetch.enable, failRequest, continueRequest 1591, 1625, 1636, 1650 (caller 1299);
+     hydrate_cookies set_cookies 1840 (caller 1328);
+     hydrate_storage evaluate 1865 (caller 1330; only the reload at 1335 is under Navigate);
+     install_popup_bridge evaluate 1876 (callers 1352, 3059);
+     capture_live_frame screencast start, ack, stop 2648, 2675, 2684 (caller 3557; its bound is options.timeout_ms, not the table);
+     list_tabs page.url() 3602 (caller 3643);
+     root_frame_id GetFrameTree 4241 (download path caller 3323 is before the NativeAction wrapper at 3381).
+   - The only stated bound for the unwrapped calls is the builder comment near line 797 ("bounds the calls that are not wrapped (event collectors, guards)"), which is 40 s request_timeout.
+
+2. Durations outside the table (WS3.D DoD "the table is the only place durations are written").
+   - chromiumoxide.rs:91 BROWSER_EXIT_WAIT 5 s, used at 735-736 in retire_browser.
+   - Builder 800-801: request_timeout 40 s and launch_timeout 20 s (plan text said 15 s request timeout; ledger says 40 s).
+   - 2196: Duration::from_millis(500) around ReleaseObjectParams (WS3.K code).
+   - 2656: options.timeout_ms for the screencast frame (caller supplied).
+   - grep "timed out" with DriverFailed: 2669-2670 "chromiumoxide screencast frame timed out" is DriverFailed (should be typed Timeout per the DoD); 3985-3986 "wait_for selector timed out" is DriverFailed (page-condition expiry; judgement).
+   - Download begin and complete use deadline(Op::DownloadBegin/DownloadComplete) at 3394 and 3410. The old constants are gone.
+
+3. WS3.A sandbox (61533fdd).
+   - Defaults: deploy/compose/docker-compose.yml:108 ${QUARRY_BROWSER_NO_SANDBOX:-0}; apps/Ingestion Plane/docker-compose.yml:135 "${...:-0}"; docker-compose.production.yml:36 "0"; .env.example:22 0.
+   - Refusal: chromiumoxide.rs sandbox_policy 1753, is_production_env 1762, tests 4590-4607 (sandbox_is_on_by_default_everywhere, no_sandbox_is_refused_in_production_env, no_sandbox_allowed_in_dev_env_with_warning).
+   - seccomp-chromium.json is defaultAction SCMP_ACT_ALLOW with a 26-name ERRNO deny list (ptrace, bpf, keyctl, kexec, init_module, personality, _sysctl and others). It does NOT deny mount, umount2, pivot_root, unshare, setns or clone. The plan's Files bullet described "Docker default profile plus allow rules for clone, clone3, unshare, setns". The shape matches the Model Plane precedent apps/Model Plane/deploy/seccomp-bwrap.json (also SCMP_ACT_ALLOW). Review item: rely on capabilities (dev stack keeps Docker default caps; production overlay drops ALL).
+   - Production overlay: read_only, cap_drop ALL, tmpfs /tmp, /dev/shm and /var/lib/quarry/chromium (uid 65532), XDG_CONFIG_HOME and XDG_DATA_HOME under it, no no-new-privileges on quarry-edge.
+   - Evidence: 2026-10-16 notes (.plan-work/quarry-w1w2/quarryv2-verification-2026-10-16.md, section "Slice WS3.A") show a production-flag container at dd4bc8b7 (a descendant of 61533fdd): POST /v1/scrape with screenshot signal, browser driver, 200; ps sampled 0.5 s for 30 s: 0 lines with --no-sandbox. Not covered: the agent-run navigate step, and a literal compose up (avoided because the live container would be swapped).
+   - Not recorded: whether the standalone runs at 89c67974, 1f4edbca and ddbd4b2c had the sandbox on (seccomp applied or NO_SANDBOX=1). A healthy browser on those images implies one of the two, but the record does not say which.
+
+4. WS3.B CI lane (9e4c9b37; round 4 U2: 992e3b95, bf2e7882, 3496dd07, f1e3a19e, 6cffdc2e).
+   - .github/workflows/quarry-v2-ci.yml job quarry-browser-live (name "Live browser tests (Chromium)", line ~338): CHROMIUMOXIDE_TEST=1, QUARRY_BROWSER_NO_SANDBOX=1, setup-chrome 155.0.8059.84, no continue-on-error, timeout-minutes 60, --test-threads=1, last step lists ignored tests.
+   - Plan ramp (continue-on-error first, hard gate after two weeks green) was not followed (bf2e7882 subject says "is a required check": RUNBOOKS line 413 corrects it; branch protection is a repository setting).
+   - Live tests: launches_and_fetches_content 6110 and captures_live_frame_after_navigation 6136 run; #[ignore] at 6180, 6233, 6290 (three cookie and profile tests), 6387 (measurement). tests/ssrf.rs: 1 ignored (172). blocks_loopback_subresources_before_they_reach_the_server 6032 runs.
+   - No per-test 60 s timeout and no apt or Chrome cache step in the workflow.
+
+5. WS3.C viewport (6806a0e0). active_viewport: no hits. resolve_viewport 2784, resolve_viewport_with 2796, apply_page_hygiene 2854 (called inside open_tab_page under with_deadline(TabAttach) at 1280). ensure_browser 747-800 clears maps only on a fresh launch or a dead browser. lease.rs:21-22 doc replaced. Live test concurrent_leases_with_different_viewports_do_not_lose_pages 4841 (launch_count 1, innerWidth 1280/1280/390, hasFocus, release B). Unit tests resolve_viewport_* 4638-4659. Image evidence (89c67974, RUNBOOKS 363): three runs, one "browser slot launched", navigate 200, frames 1280/1280/390, screenshots 1280/1280/780 (device scale 2). Not run: reverse start order; profiles dir count. Ledger still says "X-15 acknowledgement pending"; plan status line (2026-10-15 approval of all 13 defaults) is the only record.
+
+6. WS3.D deadlines (d724763d; b86a32c8, 7420d3a6 leftovers). deadlines.rs: Op enum 35-, table base_millis 178-, values match the plan table. timeout_error 189 (details op, deadline_ms, effect; retryable = !effectful). with_deadline 208. read_with_retry 279 used for Content (3080) and AxSnapshot (3842). Unit tests 301-458 (names match the plan). Live tests navigation_during_content_read_is_retried_once 5366, attach_timeout_cleans_up_partial_context 5416 (not ignored). Image 89c67974 (RUNBOOKS 363): scale 0.02 navigate to httpbin delay 504 TIMEOUT op navigate deadline_ms 600 effect unknown; browser_op_duration_ms lines at debug. Not recorded: the next /step accepted after the 504.
+   - cdp_err, named in the plan, does not exist; the code uses timeout_error and with_deadline.
+
+7. WS3.E stealth deletion (2e62ad5a). git grep for stealth_level, STEALTH_SCRIPT, CONSENT_DISMISS_SCRIPT, default_preamble under crates/: empty. stealth.rs absent. lib.rs has no "pub mod stealth". FingerprintRotator removed (only a doc-comment mention remains in fingerprint_rotation.rs:6); is_block_status kept (egress_broker.rs:159, fallback_driver.rs:96, fetch.rs:252). Docs: GAP.md 32, 52, 770 updated; Features.md 65; ARCHITECTURE.md 83 updated; STALE_DOC_DELETION_REGISTER.md 138-140. Still mentioning stealth preset (WS3.I scope): ARCHITECTURE.md 91, GAP.md 245, 466, PROGRESS.md 20, 173, 323. Not run: strings | grep navigator.webdriver on an image.
+
+8. WS3.F slot book (77749d34, b86a32c8, 5102b059, 37b7ebb0, c8c31a26, 60e32caf, 7420d3a6, 0b86c8c6, a4447aff, 86b546e6, 46157832, e78b562c, gateway 62f1b66a).
+   - slots.rs: BrowserPoolConfig defaults 40/24/REAPER log, probe 15 s, reaper 30 s (slots.rs 146-152); env parse 178-215. session_cap_warnings 269, wired at quarry-edge main.rs 211 (R-26 WARN; the wiring landed in e50046a9, whose subject is WS4.F).
+   - Tests present: admit_fills_least_loaded_slot_first, admit_returns_busy_at_max_sessions_with_retry_after, page_cap_is_per_slot, reap_idle_returns_only_sessions_past_threshold_and_respects_touch, reap_uses_max_of_two_ttl_and_idle_floor, mark_dead_returns_affected_sessions_and_blocks_new_admission_until_relaunch, release_is_idempotent, config_from_env_clamps_values (slots.rs); crash_is_detected_and_next_acquire_relaunches 5104, reaper_closes_abandoned_session_and_tombstones_it 5154, probe_does_not_touch_session_state_or_egress 5282 (all live-gated, not ignored); acquire_past_the_session_cap_is_rate_limited_with_details 5522 and new_tab_past_the_page_cap_is_rate_limited_with_details 5545 (NOT live-gated: unit-level).
+   - ready_browser.rs (quarry-edge tests): unhealthy_browser_answers_503_browser_unhealthy, healthy_and_idle_browsers_answer_200_with_a_browser_field, not_applicable_leaves_the_ready_body_byte_identical, an_unhealthy_scrape_browser_answers_503_beside_a_healthy_agent_browser, a_degraded_browser_is_ready, ready_bodies_match_the_documented_schemas_both_ways; /health checked 200 in each.
+   - ERROR_REASONS.md 73-74 (browser_session_cap, browser_page_cap), 84-85 (session_reaped, browser_process_lost).
+   - Profile dirs: retire_browser removes launch dirs (chromiumoxide.rs 773-776, 851, 1785-1786); sweep_stale_launch_dirs 4550 (skips own pid). No test found for "directories do not accumulate".
+   - Image evidence: 1f4edbca (R9 check 1, RUNBOOKS ~line 405) and ddbd4b2c (U9): /ready 200 with browser and scrape_browser objects, state idle then healthy with one run open, sessions_open 1, slot ready. No run of the 13-session cap, pkill, reaper or hidden-binary 503 on an image.
+   - Not built: memory limit on quarry-edge in either compose file (X-15 placeholder 4 GiB; the R9 run used --memory 1g by hand).
+   - Known open (ledger): two concurrent releases of one key racing a new acquire of that key are not covered by the teardown gate.
+
+9. WS3.H challenge (4e82894b, ed45220b, de6c83f9, c1d2e91f, 08b0a8be, 91a64773, d8e62fa3, 23e1ad7f, ab8a5b99, 1b1a9810, 12e37792, d2829c30, 6f918335; B-T2 d711a1bb fixed the flaky scrape-log test).
+   - challenge.rs: 64 corpus rows (case()/text_case()), 30 tests (1686 the_classification_table_holds, 1717 no_non_signal_row_reports_a_strong_signal, 1833 a_login_page_does_not_ask_for_escalation, 2174 reject_if_exhausted_refuses_navigation_and_interaction_and_allows_the_rest, 2306 every_action_variant_is_refused_or_allowed_as_decided).
+   - Production constructor: QuarryError::challenge_detected (quarry-core error.rs:152) used at challenge.rs:1440.
+   - Runner test execute_rejects_same_host_navigation_after_challenge_loop: observation.rs:2851 (uses enforcing config).
+   - Schema and parity: quarry-core tests/challenge_schema.rs; scripts/tests/openapi-challenge-parity.test.mjs.
+   - Defaults: ChallengeConfig::default enforce = Log (challenge.rs ~120-128); refusal needs QUARRY_CHALLENGE_ENFORCE=enforce.
+   - Scrape path: pipeline.rs scrape_challenge_tests (2589); d8e62fa3 refuses a bot-wall fetch.
+   - Image evidence: 1f4edbca (R9 check 7, RUNBOOKS ~line 409): local Cloudflare-interstitial and bare Turnstile widget pages, enforce: 403 CHALLENGE_DETECTED block_reason waf_interstitial and captcha_widget; default log: 200 plus would_refuse_scrape line. Fixtures only.
+   - Not run: live Turnstile, hCaptcha or login page; agent /step observation check; second same-host navigate on an image; python SDK regeneration; GitHub Actions for the two new CI steps.
+   - Open (hand-over and ledger): widget-only strong signals count toward the third strike; a redirect from another host onto an exhausted host is not checked.
+
+10. WS3.I escalation (no commits; no commit subject mentions WS3.I, escalation or QUARRY_BLOCK).
+   - Absent: escalation.rs, QUARRY_BLOCK_ESCALATION (git grep empty), honest mode, health_rotation label (egress_broker.rs:149 still "block_rotation"), prior_block_signals still picks tiers (driver_plan.rs 40, 45), fetch.rs still rotates on block status (252), presets.go still "stealth" (84) with Block set (116-117). presets.go last changed in 1eecf8d0, before the branch base.
+
+11. WS3.J (Quarry half in ledger row 43; gateway U4 b2272e55, 779bbfb2, ed34f04d, 8b6a71df, a235cf08, 93fac697, f3f6a367, d58b7183, ab0b8ff6, eb5a3f9e; V3 10f91e58, 501a7920, 221ed5e8, 1a18f670, eb3af8ac, 88575b59, 3f6ddf07, 399d3f10; SPA B-T1 1f0885e9, 5d0961ef, a4d1a246, 2aa92fbc, f57bf091, 137ba2ac).
+   - Gateway: knowledge/quarry.rs scrape_block_reason 235, classify_scrape_failure 255; no proxy suggestion (comment 254). browser.rs 403 browser_site_blocked (779bbfb2).
+   - SPA: browser-client.ts challenge field (41-55); action-registry.ts:3148 browser.blocked.try_other_source; BrowserBlockedNotice.tsx and .test.tsx (strong renders; login, consent, paywall, rate_limit render nothing); browser-blocked.test.ts; BrowserChrome.tsx:1775 mounts the notice; errors.ts browser_site_blocked, scrape_refused, scrape_rate_limited (252, 291, 295).
+   - Absent: tests/e2e/browser-workspace-blocked.spec.ts (No such file).
+   - Model Plane: no "challenge" in execution-core browser_agent.rs, quarry_agent.rs, llm_planner.rs, or model-gateway http_routes.rs (only an unrelated pkce.challenge). No observation_from_wire_maps_challenge or planner_text_includes_challenge_and_recovery_rule test anywhere under apps/Model Plane. round3-critic (side-session notes) assigns the Model Plane, gateway and SPA halves to sibling session (b).
+   - Uncommitted (git status): gateway knowledge/quarry.rs has +6 lines in classify_scrape_failure (hunk at 278) and a +145-line test block at 1036, both for WS5.G (unsupported_media); errors.ts has one WS5.G line (unsupported_media). Model Plane grpc.rs and quarry.rs are WS5.G or other units.
+   - Gateway tests: knowledge::quarry 22 (U8, c7429f2e); gateway bin 758 passed on a tree with WS5.G hunks (V9). SPA: commit messages record vitest on touched files; tsc 33 baseline errors (RemoteSupportPage, quarry-client); eslint 0 errors.
+
+12. Evidence images (ancestry checked with git merge-base --is-ancestor):
+   - 89c67974 contains 61533fdd, 6806a0e0, d724763d, 2e62ad5a, 9e4c9b37, b86a32c8, 5102b059, 4e82894b (not d8e62fa3, 62f1b66a).
+   - 1f4edbca contains 2e62ad5a, 77749d34, b86a32c8, 5102b059, 6806a0e0, d724763d, 4e82894b, d8e62fa3, 62f1b66a (not the U4 or B-T1 commits b2272e55, 779bbfb2, a235cf08, a4d1a246, 5d0961ef).
+   - ddbd4b2c contains all WS3 commits listed above, including U4 and B-T1.
+   - 2026-10-16 verification at dd4bc8b7 (contains 61533fdd) for WS3.A: side-by-side stack, production flags container.
+
+13. Errata seen: bf2e7882 subject says the lane "is a required check" (corrected at RUNBOOKS 413). ledger WS3.F and WS3.H rows carry superseded text (corrected by later rows).

@@ -61,7 +61,7 @@ export function mountKnowledgeGraph(host: HTMLDivElement, reducedMotion: boolean
 	const camera = new PerspectiveCamera(36, 1, 0.1, 20);
 	const group = new Group();
 	const { positions, edges, degree, hubCount } = createKnowledgeGraphData();
-	const departmentNodes = Array.from(host.querySelectorAll<HTMLButtonElement>("[data-business-node]")).map((element) => {
+	const departmentNodes = Array.from(host.querySelectorAll<HTMLElement>("[data-business-node]")).map((element) => {
 		const x = Number(element.dataset.nodeX);
 		const y = Number(element.dataset.nodeY);
 		const target = new Vector3(x, y, Math.sqrt(1 - x * x - y * y));
@@ -138,7 +138,7 @@ export function mountKnowledgeGraph(host: HTMLDivElement, reducedMotion: boolean
 			if (distance < closestDistance) { closestDistance = distance; closest = node; }
 		}
 		for (const node of departmentNodes) {
-			const highlight = String(host.dataset.selectedNode ? node.element.dataset.businessNode === host.dataset.selectedNode : hovering && closestDistance < 52 ** 2 && node === closest);
+			const highlight = String(hovering && closestDistance < 52 ** 2 && node === closest);
 			if (node.element.dataset.highlight !== highlight) node.element.dataset.highlight = highlight;
 		}
 		renderer.render(scene, camera);
@@ -206,7 +206,7 @@ export function mountKnowledgeGraph(host: HTMLDivElement, reducedMotion: boolean
 	host.dataset.graphReady = "true";
 	visibility.observe(host);
 	sizing.observe(host);
-	expandedState.observe(host, { attributes: true, attributeFilter: ["data-expanded", "data-selected-node"] });
+	expandedState.observe(host, { attributes: true, attributeFilter: ["data-expanded"] });
 	document.addEventListener("visibilitychange", syncAnimation);
 	host.addEventListener("pointermove", pointerMove);
 	host.addEventListener("pointerleave", pointerLeave);

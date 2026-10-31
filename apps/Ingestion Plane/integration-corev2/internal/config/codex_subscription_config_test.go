@@ -32,7 +32,7 @@ func codexEnabledConfig(t *testing.T) Config {
 	cfg.OrgCoreServiceToken = "org-service-token-at-least-32-bytes"
 	cfg.BillingCoreServiceToken = "billing-service-token-at-least-32-bytes"
 	cfg.AuditCoreServiceToken = "audit-service-token-at-least-32-bytes"
-	cfg.PublicBaseURL = "http://integration-corev2:3026"
+	cfg.PublicBaseURL = "https://integration-corev2.example"
 	cfg.DatabaseURL = "postgres://integration"
 	cfg.ProviderWriteAttestationKeysJSON = string(rawKeys)
 	cfg.CodexSubscriptionEnabled = true

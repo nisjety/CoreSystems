@@ -8,8 +8,10 @@ All URIs are relative to *http://localhost:8080*
 | [**deleteSource**](ResourcesApi.md#deletesource) | **DELETE** /v1/sources/{source_id} | Soft-delete an ingestion source |
 | [**getArtifact**](ResourcesApi.md#getartifact) | **GET** /v1/artifacts/{artifact_id} | Fetch artifact bytes or metadata |
 | [**listArtifacts**](ResourcesApi.md#listartifacts) | **GET** /v1/artifacts | List stored artifacts (served locally by edge) |
+| [**listBatchEvents**](ResourcesApi.md#listbatchevents) | **GET** /v1/batch/{job_id}/events | Job events of a batch job (same contract as /v1/jobs/{job_id}/events) |
 | [**listBenchmarks**](ResourcesApi.md#listbenchmarks) | **GET** /v1/benchmarks | List benchmark runs (placeholder) |
-| [**listJobEvents**](ResourcesApi.md#listjobevents) | **GET** /v1/jobs/{job_id}/events | Durable events keyed by handoff job_id |
+| [**listCrawlEvents**](ResourcesApi.md#listcrawlevents) | **GET** /v1/crawl/{job_id}/events | Job events of a crawl job (same contract as /v1/jobs/{job_id}/events) |
+| [**listJobEvents**](ResourcesApi.md#listjobevents) | **GET** /v1/jobs/{job_id}/events | Durable events keyed by handoff job_id, or a live tail with follow&#x3D;true |
 | [**listJobsByKind**](ResourcesApi.md#listjobsbykind) | **GET** /v1/{kind}/jobs | List jobs of one kind |
 | [**listRequestQueues**](ResourcesApi.md#listrequestqueues) | **GET** /v1/request-queues | List request queues with live stats |
 | [**listRunEvents**](ResourcesApi.md#listrunevents) | **GET** /v1/runs/{run_id}/events | Durable event history for one run |
@@ -287,6 +289,80 @@ No authorization required
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 
 
+## listBatchEvents
+
+> string listBatchEvents(jobId, follow, replay)
+
+Job events of a batch job (same contract as /v1/jobs/{job_id}/events)
+
+A crawl id on this path is 404. The follow, replay, after_seq, limit and Last-Event-ID rules are those of list_job_events.
+
+### Example
+
+```ts
+import {
+  Configuration,
+  ResourcesApi,
+} from '@quarry/client';
+import type { ListBatchEventsRequest } from '@quarry/client';
+
+async function example() {
+  console.log("🚀 Testing @quarry/client SDK...");
+  const api = new ResourcesApi();
+
+  const body = {
+    // string
+    jobId: jobId_example,
+    // string (optional)
+    follow: follow_example,
+    // 'all' | 'none' (optional)
+    replay: replay_example,
+  } satisfies ListBatchEventsRequest;
+
+  try {
+    const data = await api.listBatchEvents(body);
+    console.log(data);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+// Run the test
+example().catch(console.error);
+```
+
+### Parameters
+
+
+| Name | Type | Description  | Notes |
+|------------- | ------------- | ------------- | -------------|
+| **jobId** | `string` |  | [Defaults to `undefined`] |
+| **follow** | `string` |  | [Optional] [Defaults to `undefined`] |
+| **replay** | `all`, `none` |  | [Optional] [Defaults to `undefined`] [Enum: all, none] |
+
+### Return type
+
+**string**
+
+### Authorization
+
+No authorization required
+
+### HTTP request headers
+
+- **Content-Type**: Not defined
+- **Accept**: `text/event-stream`
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+| **200** | SSE re-emission (legacy drain or live tail) |  -  |
+| **404** | Foreign id, or a job that is not a batch. |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
+
+
 ## listBenchmarks
 
 > ListBenchmarks200Response listBenchmarks()
@@ -346,13 +422,87 @@ No authorization required
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 
 
+## listCrawlEvents
+
+> string listCrawlEvents(jobId, follow, replay)
+
+Job events of a crawl job (same contract as /v1/jobs/{job_id}/events)
+
+A batch id on this path is 404. The follow, replay, after_seq, limit and Last-Event-ID rules are those of list_job_events.
+
+### Example
+
+```ts
+import {
+  Configuration,
+  ResourcesApi,
+} from '@quarry/client';
+import type { ListCrawlEventsRequest } from '@quarry/client';
+
+async function example() {
+  console.log("🚀 Testing @quarry/client SDK...");
+  const api = new ResourcesApi();
+
+  const body = {
+    // string
+    jobId: jobId_example,
+    // string (optional)
+    follow: follow_example,
+    // 'all' | 'none' (optional)
+    replay: replay_example,
+  } satisfies ListCrawlEventsRequest;
+
+  try {
+    const data = await api.listCrawlEvents(body);
+    console.log(data);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+// Run the test
+example().catch(console.error);
+```
+
+### Parameters
+
+
+| Name | Type | Description  | Notes |
+|------------- | ------------- | ------------- | -------------|
+| **jobId** | `string` |  | [Defaults to `undefined`] |
+| **follow** | `string` |  | [Optional] [Defaults to `undefined`] |
+| **replay** | `all`, `none` |  | [Optional] [Defaults to `undefined`] [Enum: all, none] |
+
+### Return type
+
+**string**
+
+### Authorization
+
+No authorization required
+
+### HTTP request headers
+
+- **Content-Type**: Not defined
+- **Accept**: `text/event-stream`
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+| **200** | SSE re-emission (legacy drain or live tail) |  -  |
+| **404** | Foreign id, or a job that is not a crawl. |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
+
+
 ## listJobEvents
 
-> Array&lt;JobHistoryEvent&gt; listJobEvents(jobId)
+> string listJobEvents(jobId, follow, replay, afterSeq, limit, lastEventID)
 
-Durable events keyed by handoff job_id
+Durable events keyed by handoff job_id, or a live tail with follow&#x3D;true
 
-Forwards to control\&#39;s /v1/jobs/{id}/events and re-emits as JSON (or SSE for the SPA gateway).
+Without follow (the legacy drain): every event of the job after after_seq (or Last-Event-ID), read page by page until caught up, then a terminal \&quot;done\&quot; frame. With follow&#x3D;true and the edge flag QUARRY_EDGE__JOB_STREAM_FOLLOW&#x3D;1: a live tail. The first frame is \&quot;event: snapshot\&quot; (status, phase, counts, last_seq, deadline_at, origin, control; its id is the start cursor). Every event frame carries \&quot;id: &lt;seq&gt;\&quot; and \&quot;event: &lt;type&gt;\&quot;. The stream ends with \&quot;data: done\&quot; after a terminal event (run_completed, run_failed, run_cancelled, run_timed_out) or when the job record is terminal and the log is caught up. After QUARRY_EDGE__JOB_STREAM_MAX_AGE_S (default 1800) it ends with \&quot;event: reconnect\&quot;; a failed control read ends it with \&quot;event: error\&quot;. Over the per-org or per-instance cap of open streams: 429 RATE_LIMITED with retry_after_seconds. A foreign id is 404 before any frame.
 
 ### Example
 
@@ -370,6 +520,16 @@ async function example() {
   const body = {
     // string
     jobId: jobId_example,
+    // string | `true` or `1` keeps the stream open. Ignored while the edge flag is off. (optional)
+    follow: follow_example,
+    // 'all' | 'none' | `all` (default) starts from the first event; `none` starts at the snapshot. Other values are 400. Follow only. (optional)
+    replay: replay_example,
+    // number | Events after this seq. A Last-Event-ID header wins over it. (optional)
+    afterSeq: 56,
+    // number | Page size of the legacy drain (default 500, at most 1000). (optional)
+    limit: 56,
+    // number | Resume after this seq (follow and legacy). (optional)
+    lastEventID: 56,
   } satisfies ListJobEventsRequest;
 
   try {
@@ -390,10 +550,15 @@ example().catch(console.error);
 | Name | Type | Description  | Notes |
 |------------- | ------------- | ------------- | -------------|
 | **jobId** | `string` |  | [Defaults to `undefined`] |
+| **follow** | `string` | &#x60;true&#x60; or &#x60;1&#x60; keeps the stream open. Ignored while the edge flag is off. | [Optional] [Defaults to `undefined`] |
+| **replay** | `all`, `none` | &#x60;all&#x60; (default) starts from the first event; &#x60;none&#x60; starts at the snapshot. Other values are 400. Follow only. | [Optional] [Defaults to `undefined`] [Enum: all, none] |
+| **afterSeq** | `number` | Events after this seq. A Last-Event-ID header wins over it. | [Optional] [Defaults to `undefined`] |
+| **limit** | `number` | Page size of the legacy drain (default 500, at most 1000). | [Optional] [Defaults to `undefined`] |
+| **lastEventID** | `number` | Resume after this seq (follow and legacy). | [Optional] [Defaults to `undefined`] |
 
 ### Return type
 
-[**Array&lt;JobHistoryEvent&gt;**](JobHistoryEvent.md)
+**string**
 
 ### Authorization
 
@@ -402,13 +567,15 @@ No authorization required
 ### HTTP request headers
 
 - **Content-Type**: Not defined
-- **Accept**: `application/json`, `text/event-stream`
+- **Accept**: `text/event-stream`
 
 
 ### HTTP response details
 | Status code | Description | Response headers |
 |-------------|-------------|------------------|
-| **200** | JSON event array or SSE re-emission |  -  |
+| **200** | SSE re-emission (legacy drain or live tail) |  -  |
+| **404** | Foreign id, or a job of another kind on the crawl and batch paths. |  -  |
+| **429** | Over the per-org or per-instance cap of open streams (follow only). Body carries code RATE_LIMITED and retry_after_seconds. |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 

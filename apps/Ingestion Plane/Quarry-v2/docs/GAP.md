@@ -29,7 +29,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 | TLS/JA3/JA4/H2 impersonation | ❌ detectable | ✅ BoringSSL via `wreq` | **V1 gap** |
 | Browser (headless) | ✅ Rod (CDP) | ✅ chromiumoxide CDP | Equivalent |
 | Browserbase cloud driver | ❌ | ✅ Feature-gated Browserbase WSS driver (`browserbase`) | V2 ahead (optional cloud browser backend) |
-| Browser stealth mode | ✅ (JS injection evasions) | 🟡 Baseline CDP stealth init script + emulation overrides are wired in chromiumoxide and Browserbase; fingerprint benchmark still pending | **V2 partial gap** |
+| Browser stealth mode | ✅ (JS injection evasions) | ❌ None. Emulation overrides (viewport, locale, timezone, headers) exist; there is no stealth script or fingerprint spoofing, by decision (ADR-5) | **V2 gap by design** |
 | PDF rendering / fetch | ✅ Rod print-to-PDF | ✅ CDP `printToPdf` | Equivalent |
 | PDF parsing (ingest PDF as source) | ❌ | ✅ Self-hosted `pdf-extract` text extraction in transform pipeline | V2 ahead for text PDFs; OCR/layout parsing still optional |
 | Document/binary fetch | ✅ | ✅ Text/PDF/binary classification with raw/markdown output routing | Equivalent |
@@ -49,7 +49,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 | Static TLS impersonation | Fire Engine (hosted) | ✅ self-owned BoringSSL | **V2 structural advantage** |
 | Browser CDP (headless) | Fire Engine + Playwright | ✅ chromiumoxide | Equivalent |
 | Cloud browser session backend | ✅ Managed Fire Engine sessions | ✅ Browserbase WSS driver (feature-gated) | Equivalent (different ops model) |
-| Stealth / anti-detect | Fire Engine stealth tier | 🟡 Baseline CDP stealth script + device/locale overrides are shipped across local/cloud browser paths | **V2 partial gap in hardening/measurement** |
+| Stealth / anti-detect | Fire Engine stealth tier | ❌ None. Device and locale overrides only; the stealth script and fingerprint rotation code were removed (WS3.E) | **V2 gap by design** |
 | `fetch` fallback | ✅ | ✅ | Equivalent |
 | PDF ingest (LlamaParse) | ✅ | 🟡 Self-hosted text-PDF extraction; no hosted OCR/layout parser | **V2 partial gap for OCR/layout fidelity** |
 | Wikipedia Enterprise | ✅ | ✅ Configurable Wikipedia source adapter with enterprise base URL/token support | Equivalent |
@@ -82,9 +82,9 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 - Action script schema now accepts `screenshotAfterEach` and `write` (alias of `type`), and runtime captures a screenshot after each successful non-screenshot action.
 - Runtime events now use an ephemeral-only path for ZDR requests, so live subscribers still receive progress while durable publisher channels stay empty.
 - Static/TLS drivers now fail fast on browser actions, while the browser adapter executes public action scripts before content extraction.
-- PDF, text, and binary source routing is implemented in the pipeline; PDF text extraction uses a self-hosted parser and text documents preserve raw content.
+- Source routing is partly implemented. The pipeline detects the body kind (quarry-transform `sniff`: magic bytes first, then Content-Type) and records it as `metadata.content_kind`. With `QUARRY_EDGE__DOC_ROUTING=skip` or `on` a body it cannot extract (image, archive, spreadsheet, ...) is refused with a typed 415 `UNSUPPORTED_MEDIA`. With `on`, PDF and DOCX bodies are parsed for their text (15 s deadline, 2 concurrent parses, 8 MiB text cap, DOCX input, entry-count and unpacked-size caps) and stored as `formats.raw` + `formats.markdown`; under ZDR the text is returned inline in `ScrapeResponse.markdown` with no artifact. Since WS5.C the parse runs in a child process under address-space, CPU and file-descriptor limits (`QUARRY_EDGE__DOC_PARSE_ISOLATION=process`, the default on Unix for the edge binary; `inprocess` is the rollback). Not done: OCR for scans, the streaming body cap in the drivers (a driver buffers the whole body and the pipeline refuses bodies above 16 MiB, so 16 to 25 MiB documents are refused earlier), XLSX/PPTX/ODF/EPUB extraction, an image parser. Default mode is `shadow` (detect and record only). `on` has run on a rebuilt image: the child round-trips a PDF, the boot line `document parser isolation` reports `isolation=process`, and one public PDF was scraped through the child. Not run: the memory bomb through the full HTTP path. Corrected 2026-10-16 (WS5.A, WS5.B); updated 2026-10-18 (WS5.C, WS5.H).
 - Wikipedia pages can be fetched through a configurable source adapter, including enterprise-style base URL and bearer token configuration.
-- Chromiumoxide now applies a baseline stealth init script plus request-scoped mobile metrics, touch emulation, locale override, timezone hint, headers, ad blocking, and country proxy selection.
+- Chromiumoxide applies request-scoped mobile metrics, touch emulation, locale override, timezone hint, headers, ad blocking, and country proxy selection. It injects no stealth script (the one that existed was never loaded and was removed in WS3.E).
 
 ---
 
@@ -173,11 +173,11 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 | Async crawl with job ID | ✅ | ✅ | Equivalent |
 | Depth control | ✅ | ✅ BFS in Go orchestrator | Equivalent |
 | Page limit | ✅ | ✅ | Equivalent |
-| Include / exclude paths | ✅ (regex + glob) | ✅ Go orchestrator filters sitemap + discovered URLs with path glob, path regex (`re:`), and full-URL glob/regex (`re_url:`) rules | Closed |
-| Sitemap-guided crawl | ✅ | ✅ Go orchestrator seeds crawl frontier via runtime-backed sitemap activity; targeted workflow coverage added | Closed |
-| Robots.txt respect | ✅ | ✅ Go orchestrator enforces runtime-backed robots checks and emits `page.blocked` on denial | Closed |
-| Allow external links | ✅ | ✅ Go orchestrator blocks cross-host links by default and admits them when `allow_external_links=true` | Closed |
-| Allow subdomains | ✅ | ✅ Go orchestrator admits sibling subdomains when `allow_subdomains=true` | Closed |
+| Include / exclude paths | ✅ (regex + glob) | ❌ Not wired. The Rust crawl frontier has pattern fields but no production caller; the Go orchestrator crawl input has no include or exclude field and filters nothing. Corrected 2026-10-23 (WS14.S0). | Open - see WS14 |
+| Sitemap-guided crawl | ✅ | ❌ Not wired. The crawl request accepts only `sitemap: skip` (`crawl_request.rs`), the Go orchestrator has no sitemap activity, and nothing seeds a crawl from a sitemap. `/v1/map` reads `/sitemap.xml` for its own URL list (`map_routes.rs`). Corrected 2026-10-23 (WS14.S0) and 2026-10-27 (D2-037). | Open - see WS14 |
+| Robots.txt respect | ✅ | ❌ Not enforced in the crawl or batch path. `/v1/map` applies a path-only robots matcher; no `check_robots` route is served and the orchestrator emits no `page.blocked` for robots. Corrected 2026-10-23 (WS14.S0). | Open - see WS14 |
+| Allow external links | ✅ | ❌ Not scoped. The orchestrator follows cross-host links today; pinned by `TestCrawlJobWF_CharacterizesExternalLinkFollowing_Legacy`. Corrected 2026-10-23 (WS14.S0). | Open - see WS14 |
+| Allow subdomains | ✅ | ❌ Not scoped. The crawl path has no host or subdomain rule. Corrected 2026-10-23 (WS14.S0). | Open - see WS14 |
 | Backward / whole-domain path scope | ✅ | ✅ `crawl_entire_domain` is canonical and `allow_backward_crawling` is accepted as a compatibility alias | Closed |
 | Cancel crawl | ✅ | ✅ Temporal cancellation | Equivalent |
 | Crawl error report | ✅ | ✅ event log | Equivalent |
@@ -198,8 +198,8 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 | Scheduled / cron crawl | ❌ | ✅ | **Firecrawl gap** |
 | Crawl durability (restart-safe) | ❌ Redis-only | ✅ Postgres + checkpoints | **V2 structural advantage** |
 | SSE streaming | ❌ | ✅ | **Firecrawl gap** |
-| Sitemap-guided | ✅ | ✅ Runtime sitemap fetch/parse is wired into crawl BFS through internal edge/orchestrator activities | Closed |
-| Robots.txt | ✅ | ✅ Runtime robots cache/parser is wired into crawl BFS through internal edge/orchestrator activities | Closed |
+| Sitemap-guided | ✅ | ❌ Not wired into crawl BFS. The crawl request accepts only `sitemap: skip`, and `/v1/map` reads `/sitemap.xml` without seeding any crawl. Corrected 2026-10-23 (WS14.S0) and 2026-10-27 (D2-037). | Open - see WS14 |
+| Robots.txt | ✅ | ❌ Not wired into crawl BFS. `quarry-runtime/src/robots_cache.rs` has no production caller and no `check_robots` route is served. Corrected 2026-10-23 (WS14.S0). | Open - see WS14 |
 | Natural language prompt | ✅ | ✅ Model Plane NL ranking when configured (`x-quarry-search-mode: model-ranked`); term-match fallback otherwise | Closed |
 
 ---
@@ -242,7 +242,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 | Cursor pagination | ❌ | ✅ opaque base64 cursor | ❌ |
 | Event idempotency | ✅ Temporal | ✅ idempotency_key | ❌ |
 | Blocklist persistence | ✅ DB | ✅ Postgres + Bloom filter hint | ❌ |
-| Presets catalog | ❌ | ✅ fast/polite/stealth/deterministic | ❌ |
+| Presets catalog | ❌ | ✅ fast/polite/careful/deterministic (`stealth` is a deprecated alias of `careful` for one release) | ❌ |
 | SSRF guard | ✅ URL heuristics | ✅ DnsGuard + URL signature | Playwright route intercept only |
 | Secrets in source | ❌ (env only) | ❌ (env only) | ❌ (env only) |
 
@@ -254,7 +254,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 |-----------|----|----|-----------|
 | Structured logging | ✅ (zap/slog) | ✅ (tracing crate, structured) | ✅ |
 | OpenTelemetry traces | 🟡 partial | 🟡 partial | ✅ |
-| Metrics endpoint | ✅ `/metrics` | ✅ `/health` + `/ready` | ✅ |
+| Metrics endpoint | ✅ `/metrics` | 🟡 `/health` + `/ready` on the public port; Prometheus `/metrics` on a separate bearer-authenticated internal listener, off unless `QUARRY_EDGE__METRICS_ENABLED=1` (WS6.I; usage series and the Control Plane scrape job not built) | ✅ |
 | Slow-request warnings | ✅ (middleware) | 🟡 (planned, not shipped) | ✅ |
 | SDK | ❌ | ❌ | ✅ 6 languages |
 | API docs / OpenAPI | ✅ | ❌ | ✅ |
@@ -289,7 +289,7 @@ Ranked by business impact × implementation effort.
 | 1 | Eval harness + warm/cold benchmarks | P0 — cannot retire V1 without proof | Medium | Phase 8 |
 | 2 | Donor scrape removal (V1 hot path) | Closed — donor path removed; AppState carries no donor URL; scrape handler routes 100% through PageRunner::run(); cargo check clean | Done | Done 2026-05-05 |
 | 3 | Coverage CI gate (≥ 80 %) | Closed — CI workflow enforces Rust + Go coverage floors at 80% and fails on regression; local `make coverage` command documented | Done | Done 2026-05-06 |
-| 4 | Sitemap + robots.txt in crawl BFS | Closed — `CrawlJobWF` now seeds from sitemap, checks robots before `RunPage`, and emits `page.blocked` on robots denial; targeted workflow tests pass | Done | Done 2026-05-05 |
+| 4 | Sitemap + robots.txt in crawl BFS | Open - reopened 2026-10-23 (WS14.S0). `CrawlJobWF` has no sitemap seeding and no robots check. The 2026-05-05 closure cited internal routes that are not served. | Open | Reopened 2026-10-23 |
 | 5 | Browser action schema in edge API | Closed — public schema, runtime execution, retry, screenshot-after-each validated | Done | Done 2026-05-04 |
 | 6 | Mobile emulation + geo targeting | P1 — parity with V1 + Firecrawl; Chromium/static/browserless baseline shipped, provider-wide fingerprint proof still pending | Low | Phase 9 |
 | 7 | `/v1/map` endpoint | Closed — endpoint implemented in `quarry-edge` | Done | Done 2026-05-04 |
@@ -313,7 +313,7 @@ Ranked by business impact × implementation effort.
 - Every failed attempt is stored in `statusCodes[]` and `errors[]`; the final error payload contains the full attempt history.
 - More than 20 distinct error subtypes (e.g. `EngineError`, `RobotsBlockedError`, `TimeoutError`, `PdfError`, `AbortError`).
 - `AbortManager` singleton: callers can cancel an in-flight scrape via `abort(jobId)`; quarry-v2 uses Tokio `CancellationToken` which is equivalent.
-- Robots.txt fetched per-origin with a 10 s timeout; result cached in Redis. Quarry-v2 now mirrors that baseline behavior in `crates/quarry-runtime/src/robots.rs`, wired into the live orchestrator crawl path through `quarry-edge` internal endpoints.
+- Robots.txt fetched per-origin with a 10 s timeout; result cached in Redis. Quarry-v2 has a robots cache in `crates/quarry-runtime/src/robots_cache.rs`, but no production caller uses it (corrected 2026-10-23, WS14.S0; see WS14 in `docs/CRAWL_SCOPE_ROBOTS.md`).
 - OpenTelemetry spans wrap each engine attempt; quarry-v2 has `tracing` instrumentation but no OTEL exporter yet.
 
 ### 11.2 Fire Engine Adapter — `engines/fire-engine/index.ts`
@@ -416,7 +416,7 @@ Extends Section 10 with new items from source analysis.
 | 1 | Eval harness + warm/cold benchmarks | P0 — cannot retire V1 without proof | Medium | Phase 8 |
 | 2 | Donor scrape removal (V1 hot path) | Closed — donor path removed; AppState carries no donor URL; scrape handler routes 100% through PageRunner::run(); cargo check clean | Done | Done 2026-05-05 |
 | 3 | Coverage CI gate (≥ 80 %) | Closed — CI workflow enforces Rust + Go coverage floors at 80% and fails on regression; local `make coverage` command documented | Done | Done 2026-05-06 |
-| 4 | Sitemap + robots.txt in crawl BFS | Closed — `CrawlJobWF` now seeds from sitemap, checks robots before `RunPage`, and emits `page.blocked` on robots denial; targeted workflow tests pass | Done | Done 2026-05-05 |
+| 4 | Sitemap + robots.txt in crawl BFS | Open - reopened 2026-10-23 (WS14.S0). `CrawlJobWF` has no sitemap seeding and no robots check. The 2026-05-05 closure cited internal routes that are not served. | Open | Reopened 2026-10-23 |
 | 5 | Browser action schema in edge API | Closed — public schema, runtime execution, retry, screenshot-after-each validated | Done | Done 2026-05-04 |
 | 6 | Mobile emulation + geo targeting | P1 — parity with V1 + Firecrawl; Chromium/static/browserless baseline shipped, provider-wide fingerprint proof still pending | Low | Phase 9 |
 | 7 | `/v1/map` endpoint | Closed — endpoint implemented in `quarry-edge` | Done | Done 2026-05-04 |
@@ -428,7 +428,7 @@ Extends Section 10 with new items from source analysis.
 | 13 | Browser-device emulation parity (metrics/profile fidelity) | P3 — metrics/touch/locale shipped, full fingerprint benchmarking still partial | Medium | Phase 9 |
 | 14 | `zeroDataRetention` — pervasive threading through pipeline | Closed for `/v1/scrape` — cache/artifact/durable-event bypass validated | Done | Done 2026-05-04 |
 | 15 | OTEL exporter (spans to Jaeger/Honeycomb) | P2 — observability parity | Low | Phase 8 |
-| 16 | Robots.txt per-origin cache (Redis, 10 s TTL) | Closed — runtime Redis-backed robots cache is now exercised through the internal robots check endpoint used by crawl orchestration | Done | Done 2026-05-05 |
+| 16 | Robots.txt per-origin cache (Redis, 10 s TTL) | Open - reopened 2026-10-23 (WS14.S0). No internal robots check endpoint is served and no crawl orchestration calls one. | Open | Reopened 2026-10-23 |
 | 17 | Browser path SSRF via chromiumoxide (DnsGuard not called) | Closed — `guard_navigation_target`/`guard_page_request_target` (`crates/quarry-browser/src/navigation.rs`) wired into `ChromiumoxideDriver::goto()` and `install_network_guard()`; SSRF tests in `crates/quarry-browser/tests/ssrf.rs`. Re-verified 2026-08-06: `navigation.rs` had gone missing entirely since this was marked Done (unresolved `crate::navigation` import — the `chromiumoxide` feature failed to compile, invisible because it isn't a default feature). Module reconstructed from the recovered source; `cargo check`/`cargo test --features chromiumoxide` now pass clean. | Done | Done 2026-05-05, re-verified 2026-08-06 |
 | 18 | A/B test tagging on scrape requests | P3 — experiment infra | High | Phase 9+ |
 | 19 | LLM-driven browser agent loop (MAX_STEPS gate) | P3 — autonomous scraping | High | Phase 9+ |
@@ -463,7 +463,7 @@ The three remote-CDP drivers (`browserbase.rs`, `browserless.rs`, `kernel.rs`) n
 5. **Blake3 fingerprint + semantic paragraph diff** — `SemanticDiff::is_real_delta` filters noise; consumers get structured change objects, not raw hash comparisons.
 6. **Wiki-ready content chunks** — Deterministic fixed-size paragraph chunks with stable IDs; designed for RAG ingestion pipelines.
 7. **DriverPlan typed waterfall** — Engine fallback is a structured type, not ad-hoc if/else; each tier is independently testable.
-8. **Preset catalog** — `fast`/`polite`/`stealth`/`deterministic` presets drive both `DriverPlan` and crawl policy from a single registry.
+8. **Preset catalog** — `fast`/`polite`/`careful`/`deterministic` presets (`stealth` is a deprecated alias of `careful` for one release) drive both `DriverPlan` and crawl policy from a single registry.
 9. **Crawl BFS durability** — 50-page checkpoints in Postgres; crawl jobs resume after restart without re-crawling already-visited pages.
 10. **Security engine separation** — `DnsGuard` resolves the host at the network layer before any fetch; SSRF is blocked at DNS resolution, not just URL parsing.
 11. **Self-hosted document ingest** — text, binary, Wikipedia, and PDF source routing now stays inside the Quarry runtime without a hosted parsing dependency for baseline extraction.
@@ -491,7 +491,7 @@ This section is the operating system for the rest of this document. Sections 10 
 |---------------|----------------|------|----------------|-----------|
 | Phase 3 - Cutover Gate | Fast-path cutover | Remove remaining donor scrape dependency and prove edge-owned scrape traffic. | #2 | `/v1/scrape` no longer depends on the V1 hot path; canary reaches 100%; warm scrape p50 stays within target. |
 | Phase 4 - Browser Safety Gate | Browser lease model | Browser-path security and session correctness. | #17 | Chromiumoxide/browser routes enforce DNS/SSRF guard behavior equivalent to static fetch; lease/profile round-trip tests cover restore and cleanup. |
-| Phase 5 - Crawl Correctness Gate | Crawl workers to Rust | Remaining crawl parity: richer include/exclude parity, backward/crawlEntireDomain controls, broader denial reasons, adaptive throttling, and eventual Rust frontier ownership. | — | Remaining crawl fixtures prove restart recovery and cancellation beyond the now-closed sitemap/robots/path-policy slice. |
+| Phase 5 - Crawl Correctness Gate | Crawl workers to Rust | Remaining crawl parity: richer include/exclude parity, backward/crawlEntireDomain controls, broader denial reasons, adaptive throttling, and eventual Rust frontier ownership. | — | Remaining crawl fixtures prove restart recovery and cancellation beyond the sitemap/robots/path-policy slice, which is open again (WS14, reopened 2026-10-23). |
 | Phase 6 - Pipeline Integration Gate | Output normalization + change tracking | Post-transform indexing hooks and artifact-backed downstream integrations. | #20 | Transformer/index handoff is feature-gated, ZDR-safe, retryable, and covered by integration tests. |
 | Phase 8 - Evidence Gate | Benchmark + retire old path | Benchmark truth, coverage enforcement, OTEL/export visibility, final V1 retirement decision. | #1, #3, #15 | Scoreboard generated; coverage gate enforced; warm/cold and JS benchmarks captured; retirement blocker list is empty. |
 | Phase 9 - Product Parity Gate | Product parity hardening | SDKs, OpenAPI, fingerprint proof, OCR/layout parity, branding/audio, optional experimentation and agent loops. | #6, #9, #10, #11, #12, #13, #18, #19 | Public DX docs and SDKs are usable; optional/high-cost features are either shipped behind flags or explicitly deferred. |
@@ -722,7 +722,7 @@ After re-checking the live codebase and validating the new tests, the old “mis
 - **Core scrape/crawl/batch/map:** `/v1/scrape`, `/v1/scrape/stream`, `/v1/crawl`, `/v1/batch`, `/v1/map`
 - **Operational/public wrappers:** `/v1/search`, `/v1/extract`, `/v1/agent`, `/v1/change/check`, `/v1/change/latest`
 - **Control-plane proxy surface:** `/v1/profiles`, `/v1/snapshots`, `/v1/artifacts`, `/v1/schedules`, `/v1/jobs/:id/history`, `/v1/restore`, `/v1/blocklists`, `/v1/runs/:id/events`
-- **Internal/runtime routes:** `/v1/internal/run_page`, `/v1/internal/fetch_sitemap`, `/v1/internal/check_robots`
+- **Internal/runtime routes:** `/v1/internal/run_page` is served. `/v1/internal/fetch_sitemap` and `/v1/internal/check_robots` were listed here but are not served (removed 2026-10-23, WS14.S0).
 - **Explicit unsupported routes:** `POST /v1/presets`, `POST /v1/deep-research`
 
 #### ⚠️ Reduced / Partial Parity
@@ -767,7 +767,7 @@ After re-checking the live codebase and validating the new tests, the old “mis
 - **Extract parity:** sync single-URL + `structured_output_schema` passthrough are shipped; source-trace, cost-guard, and async multi-URL extraction remain open.
 - **NL crawl parity:** `prompt` field wired on edge and forwarded to orchestrator; Go orchestrator-side BFS URL ranking requires Phase 15.5 work.
 - **Agent parity:** current route is a sync fetch+answer helper, not a full agent loop.
-- **Browser stealth evidence:** baseline stealth and emulation are wired, but benchmark proof is still pending.
+- **Browser stealth:** none (removed in WS3.E); emulation overrides only.
 
 #### ❌ Not Implemented
 - **Deep research workflow:** explicit Post-V2 deferral

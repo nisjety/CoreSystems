@@ -17,9 +17,9 @@ pub struct BrowserLease {
     /// releases. False keeps the profile id run-scoped and isolated.
     #[serde(default)]
     pub persist_profile: bool,
-    /// Requested browser viewport for this lease. Drivers that can only apply
-    /// viewport at launch should relaunch when this differs from the active
-    /// browser viewport.
+    /// Requested browser viewport for this lease. Applied per page, when the
+    /// page opens; drivers must not relaunch a browser for it, because other
+    /// leases are using that browser. Unset means the driver's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewport: Option<BrowserViewport>,
     /// Tenant scope. P0 / cluster #auth+tenancy. The lease's `org_id`

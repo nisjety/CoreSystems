@@ -3,7 +3,7 @@ import { createEffect, createSignal, For, Show } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import { Button } from '@/shared/ui/Button'
 import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError } from '@/shared/i18n'
 import type { SharePointDrive, SharePointFolder, SharePointSite } from '@/shared/api/knowledge-client'
 
 type ConnectProvider = {
@@ -82,7 +82,7 @@ export function KnowledgeAddSourceModal(props: {
     try {
       setSpFolders(await props.onListSharePointFolders(driveId, itemId))
     } catch (error) {
-      setSpError(error instanceof Error ? error.message : i18n.tr('Kunne ikke laste mapper.', 'Could not load folders.'))
+      setSpError(translateApiError(error, i18n.tr, { no: 'Kunne ikke laste mapper.', en: 'Could not load folders.' }))
     } finally {
       setSpLoadingFolders(false)
     }
@@ -126,7 +126,7 @@ export function KnowledgeAddSourceModal(props: {
         setSpError(i18n.tr('Ingen SharePoint-nettsteder funnet. Koble til Microsoft 365 først.', 'No SharePoint sites found. Connect Microsoft 365 first.'))
       }
     } catch (error) {
-      setSpError(error instanceof Error ? error.message : i18n.tr('Kunne ikke laste nettsteder.', 'Could not load sites.'))
+      setSpError(translateApiError(error, i18n.tr, { no: 'Kunne ikke laste nettsteder.', en: 'Could not load sites.' }))
     } finally {
       setSpLoadingSites(false)
     }
@@ -149,7 +149,7 @@ export function KnowledgeAddSourceModal(props: {
         setSpSelectedDrive(drives[0] ?? null)
       }
     } catch (error) {
-      setSpError(error instanceof Error ? error.message : i18n.tr('Kunne ikke laste biblioteker.', 'Could not load libraries.'))
+      setSpError(translateApiError(error, i18n.tr, { no: 'Kunne ikke laste biblioteker.', en: 'Could not load libraries.' }))
     } finally {
       setSpLoadingDrives(false)
     }

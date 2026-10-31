@@ -36,6 +36,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
+	"github.com/triodelab/quarry-v2/pkg/quarryotel"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/httpx"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/notify"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
@@ -81,6 +82,8 @@ func changeWebhookHandler(db store.DB, sink notify.Sink) http.HandlerFunc {
 			return
 		}
 		if bodyAssertsZDR(probe) {
+			// WS10.S8: the ZDR posture is known after the request span started; drop its trace from export.
+			quarryotel.MarkZDR(r.Context())
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest,
 				"zero-data-retention payloads are never persisted", map[string]any{"zdr": true})
 			return

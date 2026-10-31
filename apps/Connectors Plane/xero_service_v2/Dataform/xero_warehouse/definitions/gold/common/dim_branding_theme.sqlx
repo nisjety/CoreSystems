@@ -1,0 +1,26 @@
+config {
+  type: "table",
+  schema: "xero_gold_common",
+  description: "Conformed Xero document-branding dimension. It identifies invoice templates, not payment methods or a Visma equivalent.",
+  assertions: {
+    nonNull: ["tenant_id", "branding_theme_id", "branding_theme_key", "company_key"],
+    uniqueKey: ["branding_theme_key"]
+  }
+}
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(tenant_id, '|', branding_theme_id)) AS branding_theme_key,
+  FARM_FINGERPRINT(tenant_id) AS company_key,
+  tenant_id,
+  branding_theme_id,
+  branding_theme_internal_id,
+  theme_name,
+  theme_type,
+  sort_order,
+  logo_url,
+  payment_service_count,
+  created_at,
+  first_seen_at,
+  synced_at,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_branding_theme")}

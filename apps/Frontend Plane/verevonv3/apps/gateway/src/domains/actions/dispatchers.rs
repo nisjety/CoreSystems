@@ -1,5 +1,8 @@
 use axum::{
-    extract::{Extension as ExtensionExtractor, Path as PathExtractor, State as StateExtractor},
+    extract::{
+        Extension as ExtensionExtractor, Path as PathExtractor, Query as QueryExtractor,
+        State as StateExtractor,
+    },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -13,13 +16,14 @@ use crate::domains::ai::{proxy_dictate, proxy_speech};
 use crate::domains::browser::{
     close_session as close_browser_session, close_tab as close_browser_tab, control_ai_run,
     create_browser_profile, create_session as create_browser_session,
+    keepalive_session as keepalive_browser_session,
     delete_profile as delete_browser_profile, new_tab as new_browser_tab, rename_browser_profile,
     restore_profile_probe as restore_browser_profile_probe, run_action as run_browser_action,
     select_tab as select_browser_tab, set_control_mode as set_browser_control_mode,
     start_ai_run as start_browser_ai_run, suggest_action as suggest_browser_action,
     ActionBody as BrowserActionBody, BrowserActionActor, BrowserProfileScope,
     ControlBody as BrowserControlBody, CreateProfileBody, CreateSessionBody, NewTabBody,
-    RenameProfileBody, RestoreProbeBody, StartAiRunBody, SuggestActionBody,
+    RenameProfileBody, RestoreProbeBody, StartAiRunBody, SuggestActionBody, TabActorQuery,
     Viewport as BrowserViewport,
 };
 use crate::domains::chat::documents::upload_chat_document;
@@ -322,21 +326,26 @@ pub(super) async fn dispatch_crawl_site(
     headers: &HeaderMap,
     input: &Value,
 ) -> Response {
-    let target = input.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    let org_id = crate::upstream::authorized_org_id(state, user).await;
     let cookie = cookie_header(headers);
     let token = quarry_token(state, user, &cookie).await;
 
     let url = format!("{}/v1/crawl", state.quarry_edge_url);
-    let mut crawl_body = json!({ "url": target, "org_id": org_id });
-    if let Some(max_pages) = input.get("maxPages").and_then(|v| v.as_u64()) {
-        crawl_body["max_pages"] = json!(max_pages);
-    }
-    // Phase 6 selective ingest: forward the resolved decision (default NEVER at
-    // quarry when absent → working-set only).
-    if let Some(ingest) = input.get("ingest").and_then(|v| v.as_bool()) {
-        crawl_body["ingest"] = json!(ingest);
-    }
+    // WS14.S3: the body goes through the knowledge route's normaliser, so the URL is checked
+    // (SSRF) and the page bound clamped. The org id is not sent: the edge takes it from the
+    // verified token. Ingest and the scope switches are forwarded when present.
+    let crawl_body = match crate::domains::knowledge::quarry::normalize_crawl_body_for(
+        input,
+        crate::domains::knowledge::quarry::Surface::Model,
+    ) {
+        Ok(body) => body,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": { "code": "invalid_crawl_request", "message": message } })),
+            )
+                .into_response();
+        }
+    };
 
     let (status, Json(resp)) = proxy_bearer_json(
         state,
@@ -2257,7 +2266,7 @@ pub(super) async fn dispatch_ticket_update_macro(
 // create/bind-then-confirm-membership sequence, and per-field length limits
 // enforced nowhere else. Reusing the exact function is the only way to
 // guarantee none of that is bypassed.
-fn owner_json_response_to_envelope(
+pub(super) fn owner_json_response_to_envelope(
     action_id: &str,
     user: &AuthenticatedUser,
     status: StatusCode,
@@ -5179,11 +5188,40 @@ pub(super) async fn dispatch_orchestration_cancel_run(
 // legacy gate in execution-core), so offering it as a working input would
 // misrepresent what this action actually does. maxCostUsd IS real and is
 // forwarded (see build_ai_run_request in browser.rs).
+/// The headers a `browser_run.start` action forwards: the caller's, with an
+/// `Idempotency-Key` added when they carry none. The key is the action
+/// envelope's own when it is usable, else a generated one, so a retry the gateway
+/// makes on its own (a keyring retry of the Model Gateway call) finds the run the
+/// first attempt made instead of starting a second one (D1-020). A key the caller
+/// sent in the header is left alone.
+fn run_start_headers(headers: &HeaderMap, envelope_key: &str) -> HeaderMap {
+    let mut forwarded = headers.clone();
+    if forwarded.contains_key("idempotency-key") {
+        return forwarded;
+    }
+    let trimmed = envelope_key.trim();
+    let usable = !trimmed.is_empty()
+        && trimmed.len() <= 128
+        && trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'));
+    let key = if usable {
+        trimmed.to_owned()
+    } else {
+        format!("act-{:032x}", rand::random::<u128>())
+    };
+    if let Ok(value) = axum::http::HeaderValue::from_str(&key) {
+        forwarded.insert("idempotency-key", value);
+    }
+    forwarded
+}
+
 pub(super) async fn dispatch_browser_run_start(
     state: &AppState,
     user: &AuthenticatedUser,
     headers: &HeaderMap,
     input: &Value,
+    idempotency_key: &str,
 ) -> Response {
     let session_id = ticket_string(input, "sessionId");
     let goal = ticket_string(input, "goal");
@@ -5220,7 +5258,7 @@ pub(super) async fn dispatch_browser_run_start(
     let response = start_browser_ai_run(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
-        headers.clone(),
+        run_start_headers(headers, idempotency_key),
         PathExtractor(session_id.to_owned()),
         Json(body),
     )
@@ -5252,6 +5290,132 @@ pub(super) async fn dispatch_browser_run_control(
     .await;
     let (status, payload) = response_to_status_and_json(response).await;
     owner_json_response_to_envelope("browser_run.control", user, status, payload)
+}
+
+/// How a request to stop an AI browser run came out, for
+/// [`dispatch_browser_blocked_try_other_source`].
+#[derive(Debug, PartialEq, Eq)]
+enum RunStopOutcome {
+    /// The owner stopped it.
+    Stopped,
+    /// Nothing was left to stop: no run of this person's has that id (404), or it
+    /// is no longer running (409). Leaving a site after the agent already gave up
+    /// on it is the usual case, so this is not a failure.
+    AlreadyEnded,
+    /// The owner answered 412 with its zero-data-retention refusal of run controls
+    /// (see [`is_zdr_run_controls_refusal`]). Nobody can stop the run, so refusing would leave the
+    /// person with no way off the blocked site; the session is still closed, which
+    /// ends the run's browsing, and the result says the run was not stopped.
+    ControlsDisabled,
+    /// The owner refused or failed (a missing grant, an outage, a 5xx): the run may
+    /// still be going, so the action fails rather than report a clean exit.
+    Refused,
+}
+
+/// The start of the text model-gateway's run-control endpoint answers when the
+/// organization has zero data retention (`browser_run.rs`, `control_browser_run`:
+/// "ZDR browser-run controls are disabled until ..."). The owner sends it as
+/// `{ "error": "<text>" }`, with no code, so the text is the only thing that tells it
+/// from another 412. Coupled to that sentence: if the owner reworded it the check
+/// would fail closed (the stop reads as refused and the session stays open), never
+/// open, and the test below that pins the text would need the new wording.
+const ZDR_RUN_CONTROLS_REFUSAL: &str = "ZDR browser-run controls are disabled";
+
+/// A 412 is only "run controls are off" when it carries the ZDR refusal. The same
+/// status also comes out of the owner for a failed precondition on the cancel itself
+/// (gRPC FailedPrecondition mapped to 412); that one says nothing about the run
+/// being unstoppable, it may still be going, so it is a refusal like any other.
+fn is_zdr_run_controls_refusal(payload: &Value) -> bool {
+    payload
+        .get("error")
+        .and_then(Value::as_str)
+        .is_some_and(|text| text.starts_with(ZDR_RUN_CONTROLS_REFUSAL))
+}
+
+fn run_stop_outcome(status: StatusCode, payload: &Value) -> RunStopOutcome {
+    match status {
+        status if status.is_success() => RunStopOutcome::Stopped,
+        StatusCode::NOT_FOUND | StatusCode::CONFLICT => RunStopOutcome::AlreadyEnded,
+        StatusCode::PRECONDITION_FAILED if is_zdr_run_controls_refusal(payload) => {
+            RunStopOutcome::ControlsDisabled
+        }
+        _ => RunStopOutcome::Refused,
+    }
+}
+
+/// `browser.blocked.try_other_source`: the person chose another source after a site
+/// blocked automated browsing. The owner paths already exist, so this only joins
+/// them: stop the named AI run when a `runId` is given, then close the named
+/// session. It never reads or keeps page content and never tries to get past the
+/// block.
+///
+/// The two ids are authorized separately and are NOT checked against each other:
+/// the run must be one of the caller's own (same user and organization, see
+/// `owned_orchestration_run`) and the session one of the caller's own, which are
+/// the same two checks the existing stop and close routes make, so this joins two
+/// things the person may already do and grants nothing new.
+///
+/// A failure to stop the run aborts before the close, so a run that may still be
+/// going is never reported as left behind, with two exceptions: "it already ended"
+/// (404, 409) and "run controls are disabled" (a 412 that carries the owner's
+/// zero-data-retention refusal; any other 412 aborts like the rest), where stopping
+/// is impossible and the close is the only way off the site.
+pub(super) async fn dispatch_browser_blocked_try_other_source(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    const ACTION: &str = "browser.blocked.try_other_source";
+    const RUN_ID_REFUSAL: &str =
+        "browser.blocked.try_other_source 'runId' must be a non-empty string when given";
+    let session_id = ticket_string(input, "sessionId");
+    if session_id.is_empty() {
+        return ticket_bad_request(
+            "browser.blocked.try_other_source requires a non-empty 'sessionId'",
+        );
+    }
+    let run_id = match input.get("runId") {
+        None | Some(Value::Null) => "",
+        Some(Value::String(run_id)) if !run_id.trim().is_empty() => run_id.trim(),
+        Some(_) => return ticket_bad_request(RUN_ID_REFUSAL),
+    };
+    let mut run_stopped = false;
+    let mut run_controls_disabled = false;
+    if !run_id.is_empty() {
+        let response = control_ai_run(
+            StateExtractor(state.clone()),
+            ExtensionExtractor(user.clone()),
+            headers.clone(),
+            PathExtractor(run_id.to_owned()),
+            Json(json!({ "action": "stop" })),
+        )
+        .await;
+        let (status, payload) = response_to_status_and_json(response).await;
+        match run_stop_outcome(status, &payload) {
+            RunStopOutcome::Stopped => run_stopped = true,
+            RunStopOutcome::AlreadyEnded => {}
+            RunStopOutcome::ControlsDisabled => run_controls_disabled = true,
+            RunStopOutcome::Refused => {
+                return owner_json_response_to_envelope(ACTION, user, status, payload)
+            }
+        }
+    }
+    let response = close_browser_session(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(session_id.to_owned()),
+    )
+    .await;
+    let (status, mut payload) = response_to_status_and_json(response).await;
+    if status.is_success() {
+        payload = json!({ "data": { "closed": true, "runStopped": run_stopped } });
+        if run_controls_disabled {
+            payload["data"]["runControlsDisabled"] = Value::Bool(true);
+        }
+    }
+    owner_json_response_to_envelope(ACTION, user, status, payload)
 }
 
 fn parse_browser_profile_scope(value: &str) -> Option<BrowserProfileScope> {
@@ -5309,6 +5473,27 @@ pub(super) async fn dispatch_browser_create_session(
     owner_json_response_to_envelope("browser_session.create", user, status, payload)
 }
 
+pub(super) async fn dispatch_browser_keepalive_session(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let session_id = ticket_string(input, "sessionId");
+    if session_id.is_empty() {
+        return ticket_bad_request("browser_session.keepalive requires a non-empty 'sessionId'");
+    }
+    let response = keepalive_browser_session(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(session_id.to_owned()),
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("browser_session.keepalive", user, status, payload)
+}
+
 pub(super) async fn dispatch_browser_close_session(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -5330,6 +5515,22 @@ pub(super) async fn dispatch_browser_close_session(
     owner_json_response_to_envelope("browser_session.close", user, status, payload)
 }
 
+/// The `actor` of a browser tab action: the JSON string `"human"` or `"agent"`.
+/// It is required. Omitting it is refused rather than read as the person's, so a
+/// caller that forgets to say who is asking fails closed instead of being
+/// recorded as a person during a take-over. Anything else (another string, a
+/// number, a boolean, an array, an object, `null`) is refused too, never read as
+/// the person's.
+fn ticket_tab_actor(input: &Value, action: &str) -> Result<BrowserActionActor, Response> {
+    match input.get("actor") {
+        Some(Value::String(actor)) if actor == "human" => Ok(BrowserActionActor::Human),
+        Some(Value::String(actor)) if actor == "agent" => Ok(BrowserActionActor::Agent),
+        _ => Err(ticket_bad_request(&format!(
+            "{action} requires 'actor', which must be the string 'human' or 'agent'"
+        ))),
+    }
+}
+
 pub(super) async fn dispatch_browser_create_tab(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -5340,12 +5541,20 @@ pub(super) async fn dispatch_browser_create_tab(
     if session_id.is_empty() {
         return ticket_bad_request("browser_tab.create requires a non-empty 'sessionId'");
     }
+    let actor = match ticket_tab_actor(input, "browser_tab.create") {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
     let body = NewTabBody {
         url: input.get("url").and_then(Value::as_str).map(str::to_owned),
+        actor,
     };
     let response = new_browser_tab(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
+        // D2-012, decided: the Model Plane has no credential to this gateway, so no caller
+        // class is produced here (see CallerClass); Quarry decides the agent from its token.
+        None,
         headers.clone(),
         PathExtractor(session_id.to_owned()),
         Json(body),
@@ -5366,11 +5575,19 @@ pub(super) async fn dispatch_browser_select_tab(
     if session_id.is_empty() || tab_id.is_empty() {
         return ticket_bad_request("browser_tab.select requires 'sessionId' and 'tabId'");
     }
+    let actor = match ticket_tab_actor(input, "browser_tab.select") {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
     let response = select_browser_tab(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
+        // D2-012, decided: the Model Plane has no credential to this gateway, so no caller
+        // class is produced here (see CallerClass); Quarry decides the agent from its token.
+        None,
         headers.clone(),
         PathExtractor((session_id.to_owned(), tab_id.to_owned())),
+        QueryExtractor(TabActorQuery { actor }),
     )
     .await;
     let (status, payload) = response_to_status_and_json(response).await;
@@ -5388,11 +5605,19 @@ pub(super) async fn dispatch_browser_close_tab(
     if session_id.is_empty() || tab_id.is_empty() {
         return ticket_bad_request("browser_tab.close requires 'sessionId' and 'tabId'");
     }
+    let actor = match ticket_tab_actor(input, "browser_tab.close") {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
     let response = close_browser_tab(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
+        // D2-012, decided: the Model Plane has no credential to this gateway, so no caller
+        // class is produced here (see CallerClass); Quarry decides the agent from its token.
+        None,
         headers.clone(),
         PathExtractor((session_id.to_owned(), tab_id.to_owned())),
+        QueryExtractor(TabActorQuery { actor }),
     )
     .await;
     let (status, payload) = response_to_status_and_json(response).await;
@@ -5417,14 +5642,16 @@ pub(super) async fn dispatch_browser_run_action(
     if session_id.is_empty() || action.is_none() {
         return ticket_bad_request("browser_action.run requires 'sessionId' and 'action'");
     }
-    let actor_raw = input
-        .get("actor")
-        .and_then(Value::as_str)
-        .unwrap_or("human");
-    let actor = match actor_raw {
-        "agent" => BrowserActionActor::Agent,
-        "human" => BrowserActionActor::Human,
-        _ => return ticket_bad_request("browser_action.run 'actor' must be 'human' or 'agent'"),
+    // An absent actor is the person's (the SPA's own calls omit it); a present
+    // actor that is not exactly the string "human" or "agent" is refused, never
+    // read as the person's.
+    let actor = match input.get("actor") {
+        None => BrowserActionActor::Human,
+        Some(Value::String(actor)) if actor == "human" => BrowserActionActor::Human,
+        Some(Value::String(actor)) if actor == "agent" => BrowserActionActor::Agent,
+        Some(_) => {
+            return ticket_bad_request("browser_action.run 'actor' must be 'human' or 'agent'")
+        }
     };
     let body = BrowserActionBody {
         action: action.unwrap_or(Value::Null),
@@ -5433,6 +5660,9 @@ pub(super) async fn dispatch_browser_run_action(
     let response = run_browser_action(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
+        // D2-012, decided: the Model Plane has no credential to this gateway, so no caller
+        // class is produced here (see CallerClass); Quarry decides the agent from its token.
+        None,
         headers.clone(),
         PathExtractor(session_id.to_owned()),
         Json(body),
@@ -5463,12 +5693,24 @@ pub(super) async fn dispatch_browser_set_control_mode(
     } else {
         crate::domains::browser::BrowserControlMode::AgentControl
     };
+    // WS9.I: the epoch the person saw, as a compare-and-set. Anything but a whole number is refused.
+    let expected_epoch = match input.get("expectedEpoch") {
+        None | Some(Value::Null) => None,
+        Some(value) => match value.as_u64() {
+            Some(epoch) => Some(epoch),
+            None => {
+                return ticket_bad_request(
+                    "browser_action.set_control_mode expectedEpoch must be a non-negative integer",
+                )
+            }
+        },
+    };
     let response = set_browser_control_mode(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
         headers.clone(),
         PathExtractor(session_id.to_owned()),
-        Json(BrowserControlBody { mode }),
+        Json(BrowserControlBody { mode, expected_epoch }),
     )
     .await;
     let (status, payload) = response_to_status_and_json(response).await;
@@ -6182,7 +6424,680 @@ fn social_execution(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_browser_run_start_always_forwards_an_idempotency_key() {
+        // The caller's own header wins.
+        let mut own = HeaderMap::new();
+        own.insert("idempotency-key", "caller-key".parse().unwrap());
+        let forwarded = run_start_headers(&own, "envelope-key");
+        assert_eq!(forwarded.get("idempotency-key").unwrap(), "caller-key");
+        assert_eq!(forwarded.get_all("idempotency-key").iter().count(), 1);
+
+        // Otherwise the envelope's key, when it has the accepted shape.
+        let forwarded = run_start_headers(&HeaderMap::new(), "act-123:abc");
+        assert_eq!(forwarded.get("idempotency-key").unwrap(), "act-123:abc");
+
+        // Otherwise a generated one, which Model Gateway's key shape accepts.
+        for bad in ["", "  ", "has space", "semi;colon", &"x".repeat(129)] {
+            let forwarded = run_start_headers(&HeaderMap::new(), bad);
+            let key = forwarded
+                .get("idempotency-key")
+                .expect("a generated key")
+                .to_str()
+                .unwrap();
+            assert!(key.starts_with("act-") && key.len() <= 128, "{key}");
+            assert!(key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':')));
+        }
+        let first = run_start_headers(&HeaderMap::new(), "");
+        let second = run_start_headers(&HeaderMap::new(), "");
+        assert_ne!(first.get("idempotency-key"), second.get("idempotency-key"));
+    }
+
     use super::*;
+
+    #[test]
+    fn a_tab_action_takes_human_or_agent_as_its_actor_and_nothing_else() {
+        let actor = |input: Value| ticket_tab_actor(&input, "browser_tab.select");
+        assert_eq!(
+            actor(json!({ "actor": "human" })).ok(),
+            Some(BrowserActionActor::Human)
+        );
+        assert_eq!(
+            actor(json!({ "actor": "agent" })).ok(),
+            Some(BrowserActionActor::Agent)
+        );
+        // Omitting the actor, a null, another string and every non-string value
+        // are all refused: none is read as the person's.
+        for refused in [
+            json!({}),
+            json!({ "actor": null }),
+            json!({ "actor": "system" }),
+            json!({ "actor": "" }),
+            json!({ "actor": "Agent" }),
+            json!({ "actor": 1 }),
+            json!({ "actor": 0 }),
+            json!({ "actor": true }),
+            json!({ "actor": false }),
+            json!({ "actor": ["agent"] }),
+            json!({ "actor": ["human"] }),
+            json!({ "actor": { "kind": "agent" } }),
+        ] {
+            let response =
+                actor(refused.clone()).expect_err("a missing or unknown actor is refused");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{refused}");
+        }
+    }
+
+    /// A Quarry that knows one run (`run-1`, one tab `tab-1`) in the given control
+    /// mode, answering every tab route.
+    async fn mount_tab_run(quarry: &wiremock::MockServer, control_mode: &str) {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, ResponseTemplate,
+        };
+
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/agent/runs/run-1/browser-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "runId": "run-1", "controlMode": control_mode, "tabs": [] }
+            })))
+            .mount(quarry)
+            .await;
+        let tabs = ResponseTemplate::new(200).set_body_json(json!({ "data": { "tabs": [] } }));
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/agent/runs/run-1/tabs/tab-1/select"))
+            .respond_with(tabs.clone())
+            .mount(quarry)
+            .await;
+        Mock::given(wm_method("DELETE"))
+            .and(wm_path("/v1/agent/runs/run-1/tabs/tab-1"))
+            .respond_with(tabs)
+            .mount(quarry)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/agent/runs/run-1/tabs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "tab": { "tabId": "tab-2" }, "tabs": [] }
+            })))
+            .mount(quarry)
+            .await;
+    }
+
+    /// What Quarry was asked to change: method, path with query, and JSON body.
+    async fn quarry_mutations(quarry: &wiremock::MockServer) -> Vec<(String, String, Value)> {
+        quarry
+            .received_requests()
+            .await
+            .expect("recorded Quarry requests")
+            .into_iter()
+            .filter(|request| request.method.as_str() != "GET")
+            .map(|request| {
+                (
+                    request.method.to_string(),
+                    match request.url.query() {
+                        Some(query) => format!("{}?{query}", request.url.path()),
+                        None => request.url.path().to_owned(),
+                    },
+                    serde_json::from_slice(&request.body).unwrap_or(Value::Null),
+                )
+            })
+            .collect()
+    }
+
+    fn tab_dispatch_user() -> crate::middleware::AuthenticatedUser {
+        crate::middleware::AuthenticatedUser {
+            user_id: "user-owner".to_owned(),
+            user_email: "owner@example.test".to_owned(),
+            user_name: "owner".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: None,
+            active_org_id: Some("org-owner".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-owner".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    /// Runs the three tab dispatchers with `extra` merged into each input and
+    /// returns their statuses in the order create, select, close.
+    async fn dispatch_tab_actions(state: &AppState, extra: Value) -> [StatusCode; 3] {
+        let user = tab_dispatch_user();
+        let headers = HeaderMap::new();
+        let with_extra = |mut base: Value| {
+            if let (Some(base), Some(extra)) = (base.as_object_mut(), extra.as_object()) {
+                base.extend(extra.clone());
+            }
+            base
+        };
+        let create = dispatch_browser_create_tab(
+            state,
+            &user,
+            &headers,
+            &with_extra(json!({ "sessionId": "run-1" })),
+        )
+        .await;
+        let select = dispatch_browser_select_tab(
+            state,
+            &user,
+            &headers,
+            &with_extra(json!({ "sessionId": "run-1", "tabId": "tab-1" })),
+        )
+        .await;
+        let close = dispatch_browser_close_tab(
+            state,
+            &user,
+            &headers,
+            &with_extra(json!({ "sessionId": "run-1", "tabId": "tab-1" })),
+        )
+        .await;
+        [create.status(), select.status(), close.status()]
+    }
+
+    #[tokio::test]
+    async fn the_tab_dispatchers_carry_actor_agent_to_quarry_as_the_initiator_hint() {
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "agent_control").await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        assert_eq!(
+            dispatch_tab_actions(&state, json!({ "actor": "agent" })).await,
+            [StatusCode::OK; 3]
+        );
+        let mutations = quarry_mutations(&quarry).await;
+        assert_eq!(
+            mutations
+                .iter()
+                .map(|(method, target, _)| (method.as_str(), target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("POST", "/v1/agent/runs/run-1/tabs"),
+                ("POST", "/v1/agent/runs/run-1/tabs/tab-1/select?initiatedBy=agent"),
+                ("DELETE", "/v1/agent/runs/run-1/tabs/tab-1?initiatedBy=agent"),
+            ]
+        );
+        assert_eq!(mutations[0].2["initiatedBy"], "agent", "{:?}", mutations[0]);
+    }
+
+    #[tokio::test]
+    async fn the_tab_dispatchers_send_a_persons_calls_without_a_hint() {
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "human_takeover").await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        assert_eq!(
+            dispatch_tab_actions(&state, json!({ "actor": "human" })).await,
+            [StatusCode::OK; 3]
+        );
+        let mutations = quarry_mutations(&quarry).await;
+        assert_eq!(
+            mutations
+                .iter()
+                .map(|(method, target, _)| (method.as_str(), target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("POST", "/v1/agent/runs/run-1/tabs"),
+                ("POST", "/v1/agent/runs/run-1/tabs/tab-1/select"),
+                ("DELETE", "/v1/agent/runs/run-1/tabs/tab-1"),
+            ]
+        );
+        assert!(mutations[0].2.get("initiatedBy").is_none(), "{:?}", mutations[0]);
+    }
+
+    #[tokio::test]
+    async fn a_models_tab_dispatch_is_refused_during_a_takeover_before_it_reaches_quarry() {
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "human_takeover").await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        assert_eq!(
+            dispatch_tab_actions(&state, json!({ "actor": "agent" })).await,
+            [StatusCode::CONFLICT; 3]
+        );
+        assert!(
+            quarry_mutations(&quarry).await.is_empty(),
+            "a refused tab call never reaches Quarry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tab_dispatch_without_a_usable_actor_never_reaches_quarry() {
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "human_takeover").await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        for extra in [
+            json!({}),
+            json!({ "actor": null }),
+            json!({ "actor": 1 }),
+            json!({ "actor": true }),
+            json!({ "actor": ["agent"] }),
+            json!({ "actor": "system" }),
+        ] {
+            assert_eq!(
+                dispatch_tab_actions(&state, extra.clone()).await,
+                [StatusCode::BAD_REQUEST; 3],
+                "{extra}"
+            );
+        }
+        assert!(
+            quarry.received_requests().await.expect("recorded").is_empty(),
+            "an unlabelled tab call is refused before Quarry is asked anything"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_browser_action_with_a_non_string_actor_is_refused_not_read_as_human() {
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "human_takeover").await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let user = tab_dispatch_user();
+        let headers = HeaderMap::new();
+
+        for actor in [
+            json!(null),
+            json!(1),
+            json!(true),
+            json!(["agent"]),
+            json!({ "kind": "agent" }),
+            json!("system"),
+        ] {
+            let response = dispatch_browser_run_action(
+                &state,
+                &user,
+                &headers,
+                &json!({
+                    "sessionId": "run-1",
+                    "action": { "type": "click", "selector": "#go" },
+                    "actor": actor,
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{actor}");
+        }
+        assert!(
+            quarry.received_requests().await.expect("recorded").is_empty(),
+            "a malformed actor is refused before Quarry is asked anything"
+        );
+    }
+
+    /// What model-gateway's run-control endpoint answers (412) for a zero-data-retention
+    /// organization: the exact text of its `browser_run.rs` refusal, as a bare string.
+    fn zdr_refusal_body() -> Value {
+        json!({
+            "error": "ZDR browser-run controls are disabled until the durable run lifecycle is bypassed"
+        })
+    }
+
+    #[test]
+    fn a_failed_stop_is_only_fine_when_the_run_is_gone() {
+        let none = json!({});
+        for status in [StatusCode::OK, StatusCode::ACCEPTED, StatusCode::NO_CONTENT] {
+            assert_eq!(
+                run_stop_outcome(status, &none),
+                RunStopOutcome::Stopped,
+                "{status}"
+            );
+        }
+        for status in [StatusCode::NOT_FOUND, StatusCode::CONFLICT] {
+            assert_eq!(
+                run_stop_outcome(status, &none),
+                RunStopOutcome::AlreadyEnded,
+                "{status}"
+            );
+        }
+        // ZDR's refusal of run controls: nobody can stop the run, so the close goes ahead.
+        assert_eq!(
+            run_stop_outcome(StatusCode::PRECONDITION_FAILED, &zdr_refusal_body()),
+            RunStopOutcome::ControlsDisabled
+        );
+        // Any other 412 (a failed precondition on the cancel itself, a bare 412, an
+        // error object with some other text) says nothing about run controls being
+        // off: the run may still be going.
+        for other in [
+            none.clone(),
+            json!({ "error": "run is not in a cancellable state" }),
+            json!({ "error": { "code": "run_control_refused", "message": "refused" } }),
+            json!({ "error": "browser_approval_continuation_unavailable" }),
+            json!({ "message": "ZDR browser-run controls are disabled" }),
+        ] {
+            assert_eq!(
+                run_stop_outcome(StatusCode::PRECONDITION_FAILED, &other),
+                RunStopOutcome::Refused,
+                "{other}"
+            );
+        }
+        // The body of a 404 or a 409 is not looked at.
+        assert_eq!(
+            run_stop_outcome(StatusCode::NOT_FOUND, &zdr_refusal_body()),
+            RunStopOutcome::AlreadyEnded
+        );
+        // Everything else may leave the run going, including a missing grant (403),
+        // a missing sign-in (401) and every 5xx.
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert_eq!(
+                run_stop_outcome(status, &zdr_refusal_body()),
+                RunStopOutcome::Refused,
+                "{status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn leaving_a_blocked_site_refuses_a_malformed_request_before_anything_upstream() {
+        let quarry = wiremock::MockServer::start().await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let user = tab_dispatch_user();
+        let headers = HeaderMap::new();
+
+        for input in [
+            json!({}),
+            json!({ "sessionId": "" }),
+            json!({ "sessionId": "   " }),
+            json!({ "sessionId": 7 }),
+            json!({ "runId": "run-1" }),
+            json!({ "sessionId": "run-1", "runId": "" }),
+            json!({ "sessionId": "run-1", "runId": 7 }),
+            json!({ "sessionId": "run-1", "runId": ["run-1"] }),
+        ] {
+            let response =
+                dispatch_browser_blocked_try_other_source(&state, &user, &headers, &input).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{input}");
+        }
+        assert!(
+            quarry
+                .received_requests()
+                .await
+                .expect("recorded")
+                .is_empty(),
+            "a malformed request is refused before Quarry is asked anything"
+        );
+    }
+
+    #[tokio::test]
+    async fn leaving_a_blocked_site_with_no_run_closes_the_session_and_says_no_run_was_stopped() {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, ResponseTemplate,
+        };
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "agent_control").await;
+        Mock::given(wm_method("DELETE"))
+            .and(wm_path("/v1/agent/runs/run-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {} })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let user = tab_dispatch_user();
+
+        let response = dispatch_browser_blocked_try_other_source(
+            &state,
+            &user,
+            &HeaderMap::new(),
+            &json!({ "sessionId": "run-1" }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let (_, body) = response_to_status_and_json(response).await;
+        assert_eq!(body["data"]["actionId"], "browser.blocked.try_other_source");
+        assert_eq!(body["data"]["status"], "completed");
+        assert_eq!(
+            body["data"]["result"],
+            json!({ "closed": true, "runStopped": false })
+        );
+        let deletes: Vec<String> = quarry
+            .received_requests()
+            .await
+            .expect("recorded")
+            .into_iter()
+            .filter(|request| request.method.as_str() == "DELETE")
+            .map(|request| request.url.path().to_owned())
+            .collect();
+        assert_eq!(
+            deletes,
+            ["/v1/agent/runs/run-1"],
+            "the session, and only it, is closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn leaving_a_blocked_site_reports_a_session_that_would_not_close() {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, ResponseTemplate,
+        };
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "agent_control").await;
+        Mock::given(wm_method("DELETE"))
+            .and(wm_path("/v1/agent/runs/run-1"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+                "error": { "code": "unavailable", "message": "closing is down" }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        let response = dispatch_browser_blocked_try_other_source(
+            &state,
+            &tab_dispatch_user(),
+            &HeaderMap::new(),
+            &json!({ "sessionId": "run-1" }),
+        )
+        .await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a close that failed is not reported as left"
+        );
+    }
+
+    /// Everything the stop path talks to, with the run-control endpoint answering
+    /// `control_status`: auth-core's plane-token endpoints, model-gateway's run read
+    /// model (the ownership check) for `run_id` and its run-control endpoint, and
+    /// Quarry's session close for `run-1`. Returns the state to dispatch with plus the
+    /// three servers, so a test can read what each was asked.
+    async fn stop_path_upstreams(
+        run_id: &str,
+        control_status: u16,
+        refusal_body: Value,
+    ) -> (
+        AppState,
+        wiremock::MockServer,
+        wiremock::MockServer,
+        wiremock::MockServer,
+    ) {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path, path_regex},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(path_regex(r"^/api/[a-z-]+/token$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "token": "t" })))
+            .mount(&auth)
+            .await;
+        let model = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path(format!("/v1/runs/{run_id}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "run": { "run_id": run_id, "status": "running" } })),
+            )
+            .mount(&model)
+            .await;
+        let control = if (200..300).contains(&control_status) {
+            ResponseTemplate::new(control_status).set_body_json(json!({ "data": { "ok": true } }))
+        } else {
+            ResponseTemplate::new(control_status).set_body_json(refusal_body)
+        };
+        Mock::given(wm_method("POST"))
+            .and(wm_path(format!("/v1/browser/runs/{run_id}/control")))
+            .respond_with(control)
+            .mount(&model)
+            .await;
+        let quarry = MockServer::start().await;
+        mount_tab_run(&quarry, "agent_control").await;
+        Mock::given(wm_method("DELETE"))
+            .and(wm_path("/v1/agent/runs/run-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {} })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.model_gateway_url = model.uri();
+        state.quarry_edge_url = quarry.uri();
+        (state, auth, model, quarry)
+    }
+
+    async fn requests_of(server: &wiremock::MockServer, method: &str) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .into_iter()
+            .filter(|request| request.method.as_str() == method)
+            .map(|request| request.url.path().to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn leaving_a_blocked_site_stops_the_named_run_then_closes_the_named_session() {
+        // The run id and the session id differ on purpose: the two are authorized
+        // separately and not matched against each other, each acts on its own id.
+        let (state, _auth, model, quarry) = stop_path_upstreams("run-2", 200, json!({})).await;
+
+        let response = dispatch_browser_blocked_try_other_source(
+            &state,
+            &tab_dispatch_user(),
+            &HeaderMap::new(),
+            &json!({ "sessionId": "run-1", "runId": "run-2" }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let (_, body) = response_to_status_and_json(response).await;
+        assert_eq!(
+            body["data"]["result"],
+            json!({ "closed": true, "runStopped": true })
+        );
+        assert_eq!(
+            requests_of(&model, "POST").await,
+            ["/v1/browser/runs/run-2/control"]
+        );
+        let stop = model
+            .received_requests()
+            .await
+            .expect("recorded")
+            .into_iter()
+            .find(|request| request.method.as_str() == "POST")
+            .expect("a stop was sent");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&stop.body).expect("json body"),
+            json!({ "action": "stop" })
+        );
+        assert_eq!(requests_of(&quarry, "DELETE").await, ["/v1/agent/runs/run-1"]);
+    }
+
+    #[tokio::test]
+    async fn leaving_a_blocked_site_closes_when_the_run_is_gone_or_its_controls_are_off() {
+        // 404 and 409: the run already ended. 412: zero data retention turns every
+        // run control off, so nobody can stop it and the close is the only way off.
+        for (control_status, run_stopped, controls_disabled) in
+            [(404, false, false), (409, false, false), (412, false, true)]
+        {
+            let refusal = if control_status == 412 {
+                zdr_refusal_body()
+            } else {
+                json!({ "error": "not found or not running" })
+            };
+            let (state, _auth, model, quarry) =
+                stop_path_upstreams("run-2", control_status, refusal).await;
+
+            let response = dispatch_browser_blocked_try_other_source(
+                &state,
+                &tab_dispatch_user(),
+                &HeaderMap::new(),
+                &json!({ "sessionId": "run-1", "runId": "run-2" }),
+            )
+            .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{control_status}");
+            let (_, body) = response_to_status_and_json(response).await;
+            let mut expected = json!({ "closed": true, "runStopped": run_stopped });
+            if controls_disabled {
+                expected["runControlsDisabled"] = json!(true);
+            }
+            assert_eq!(body["data"]["result"], expected, "{control_status}");
+            assert_eq!(
+                requests_of(&model, "POST").await,
+                ["/v1/browser/runs/run-2/control"],
+                "{control_status}: the stop was tried once"
+            );
+            assert_eq!(
+                requests_of(&quarry, "DELETE").await,
+                ["/v1/agent/runs/run-1"],
+                "{control_status}: the session was closed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn leaving_a_blocked_site_does_not_close_when_a_run_that_may_still_go_cannot_be_stopped() {
+        // 412 is in the list with a body that is not the ZDR refusal: a failed
+        // precondition on the cancel itself says nothing about run controls being off.
+        for control_status in [401, 403, 412, 500, 502, 503] {
+            let (state, _auth, model, quarry) = stop_path_upstreams(
+                "run-2",
+                control_status,
+                json!({ "error": "run is not in a cancellable state" }),
+            )
+            .await;
+
+            let response = dispatch_browser_blocked_try_other_source(
+                &state,
+                &tab_dispatch_user(),
+                &HeaderMap::new(),
+                &json!({ "sessionId": "run-1", "runId": "run-2" }),
+            )
+            .await;
+
+            assert!(
+                !response.status().is_success(),
+                "{control_status}: reported as {}",
+                response.status()
+            );
+            assert_eq!(
+                requests_of(&model, "POST").await,
+                ["/v1/browser/runs/run-2/control"],
+                "{control_status}: the stop was tried"
+            );
+            assert!(
+                requests_of(&quarry, "DELETE").await.is_empty(),
+                "{control_status}: the session stays open so the run is not left unattended"
+            );
+        }
+    }
 
     #[test]
     fn audio_dictate_forwards_safari_recordings_and_the_retention_flag() {

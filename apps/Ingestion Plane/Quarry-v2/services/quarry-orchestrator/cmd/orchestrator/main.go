@@ -5,8 +5,11 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -63,6 +66,11 @@ func main() {
 	// X-Quarry-Run-Sig so a leaked runtime bearer can't forge a tenant org.
 	edgeRunSecret := os.Getenv("QUARRY_INTERNAL_SECRET")
 
+	// A bad stop bound is a start-up error naming the variable, checked before the dial.
+	workerStopTimeout, err := loadWorkerStopTimeout(os.Getenv)
+	if err != nil {
+		log.Fatal().Err(err).Msg("worker stop timeout")
+	}
 	c, err := client.Dial(client.Options{HostPort: hostPort, Namespace: namespace})
 	if err != nil {
 		log.Fatal().Err(err).Msg("temporal dial")
@@ -80,7 +88,9 @@ func main() {
 		EdgeRunSecret:     edgeRunSecret,
 	})
 
-	w := worker.New(c, TaskQueue, worker.Options{})
+	// WorkerStopTimeout bounds how long a stop waits for in-flight activities
+	// (they are cancelled first). Zero would not wait at all.
+	w := worker.New(c, TaskQueue, worker.Options{WorkerStopTimeout: workerStopTimeout})
 	// Workflow functions take `*activities.Activities` as a third
 	// parameter so they can call activity methods (`a.RunPage`, etc.)
 	// directly. The Temporal Go SDK can't serialize that pointer over
@@ -115,6 +125,14 @@ func main() {
 		},
 		workflow.RegisterOptions{Name: "ChangeMonitorWF"},
 	)
+	// ScheduledJobWF is the schedule action of a scrape, crawl or batch
+	// schedule (WS15.S2). Dark until QUARRY_SCHEDULED_JOBS_ENABLED is 1 in control.
+	w.RegisterWorkflowWithOptions(
+		func(ctx workflow.Context, in workflows.ScheduledJobInput) error {
+			return workflows.ScheduledJobWF(ctx, in, acts)
+		},
+		workflow.RegisterOptions{Name: "ScheduledJobWF"},
+	)
 	w.RegisterActivity(acts)
 
 	// Root context cancelled on SIGINT / SIGTERM. All long-running
@@ -129,27 +147,49 @@ func main() {
 	)
 	defer rootCancel()
 
+	// Ad-hoc jobs dispatcher: polls control for newly POSTed jobs (the
+	// REST entrypoint verevon's onboarding crawl-preview uses) and
+	// starts the matching Temporal workflow. Without this, ad-hoc jobs
+	// never execute — only scheduled cron jobs would.
+	// An unparsable or disabled bound is a start-up error naming the variable:
+	// a crawl bound that cannot be read must not silently become "no bound".
+	crawlLimits, err := jobs.LoadCrawlLimits()
+	if err != nil {
+		log.Fatal().Err(err).Msg("crawl limits")
+	}
+	claimBatch, err := jobs.LoadClaimBatch()
+	if err != nil {
+		log.Fatal().Err(err).Msg("job claim batch")
+	}
+
+	// The schedule reconciler resolves a crawl schedule's bounds with the same
+	// limits the dispatcher uses (WS15.S2), so it starts after they are loaded.
 	schedMgr := schedules.New(c, schedules.Config{
 		ControlBaseURL:    controlURL,
 		ControlAuthToken:  controlToken,
 		ControlHMACSecret: edgeRunSecret,
 		TaskQueue:         TaskQueue,
 		Interval:          30 * time.Second,
+		CrawlLimits:       crawlLimits,
 	})
 	go schedMgr.Run(rootCtx)
 
-	// Ad-hoc jobs dispatcher: polls control for newly POSTed jobs (the
-	// REST entrypoint verevon's onboarding crawl-preview uses) and
-	// starts the matching Temporal workflow. Without this, ad-hoc jobs
-	// never execute — only scheduled cron jobs would.
 	jobsMgr := jobs.New(c, jobs.Config{
 		ControlBaseURL:    controlURL,
 		ControlAuthToken:  controlToken,
 		ControlHMACSecret: edgeRunSecret,
 		TaskQueue:         TaskQueue,
 		Interval:          2 * time.Second,
+		CrawlLimits:       crawlLimits,
+		ClaimBatch:        claimBatch,
+		ControlLoop:       jobs.ControlLoopEnabled(),
 	})
 	go jobsMgr.Run(rootCtx)
+	// Job control loop (WS15.L2): applies the pause, resume and cancel requests
+	// control records, and finalizes jobs whose workflow ended unreported. Off by default.
+	if jobs.ControlLoopEnabled() {
+		go jobsMgr.RunControl(rootCtx)
+	}
 
 	// Use rootCtx.Done() instead of worker.InterruptCh() so signal
 	// handling has a single owner. Previously worker.InterruptCh() and
@@ -171,6 +211,11 @@ func main() {
 	// returns an error on its own. Either path triggers shutdown.
 	select {
 	case <-rootCtx.Done():
+		// The worker stops on the cancel above. The SDK stops the workflow worker and
+		// the activity worker one after the other, each for at most WorkerStopTimeout,
+		// so main waits for twice the bound plus the slack. Returning earlier would end
+		// the process mid-activity.
+		awaitWorkerStop(workerErr, 2*workerStopTimeout+workerStopSlack)
 	case err := <-workerErr:
 		if err != nil {
 			log.Error().Err(err).Msg("worker run failed")
@@ -184,4 +229,47 @@ func envOr(k, d string) string {
 		return v
 	}
 	return d
+}
+
+// Worker stop bound (WS6.J). On SIGTERM the worker cancels in-flight activities
+// and waits up to this long per base worker (workflow, then activity) for them
+// to return. Total wait = 2 * bound + slack <= 2*25 + 5 = 55 s, inside the
+// compose stop_grace_period (60 s).
+const (
+	envWorkerStopTimeout     = "QUARRY_ORCH_WORKER_STOP_TIMEOUT_S"
+	defaultWorkerStopTimeout = 20 * time.Second
+	maxWorkerStopTimeoutS    = 25
+	workerStopSlack          = 5 * time.Second
+)
+
+// loadWorkerStopTimeout reads QUARRY_ORCH_WORKER_STOP_TIMEOUT_S: whole seconds
+// from 1 to 25 per base worker. Unset is 20. Anything else is an error naming the
+// variable; a stop that waits for nothing, or without a bound, is never chosen
+// silently.
+func loadWorkerStopTimeout(getenv func(string) string) (time.Duration, error) {
+	raw := strings.TrimSpace(getenv(envWorkerStopTimeout))
+	if raw == "" {
+		return defaultWorkerStopTimeout, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > maxWorkerStopTimeoutS {
+		return 0, fmt.Errorf("%s must be an integer from 1 to %d", envWorkerStopTimeout, maxWorkerStopTimeoutS)
+	}
+	return time.Duration(n) * time.Second, nil
+}
+
+// awaitWorkerStop blocks until the worker Run has returned, or until bound has
+// passed, so that main exits in either case.
+func awaitWorkerStop(workerErr <-chan error, bound time.Duration) {
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	select {
+	case err := <-workerErr:
+		if err != nil {
+			log.Error().Err(err).Msg("worker run failed during stop")
+		}
+		log.Info().Msg("worker stopped")
+	case <-timer.C:
+		log.Warn().Dur("bound", bound).Msg("worker did not stop within its bound; exiting")
+	}
 }

@@ -29,7 +29,7 @@ import {
   type NavbarPayload,
 } from '@/shared/api/navbar-client'
 import { cn } from '@/shared/lib/cn'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError } from '@/shared/i18n'
 import { shouldShowWorkspaceAdminNavigation } from '@/shared/session/access'
 import { getSession } from '@/shared/session/session-store'
 
@@ -196,7 +196,7 @@ function CalendarDropdown(props: {
       setError(null)
       props.onRefresh?.()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : i18n.tr('Kalenderhendelsen kunne ikke lagres.', 'Calendar event could not be saved.'))
+      setError(translateApiError(reason, i18n.tr, { no: 'Kalenderhendelsen kunne ikke lagres.', en: 'Calendar event could not be saved.' }))
     }
   }
 
@@ -215,7 +215,7 @@ function CalendarDropdown(props: {
       setError(null)
       props.onRefresh?.()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : i18n.tr('Kalendernotatet kunne ikke lagres.', 'Calendar note could not be saved.'))
+      setError(translateApiError(reason, i18n.tr, { no: 'Kalendernotatet kunne ikke lagres.', en: 'Calendar note could not be saved.' }))
     }
   }
 

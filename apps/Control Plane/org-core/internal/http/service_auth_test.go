@@ -200,6 +200,8 @@ func TestOrgServiceScopeForRequest(t *testing.T) {
 		{method: http.MethodPost, path: "/api/v1/organizations/org-1/plan", want: []string{"org:settings:write:self"}},
 		{method: http.MethodPatch, path: "/api/v1/organizations/org-1/settings", want: []string{"org:settings:write:self"}},
 		{method: http.MethodPatch, path: "/api/v1/organizations/org-1/brreg", want: []string{"org:settings:write:self"}},
+		{method: http.MethodPatch, path: "/api/v1/organizations/org-1/website", want: []string{"org:settings:write:self"}},
+		{method: http.MethodGet, path: "/api/v1/organizations/org-1/website", want: []string{"org:website:read"}},
 		{method: http.MethodGet, path: "/orgs/org-1", want: []string{"org:read:self", "org:read:any"}},
 		{method: http.MethodGet, path: "/orgs", want: []string{"org:read:self"}},
 		{method: http.MethodPost, path: "/orgs", want: []string{"org:provision:self"}},

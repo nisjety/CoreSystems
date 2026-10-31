@@ -30,8 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
-use quarry_core::ids::kinds::RequestKind;
-use quarry_core::resources::{JobResourceKind, OverlapPolicy};
+use quarry_core::resources::OverlapPolicy;
 
 use crate::state::AppState;
 
@@ -39,60 +38,99 @@ use crate::state::AppState;
 // Request bodies
 // =============================================================================
 
-/// `POST /v1/schedules` body. Exactly one of `cron` / `schedule_at`
-/// must be set — the backend enforces the constraint.
+/// `POST /v1/schedules` body (WS15.S1). Two shapes share it:
+///
+/// * a change monitor: `preset` (hourly | daily | weekly) and the URL to watch
+///   (`target_ref`, or `config.url`). A monitor starts when created, as before;
+///   its posture is stamped (WS4.H);
+/// * an executable schedule: `kind` (scrape | crawl | batch), a 5-field `cron`,
+///   and a `config` holding `url` (scrape, crawl) or `urls` (batch). It is
+///   created disabled unless the caller sends `activate: true`, and only a user
+///   token may activate it.
+///
+/// `schedule_at` is not supported yet and answers 400 `unsupported_schedule_at`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CreateScheduleRequest {
     #[serde(default)]
     pub name: String,
-    /// Job kind for the legacy cron/schedule_at path. Optional because a
-    /// W2 change-monitor create (signalled by `preset`) isn't a
-    /// job-resource kind — it maps to the `change_monitor` target kind.
-    #[serde(default)]
-    pub kind: Option<JobResourceKind>,
+    /// `scrape` | `crawl` | `batch` for an executable schedule. Any other value
+    /// answers 400 `unsupported_schedule_kind`. Absent for a change monitor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cron: Option<String>,
+    /// One-shot timestamps are not supported yet (400 `unsupported_schedule_at`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// IANA zone the cron is read in. Control defaults to UTC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
     #[serde(default)]
     pub overlap_policy: OverlapPolicy,
     #[serde(default)]
     pub catchup_window_s: u64,
     #[serde(default)]
     pub pause_on_failure: bool,
-    /// W2 recurring change-monitoring. When `preset` is set the request is
-    /// a change-monitor create: `target_ref` (the URL to watch) is
-    /// required and the cron is derived server-side from the preset.
+    /// W2 recurring change-monitoring. When `preset` is set the request is a
+    /// change-monitor create: `target_ref` (the URL to watch) is required and the
+    /// cron is derived server-side from the preset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_ref: Option<String>,
-    /// Per-kind payload (seed URL + max_pages for crawl, query for
-    /// search, etc.). Mirrors the inline request body the schedule
-    /// would otherwise be triggering.
+    /// Per-kind payload: `url` for scrape and crawl, `urls` for batch, and
+    /// optional `max_pages`, `max_depth`, `ingest`.
     #[serde(default)]
     pub config: serde_json::Value,
+    /// Start the schedule when it is created. Honoured only for a user token; a
+    /// service principal's value is ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activate: Option<bool>,
+    /// The caller may DECLARE zero data retention for a change-monitor create. A
+    /// declaration only raises the stamp: [`Claims::effective_zdr`] never lets a body
+    /// lower what a user token's floor requires. It is how a user of a standard
+    /// organization says this monitor is ZDR. (A service principal cannot reach this
+    /// route: `require_service_route_scope` answers 403 first.) Never forwarded as is
+    /// (`skip_serializing`): only the stamped [`ControlScheduleCreate`] carries a
+    /// posture to control.
+    #[serde(default, skip_serializing)]
+    pub zdr: Option<bool>,
 }
 
-/// Control-plane-facing schedule create body. Matches the Go
-/// `store.Schedule` json tags exactly — including `org_id`, which control's
-/// Validate requires in the BODY (the ?org_id query param is advisory). We
-/// stamp org_id from the verified JWT claim, never the client body.
+/// Control-plane-facing schedule create body. Matches the Go `store.Schedule` json
+/// tags. The org is carried on the signed query (control takes it from there and
+/// ignores a body org_id); `org_id` here is the verified claim for older readers.
 #[derive(Debug, Serialize)]
 struct ControlScheduleCreate {
     org_id: String,
     /// user_id of the creator (verified JWT). Control rides this into the
-    /// change-monitor workflow so the in-product notification on a detected
-    /// change reaches the person who set up the monitor.
+    /// change-monitor workflow so the in-product notification on a detected change
+    /// reaches the person who set up the monitor.
     #[serde(skip_serializing_if = "String::is_empty")]
     created_by: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     cron: Option<String>,
     target_kind: String,
     target_ref: String,
-    enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     preset: Option<String>,
+    config: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timezone: Option<String>,
+    overlap_policy: OverlapPolicy,
+    catchup_window_s: u64,
+    pause_on_failure: bool,
+    /// Control starts the schedule only when this is true.
+    activate: bool,
+    /// The caller's Zero Data Retention posture, STAMPED AT CREATE (WS4.H,
+    /// quarry-control migration 023). Set on a change-monitor body only; a legacy
+    /// executable create never carries it. It is [`Claims::effective_zdr`] of the
+    /// body's declared `zdr`: the body can raise the posture, never lower the
+    /// token's floor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    zdr: Option<bool>,
 }
 
 /// `POST /v1/schedules/:id/backfill` body. The Temporal `backfill`
@@ -119,6 +157,12 @@ fn err_response(request_id: &str, err: QuarryError) -> (StatusCode, Json<Envelop
     )
 }
 
+/// The machine `reason` control attached to its error (`error.details.reason`), if any.
+fn control_reason(body: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(body).ok()?;
+    parsed["error"]["details"]["reason"].as_str().map(str::to_owned)
+}
+
 /// Forward a JSON body to control plane. Generic over both the request
 /// and response shape — the schedule routes all share the same wire
 /// pattern (POST → JSON → typed response).
@@ -143,7 +187,7 @@ where
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
-        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {e}")))?;
+        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {}", e.without_url())))?;
 
     // Serialize the body up front so we can HMAC-hash it AND attach
     // it to the request — both paths see the exact same bytes.
@@ -184,7 +228,7 @@ where
     let resp = req.send().await.map_err(|e| {
         QuarryError::new(
             ErrorCode::DriverFailed,
-            format!("control-plane {method} {path} failed: {e}"),
+            format!("control-plane {method} {path} failed: {}", e.without_url()),
         )
     })?;
     let status = resp.status();
@@ -196,10 +240,14 @@ where
             401 | 403 => ErrorCode::Forbidden,
             _ => ErrorCode::DriverFailed,
         };
-        return Err(QuarryError::new(
+        let mut err = QuarryError::new(
             code,
             format!("control-plane {method} {path} returned {status}: {body}"),
-        ));
+        );
+        if let Some(reason) = control_reason(&body) {
+            err = err.with_details(serde_json::json!({ "reason": reason }));
+        }
+        return Err(err);
     }
     // Read the body as text first so we can tolerate three shapes:
     //   * empty body (204 No Content from DELETE / no-content POSTs),
@@ -210,7 +258,7 @@ where
     let text = resp.text().await.map_err(|e| {
         QuarryError::new(
             ErrorCode::Internal,
-            format!("control-plane {method} {path} read: {e}"),
+            format!("control-plane {method} {path} read: {}", e.without_url()),
         )
     })?;
     let inner = if text.trim().is_empty() {
@@ -236,26 +284,79 @@ where
 // Handlers
 // =============================================================================
 
+/// A 400 with a stable machine reason in `error.details.reason`.
+fn bad_schedule(request_id: &str, reason: &str, message: impl Into<String>) -> (StatusCode, Json<Envelope<()>>) {
+    err_response(
+        request_id,
+        QuarryError::new(ErrorCode::BadRequest, message)
+            .with_details(serde_json::json!({ "reason": reason })),
+    )
+}
+
+/// Accepts an http or https URL with a host and no credentials, as control does.
+fn checked_http_url(raw: &str) -> Option<String> {
+    let parsed = url::Url::parse(raw.trim()).ok()?;
+    let scheme_ok = matches!(parsed.scheme(), "http" | "https");
+    let plain = parsed.username().is_empty() && parsed.password().is_none();
+    (scheme_ok && plain && parsed.host_str().is_some()).then(|| parsed.to_string())
+}
+
+/// Checks the per-kind config at the edge (control checks it again) and returns the
+/// `target_ref` to store: the URL, or the first URL of a batch.
+fn schedule_target(kind: &str, config: &serde_json::Value) -> Result<String, (&'static str, String)> {
+    if kind == "batch" {
+        let urls = config
+            .get("urls")
+            .and_then(serde_json::Value::as_array)
+            .filter(|u| (1..=200).contains(&u.len()))
+            .ok_or(("invalid_config", "config.urls must hold 1 to 200 URLs".to_owned()))?;
+        let mut first = None;
+        for entry in urls {
+            let raw = entry.as_str().unwrap_or_default();
+            let ok = checked_http_url(raw)
+                .ok_or(("invalid_config", "config.urls entries must be http or https URLs without credentials".to_owned()))?;
+            first.get_or_insert(ok);
+        }
+        return Ok(first.unwrap_or_default());
+    }
+    let raw = config
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(("invalid_config", "config.url is required for this kind".to_owned()))?;
+    checked_http_url(raw).ok_or((
+        "invalid_config",
+        "config.url must be an http or https URL without credentials".to_owned(),
+    ))
+}
+
 pub async fn create_schedule(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<CreateScheduleRequest>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
+    // One posture for both uses: the refusal below and the stamp on the forwarded
+    // change-monitor schedule are the same value, so they can never disagree.
+    let zdr = claims.effective_zdr(req.zdr.unwrap_or(false));
+    crate::zdr_refusal::refuse(
+        &state,
+        &claims.org_id,
+        zdr,
+        &request_id,
+        "schedules",
+        "create",
+    )?;
 
-    // W2 change-monitoring path: `preset` signals a recurring change
-    // monitor. We build a control-facing store.Schedule body with org_id
-    // stamped from the verified JWT (never the client body) and the URL in
-    // target_ref. The cron is derived from the preset on the control side.
+    // W2 change-monitoring path: `preset` signals a recurring change monitor. The
+    // org comes from the verified JWT (never the body), the cron from the preset on
+    // the control side, and the monitor starts when created, as it always has.
     if let Some(preset) = req.preset.as_deref() {
         const PRESETS: [&str; 3] = ["hourly", "daily", "weekly"];
         if !PRESETS.contains(&preset) {
-            return Err(err_response(
+            return Err(bad_schedule(
                 &request_id,
-                QuarryError::new(
-                    ErrorCode::BadRequest,
-                    "preset must be one of hourly|daily|weekly",
-                ),
+                "invalid_preset",
+                "preset must be one of hourly|daily|weekly",
             ));
         }
         let target_ref = req
@@ -269,28 +370,34 @@ pub async fn create_schedule(
             })
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| {
-                err_response(
+                bad_schedule(
                     &request_id,
-                    QuarryError::new(
-                        ErrorCode::BadRequest,
-                        "change-monitor schedule requires target_ref (url)",
-                    ),
+                    "target_ref_required",
+                    "change-monitor schedule requires target_ref (url)",
                 )
             })?;
         if url::Url::parse(&target_ref).is_err() {
-            return Err(err_response(
+            return Err(bad_schedule(
                 &request_id,
-                QuarryError::new(ErrorCode::BadRequest, "target_ref must be a valid url"),
+                "invalid_target_ref",
+                "target_ref must be a valid url",
             ));
         }
         let body = ControlScheduleCreate {
             org_id: claims.org_id.clone(),
             created_by: claims.user_id.clone(),
+            name: req.name.trim().to_owned(),
             cron: None,
             target_kind: "change_monitor".to_string(),
             target_ref,
-            enabled: true,
             preset: Some(preset.to_string()),
+            config: serde_json::json!({}),
+            timezone: None,
+            overlap_policy: OverlapPolicy::default(),
+            catchup_window_s: 0,
+            pause_on_failure: false,
+            activate: true,
+            zdr: Some(zdr),
         };
         let summary = forward_json::<ControlScheduleCreate, serde_json::Value>(
             &state,
@@ -304,35 +411,63 @@ pub async fn create_schedule(
         return Ok(Json(Envelope::ok(request_id, summary)));
     }
 
-    if req.cron.is_some() == req.schedule_at.is_some() {
-        return Err(err_response(
+    // WS15.S1 executable schedule: scrape, crawl or batch, with a 5-field cron.
+    if req.schedule_at.is_some() {
+        return Err(bad_schedule(
             &request_id,
-            QuarryError::new(
-                ErrorCode::BadRequest,
-                "exactly one of `cron` / `schedule_at` must be set",
-            ),
+            "unsupported_schedule_at",
+            "schedule_at is not supported yet; use a 5-field cron",
         ));
     }
-    if let Some(cron) = req.cron.as_deref() {
-        // Basic shape check — full validation lives on the control side
-        // (the cron parser quirks are vendor-specific). Reject obvious
-        // garbage at the edge so we never round-trip on bad input.
-        if cron.split_whitespace().count() < 5 {
-            return Err(err_response(
+    let target_kind = match req.kind.as_deref().map(str::trim) {
+        Some(kind @ ("scrape" | "crawl" | "batch")) => kind.to_owned(),
+        _ => {
+            return Err(bad_schedule(
                 &request_id,
-                QuarryError::new(
-                    ErrorCode::BadRequest,
-                    "cron must be a 5- or 6-field expression",
-                ),
-            ));
+                "unsupported_schedule_kind",
+                "kind must be scrape, crawl or batch",
+            ))
         }
+    };
+    let cron = req
+        .cron
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| bad_schedule(&request_id, "cron_required", "cron is required"))?;
+    // Exactly five fields. Control accepts only five, so a six-field cron is refused here
+    // rather than failing later.
+    if cron.split_whitespace().count() != 5 {
+        return Err(bad_schedule(
+            &request_id,
+            "invalid_cron",
+            "cron must be a 5-field expression",
+        ));
     }
-    let summary = forward_json::<CreateScheduleRequest, serde_json::Value>(
+    let target_ref = schedule_target(&target_kind, &req.config)
+        .map_err(|(reason, message)| bad_schedule(&request_id, reason, message))?;
+    let body = ControlScheduleCreate {
+        org_id: claims.org_id.clone(),
+        created_by: claims.user_id.clone(),
+        name: req.name.trim().to_owned(),
+        cron: Some(cron.to_owned()),
+        target_kind,
+        target_ref,
+        preset: None,
+        config: req.config.clone(),
+        timezone: req.timezone.clone(),
+        overlap_policy: req.overlap_policy,
+        catchup_window_s: req.catchup_window_s,
+        pause_on_failure: req.pause_on_failure,
+        activate: req.activate.unwrap_or(false) && !claims.is_service(),
+        zdr: None,
+    };
+    let summary = forward_json::<ControlScheduleCreate, serde_json::Value>(
         &state,
         reqwest::Method::POST,
         "/v1/schedules",
         &claims.org_id,
-        Some(&req),
+        Some(&body),
     )
     .await
     .map_err(|e| err_response(&request_id, e))?;
@@ -344,7 +479,7 @@ pub async fn pause_schedule(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(id): Path<String>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let path = format!("/v1/schedules/{id}/pause");
     let summary = forward_json::<(), serde_json::Value>(
         &state,
@@ -363,7 +498,15 @@ pub async fn unpause_schedule(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(id): Path<String>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
+    crate::zdr_refusal::refuse_for_claims(
+        &state,
+        &claims,
+        None,
+        &request_id,
+        "schedules",
+        "unpause",
+    )?;
     let path = format!("/v1/schedules/{id}/unpause");
     let summary = forward_json::<(), serde_json::Value>(
         &state,
@@ -382,7 +525,15 @@ pub async fn trigger_schedule(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(id): Path<String>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
+    crate::zdr_refusal::refuse_for_claims(
+        &state,
+        &claims,
+        None,
+        &request_id,
+        "schedules",
+        "trigger",
+    )?;
     let path = format!("/v1/schedules/{id}/trigger");
     let summary = forward_json::<(), serde_json::Value>(
         &state,
@@ -402,7 +553,15 @@ pub async fn backfill_schedule(
     Path(id): Path<String>,
     Json(req): Json<BackfillRequest>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
+    crate::zdr_refusal::refuse_for_claims(
+        &state,
+        &claims,
+        None,
+        &request_id,
+        "schedules",
+        "backfill",
+    )?;
     if req.end_at <= req.start_at {
         return Err(err_response(
             &request_id,
@@ -430,7 +589,7 @@ pub async fn delete_schedule(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let path = format!("/v1/schedules/{id}");
     // DELETE returns no body — use forward_json with `serde_json::Value`
     // and ignore the parsed result.
@@ -451,7 +610,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn create_schedule_request_requires_cron_xor_schedule_at_check_pattern() {
+    fn create_request_serializes_cron_and_schedule_at_when_both_are_set() {
         // Pin the validation contract directly via the shape: a request
         // with both fields populated must be rejected at the route
         // layer. (Route-level test runs in integration; here we just
@@ -459,15 +618,18 @@ mod tests {
         // is the one that says "exactly one".)
         let r = CreateScheduleRequest {
             name: "n".into(),
-            kind: Some(JobResourceKind::Crawl),
+            kind: Some("crawl".into()),
             cron: Some("0 3 * * *".into()),
             schedule_at: Some(chrono::Utc::now()),
+            timezone: None,
             overlap_policy: OverlapPolicy::Skip,
             catchup_window_s: 0,
             pause_on_failure: false,
             preset: None,
             target_ref: None,
             config: serde_json::json!({}),
+            activate: None,
+            zdr: None,
         };
         // Body still serializes — the route layer rejects, not serde.
         let s = serde_json::to_string(&r).unwrap();
@@ -498,8 +660,15 @@ mod tests {
             cron: None,
             target_kind: "change_monitor".into(),
             target_ref: "https://example.com".into(),
-            enabled: true,
+            name: String::new(),
+            config: serde_json::json!({}),
+            timezone: None,
+            overlap_policy: OverlapPolicy::Skip,
+            catchup_window_s: 0,
+            pause_on_failure: false,
+            activate: true,
             preset: Some("daily".into()),
+            zdr: Some(true),
         };
         let s = serde_json::to_string(&body).unwrap();
         assert!(s.contains("\"org_id\":\"org_verevon\""));
@@ -507,8 +676,45 @@ mod tests {
         assert!(s.contains("\"target_kind\":\"change_monitor\""));
         assert!(s.contains("\"target_ref\":\"https://example.com\""));
         assert!(s.contains("\"preset\":\"daily\""));
+        // The stamp is always serialised, true and false alike (false is
+        // "stamped standard", which control keeps distinct from unstamped).
+        assert!(s.contains("\"zdr\":true"));
+        let standard = ControlScheduleCreate { zdr: Some(false), ..body };
+        assert!(serde_json::to_string(&standard).unwrap().contains("\"zdr\":false"));
         // cron omitted (derived server-side from preset).
         assert!(!s.contains("\"cron\":"));
+    }
+
+    #[test]
+    fn schedule_target_checks_the_url_shape_per_kind() {
+        let crawl = serde_json::json!({ "url": "https://example.com/docs", "max_pages": 20 });
+        assert_eq!(schedule_target("crawl", &crawl).unwrap(), "https://example.com/docs");
+        for bad in [
+            serde_json::json!({}),
+            serde_json::json!({ "url": "ftp://example.com" }),
+            serde_json::json!({ "url": "https://user:pw@example.com" }),
+            serde_json::json!({ "url": "not a url" }),
+        ] {
+            let (reason, _) = schedule_target("scrape", &bad).unwrap_err();
+            assert_eq!(reason, "invalid_config", "{bad}");
+        }
+    }
+
+    #[test]
+    fn batch_target_is_the_first_url_and_bounds_the_list() {
+        let batch = serde_json::json!({ "urls": ["https://a.example.com", "https://b.example.com"] });
+        assert_eq!(schedule_target("batch", &batch).unwrap(), "https://a.example.com/");
+        assert!(schedule_target("batch", &serde_json::json!({ "urls": [] })).is_err());
+        let too_many: Vec<String> = (0..201).map(|i| format!("https://x{i}.example.com")).collect();
+        assert!(schedule_target("batch", &serde_json::json!({ "urls": too_many })).is_err());
+    }
+
+    #[test]
+    fn control_reason_reads_the_details_token_only() {
+        let body = r#"{"error":{"code":"BAD_REQUEST","message":"x","details":{"reason":"invalid_timezone"}}}"#;
+        assert_eq!(control_reason(body).as_deref(), Some("invalid_timezone"));
+        assert_eq!(control_reason(r#"{"error":{"code":"BAD_REQUEST"}}"#), None);
+        assert_eq!(control_reason("not json"), None);
     }
 
     #[test]

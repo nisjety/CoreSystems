@@ -36,6 +36,10 @@ type DB interface {
 	// ResourceStore[Snapshot] used by MountRestore — different table, different
 	// producer. See SnapshotV2 for the coexistence rationale.
 	SnapshotsV2() SnapshotsV2Store
+	// ZdrTombstones is the metadata-only record of runs that happened under Zero
+	// Data Retention (WS4.J, migration 015). OFF BY DEFAULT: nothing writes it
+	// unless the edge's QUARRY_EDGE__ZDR_TOMBSTONE is on. See zdr_tombstones.go.
+	ZdrTombstones() ZdrTombstoneStore
 	// PurgeOrg hard-deletes every row this service holds for orgID across
 	// every org-scoped table (jobs, schedules, quarry_sources,
 	// quarry_benchmarks, quarry_idempotency_keys) — the GDPR cross-plane
@@ -79,9 +83,37 @@ type WebhookDeliveryStore interface {
 	ClaimDue(now int64, limit int) ([]WebhookDelivery, error)
 }
 
+// SchedulesStore is the schedule table. The tenant methods (GetByOrg,
+// ListByOrg, DeleteByOrg, UpdateEnabledByOrg) are the only ones the edge
+// reaches; a row that belongs to another org answers exactly like a missing
+// one. The unscoped methods (Get, List, Delete, UpdateEnabled, ListDesired)
+// serve the orchestrator reconciler and the internal source-monitor path.
 type SchedulesStore interface {
 	ResourceStore[Schedule]
 	UpdateEnabled(id quarrycontracts.ID, enabled bool) error
+	GetByOrg(id quarrycontracts.ID, orgID string) (Schedule, bool)
+	ListByOrg(orgID string, limit int, cursor string) ([]Schedule, string)
+	DeleteByOrg(id quarrycontracts.ID, orgID string) error
+	UpdateEnabledByOrg(id quarrycontracts.ID, orgID string, enabled bool) error
+	// ListDesired is the orchestrator's all-orgs read (internal path only).
+	ListDesired(limit int, cursor string) ([]Schedule, string)
+	// UpdateRuntime writes the executor's bookkeeping (WS15.S2 writes it; the
+	// method exists now so the column contract is one place).
+	UpdateRuntime(id quarrycontracts.ID, lastRunAt, nextRunAt *int64, skippedOverlap int64) error
+}
+
+// ValidationError is a schedule definition that cannot be stored. Reason is
+// a stable machine token (invalid_timezone, cadence_too_frequent, ...) that
+// the handler returns in error.details.reason; Message is for people.
+type ValidationError struct {
+	Reason  string
+	Message string
+}
+
+func (e *ValidationError) Error() string { return e.Message }
+
+func invalid(reason, format string, args ...any) error {
+	return &ValidationError{Reason: reason, Message: fmt.Sprintf(format, args...)}
 }
 
 // SourcesStore is the durable registry of recurring ingestion targets a
@@ -148,6 +180,86 @@ type JobsStore interface {
 	// tenant's job is treated as a miss, never returning a cross-tenant
 	// record. Used by createJob to de-dupe client retries.
 	FindByIdempotencyKey(orgID, key string) (Job, bool)
+
+	// ClaimAccepted leases up to limit accepted jobs to a dispatcher for
+	// `lease` and returns them, oldest first within each organization and
+	// round-robin across organizations: the first job of every organization with
+	// room, then the second, and so on. An organization has room while the
+	// jobs it has running plus those leased and not yet started are below its
+	// cap, which is the job's own params.admission.cap or defaultCap. A job
+	// whose lease has expired is claimable again. Only the kinds the dispatcher
+	// can execute are claimed (see AdmissionKind).
+	ClaimAccepted(limit int, now time.Time, lease time.Duration, defaultCap int) ([]Job, error)
+	// CountAccepted is how many of the organization's jobs are waiting: accepted
+	// and not currently leased.
+	CountAccepted(orgID string, now time.Time) int
+	// FailExpired fails every waiting (accepted, unleased) job created before
+	// the cutoff and returns them, with params.failure_reason set to
+	// "backlog_expired".
+	FailExpired(createdBefore, now time.Time) ([]Job, error)
+	// ListByKindStatus is ListByKind restricted to the given statuses (an empty
+	// list means any status). Backs GET /v1/{kind}/jobs?status=a,b.
+	ListByKindStatus(orgID, kind string, statuses []string, limit int, cursor string) ([]Job, string)
+	// ListActiveByOrg returns the organization's non-terminal jobs (accepted,
+	// running, paused), oldest first, for the ongoing list. Org-scoped by
+	// design: the ongoing list is a tenant-facing read.
+	ListActiveByOrg(orgID string, limit int) []Job
+	// UpdateIfStatus replaces a job only while its stored status is expected.
+	// A job in another status is ErrConflict; a missing job is ErrNotFound.
+	UpdateIfStatus(j Job, expected string) error
+	// SetControl records one control request against a job (WS15.L2), as one
+	// write: a cancel of an accepted job ends it at once, any other allowed verb
+	// sets desired_state and raises desired_seq. A refused request is a
+	// *ControlError; a repeat of a request already pending returns the job.
+	SetControl(orgID string, id quarrycontracts.ID, action string) (Job, error)
+	// AckControl records that the orchestrator applied the desired state up to
+	// appliedSeq. It only raises applied_seq. Internal.
+	AckControl(id quarrycontracts.ID, appliedSeq int64) error
+	// PendingControl lists up to limit jobs whose desired state is ahead of what
+	// was applied, across organizations. Internal, for the orchestrator loop.
+	PendingControl(limit int) []Job
+	// ListRunning lists up to limit running or paused jobs that have a workflow,
+	// across organizations. Internal, for the orchestrator's sweep.
+	ListRunning(limit int) []Job
+	// Finalize ends a job the orchestrator found ended (a timeout, a forced
+	// cancel). Terminal only: a job that already ended is returned with
+	// changed=false. Internal.
+	Finalize(id quarrycontracts.ID, status, reason string, finishedAt int64) (Job, bool, error)
+}
+
+// AdmissionKind reports whether the dispatcher executes jobs of this kind, and
+// so whether admission applies to them.
+func AdmissionKind(kind string) bool {
+	switch kind {
+	case "scrape", "crawl", "batch":
+		return true
+	}
+	return false
+}
+
+// JobAdmissionCap is the job's concurrency cap for its organization: the
+// params.admission.cap the edge stamped at submit time when it is a positive
+// number, otherwise def.
+func JobAdmissionCap(j Job, def int) int {
+	admission, ok := j.Params["admission"].(map[string]any)
+	if !ok {
+		return def
+	}
+	switch v := admission["cap"].(type) {
+	case float64:
+		if v >= 1 && v <= 1_000_000 {
+			return int(v)
+		}
+	case int:
+		if v >= 1 && v <= 1_000_000 {
+			return v
+		}
+	case int64:
+		if v >= 1 && v <= 1_000_000 {
+			return int(v)
+		}
+	}
+	return def
 }
 
 type EventLog interface {
@@ -158,6 +270,17 @@ type EventLog interface {
 	// when no events exist yet. The handler uses this to assign durable
 	// per-run seq server-side regardless of caller numbering.
 	NextSeq(runID quarrycontracts.ID) uint64
+	// AppendNext assigns the event's seq as one above the highest seq of its
+	// run and appends it, as one atomic step (D2-016). NextSeq followed by
+	// Append is two steps: two writers of one run read the same max, one insert
+	// loses on (run_id, seq), and the batch handler's replay tolerance then
+	// drops that event without a trace. AppendNext holds a per-run lock from the
+	// read of the max to the commit of the insert, so the seqs of a run are
+	// unique, gap-free and committed in order, and a follower that has read seq N
+	// never misses an event below N. An event with no run gets seq 1 (the seq of
+	// a job's one event before it has a run). It returns the seq it stored, and
+	// the evt.Seq the caller set is ignored.
+	AppendNext(evt quarrycontracts.Event) (uint64, error)
 	// FindByIdempotencyKey resolves a change-webhook retry to the event
 	// already recorded under the caller's Idempotency-Key header. Scoped
 	// to type='change_detected' — exactly the rows the partial unique
@@ -167,6 +290,42 @@ type EventLog interface {
 	// realistic threat, and the lookup only ever surfaces an event_id,
 	// never payload content, to the retrying caller.
 	FindByIdempotencyKey(key string) (quarrycontracts.Event, bool)
+	// SummaryForJob counts a job's events by type: the count, the highest seq
+	// and the first and last timestamp of each type.
+	SummaryForJob(jobID quarrycontracts.ID) map[quarrycontracts.EventType]EventTypeSummary
+	// CountsForJobs counts events by type for each of the jobs, in one query per
+	// page (the job list's stats). Jobs with no events are absent from the map.
+	CountsForJobs(jobIDs []quarrycontracts.ID) map[quarrycontracts.ID]map[quarrycontracts.EventType]int64
+	// ForJobTypes is ForJob restricted to the given event types, in seq order.
+	ForJobTypes(jobID quarrycontracts.ID, types []quarrycontracts.EventType, afterSeq uint64, limit int) []quarrycontracts.Event
+}
+
+// EventTypeSummary is what SummaryForJob reports for one event type.
+type EventTypeSummary struct {
+	Count  int64
+	MaxSeq uint64
+	First  time.Time
+	Last   time.Time
+}
+
+// IsTerminalJobStatus reports whether a job status is final: the job takes no
+// further transition, and a terminal event never moves it back.
+func IsTerminalJobStatus(status string) bool {
+	switch status {
+	case "completed", "failed", "cancelled", "timed_out", "skipped":
+		return true
+	}
+	return false
+}
+
+// IsActiveJobStatus reports whether a job is still in flight: waiting, running
+// or paused. These are the statuses the ongoing list shows.
+func IsActiveJobStatus(status string) bool {
+	switch status {
+	case "accepted", "running", "paused":
+		return true
+	}
+	return false
 }
 
 // ---- resource types -------------------------------------------------------
@@ -204,7 +363,44 @@ type Job struct {
 	// exists the handler returns the existing record (200) rather than
 	// creating a duplicate (201). Nil for legacy / schedule-driven jobs.
 	IdempotencyKey *string `json:"idempotency_key,omitempty"`
+	// Statistics is what the finished run reported about itself (pages
+	// visited and failed, status classes, drivers, error categories,
+	// duration). Set from the terminal event; absent while the job runs and
+	// for job kinds that do not report it. Closed vocabularies only.
+	Statistics map[string]any `json:"statistics,omitempty"`
+	// Origin says who started the job and from which run. Stamped at create time
+	// from the verified caller; never read from the request body.
+	Origin JobOrigin `json:"origin"`
+	// DesiredState is the state the caller asked the job to reach next (for
+	// example "paused" or "cancelled"). DesiredSeq rises with each request and
+	// AppliedSeq is the last request the orchestrator carried out (WS15.L2).
+	DesiredState string `json:"desired_state,omitempty"`
+	DesiredSeq   int64  `json:"desired_seq"`
+	AppliedSeq   int64  `json:"applied_seq"`
+	// WorkflowID is the Temporal workflow id the orchestrator started. Empty
+	// until the job is dispatched.
+	WorkflowID string `json:"workflow_id,omitempty"`
+	// DeadlineAt is when the job times out, in unix millis. Nil when unbounded.
+	DeadlineAt *int64 `json:"deadline_at,omitempty"`
+	// TerminalReason is the event type that ended the job, for example
+	// "run_completed". Empty while the job is not terminal.
+	TerminalReason string `json:"terminal_reason,omitempty"`
+	// FinishedAt is when the job reached a terminal status, in unix millis.
+	FinishedAt *int64 `json:"finished_at,omitempty"`
 }
+
+// JobOrigin is who started a job and from which run. Type is one of the closed
+// set in OriginTypes; control refuses any other value at create time. Rows
+// written before migration 016 read back as "unknown".
+type JobOrigin struct {
+	Type      string `json:"type"`
+	Actor     string `json:"actor,omitempty"`
+	Ref       string `json:"ref,omitempty"`
+	CreatedBy string `json:"created_by,omitempty"`
+}
+
+// OriginTypes is the closed set of job origins a caller may declare.
+var OriginTypes = map[string]bool{"user": true, "agent": true, "schedule": true, "webhook": true, "api": true}
 
 // MarshalJSON renders Job.CreatedAt as an RFC3339 string on the wire
 // instead of the raw Unix-millis int64 it's stored as internally.
@@ -239,6 +435,15 @@ func (j Job) MarshalJSON() ([]byte, error) {
 		CreatedAt      string                    `json:"created_at"`
 		RunID          *quarrycontracts.ID       `json:"run_id,omitempty"`
 		IdempotencyKey *string                   `json:"idempotency_key,omitempty"`
+		Statistics     map[string]any            `json:"statistics,omitempty"`
+		Origin         JobOrigin                 `json:"origin"`
+		DesiredState   string                    `json:"desired_state,omitempty"`
+		DesiredSeq     int64                     `json:"desired_seq"`
+		AppliedSeq     int64                     `json:"applied_seq"`
+		WorkflowID     string                    `json:"workflow_id,omitempty"`
+		DeadlineAt     *string                   `json:"deadline_at,omitempty"`
+		TerminalReason string                    `json:"terminal_reason,omitempty"`
+		FinishedAt     *string                   `json:"finished_at,omitempty"`
 	}
 	return json.Marshal(wire{
 		ID:             j.ID,
@@ -251,7 +456,26 @@ func (j Job) MarshalJSON() ([]byte, error) {
 		CreatedAt:      time.UnixMilli(j.CreatedAt).UTC().Format(time.RFC3339Nano),
 		RunID:          j.RunID,
 		IdempotencyKey: j.IdempotencyKey,
+		Statistics:     j.Statistics,
+		Origin:         j.Origin,
+		DesiredState:   j.DesiredState,
+		DesiredSeq:     j.DesiredSeq,
+		AppliedSeq:     j.AppliedSeq,
+		WorkflowID:     j.WorkflowID,
+		DeadlineAt:     unixMilliPtrRFC3339(j.DeadlineAt),
+		TerminalReason: j.TerminalReason,
+		FinishedAt:     unixMilliPtrRFC3339(j.FinishedAt),
 	})
+}
+
+// unixMilliPtrRFC3339 renders an optional unix-millis timestamp as RFC3339,
+// or nil when it is unset.
+func unixMilliPtrRFC3339(ms *int64) *string {
+	if ms == nil {
+		return nil
+	}
+	s := time.UnixMilli(*ms).UTC().Format(time.RFC3339Nano)
+	return &s
 }
 
 // UnmarshalJSON is MarshalJSON's symmetric counterpart: it accepts
@@ -274,6 +498,15 @@ func (j *Job) UnmarshalJSON(data []byte) error {
 		CreatedAt      string                    `json:"created_at"`
 		RunID          *quarrycontracts.ID       `json:"run_id,omitempty"`
 		IdempotencyKey *string                   `json:"idempotency_key,omitempty"`
+		Statistics     map[string]any            `json:"statistics,omitempty"`
+		Origin         JobOrigin                 `json:"origin"`
+		DesiredState   string                    `json:"desired_state,omitempty"`
+		DesiredSeq     int64                     `json:"desired_seq"`
+		AppliedSeq     int64                     `json:"applied_seq"`
+		WorkflowID     string                    `json:"workflow_id,omitempty"`
+		DeadlineAt     *string                   `json:"deadline_at,omitempty"`
+		TerminalReason string                    `json:"terminal_reason,omitempty"`
+		FinishedAt     *string                   `json:"finished_at,omitempty"`
 	}
 	var w wire
 	if err := json.Unmarshal(data, &w); err != nil {
@@ -289,6 +522,13 @@ func (j *Job) UnmarshalJSON(data []byte) error {
 		ScheduleID:     w.ScheduleID,
 		RunID:          w.RunID,
 		IdempotencyKey: w.IdempotencyKey,
+		Statistics:     w.Statistics,
+		Origin:         w.Origin,
+		DesiredState:   w.DesiredState,
+		DesiredSeq:     w.DesiredSeq,
+		AppliedSeq:     w.AppliedSeq,
+		WorkflowID:     w.WorkflowID,
+		TerminalReason: w.TerminalReason,
 	}
 	if w.CreatedAt != "" {
 		t, err := time.Parse(time.RFC3339Nano, w.CreatedAt)
@@ -296,6 +536,22 @@ func (j *Job) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("job.created_at: %w", err)
 		}
 		j.CreatedAt = t.UnixMilli()
+	}
+	if w.DeadlineAt != nil {
+		t, err := time.Parse(time.RFC3339Nano, *w.DeadlineAt)
+		if err != nil {
+			return fmt.Errorf("job.deadline_at: %w", err)
+		}
+		ms := t.UnixMilli()
+		j.DeadlineAt = &ms
+	}
+	if w.FinishedAt != nil {
+		t, err := time.Parse(time.RFC3339Nano, *w.FinishedAt)
+		if err != nil {
+			return fmt.Errorf("job.finished_at: %w", err)
+		}
+		ms := t.UnixMilli()
+		j.FinishedAt = &ms
 	}
 	return nil
 }
@@ -348,11 +604,70 @@ type Schedule struct {
 	// change reaches the person who set the monitor up. Empty for legacy
 	// rows / non-user-initiated schedules.
 	CreatedBy string `json:"created_by,omitempty"`
+	// Zdr is the Zero Data Retention posture of the caller, STAMPED AT
+	// CREATE (migration 023, WS4.H). The edge sets it from the verified
+	// claims and a client body can never lower it (the edge's
+	// CreateScheduleRequest has no such field). nil means "created before
+	// the stamp existed" and is distinct from false ("stamped standard");
+	// both serialise to workflow args exactly as before. It rides into the
+	// change-monitor workflow so the orchestrator can declare the posture
+	// on /v1/internal/change/record. An org that turns ZDR on LATER keeps
+	// the stamp it was created with (documented gap, RUNBOOKS).
+	Zdr *bool `json:"zdr,omitempty"`
 	// Preset is INPUT-ONLY for change_monitor schedules: the caller sends
 	// a fixed cadence ("hourly"|"daily"|"weekly") which Validate maps to a
 	// literal 5-field cron. It is never persisted (no DB column) — only
 	// the resolved Cron is stored.
 	Preset string `json:"preset,omitempty"`
+	// Name is the operator-facing label (WS15.S1, migration 017). Empty for
+	// legacy rows; the tenant view falls back to the target.
+	Name string `json:"name,omitempty"`
+	// Config is the per-kind payload: {url} for scrape and crawl, {urls} for
+	// batch, plus max_pages, max_depth and ingest. JSONB in the table.
+	Config map[string]any `json:"config,omitempty"`
+	// Timezone is an IANA zone the cron is read in. Default UTC.
+	Timezone string `json:"timezone,omitempty"`
+	// OverlapPolicy is skip | allow | cancel. Default skip.
+	OverlapPolicy string `json:"overlap_policy,omitempty"`
+	// CatchupWindowS is how far back a missed fire may be replayed (0..86400).
+	CatchupWindowS int64 `json:"catchup_window_s,omitempty"`
+	// PauseOnFailure pauses the schedule after a failed fire.
+	PauseOnFailure bool `json:"pause_on_failure,omitempty"`
+	// JitterS spreads each fire by up to this many seconds.
+	JitterS int64 `json:"jitter_s,omitempty"`
+	// UpdatedAt is unix seconds of the last create or enable/disable stamp.
+	// 0 means a pre-017 row (the migration keys on it).
+	UpdatedAt int64 `json:"updated_at,omitempty"`
+	// LastRunAt and NextRunAt are written by the executor (WS15.S2).
+	LastRunAt *int64 `json:"last_run_at,omitempty"`
+	NextRunAt *int64 `json:"next_run_at,omitempty"`
+	// SkippedOverlapCount counts fires skipped because a run was in flight.
+	SkippedOverlapCount int64 `json:"skipped_overlap_count,omitempty"`
+	// Activate is INPUT-ONLY. A create starts the schedule enabled only when
+	// the body carries activate:true; the edge sets it for user tokens only.
+	// It is never persisted: the stored state is Enabled.
+	Activate bool `json:"activate,omitempty"`
+}
+
+// ApplyDefaults fills the fields a create leaves empty, so every stored row
+// has the same shape whichever path created it (the source-monitor path does
+// not go through Validate). now is unix seconds.
+func (s *Schedule) ApplyDefaults(now int64) {
+	if s.Config == nil {
+		s.Config = map[string]any{}
+	}
+	if s.Timezone == "" {
+		s.Timezone = "UTC"
+	}
+	if s.OverlapPolicy == "" {
+		s.OverlapPolicy = "skip"
+	}
+	if s.CreatedAt == 0 {
+		s.CreatedAt = now
+	}
+	if s.UpdatedAt == 0 {
+		s.UpdatedAt = s.CreatedAt
+	}
 }
 
 // Source is a user-registered recurring ingestion target (Cycle 23
@@ -417,6 +732,8 @@ type memDB struct {
 	blocklists   *genericStore[BlocklistEntry]
 	events       *memEventLog
 	snapshotsV2  *memSnapshotsV2
+	jobClaims    *jobClaimTable
+	zdrTombs     *memZdrTombstones
 }
 
 func NewMemory() DB {
@@ -433,10 +750,14 @@ func NewMemory() DB {
 		blocklists:   newGeneric[BlocklistEntry](func(b BlocklistEntry) quarrycontracts.ID { return b.ID }),
 		events:       &memEventLog{},
 		snapshotsV2:  &memSnapshotsV2{},
+		jobClaims:    &jobClaimTable{until: map[quarrycontracts.ID]time.Time{}},
+		zdrTombs:     newMemZdrTombstones(),
 	}
 }
 
-func (d *memDB) Jobs() JobsStore                         { return &memJobs{d.jobs} }
+func (d *memDB) ZdrTombstones() ZdrTombstoneStore { return d.zdrTombs }
+
+func (d *memDB) Jobs() JobsStore                         { return &memJobs{d.jobs, d.jobClaims} }
 func (d *memDB) Stores() ResourceStore[NamedStore]       { return d.stores }
 func (d *memDB) Snapshots() ResourceStore[Snapshot]      { return d.snaps }
 func (d *memDB) Artifacts() ResourceStore[Artifact]      { return d.arts }
@@ -452,6 +773,12 @@ func (d *memDB) Events() EventLog                          { return d.events }
 
 type memSchedules struct{ *genericStore[Schedule] }
 
+// Create applies the same defaults the pg store applies (ApplyDefaults).
+func (m *memSchedules) Create(s Schedule) error {
+	s.ApplyDefaults(time.Now().Unix())
+	return m.genericStore.Create(s)
+}
+
 func (m *memSchedules) UpdateEnabled(id quarrycontracts.ID, enabled bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -460,8 +787,103 @@ func (m *memSchedules) UpdateEnabled(id quarrycontracts.ID, enabled bool) error 
 		return ErrNotFound
 	}
 	it.Enabled = enabled
+	it.UpdatedAt = time.Now().Unix()
 	m.items[id] = it
 	return nil
+}
+
+func (m *memSchedules) GetByOrg(id quarrycontracts.ID, orgID string) (Schedule, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	it, ok := m.items[id]
+	if !ok || it.OrgID != orgID {
+		return Schedule{}, false
+	}
+	return it, true
+}
+
+func (m *memSchedules) ListByOrg(orgID string, limit int, cursor string) ([]Schedule, string) {
+	m.mu.RLock()
+	all := make([]Schedule, 0, len(m.items))
+	for _, it := range m.items {
+		if it.OrgID == orgID {
+			all = append(all, it)
+		}
+	}
+	m.mu.RUnlock()
+	return pageSchedulesMem(all, limit, cursor)
+}
+
+func (m *memSchedules) ListDesired(limit int, cursor string) ([]Schedule, string) {
+	m.mu.RLock()
+	all := make([]Schedule, 0, len(m.items))
+	for _, it := range m.items {
+		all = append(all, it)
+	}
+	m.mu.RUnlock()
+	return pageSchedulesMem(all, limit, cursor)
+}
+
+// DeleteByOrg checks the org and then deletes. The two steps are not atomic
+// in this dev store; the pg store does it in one WHERE clause.
+func (m *memSchedules) DeleteByOrg(id quarrycontracts.ID, orgID string) error {
+	if _, ok := m.GetByOrg(id, orgID); !ok {
+		return ErrNotFound
+	}
+	return m.genericStore.Delete(id)
+}
+
+func (m *memSchedules) UpdateEnabledByOrg(id quarrycontracts.ID, orgID string, enabled bool) error {
+	if _, ok := m.GetByOrg(id, orgID); !ok {
+		return ErrNotFound
+	}
+	return m.UpdateEnabled(id, enabled)
+}
+
+func (m *memSchedules) UpdateRuntime(id quarrycontracts.ID, lastRunAt, nextRunAt *int64, skippedOverlap int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, ok := m.items[id]
+	if !ok {
+		return ErrNotFound
+	}
+	it.LastRunAt, it.NextRunAt, it.SkippedOverlapCount = lastRunAt, nextRunAt, skippedOverlap
+	m.items[id] = it
+	return nil
+}
+
+// pageSchedulesMem sorts newest first (created_at desc, id desc, as the pg
+// store does) and pages by the last id of the previous page.
+func pageSchedulesMem(all []Schedule, limit int, cursor string) ([]Schedule, string) {
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].CreatedAt != all[j].CreatedAt {
+			return all[i].CreatedAt > all[j].CreatedAt
+		}
+		return all[i].ID > all[j].ID
+	})
+	if limit <= 0 {
+		limit = 50
+	}
+	start := 0
+	if cursor != "" {
+		start = len(all)
+		for i, s := range all {
+			if string(s.ID) == cursor {
+				start = i + 1
+				break
+			}
+		}
+	}
+	end := start + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	out := append([]Schedule(nil), all[start:end]...)
+	next := ""
+	if end < len(all) && len(out) > 0 {
+		next = string(out[len(out)-1].ID)
+	}
+	return out, next
 }
 
 // memSources is the dev-only in-memory SourcesStore. Unlike genericStore it
@@ -566,7 +988,211 @@ func (m *memSources) SoftDeleteByOrg(orgID string, id quarrycontracts.ID) error 
 	return nil
 }
 
-type memJobs struct{ *genericStore[Job] }
+// listWhere is the in-memory counterpart of the keyset-paged list queries: the
+// jobs keep returns true for, newest first, after the cursor.
+func (m *memJobs) listWhere(keep func(Job) bool, limit int, cur string) ([]Job, string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var curTS int64
+	var curID string
+	haveCur := false
+	if cur != "" {
+		if raw, err := base64.RawURLEncoding.DecodeString(cur); err == nil {
+			parts := strings.SplitN(string(raw), "|", 2)
+			if len(parts) == 2 {
+				if _, err := fmt.Sscan(parts[0], &curTS); err == nil {
+					curID = parts[1]
+					haveCur = true
+				}
+			}
+		}
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	out := make([]Job, 0, limit)
+	for i := len(m.order) - 1; i >= 0; i-- {
+		it := m.items[m.order[i]]
+		if !keep(it) {
+			continue
+		}
+		if haveCur && !(it.CreatedAt < curTS || (it.CreatedAt == curTS && string(it.ID) < curID)) {
+			continue
+		}
+		if len(out) == limit {
+			last := out[len(out)-1]
+			return out, base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("%d|%s", last.CreatedAt, string(last.ID))))
+		}
+		out = append(out, it)
+	}
+	return out, ""
+}
+
+// ListByKindStatus mirrors the Postgres query: kind and org, optionally
+// restricted to a set of statuses.
+func (m *memJobs) ListByKindStatus(orgID, kind string, statuses []string, limit int, cur string) ([]Job, string) {
+	want := map[string]bool{}
+	for _, s := range statuses {
+		want[s] = true
+	}
+	return m.listWhere(func(it Job) bool {
+		return it.Kind == kind && it.OrgID == orgID && (len(want) == 0 || want[it.Status])
+	}, limit, cur)
+}
+
+// ListActiveByOrg returns the organization's jobs that are still in flight,
+// oldest first. Mirrors the Postgres partial index idx_jobs_active.
+func (m *memJobs) ListActiveByOrg(orgID string, limit int) []Job {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if limit <= 0 {
+		limit = 50
+	}
+	out := []Job{}
+	for _, id := range m.order {
+		it := m.items[id]
+		if it.OrgID != orgID || !IsActiveJobStatus(it.Status) {
+			continue
+		}
+		out = append(out, it)
+		if len(out) == limit {
+			break
+		}
+	}
+	return out
+}
+
+// UpdateIfStatus is the compare-and-set form of Update: the write happens only
+// while the stored status is expected.
+func (m *memJobs) UpdateIfStatus(j Job, expected string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, ok := m.items[j.ID]
+	if !ok {
+		return ErrNotFound
+	}
+	if cur.Status != expected {
+		return ErrConflict
+	}
+	m.items[j.ID] = j
+	return nil
+}
+
+// jobClaimTable holds the in-memory lease of each claimed job (the Postgres
+// store keeps it in jobs.claimed_until).
+type jobClaimTable struct {
+	mu    sync.Mutex
+	until map[quarrycontracts.ID]time.Time
+}
+
+type memJobs struct {
+	*genericStore[Job]
+	claims *jobClaimTable
+}
+
+// ClaimAccepted mirrors the Postgres claim statement; see JobsStore.
+func (m *memJobs) ClaimAccepted(limit int, now time.Time, lease time.Duration, defaultCap int) ([]Job, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.claims.mu.Lock()
+	defer m.claims.mu.Unlock()
+
+	inUse := map[string]int{}
+	var waiting []Job
+	for _, j := range m.items {
+		leased := m.claims.until[j.ID].After(now)
+		switch {
+		case j.Status == "running":
+			inUse[j.OrgID]++
+		case j.Status == "accepted" && leased:
+			inUse[j.OrgID]++
+		case j.Status == "accepted" && AdmissionKind(j.Kind):
+			waiting = append(waiting, j)
+		}
+	}
+	sort.Slice(waiting, func(a, b int) bool {
+		if waiting[a].CreatedAt != waiting[b].CreatedAt {
+			return waiting[a].CreatedAt < waiting[b].CreatedAt
+		}
+		return waiting[a].ID < waiting[b].ID
+	})
+	type ranked struct {
+		job  Job
+		rank int
+	}
+	seen := map[string]int{}
+	var admitted []ranked
+	for _, j := range waiting {
+		seen[j.OrgID]++
+		room := JobAdmissionCap(j, defaultCap) - inUse[j.OrgID]
+		if room < 0 {
+			room = 0
+		}
+		if seen[j.OrgID] <= room {
+			admitted = append(admitted, ranked{job: j, rank: seen[j.OrgID]})
+		}
+	}
+	sort.SliceStable(admitted, func(a, b int) bool {
+		if admitted[a].rank != admitted[b].rank {
+			return admitted[a].rank < admitted[b].rank
+		}
+		if admitted[a].job.CreatedAt != admitted[b].job.CreatedAt {
+			return admitted[a].job.CreatedAt < admitted[b].job.CreatedAt
+		}
+		return admitted[a].job.ID < admitted[b].job.ID
+	})
+	if len(admitted) > limit {
+		admitted = admitted[:limit]
+	}
+	out := make([]Job, 0, len(admitted))
+	for _, a := range admitted {
+		m.claims.until[a.job.ID] = now.Add(lease)
+		out = append(out, a.job)
+	}
+	return out, nil
+}
+
+// CountAccepted counts the organization's waiting jobs.
+func (m *memJobs) CountAccepted(orgID string, now time.Time) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	m.claims.mu.Lock()
+	defer m.claims.mu.Unlock()
+	n := 0
+	for _, j := range m.items {
+		if j.OrgID == orgID && j.Status == "accepted" && !m.claims.until[j.ID].After(now) {
+			n++
+		}
+	}
+	return n
+}
+
+// FailExpired fails waiting jobs created before the cutoff.
+func (m *memJobs) FailExpired(createdBefore, now time.Time) ([]Job, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.claims.mu.Lock()
+	defer m.claims.mu.Unlock()
+	var failed []Job
+	for id, j := range m.items {
+		if j.Status != "accepted" || j.CreatedAt >= createdBefore.UnixMilli() || m.claims.until[id].After(now) {
+			continue
+		}
+		params := make(map[string]any, len(j.Params)+1)
+		for k, v := range j.Params {
+			params[k] = v
+		}
+		params["failure_reason"] = "backlog_expired"
+		j.Params = params
+		j.Status = "failed"
+		m.items[id] = j
+		failed = append(failed, j)
+	}
+	return failed, nil
+}
 
 // FindByIdempotencyKey scans the in-memory job set for a record with the
 // supplied key AND org. Linear scan is fine — the memory store is dev-only
@@ -871,6 +1497,31 @@ func (l *memEventLog) ForRun(runID quarrycontracts.ID, afterSeq uint64, limit in
 	return out
 }
 
+// AppendNext holds the log's write lock across the read of the max and the
+// append, so concurrent writers of one run get distinct, ordered seqs.
+func (l *memEventLog) AppendNext(evt quarrycontracts.Event) (uint64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, e := range l.events {
+		if e.EventID == evt.EventID {
+			// The Postgres store's primary key on event_id.
+			return 0, ErrConflict
+		}
+	}
+	evt.Seq = 1
+	if evt.RunID != nil {
+		var maxSeq uint64
+		for _, e := range l.events {
+			if e.RunID != nil && *e.RunID == *evt.RunID && e.Seq > maxSeq {
+				maxSeq = e.Seq
+			}
+		}
+		evt.Seq = maxSeq + 1
+	}
+	l.events = append(l.events, evt)
+	return evt.Seq, nil
+}
+
 func (l *memEventLog) NextSeq(runID quarrycontracts.ID) uint64 {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -895,6 +1546,75 @@ func (l *memEventLog) ForJob(jobID quarrycontracts.ID, afterSeq uint64, limit in
 			continue
 		}
 		if e.Seq <= afterSeq {
+			continue
+		}
+		out = append(out, e)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+// SummaryForJob counts a job's events by type.
+func (l *memEventLog) SummaryForJob(jobID quarrycontracts.ID) map[quarrycontracts.EventType]EventTypeSummary {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := map[quarrycontracts.EventType]EventTypeSummary{}
+	for _, e := range l.events {
+		if e.JobID == nil || *e.JobID != jobID {
+			continue
+		}
+		s := out[e.Type]
+		s.Count++
+		if e.Seq > s.MaxSeq {
+			s.MaxSeq = e.Seq
+		}
+		if s.First.IsZero() || e.Timestamp.Before(s.First) {
+			s.First = e.Timestamp
+		}
+		if e.Timestamp.After(s.Last) {
+			s.Last = e.Timestamp
+		}
+		out[e.Type] = s
+	}
+	return out
+}
+
+// CountsForJobs counts events by type for each listed job.
+func (l *memEventLog) CountsForJobs(jobIDs []quarrycontracts.ID) map[quarrycontracts.ID]map[quarrycontracts.EventType]int64 {
+	want := make(map[quarrycontracts.ID]bool, len(jobIDs))
+	for _, id := range jobIDs {
+		want[id] = true
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := map[quarrycontracts.ID]map[quarrycontracts.EventType]int64{}
+	for _, e := range l.events {
+		if e.JobID == nil || !want[*e.JobID] {
+			continue
+		}
+		counts := out[*e.JobID]
+		if counts == nil {
+			counts = map[quarrycontracts.EventType]int64{}
+			out[*e.JobID] = counts
+		}
+		counts[e.Type]++
+	}
+	return out
+}
+
+// ForJobTypes returns the job's events of the given types after afterSeq.
+func (l *memEventLog) ForJobTypes(jobID quarrycontracts.ID, types []quarrycontracts.EventType, afterSeq uint64, limit int) []quarrycontracts.Event {
+	want := make(map[quarrycontracts.EventType]bool, len(types))
+	for _, t := range types {
+		want[t] = true
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := []quarrycontracts.Event{}
+	for _, e := range l.events {
+		if e.JobID == nil || *e.JobID != jobID || e.Seq <= afterSeq || !want[e.Type] {
 			continue
 		}
 		out = append(out, e)

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use quarry_core::contracts::ChallengeStrength;
 use quarry_core::error::ErrorCode;
 use quarry_core::output::DriverKind;
 use quarry_core::QuarryResult;
@@ -11,13 +12,19 @@ use quarry_tls::TlsProfile;
 use tracing::{info, warn};
 use url::Url;
 
+use crate::challenge::{classify, ChallengeInput, MAX_SCANNED_BYTES};
 use crate::driver::{Driver, FetchHints};
+use crate::escalation::{escalation_allowed, trigger_for_error, EscalationMode, EscalationTrigger};
 use crate::fetch::FetchResponse;
 
 pub struct FallbackDriver {
     primary: DriverKind,
     chain: Vec<DriverKind>,
     drivers: HashMap<DriverKind, Arc<dyn Driver>>,
+    /// Whether a block status (or a block-class error) may move the request to
+    /// the next driver (WS3.I). Non-block reasons (a JS shell, an unfollowed
+    /// redirect, a transport failure) move it in both modes.
+    mode: EscalationMode,
 }
 
 impl FallbackDriver {
@@ -30,7 +37,14 @@ impl FallbackDriver {
             primary,
             chain,
             drivers,
+            mode: EscalationMode::current(),
         }
+    }
+
+    /// Pins the escalation mode instead of reading the process default.
+    pub fn with_escalation_mode(mut self, mode: EscalationMode) -> Self {
+        self.mode = mode;
+        self
     }
 
     pub fn from_plan(
@@ -41,7 +55,43 @@ impl FallbackDriver {
             primary: plan.driver,
             chain: plan.fallback_chain.clone(),
             drivers,
+            mode: EscalationMode::current(),
         }
+    }
+
+    /// A strong challenge classified on a body that answered 200 is not a page
+    /// that withheld its content: it is an interstitial or a CAPTCHA widget, and
+    /// a browser could run its script. Under `honest` that is a change of
+    /// identity prompted by a challenge, which ADR-5 refuses
+    /// ([`EscalationTrigger::StrongChallenge`]); the body is returned as it is
+    /// and the scrape path classifies it. Under `legacy` the trigger is allowed
+    /// and this is always false. The classifier is called directly (not through
+    /// `classify_fetched`) so the invariant does not depend on
+    /// `QUARRY_CHALLENGE_CLASSIFIER`. Only the strong class counts; a weak hint
+    /// or a non-signal (a login page, a rate limit) is not a challenge.
+    fn challenge_forbids_escalation(&self, url: &Url, resp: &FetchResponse) -> bool {
+        if escalation_allowed(self.mode, EscalationTrigger::StrongChallenge) {
+            return false;
+        }
+        let head = &resp.body[..resp.body.len().min(MAX_SCANNED_BYTES)];
+        let html = String::from_utf8_lossy(head);
+        classify(&ChallengeInput {
+            url: url.as_str(),
+            title: None,
+            html: Some(&html),
+            text_snippet: None,
+            main_doc_status: Some(resp.status),
+        })
+        .is_some_and(|signal| signal.strength == ChallengeStrength::Strong)
+    }
+
+    /// True when this response is one `honest` refuses to change identity on:
+    /// a block status, or a 200 that is a strong challenge. Always false under
+    /// `legacy`.
+    fn refuses_rotation(&self, url: &Url, resp: &FetchResponse) -> bool {
+        (crate::fingerprint_rotation::is_block_status(resp.status)
+            && !escalation_allowed(self.mode, EscalationTrigger::BlockStatus(resp.status)))
+            || self.challenge_forbids_escalation(url, resp)
     }
 
     fn attempt_order(&self) -> Vec<DriverKind> {
@@ -68,6 +118,8 @@ impl FallbackDriver {
         // 2D — on a block STATUS (403/429/503/…), fall through to the next
         // driver (a different TLS fingerprint / transport) instead of
         // returning the block. Bounded naturally by the chain length.
+        // Only under `legacy`: `honest` never changes driver on a status
+        // (WS3.I, ADR-5), the block is returned and the caller decides.
         let mut best_block: Option<FetchResponse> = None;
         // JS-shell rescue: keep the best (most readable text) shell response
         // we saw from a non-browser driver. If the browser then fails, or
@@ -95,6 +147,10 @@ impl FallbackDriver {
                 Ok(resp) => {
                     if crate::fingerprint_rotation::is_block_status(resp.status)
                         && idx < order.len() - 1
+                        && escalation_allowed(
+                            self.mode,
+                            EscalationTrigger::BlockStatus(resp.status),
+                        )
                     {
                         attempts.push((*kind, format!("blocked: HTTP {}", resp.status)));
                         warn!(
@@ -115,9 +171,14 @@ impl FallbackDriver {
                     // the embedded JSON yet. When the harvest result becomes
                     // available here, pass it — a `Found` suppresses the
                     // browser round trip entirely.
+                    //
+                    // Not for a challenge page: under `honest` a strong
+                    // challenge never moves the request to another identity
+                    // (see `challenge_forbids_escalation`).
                     if needs_browser_escalation(&resp.body, resp.status, StructuredYield::Unknown)
                         && idx < order.len() - 1
                         && *kind != DriverKind::Browser
+                        && !self.challenge_forbids_escalation(url, &resp)
                     {
                         // A browser must be REGISTERED, not merely named in
                         // the plan's chain. Deployments running
@@ -164,12 +225,23 @@ impl FallbackDriver {
                     // www.aquatiq.com` and got the 220 KB Next.js shell, TLS
                     // returned a 308 with a 44-char "Redirecting" body, and
                     // that body became the page's whole excerpt.
+                    //
+                    // Not when the response is a block status (or a strong
+                    // challenge) that `honest` refuses to rotate on: a block
+                    // body is always "thinner" than a shell, and rotating on
+                    // that would hand the page that just refused this identity
+                    // to the browser, which is the status-driven change of
+                    // identity the first branch above forbids. The gate below
+                    // then returns the shell (WS3.I). Under `legacy` a block
+                    // status never reaches here with a driver ahead (the first
+                    // branch took it), so this changes nothing there.
                     if *kind != DriverKind::Browser && idx < order.len() - 1 {
                         let is_redirect = (300..400).contains(&resp.status);
                         let thinner = best_shell
                             .as_ref()
                             .map(|b| visible_text_len(&resp.body) <= visible_text_len(&b.body))
-                            .unwrap_or(false);
+                            .unwrap_or(false)
+                            && !self.refuses_rotation(url, &resp);
                         if is_redirect || thinner {
                             attempts.push((
                                 *kind,
@@ -193,13 +265,35 @@ impl FallbackDriver {
                             continue;
                         }
                     }
+                    // A block status or a strong challenge from a later driver
+                    // that `honest` refuses to rotate on, while a shell from an
+                    // earlier driver is already held: the browser is not
+                    // called (the branches above forbid it), and the content
+                    // that was already fetched is not thrown away either. The
+                    // shell is returned, exactly as the error arm below does
+                    // when a later driver fails; its page still has a title,
+                    // links and metadata. Under `legacy` this is never true:
+                    // a block status or a challenge was rotated on above.
+                    if *kind != DriverKind::Browser
+                        && best_shell.is_some()
+                        && self.refuses_rotation(url, &resp)
+                    {
+                        if let Some(shell) = best_shell.take() {
+                            warn!(
+                                driver = ?kind,
+                                status = resp.status,
+                                shell_text_chars = visible_text_len(&shell.body),
+                                "block or challenge refused under honest after a JS shell; returning the shell response"
+                            );
+                            return Ok(shell);
+                        }
+                    }
                     if *kind == DriverKind::Browser {
                         if let Some(shell) = best_shell.take() {
                             let rendered = visible_text_len(&resp.body);
                             let shell_text = visible_text_len(&shell.body);
                             if rendered <= shell_text {
                                 warn!(
-                                    url = %url,
                                     rendered_text_chars = rendered,
                                     shell_text_chars = shell_text,
                                     rendered_bytes = resp.body.len(),
@@ -208,7 +302,6 @@ impl FallbackDriver {
                                 return Ok(shell);
                             }
                             info!(
-                                url = %url,
                                 served_by = ?resp.served_by,
                                 rendered_text_chars = rendered,
                                 shell_text_chars = shell_text,
@@ -220,7 +313,11 @@ impl FallbackDriver {
                     return Ok(resp);
                 }
                 Err(e) => {
-                    let is_retryable = is_retryable_driver_error(e.code);
+                    // A block-class error is a status that became an error
+                    // (a proxied 403 from the static driver), so it is gated
+                    // like the status itself.
+                    let is_retryable = is_retryable_driver_error(e.code)
+                        && escalation_allowed(self.mode, trigger_for_error(e.code));
                     attempts.push((
                         *kind,
                         format!("{}: {}", error_code_short(e.code), e.message),
@@ -229,7 +326,7 @@ impl FallbackDriver {
                         warn!(
                             driver = ?kind,
                             next = ?order.get(idx + 1),
-                            error = %e,
+                            error_class = e.code.wire_name(),
                             "driver failed, falling back"
                         );
                         last_err = Some(e);
@@ -238,19 +335,13 @@ impl FallbackDriver {
                     if let Some(shell) = best_shell.take() {
                         warn!(
                             driver = ?kind,
-                            error = %e,
-                            url = %url,
+                            error_class = e.code.wire_name(),
                             shell_text_chars = visible_text_len(&shell.body),
                             "browser fallback failed after JS-shell detection; returning the static shell response"
                         );
                         return Ok(shell);
                     }
-                    return Err(e.with_details(serde_json::json!({
-                        "fallback_attempts": attempts
-                            .iter()
-                            .map(|(k, msg)| serde_json::json!({"driver": format!("{k:?}"), "error": msg}))
-                            .collect::<Vec<_>>(),
-                    })));
+                    return Err(with_fallback_attempts(e, &attempts));
                 }
             }
         }
@@ -262,9 +353,10 @@ impl FallbackDriver {
             return Ok(resp);
         }
         if let Some(shell) = best_shell {
+            // A count, not `attempts` itself: each entry carries a driver's error
+            // text, which can name the URL.
             warn!(
-                url = %url,
-                attempts = ?attempts,
+                attempts = attempts.len(),
                 "no driver improved on the JS shell; returning the static shell response"
             );
             return Ok(shell);
@@ -277,14 +369,7 @@ impl FallbackDriver {
             .join("; ");
 
         Err(last_err
-            .map(|e| {
-                e.with_details(serde_json::json!({
-                    "fallback_attempts": attempts
-                        .iter()
-                        .map(|(k, msg)| serde_json::json!({"driver": format!("{k:?}"), "error": msg}))
-                        .collect::<Vec<_>>(),
-                }))
-            })
+            .map(|e| with_fallback_attempts(e, &attempts))
             .unwrap_or_else(|| {
                 quarry_core::QuarryError::new(
                     ErrorCode::DriverFailed,
@@ -572,6 +657,26 @@ pub(crate) fn is_retryable_driver_error(code: ErrorCode) -> bool {
     )
 }
 
+/// The error with the per-driver attempts added to its details. A typed reason the driver
+/// already put there (`action_failed` with the ordered outcomes of a scrape-time action
+/// run, a block reason) stays: the attempts are one more key, never a replacement.
+fn with_fallback_attempts(
+    mut error: quarry_core::QuarryError,
+    attempts: &[(DriverKind, String)],
+) -> quarry_core::QuarryError {
+    let listed = serde_json::json!(attempts
+        .iter()
+        .map(|(k, msg)| serde_json::json!({"driver": format!("{k:?}"), "error": msg}))
+        .collect::<Vec<_>>());
+    match error.details.as_mut().and_then(serde_json::Value::as_object_mut) {
+        Some(object) => {
+            object.insert("fallback_attempts".to_owned(), listed);
+            error
+        }
+        None => error.with_details(serde_json::json!({ "fallback_attempts": listed })),
+    }
+}
+
 pub(crate) fn error_code_short(code: ErrorCode) -> &'static str {
     match code {
         ErrorCode::BadRequest => "bad_request",
@@ -590,6 +695,9 @@ pub(crate) fn error_code_short(code: ErrorCode) -> &'static str {
         ErrorCode::DriverFailed => "driver_failed",
         ErrorCode::UpstreamBlocked => "upstream_blocked",
         ErrorCode::Unsupported => "unsupported",
+        ErrorCode::UnsupportedMedia => "unsupported_media",
+        ErrorCode::BudgetExhausted => "budget_exhausted",
+        ErrorCode::UserTookOver => "user_took_over",
         ErrorCode::Internal => "internal",
     }
 }
@@ -629,6 +737,7 @@ mod tests {
                 body: b"ok".to_vec(),
                 duration_ms: 1,
                 served_by: self.kind,
+                captures: None,
             })
         }
     }
@@ -662,6 +771,39 @@ mod tests {
         }
     }
 
+    /// Fails with a typed reason in the details, as a scrape-time action run does.
+    struct ReasonedFailDriver;
+
+    #[async_trait]
+    impl Driver for ReasonedFailDriver {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Browser
+        }
+
+        async fn fetch(&self, _url: &Url) -> QuarryResult<FetchResponse> {
+            Err(
+                QuarryError::new(ErrorCode::DriverFailed, "a scrape action failed").with_details(
+                    serde_json::json!({ "reason": "action_failed", "actions": [{ "index": 0 }] }),
+                ),
+            )
+        }
+    }
+
+    /// The attempts are added to a driver's own details, never put in their place:
+    /// the typed `action_failed` reason and its ordered outcomes reach the caller.
+    #[tokio::test]
+    async fn a_typed_reason_survives_the_fallback_attempts() {
+        let mut drivers: HashMap<DriverKind, Arc<dyn Driver>> = HashMap::new();
+        drivers.insert(DriverKind::Browser, Arc::new(ReasonedFailDriver));
+        let fb = FallbackDriver::new(DriverKind::Browser, vec![], drivers);
+        let url: Url = "https://example.com".parse().unwrap();
+        let err = fb.fetch(&url).await.unwrap_err();
+        let details = err.details.as_ref().expect("details");
+        assert_eq!(details["reason"], "action_failed");
+        assert_eq!(details["actions"][0]["index"], 0);
+        assert_eq!(details["fallback_attempts"].as_array().map(Vec::len), Some(1));
+    }
+
     struct BlockDriver {
         kind: DriverKind,
         calls: AtomicU32,
@@ -690,6 +832,7 @@ mod tests {
                 body: b"blocked".to_vec(),
                 duration_ms: 1,
                 served_by: self.kind,
+                captures: None,
             })
         }
     }
@@ -703,7 +846,8 @@ mod tests {
         let mut drivers: HashMap<DriverKind, Arc<dyn Driver>> = HashMap::new();
         drivers.insert(DriverKind::Static, primary.clone());
         drivers.insert(DriverKind::Tls, fallback.clone());
-        let fb = FallbackDriver::new(DriverKind::Static, vec![DriverKind::Tls], drivers);
+        let fb = FallbackDriver::new(DriverKind::Static, vec![DriverKind::Tls], drivers)
+            .with_escalation_mode(EscalationMode::Legacy);
         let resp = fb
             .fetch(&"https://example.com".parse().unwrap())
             .await
@@ -714,6 +858,517 @@ mod tests {
         assert_eq!(fallback.calls.load(Ordering::Relaxed), 1);
     }
 
+    /// A driver that always fails with a chosen error code.
+    struct CodeFailDriver {
+        kind: DriverKind,
+        code: ErrorCode,
+        calls: AtomicU32,
+    }
+
+    impl CodeFailDriver {
+        fn new(kind: DriverKind, code: ErrorCode) -> Self {
+            Self {
+                kind,
+                code,
+                calls: AtomicU32::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Driver for CodeFailDriver {
+        fn kind(&self) -> DriverKind {
+            self.kind
+        }
+
+        async fn fetch(&self, _url: &Url) -> QuarryResult<FetchResponse> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(QuarryError::new(self.code, "simulated failure"))
+        }
+    }
+
+    fn chain(mode: EscalationMode, order: Vec<(DriverKind, Arc<dyn Driver>)>) -> FallbackDriver {
+        let primary = order[0].0;
+        let rest = order[1..].iter().map(|(k, _)| *k).collect();
+        let drivers: HashMap<DriverKind, Arc<dyn Driver>> = order.into_iter().collect();
+        FallbackDriver::new(primary, rest, drivers).with_escalation_mode(mode)
+    }
+
+    #[tokio::test]
+    async fn honest_block_status_returns_without_next_driver() {
+        let primary = Arc::new(BlockDriver::new(DriverKind::Static));
+        let fallback = Arc::new(OkDriver::new(DriverKind::Tls));
+        let browser = Arc::new(OkDriver::new(DriverKind::Browser));
+        let fb = chain(
+            EscalationMode::Honest,
+            vec![
+                (DriverKind::Static, primary.clone()),
+                (DriverKind::Tls, fallback.clone()),
+                (DriverKind::Browser, browser.clone()),
+            ],
+        );
+
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status, 403, "the block is surfaced as it is");
+        assert_eq!(resp.served_by, DriverKind::Static);
+        assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(browser.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn honest_upstream_blocked_error_does_not_fall_through() {
+        // The static driver turns a proxied 403 into an UpstreamBlocked error;
+        // the error path is a second way a status could change the driver.
+        for code in [ErrorCode::UpstreamBlocked, ErrorCode::RateLimited] {
+            let primary = Arc::new(CodeFailDriver::new(DriverKind::Static, code));
+            let fallback = Arc::new(OkDriver::new(DriverKind::Tls));
+            let fb = chain(
+                EscalationMode::Honest,
+                vec![
+                    (DriverKind::Static, primary.clone()),
+                    (DriverKind::Tls, fallback.clone()),
+                ],
+            );
+
+            let err = fb
+                .fetch(&"https://example.com".parse().unwrap())
+                .await
+                .unwrap_err();
+
+            assert_eq!(err.code, code);
+            assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
+            assert_eq!(fallback.calls.load(Ordering::Relaxed), 0, "{code:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_upstream_blocked_error_still_falls_through() {
+        let primary = Arc::new(CodeFailDriver::new(
+            DriverKind::Static,
+            ErrorCode::UpstreamBlocked,
+        ));
+        let fallback = Arc::new(OkDriver::new(DriverKind::Tls));
+        let fb = chain(
+            EscalationMode::Legacy,
+            vec![
+                (DriverKind::Static, primary.clone()),
+                (DriverKind::Tls, fallback.clone()),
+            ],
+        );
+
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.served_by, DriverKind::Tls);
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn honest_timeout_still_falls_through() {
+        for code in [ErrorCode::Timeout, ErrorCode::DriverFailed] {
+            let primary = Arc::new(CodeFailDriver::new(DriverKind::Static, code));
+            let fallback = Arc::new(OkDriver::new(DriverKind::Tls));
+            let fb = chain(
+                EscalationMode::Honest,
+                vec![
+                    (DriverKind::Static, primary.clone()),
+                    (DriverKind::Tls, fallback.clone()),
+                ],
+            );
+
+            let resp = fb
+                .fetch(&"https://example.com".parse().unwrap())
+                .await
+                .unwrap();
+
+            assert_eq!(resp.served_by, DriverKind::Tls, "{code:?}");
+            assert_eq!(fallback.calls.load(Ordering::Relaxed), 1, "{code:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn honest_js_shell_still_escalates_to_browser() {
+        // Not a status: a 200 page that withheld its content. The browser tier
+        // stays available for that in both modes.
+        let static_shell = Arc::new(BodyDriver {
+            kind: DriverKind::Static,
+            body: shell_body(),
+            calls: AtomicU32::new(0),
+        });
+        let browser = Arc::new(BodyDriver {
+            kind: DriverKind::Browser,
+            body: "<html><body><main><h1>Hygiene for matindustrien</h1><p>Vi leverer hygieneløsninger til næringsmiddelindustrien.</p></main></body></html>".as_bytes().to_vec(),
+            calls: AtomicU32::new(0),
+        });
+        let fb = chain(
+            EscalationMode::Honest,
+            vec![
+                (DriverKind::Static, static_shell.clone()),
+                (DriverKind::Browser, browser.clone()),
+            ],
+        );
+
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.served_by, DriverKind::Browser);
+        assert_eq!(browser.calls.load(Ordering::Relaxed), 1);
+    }
+
+    /// A 200 challenge interstitial that is also large and text-thin (what the
+    /// shell gate looks for): a script-heavy Cloudflare-style page.
+    fn challenge_interstitial_body() -> Vec<u8> {
+        let mut b = shell_body();
+        b.extend_from_slice(b"<script>window._cf_chl_opt={cvId:'3',cType:'managed'};</script>");
+        b
+    }
+
+    #[test]
+    fn the_challenge_test_body_is_a_shell_and_a_strong_challenge() {
+        // Pins the premise of the two tests below: without it they could pass
+        // for the wrong reason (the body not being a shell at all).
+        let body = challenge_interstitial_body();
+        assert!(needs_browser_escalation(
+            &body,
+            200,
+            StructuredYield::Unknown
+        ));
+        let fb = FallbackDriver::new(DriverKind::Static, vec![], HashMap::new())
+            .with_escalation_mode(EscalationMode::Honest);
+        let resp = FetchResponse {
+            status: 200,
+            final_url: "https://example.com".parse().unwrap(),
+            headers: vec![],
+            body,
+            duration_ms: 1,
+            served_by: DriverKind::Static,
+            captures: None,
+        };
+        assert!(fb.challenge_forbids_escalation(&"https://example.com".parse().unwrap(), &resp));
+        let legacy = fb.with_escalation_mode(EscalationMode::Legacy);
+        assert!(
+            !legacy.challenge_forbids_escalation(&"https://example.com".parse().unwrap(), &resp)
+        );
+    }
+
+    #[tokio::test]
+    async fn honest_challenge_interstitial_with_200_is_not_escalated_to_browser() {
+        let static_driver = Arc::new(BodyDriver {
+            kind: DriverKind::Static,
+            body: challenge_interstitial_body(),
+            calls: AtomicU32::new(0),
+        });
+        let browser = Arc::new(OkDriver::new(DriverKind::Browser));
+        let fb = chain(
+            EscalationMode::Honest,
+            vec![
+                (DriverKind::Static, static_driver.clone()),
+                (DriverKind::Browser, browser.clone()),
+            ],
+        );
+
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.served_by, DriverKind::Static);
+        assert_eq!(resp.status, 200);
+        assert_eq!(browser.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_challenge_interstitial_with_200_still_escalates_to_browser() {
+        let static_driver = Arc::new(BodyDriver {
+            kind: DriverKind::Static,
+            body: challenge_interstitial_body(),
+            calls: AtomicU32::new(0),
+        });
+        // The browser must render more readable text than the shell, or the
+        // "no better than the shell" rule returns the shell for another reason.
+        let browser = Arc::new(BodyDriver {
+            kind: DriverKind::Browser,
+            body: "<html><body><main><h1>Hygiene for matindustrien</h1><p>Vi leverer hygieneløsninger til næringsmiddelindustrien.</p></main></body></html>".as_bytes().to_vec(),
+            calls: AtomicU32::new(0),
+        });
+        let fb = chain(
+            EscalationMode::Legacy,
+            vec![
+                (DriverKind::Static, static_driver.clone()),
+                (DriverKind::Browser, browser.clone()),
+            ],
+        );
+
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.served_by, DriverKind::Browser);
+        assert_eq!(browser.calls.load(Ordering::Relaxed), 1);
+    }
+
+    fn rendered_body() -> Vec<u8> {
+        "<html><body><main><h1>Hygiene for matindustrien</h1><p>Vi leverer hygieneløsninger til næringsmiddelindustrien.</p></main></body></html>".as_bytes().to_vec()
+    }
+
+    fn body_driver(kind: DriverKind, body: Vec<u8>) -> Arc<BodyDriver> {
+        Arc::new(BodyDriver {
+            kind,
+            body,
+            calls: AtomicU32::new(0),
+        })
+    }
+
+    /// The production chain is `[Static, Tls, Browser]`. Static returns a JS
+    /// shell (kept as `best_shell`), TLS answers 403. The 403 body is always
+    /// thinner than the shell, so the "not an improvement" branch used to hand
+    /// the page that had just refused the TLS identity to the browser: a
+    /// status-driven change of identity under `honest`. The browser is not
+    /// called, and the shell that was already fetched is returned (the same
+    /// outcome as a TLS error after a shell).
+    #[tokio::test]
+    async fn honest_block_from_tls_after_a_shell_returns_the_shell_not_the_browser() {
+        let static_shell = body_driver(DriverKind::Static, shell_body());
+        let tls = Arc::new(BlockDriver::new(DriverKind::Tls));
+        let browser = body_driver(DriverKind::Browser, rendered_body());
+        let fb = chain(
+            EscalationMode::Honest,
+            vec![
+                (DriverKind::Static, static_shell.clone()),
+                (DriverKind::Tls, tls.clone()),
+                (DriverKind::Browser, browser.clone()),
+            ],
+        );
+
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status, 200, "the shell that was already fetched");
+        assert_eq!(resp.served_by, DriverKind::Static);
+        assert_eq!(&resp.body[..], shell_body().as_slice());
+        assert_eq!(tls.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(browser.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_block_from_tls_after_a_shell_still_reaches_the_browser() {
+        let static_shell = body_driver(DriverKind::Static, shell_body());
+        let tls = Arc::new(BlockDriver::new(DriverKind::Tls));
+        let browser = body_driver(DriverKind::Browser, rendered_body());
+        let fb = chain(
+            EscalationMode::Legacy,
+            vec![
+                (DriverKind::Static, static_shell.clone()),
+                (DriverKind::Tls, tls.clone()),
+                (DriverKind::Browser, browser.clone()),
+            ],
+        );
+
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.served_by, DriverKind::Browser);
+        assert_eq!(browser.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn honest_strong_challenge_from_tls_after_a_shell_returns_the_shell_not_the_browser() {
+        let static_shell = body_driver(DriverKind::Static, shell_body());
+        let tls = body_driver(DriverKind::Tls, challenge_interstitial_body());
+        let browser = body_driver(DriverKind::Browser, rendered_body());
+        let fb = chain(
+            EscalationMode::Honest,
+            vec![
+                (DriverKind::Static, static_shell.clone()),
+                (DriverKind::Tls, tls.clone()),
+                (DriverKind::Browser, browser.clone()),
+            ],
+        );
+
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.served_by, DriverKind::Static);
+        assert_eq!(resp.status, 200);
+        assert_eq!(&resp.body[..], shell_body().as_slice());
+        assert_eq!(tls.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(browser.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_strong_challenge_from_tls_after_a_shell_still_reaches_the_browser() {
+        let static_shell = body_driver(DriverKind::Static, shell_body());
+        let tls = body_driver(DriverKind::Tls, challenge_interstitial_body());
+        let browser = body_driver(DriverKind::Browser, rendered_body());
+        let fb = chain(
+            EscalationMode::Legacy,
+            vec![
+                (DriverKind::Static, static_shell.clone()),
+                (DriverKind::Tls, tls.clone()),
+                (DriverKind::Browser, browser.clone()),
+            ],
+        );
+
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.served_by, DriverKind::Browser);
+        assert_eq!(browser.calls.load(Ordering::Relaxed), 1);
+    }
+
+    /// Only the strong class forbids the browser under `honest`. A weak hint
+    /// (a prove-human phrase, a login form with a reCAPTCHA widget) and a
+    /// non-signal (a plain login page) are JS shells like any other: the page
+    /// withheld its content and a browser may render it.
+    #[tokio::test]
+    async fn honest_weak_hint_and_non_signal_shells_still_escalate_to_browser() {
+        let mut weak_phrase = shell_body();
+        weak_phrase.extend_from_slice(b"<p>Please verify you are human to continue.</p>");
+        let mut weak_login_widget = shell_body();
+        weak_login_widget.extend_from_slice(
+            b"<form><input type=\"email\" name=\"e\"><input type=\"password\" name=\"p\"><div class=\"g-recaptcha\" data-sitekey=\"k\"></div></form>",
+        );
+        let mut plain_login = shell_body();
+        plain_login.extend_from_slice(
+            b"<form><input type=\"email\" name=\"e\"><input type=\"password\" name=\"p\"></form>",
+        );
+        let url: Url = "https://example.com".parse().unwrap();
+
+        for (label, body, expected_class) in [
+            ("prove-human phrase", weak_phrase, ChallengeStrength::Weak),
+            (
+                "login form with a recaptcha",
+                weak_login_widget,
+                ChallengeStrength::Weak,
+            ),
+            (
+                "plain login form",
+                plain_login,
+                ChallengeStrength::NonSignal,
+            ),
+        ] {
+            // Premises: still a shell, and not a strong challenge.
+            assert!(
+                needs_browser_escalation(&body, 200, StructuredYield::Unknown),
+                "{label}: premise, the body is a shell"
+            );
+            let head =
+                String::from_utf8_lossy(&body[..body.len().min(MAX_SCANNED_BYTES)]).into_owned();
+            let seen = classify(&ChallengeInput {
+                url: url.as_str(),
+                title: None,
+                html: Some(&head),
+                text_snippet: None,
+                main_doc_status: Some(200),
+            });
+            assert_ne!(
+                seen.as_ref().map(|s| s.strength),
+                Some(ChallengeStrength::Strong),
+                "{label}: premise, not a strong challenge"
+            );
+            assert_eq!(
+                seen.as_ref().map(|s| s.strength),
+                Some(expected_class),
+                "{label}: premise, the class the test is about"
+            );
+
+            let static_driver = body_driver(DriverKind::Static, body);
+            let browser = body_driver(DriverKind::Browser, rendered_body());
+            let fb = chain(
+                EscalationMode::Honest,
+                vec![
+                    (DriverKind::Static, static_driver.clone()),
+                    (DriverKind::Browser, browser.clone()),
+                ],
+            );
+
+            let resp = fb.fetch(&url).await.unwrap();
+
+            assert_eq!(resp.served_by, DriverKind::Browser, "{label}");
+            assert_eq!(browser.calls.load(Ordering::Relaxed), 1, "{label}");
+        }
+    }
+
+    /// A connect failure on the static driver is reported as
+    /// `UpstreamBlocked`, the same code a proxied 403 gets, and the error
+    /// alone cannot tell them apart. Under `honest` it therefore does not fall
+    /// through to the TLS driver (fail closed, documented in `escalation.rs`
+    /// and RUNBOOKS); under `legacy` it does. Pinned so the choice is a
+    /// visible one: changing the mapping must change this test.
+    #[tokio::test]
+    async fn honest_connect_failure_on_the_static_driver_does_not_fall_through_to_tls() {
+        use quarry_core::privacy::PrivacyPolicy;
+        let dead = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap()
+        };
+        let hints = FetchHints {
+            org_id: "org_connect_failure".into(),
+            privacy: PrivacyPolicy {
+                allow_third_party_processing: true,
+                processor_id: Some("quarry_proxy_pool".into()),
+                ..PrivacyPolicy::default()
+            },
+            ..FetchHints::default()
+        };
+        let url: Url = "http://example.com/".parse().unwrap();
+
+        for mode in [EscalationMode::Honest, EscalationMode::Legacy] {
+            let pool = crate::proxy_pool::ProxyPool::from_env_string(&format!("http://{dead}"));
+            let static_driver = Arc::new(
+                crate::fetch::StaticDriver::with_proxy_pool_and_processor(
+                    std::time::Duration::from_secs(5),
+                    "QuarryTest/1.0",
+                    pool,
+                    Some("quarry_proxy_pool".into()),
+                )
+                .unwrap()
+                .with_escalation_mode(mode),
+            );
+            let tls = Arc::new(OkDriver::new(DriverKind::Tls));
+            let fb = chain(
+                mode,
+                vec![
+                    (DriverKind::Static, static_driver),
+                    (DriverKind::Tls, tls.clone()),
+                ],
+            );
+
+            let result = fb.fetch_conditional(&url, &hints).await;
+
+            match mode {
+                EscalationMode::Honest => {
+                    let err = result.expect_err("honest: the connect failure is returned");
+                    assert_eq!(err.code, ErrorCode::UpstreamBlocked);
+                    assert_eq!(tls.calls.load(Ordering::Relaxed), 0);
+                }
+                EscalationMode::Legacy => {
+                    let resp = result.expect("legacy: the TLS driver serves it");
+                    assert_eq!(resp.served_by, DriverKind::Tls);
+                    assert_eq!(tls.calls.load(Ordering::Relaxed), 1);
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn all_blocked_returns_last_block_response() {
         let primary = Arc::new(BlockDriver::new(DriverKind::Static));
@@ -721,7 +1376,8 @@ mod tests {
         let mut drivers: HashMap<DriverKind, Arc<dyn Driver>> = HashMap::new();
         drivers.insert(DriverKind::Static, primary.clone());
         drivers.insert(DriverKind::Tls, fallback.clone());
-        let fb = FallbackDriver::new(DriverKind::Static, vec![DriverKind::Tls], drivers);
+        let fb = FallbackDriver::new(DriverKind::Static, vec![DriverKind::Tls], drivers)
+            .with_escalation_mode(EscalationMode::Legacy);
         let resp = fb
             .fetch(&"https://example.com".parse().unwrap())
             .await
@@ -863,6 +1519,7 @@ mod tests {
                 body: self.body.clone(),
                 duration_ms: 1,
                 served_by: self.kind,
+                captures: None,
             })
         }
     }
@@ -1167,6 +1824,7 @@ mod tests {
                 body: self.body.clone(),
                 duration_ms: 1,
                 served_by: self.kind,
+                captures: None,
             })
         }
     }

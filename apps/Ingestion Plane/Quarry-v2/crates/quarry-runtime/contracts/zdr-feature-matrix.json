@@ -1,0 +1,702 @@
+{
+  "contract": "quarry.zdr-feature-matrix",
+  "rows": [
+    {
+      "basis": "no artifact, page-cache entry, scrape record or durable event; the text comes back in the response (default format markdown), cut at max_inline_bytes",
+      "detail": null,
+      "enforced_by": [
+        "zdr_claim_floor::scrape_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_service",
+        "zdr_log_capture::scrape_meter_metadata_under_zdr_has_no_url_or_fingerprint",
+        "routes::tests::a_zdr_scrape_has_no_scrape_id_and_stores_no_artifact"
+      ],
+      "id": "scrape",
+      "issue": null,
+      "log": "canary",
+      "log_canary": "zdr_log_capture::a_zdr_scrape_logs_no_url_and_no_title_even_at_debug",
+      "routes": [
+        "/v1/scrape"
+      ],
+      "status": "enforced",
+      "treatment": "inline_only"
+    },
+    {
+      "basis": "the run's posture is the request flag raised by the token floor; page events go to live subscribers only",
+      "detail": null,
+      "enforced_by": [
+        "zdr_claim_floor::scrape_stream_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_service"
+      ],
+      "id": "scrape_stream",
+      "issue": null,
+      "log": "canary",
+      "log_canary": "zdr_log_capture::a_zdr_streamed_scrape_logs_no_url_from_its_spawned_runner",
+      "routes": [
+        "/v1/scrape/stream"
+      ],
+      "status": "enforced",
+      "treatment": "honored"
+    },
+    {
+      "basis": "scrape_routes::get_scrape refuses a reader whose organization is under ZDR, even for a record written before it was",
+      "detail": {
+        "code": "FORBIDDEN",
+        "feature": "scrape_record_read"
+      },
+      "enforced_by": [
+        "routes::tests::a_zdr_floored_reader_is_refused_even_for_an_earlier_record"
+      ],
+      "id": "scrape_record_read",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/scrape/{id}"
+      ],
+      "status": "enforced",
+      "treatment": "refused"
+    },
+    {
+      "basis": "routes::refuse_durable_job_under_zdr: the job record and per-page results would be retained",
+      "detail": {
+        "code": "FORBIDDEN",
+        "feature": "durable_job"
+      },
+      "enforced_by": [
+        "zdr_claim_floor::durable_crawl_and_batch_are_refused_for_a_zdr_org_user_and_open_otherwise",
+        "zdr_gap_rows::enforced_refusals_hold_for_durable_jobs"
+      ],
+      "id": "durable_jobs",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/crawl",
+        "/v1/batch"
+      ],
+      "status": "enforced",
+      "treatment": "refused"
+    },
+    {
+      "basis": "paid providers closed, search cache bypassed, no durable SearchIssued event; the provider failure is logged as a class only",
+      "detail": null,
+      "enforced_by": [
+        "zdr_claim_floor::a_user_token_from_a_zdr_org_runs_search_as_zdr_even_when_the_body_says_false",
+        "zdr_claim_floor::a_user_token_from_a_zdr_org_runs_search_as_zdr_when_the_body_omits_the_flag"
+      ],
+      "id": "search",
+      "issue": null,
+      "log": "canary",
+      "log_canary": "zdr_log_capture::a_zdr_search_with_a_failing_provider_logs_no_query",
+      "routes": [
+        "/v1/search"
+      ],
+      "status": "enforced",
+      "treatment": "honored"
+    },
+    {
+      "basis": "search_routes::images and ::videos touch no store; meter_vertical_search records user, kind and result count, not the query",
+      "detail": {
+        "reason": "a provider call and a usage count only; the query is not cached, logged or stored"
+      },
+      "enforced_by": [],
+      "id": "search_verticals",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/search/images",
+        "/v1/search/videos"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
+      "basis": "the page fetches run with the token's ZDR floor (effective_zdr_mode); the request has no zdr field of its own",
+      "detail": null,
+      "enforced_by": [],
+      "id": "search_similar",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/search/similar"
+      ],
+      "status": "enforced",
+      "treatment": "honored"
+    },
+    {
+      "basis": "search_routes::suggest calls the Model Plane and never reads the token's ZDR floor",
+      "detail": {
+        "warning": "the partial query is sent to the Model Plane without the ZDR posture"
+      },
+      "enforced_by": [
+        "zdr_gap_rows::gap_rows_currently_violate_search_suggest"
+      ],
+      "id": "search_suggest",
+      "issue": "unassigned: forward the posture, or refuse under ZDR",
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/search/suggest"
+      ],
+      "status": "gap",
+      "treatment": "degraded"
+    },
+    {
+      "basis": "the answer pipeline runs with the effective ZDR posture: no paid providers, no durable search event",
+      "detail": null,
+      "enforced_by": [
+        "zdr_claim_floor::answer_runs_as_zdr_for_a_zdr_org_user_and_as_before_otherwise",
+        "zdr_claim_floor::answer_stream_runs_as_zdr_for_a_zdr_org_user_and_as_before_otherwise"
+      ],
+      "id": "answer",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/answer",
+        "/v1/answer/stream"
+      ],
+      "status": "enforced",
+      "treatment": "honored"
+    },
+    {
+      "basis": "the page runs carry the effective ZDR posture, so no artifact or durable page event is written",
+      "detail": null,
+      "enforced_by": [
+        "zdr_claim_floor::extract_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_service"
+      ],
+      "id": "extract",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/extract"
+      ],
+      "status": "enforced",
+      "treatment": "honored"
+    },
+    {
+      "basis": "map_routes::map touches no cache, artifact store, index or event sink",
+      "detail": {
+        "reason": "reads robots and sitemaps and returns links; nothing is stored"
+      },
+      "enforced_by": [],
+      "id": "map",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/map"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
+      "basis": "audit_page::capture touches no cache, artifact store, index or event sink",
+      "detail": {
+        "reason": "fetches robots and one page and returns bounded evidence; nothing is stored"
+      },
+      "enforced_by": [],
+      "id": "audit_page",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/audit/page"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
+      "basis": "audio_routes::raise_to_zdr_floor forwards the posture to the Model Plane, which owns retention for audio",
+      "detail": null,
+      "enforced_by": [
+        "zdr_claim_floor::audio_forwards_the_floored_posture_to_the_model_plane",
+        "zdr_claim_floor::audio_transcription_forwards_the_floored_posture_to_the_model_plane"
+      ],
+      "id": "audio",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/audio"
+      ],
+      "status": "enforced",
+      "treatment": "honored"
+    },
+    {
+      "basis": "resource_routes list and get are tenant-bound reads of the artifact store",
+      "detail": {
+        "reason": "reads artifacts that already exist; a ZDR run writes none"
+      },
+      "enforced_by": [],
+      "id": "artifacts",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/artifacts",
+        "/v1/artifacts/{id}"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
+      "basis": "resource_routes forwards to Control Plane with the verified identity and keeps no copy (the crawl and batch event tails are the same handler as the job event tail, scoped to one kind; a ZDR organization can only hold jobs that pre-date its ZDR, and reads them as before); EXCEPT POST /v1/sources with monitor:true, which registers a recurring change-monitor schedule in Control Plane and is classified by the schedules row (it is refused or observed under the same flag and stamps the posture on the schedule)",
+      "detail": {
+        "reason": "reads or proxies Control Plane records; Quarry stores nothing for the caller"
+      },
+      "enforced_by": [],
+      "id": "control_records",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/sources",
+        "/v1/sources/{id}",
+        "/v1/snapshots",
+        "/v1/{kind}/jobs",
+        "/v1/request-queues",
+        "/v1/benchmarks",
+        "/v1/team/credit-usage",
+        "/v1/team/token-usage",
+        "/v1/team/concurrency",
+        "/v1/team/queue-status",
+        "/v1/team/activity",
+        "/v1/runs/{id}/events",
+        "/v1/jobs/{id}/events",
+        "/v1/crawl/{id}/events",
+        "/v1/batch/{id}/events"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
+      "basis": "job_lifecycle_routes get_job, get_crawl, get_batch and ongoing_* are org-scoped reads through control_client; the page URLs of a job are on the errors routes (job_errors row) and the event tails (control_records row). DELETE /v1/crawl/{id} and DELETE /v1/batch/{id} share these paths and are the cancel verb of the job_control row",
+      "detail": {
+        "reason": "reads Control Plane's job record (status, phase, counts, closed-vocabulary warnings); Quarry stores nothing and the view names no page URL"
+      },
+      "enforced_by": [],
+      "id": "job_lifecycle_reads",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/crawl/ongoing",
+        "/v1/crawl/{id}",
+        "/v1/batch/ongoing",
+        "/v1/batch/{id}",
+        "/v1/jobs/{id}"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
+      "basis": "job_lifecycle_routes::errors_for refuses a caller whose token floor is ZDR before it asks Control Plane anything: the error list names the URL of every page that failed. Unconditional, not behind the durable-resource flag",
+      "detail": {
+        "code": "FORBIDDEN",
+        "feature": "job_error_urls"
+      },
+      "enforced_by": [
+        "zdr_claim_floor::job_errors_are_refused_for_a_zdr_org_user_and_open_to_a_standard_org",
+        "job_lifecycle::zdr_caller_can_cancel_but_not_read_errors"
+      ],
+      "id": "job_errors",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/crawl/{id}/errors",
+        "/v1/batch/{id}/errors",
+        "/v1/jobs/{id}/errors"
+      ],
+      "status": "enforced",
+      "treatment": "refused"
+    },
+    {
+      "basis": "job_lifecycle_routes::control_request writes {action, actor, actor_type} to Control Plane and answers the job record; dark behind QUARRY_EDGE__JOB_CONTROL (501 off); a service principal is refused 403. Cancel is DELETE on the crawl or batch path shared with the lifecycle read",
+      "detail": {
+        "reason": "a control verb carries an action word and the actor id, no page content; a ZDR organization can only hold jobs that pre-date its ZDR, and cancelling one is wind-down"
+      },
+      "enforced_by": [
+        "job_lifecycle::zdr_caller_can_cancel_but_not_read_errors"
+      ],
+      "id": "job_control",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/crawl/{id}/pause",
+        "/v1/crawl/{id}/resume",
+        "/v1/batch/{id}/pause",
+        "/v1/batch/{id}/resume"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
+      "basis": "change_routes::check calls zdr_refusal::refuse behind QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES (default off: observe, zdr.would_refuse, served as before); latest and history are reads and stay open",
+      "detail": {
+        "warning": "a change check keeps a baseline and history for the URL"
+      },
+      "enforced_by": [
+        "zdr_gap_rows::gap_rows_currently_violate_change_history"
+      ],
+      "id": "change_history",
+      "issue": "WS4.H: refuse under ZDR, observe first",
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/change/check",
+        "/v1/change/latest",
+        "/v1/change/history"
+      ],
+      "status": "gap",
+      "treatment": "degraded"
+    },
+    {
+      "basis": "change_routes::snapshot and ::refresh call zdr_refusal::refuse behind QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES (default off: observe, zdr.would_refuse, served as before)",
+      "detail": {
+        "warning": "promoting a snapshot and scheduling a refresh both retain the page"
+      },
+      "enforced_by": [
+        "zdr_gap_rows::gap_rows_currently_violate_change_snapshot"
+      ],
+      "id": "change_snapshot",
+      "issue": "WS4.H: refuse under ZDR, observe first",
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/change/snapshot",
+        "/v1/change/refresh"
+      ],
+      "status": "gap",
+      "treatment": "degraded"
+    },
+    {
+      "basis": "record_internal calls zdr_refusal::refuse on the body's declared zdr before the store (flag on: 403; flag off: zdr.would_refuse and the baseline is stored as before); emit_change_side_effects suppresses the change event and webhook for a declared zdr in both modes. The orchestrator declares the posture quarry-control stamped on the schedule at create (migration 023); a schedule created before that (NULL) or before its org turned ZDR on declares nothing or false and is stored (pinned by zdr_posture_stamp::record_trusts_the_stamp_not_the_current_posture); the orchestrator also declares the stamp on the run_page fetch that precedes the record call, so a stamped-ZDR monitor's fetch runs in ZDR mode and persists no page artifact, event or local-index write-back; ChangeMonitorWF still emits run_started and change_detected with the URL. No test observes the baseline write, because the harness wires no baseline store",
+      "detail": {
+        "warning": "the change event and webhook are suppressed; the baseline is still stored"
+      },
+      "enforced_by": [],
+      "id": "change_record_internal",
+      "issue": "WS4.H stage B: with QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES on, a body that declares zdr is refused before the baseline is stored; the flag default stays off until ADR-4 sign-off and the customer notice",
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/internal/change/record"
+      ],
+      "status": "gap",
+      "treatment": "degraded"
+    },
+    {
+      "basis": "schedule_routes call zdr_refusal::refuse on create, unpause, trigger and backfill (default off: observe, zdr.would_refuse, forwarded as before); POST /v1/sources with monitor:true is covered by this row; the caller's posture is stamped on the change-monitor schedule at create (quarry-control migration 023) from the verified claims, raised (never lowered) by a zdr:true declared in the body. Known gaps: an org that turns ZDR on later keeps its stamp, the legacy non-preset create is not stamped",
+      "detail": {
+        "warning": "a schedule is a durable resource; a ZDR organization can create and run one"
+      },
+      "enforced_by": [
+        "zdr_gap_rows::gap_rows_currently_violate_schedules"
+      ],
+      "id": "schedules",
+      "issue": "WS4.H stage B: with QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES on, create, trigger, backfill and unpause are refused and list, get, pause and delete stay open so an organization can wind down; the flag default stays off until ADR-4 sign-off and the customer notice",
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/schedules",
+        "/v1/schedules/{id}",
+        "/v1/schedules/{id}/pause",
+        "/v1/schedules/{id}/unpause",
+        "/v1/schedules/{id}/trigger",
+        "/v1/schedules/{id}/backfill"
+      ],
+      "status": "gap",
+      "treatment": "degraded"
+    },
+    {
+      "basis": "profile_routes call profile_guard::precheck, whose ZDR half is zdr_refusal::refuse, on create, save, update, read and restore_probe (default off: observe, zdr.would_refuse, served as before); list and delete are never refused. precheck also refuses a service principal on every operation and a save without the quarry:profiles:import scope (WS17.P0), before the ZDR decision, whatever the flag; the agent start refuses a persistent profile in both modes",
+      "detail": {
+        "warning": "a browser profile (cookies, storage) is a durable resource a ZDR organization can create"
+      },
+      "enforced_by": [
+        "zdr_gap_rows::gap_rows_currently_violate_profiles"
+      ],
+      "id": "profiles",
+      "issue": "WS4.H stage B: with QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES on, create, save, update, read and restore_probe are refused and only list and delete stay open so profiles can be erased; the flag default stays off until ADR-4 sign-off and the customer notice",
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/profiles",
+        "/v1/profiles/create",
+        "/v1/profiles/{id}",
+        "/v1/profiles/{id}/restore_probe"
+      ],
+      "status": "gap",
+      "treatment": "degraded"
+    },
+    {
+      "basis": "a ZDR run writes no checkpoint, timeline row or receipt and logs under a ZDR span",
+      "detail": null,
+      "enforced_by": [
+        "agent_routes::tests::zdr_expiry_writes_no_timeline_row_and_no_checkpoint"
+      ],
+      "id": "agent_run",
+      "issue": null,
+      "log": "canary",
+      "log_canary": "zdr_log_capture::a_zdr_agent_start_logs_no_url",
+      "routes": [
+        "/v1/agent/runs"
+      ],
+      "status": "enforced",
+      "treatment": "honored"
+    },
+    {
+      "basis": "same route as agent_run: lifecycle::start_run refuses persist_profile or a profile id under ZDR",
+      "detail": {
+        "code": "BAD_REQUEST",
+        "feature": "persistent_profile"
+      },
+      "enforced_by": [
+        "zdr_claim_floor::a_zdr_org_users_agent_run_cannot_take_a_persistent_profile",
+        "zdr_gap_rows::a_service_principal_with_body_zdr_gets_the_same_persistent_profile_refusal"
+      ],
+      "id": "agent_persistent_profile",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [],
+      "status": "enforced",
+      "treatment": "refused"
+    },
+    {
+      "basis": "same route as agent_run: lifecycle::start_run refuses a resume of a ZDR checkpoint (none is written)",
+      "detail": {
+        "code": "FORBIDDEN",
+        "feature": "resume"
+      },
+      "enforced_by": [],
+      "id": "agent_resume",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [],
+      "status": "enforced",
+      "treatment": "refused"
+    },
+    {
+      "basis": "attach::attach_run refuses a ZDR run (reason attach_zdr_refused) before it reads the grant or opens a tab, in both modes; the route is also dark behind QUARRY_EDGE__ATTACH. The release route has nothing to release for a ZDR run. No test drives a ZDR run through the attach route yet: the refusal is a three-line guard in the handler",
+      "detail": {
+        "code": "FORBIDDEN",
+        "feature": "agent_attach"
+      },
+      "enforced_by": [],
+      "id": "agent_attach",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/agent/runs/{run_id}/attach",
+        "/v1/agent/runs/{run_id}/attach/{attach_id}"
+      ],
+      "status": "enforced",
+      "treatment": "refused"
+    },
+    {
+      "basis": "every step, tab and control change skips receipts and timeline rows when the run is ZDR (step.rs, control.rs, projection.rs; the person's tab hand-over, attach::control_tab, records through control::record_browser_timeline_event, which returns before any write for a ZDR run)",
+      "detail": null,
+      "enforced_by": [
+        "agent_routes::tests::zdr_expiry_writes_no_timeline_row_and_no_checkpoint"
+      ],
+      "id": "agent_run_surface",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/agent/runs/{run_id}",
+        "/v1/agent/runs/{run_id}/step",
+        "/v1/agent/runs/{run_id}/interact",
+        "/v1/agent/runs/{run_id}/browser-session",
+        "/v1/agent/runs/{run_id}/browser-session/control",
+        "/v1/agent/runs/{run_id}/browser-session/timeline",
+        "/v1/agent/runs/{run_id}/egress-receipts",
+        "/v1/agent/runs/{run_id}/tabs",
+        "/v1/agent/runs/{run_id}/tabs/{tab_id}",
+        "/v1/agent/runs/{run_id}/tabs/{tab_id}/select",
+        "/v1/agent/runs/{run_id}/tabs/{tab_id}/control",
+        "/v1/agent/runs/{run_id}/devtools",
+        "/v1/agent/runs/{run_id}/frames/ws",
+        "/v1/agent/runs/{run_id}/frames/stream",
+        "/v1/agent/runs/{run_id}/frame",
+        "/v1/agent/runs/{run_id}/live-view",
+        "/v1/agent/runs/{run_id}/events/stream"
+      ],
+      "status": "enforced",
+      "treatment": "honored"
+    },
+    {
+      "basis": "receipts.rs lists from the receipt store; replay, quality and impact checks hold no state",
+      "detail": {
+        "reason": "reads receipts a ZDR run never wrote; the checks are pure functions of the request body"
+      },
+      "enforced_by": [],
+      "id": "agent_receipts_and_procedures",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/agent/runs/{run_id}/receipts",
+        "/v1/agent/runs/{run_id}/procedure",
+        "/v1/agent/procedures/replay-check",
+        "/v1/agent/procedures/quality-check",
+        "/v1/agent/procedures/impact-check"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
+      "basis": "fleet_routes keep fleets in the process (new_fleet_state)",
+      "detail": {
+        "reason": "an in-memory registry; nothing is persisted, and the console is hidden (WS2.E)"
+      },
+      "enforced_by": [],
+      "id": "fleets",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/fleets",
+        "/v1/fleets/{fleet_id}",
+        "/v1/fleets/{fleet_id}/members",
+        "/v1/fleets/{fleet_id}/budget"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
+      "basis": "the GraphQL schema resolves queries from existing stores and mutates none",
+      "detail": {
+        "reason": "a read-only API over records that exist"
+      },
+      "enforced_by": [],
+      "id": "graphql",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/graphql",
+        "/graphql/schema",
+        "/graphql/playground"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
+      "basis": "routes::health, ready and version",
+      "detail": {
+        "reason": "process state; carries no caller content"
+      },
+      "enforced_by": [],
+      "id": "operations",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/health",
+        "/ready",
+        "/version"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
+      "basis": "routes::internal_run_page builds the runner with ZdrMode from the orchestrator's request",
+      "detail": null,
+      "enforced_by": [],
+      "id": "internal_run_page",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/internal/run_page"
+      ],
+      "status": "enforced",
+      "treatment": "honored"
+    },
+    {
+      "basis": "schedule_preflight::preflight checks the runtime token and the run binding, then returns the S2 answer. It does NOT check the ZDR posture at fire time (WS15.S4 is not built), so an organization that turns ZDR on later keeps its schedules firing: that is the schedules row's gap, not a second one",
+      "detail": {
+        "reason": "answers allow with the posture unchecked and stores nothing; it carries a schedule id and an org id"
+      },
+      "enforced_by": [],
+      "id": "internal_schedule_preflight",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/internal/schedules/preflight"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
+      "basis": "internal_routes::purge_org_profiles checks the shared internal token, walks the org erasure families in AppState and reports row, tombstone and cache-key counts (WS17.E3); it is how a ZDR organization's erasure is carried out, so it is never refused",
+      "detail": {
+        "reason": "erases the organization's profile families and answers counts only; it stores nothing"
+      },
+      "enforced_by": [],
+      "id": "internal_org_profile_purge",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/internal/orgs/{org}/profiles"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
+      "basis": "resource_routes::get_page_image reads the content-addressed store",
+      "detail": {
+        "reason": "serves a stored page image by content hash; a ZDR run stores none"
+      },
+      "enforced_by": [],
+      "id": "internal_page_images",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/internal/page-images/{org}/{doc}/{page}/{hash}"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
+      "basis": "queue_routes are internal and carry no ZDR flag; nothing ZDR can reach them through the public routes",
+      "detail": {
+        "reason": "the worker queue behind crawl and batch, which refuse ZDR at the public edge"
+      },
+      "enforced_by": [
+        "zdr_claim_floor::durable_crawl_and_batch_are_refused_for_a_zdr_org_user_and_open_otherwise"
+      ],
+      "id": "internal_queues",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/internal/queues/{queue_name}/enqueue",
+        "/v1/internal/queues/{queue_name}/enqueue_batch",
+        "/v1/internal/queues/{queue_name}/pop",
+        "/v1/internal/queues/{queue_name}/ack"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    }
+  ],
+  "treatments": [
+    "honored",
+    "inline_only",
+    "degraded",
+    "refused",
+    "inert"
+  ],
+  "version": 1
+}

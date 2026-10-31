@@ -1,0 +1,107 @@
+/* Shared visual language for every connected provider report. */
+.pulse-dashboard, .search-dashboard {
+  --pulse-canvas: #f0efeb;
+  --pulse-tile: #fff;
+  --pulse-dashboard-ink: #252622;
+  --pulse-dashboard-muted: #72736d;
+}
+.marketing-pulse .pulse-dashboard { width: min(1280px, 100%); margin: 28px auto; padding: 32px; border: 0; border-radius: 24px; background: var(--pulse-canvas); color: var(--pulse-dashboard-ink); }
+.pulse-dashboard .analytics-panel__header h2, .pulse-dashboard.web-vitals-panel h2 { font-size: clamp(27px, 3vw, 38px); font-weight: 500; letter-spacing: -.055em; line-height: 1.15; }
+.pulse-dashboard .analytics-panel__header { margin-bottom: 28px; }
+.pulse-dashboard .analytics-panel__cards { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; border: 0; border-radius: 0; overflow: visible; }
+.pulse-dashboard .analytics-panel__cards article { display: flex; flex-direction: column; justify-content: space-between; gap: 28px; min-height: 150px; padding: 26px; background: var(--pulse-tile); border: 0; border-radius: 16px; }
+.pulse-dashboard.analytics-panel .analytics-panel__cards article { border: 0; }
+.pulse-dashboard .analytics-panel__cards article:first-child { grid-row: span 2; min-height: 320px; background: linear-gradient(145deg, #fff 60%, #f6f5ee); }
+.pulse-dashboard .analytics-panel__cards strong { font-size: clamp(36px, 4vw, 56px); font-weight: 450; letter-spacing: -.06em; }
+.pulse-dashboard .analytics-panel__cards article:first-child strong { font-size: clamp(68px, 6vw, 90px); }
+.pulse-dashboard--ga4 .analytics-panel__cards article:last-child { grid-column: 1 / -1; flex-direction: row; align-items: center; min-height: 90px; background: #e8ece5; }
+.pulse-dashboard--clarity .analytics-panel__cards article:last-child { grid-column: span 2; background: #f9ede1; }
+.pulse-dashboard .analytics-panel__cards article > span { color: var(--pulse-dashboard-muted); font-size: 12px; }
+.pulse-dashboard .analytics-panel__status, .pulse-dashboard .analytics-panel__quality { padding: 20px; border-radius: 12px; background: white; }
+.pulse-dashboard .analytics-panel__ux { border: 0; padding-top: 0; margin-top: 0; }
+.pulse-dashboard .analytics-panel__ux dl { gap: 12px; }
+.pulse-dashboard .analytics-panel__ux dl > div { padding: 18px; border: 0; border-radius: 10px; background: #f7f7f3; }
+.pulse-dashboard .analytics-panel__ux dd { font-size: 28px; font-weight: 450; letter-spacing: -.04em; }
+.pulse-dashboard .analytics-panel__table-wrap { margin-top: 0; max-height: 420px; overflow: auto; }
+.pulse-dashboard .analytics-panel__table-wrap th { position: sticky; top: 0; background: #fafaf7; }
+.pulse-dashboard .analytics-panel__table-wrap caption { padding-bottom: 16px; }
+.pulse-dashboard .analytics-panel__scope, .pulse-dashboard .analytics-panel__timestamp, .pulse-dashboard footer { color: var(--pulse-dashboard-muted); }
+
+.pulse-report-disclosure { margin-top: 12px; background: var(--pulse-tile, #fff); border: 0; border-radius: 16px; overflow: hidden; scroll-margin-top: 72px; }
+.pulse-report-disclosure > summary { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 22px 26px; list-style: none; cursor: pointer; }
+.pulse-report-disclosure > summary::-webkit-details-marker { display: none; }
+.pulse-report-disclosure > summary small, .pulse-report-disclosure > summary strong { display: block; }
+.pulse-report-disclosure > summary small { margin-bottom: 6px; font-size: 10px; color: var(--pulse-dashboard-muted, #72736d); letter-spacing: .06em; text-transform: uppercase; }
+.pulse-report-disclosure > summary strong { font-size: 17px; font-weight: 500; letter-spacing: -.03em; }
+.pulse-report-disclosure > summary > svg { flex-shrink: 0; color: var(--pulse-dashboard-muted, #72736d); transition: transform .2s; }
+.pulse-report-disclosure[open] > summary > svg { transform: rotate(180deg); }
+.pulse-report-disclosure[open] > summary { border-bottom: 1px solid #eeeee8; }
+.pulse-report-disclosure > summary:focus-visible { outline: 2px solid #252622; outline-offset: -5px; border-radius: 12px; }
+.pulse-report-disclosure__body { padding: 24px; }
+.search-dashboard .pulse-report-disclosure__body { padding: 0; }
+.search-dashboard .pulse-report-disclosure .search-intelligence, .search-dashboard .pulse-report-disclosure .trends-panel { margin: 0; border: 0; border-radius: 0; }
+.search-dashboard .pulse-report-disclosure .search-comparison { border-top: 1px solid var(--search-line); padding-top: 6px; }
+.search-dashboard .pulse-report-disclosure .search-intelligence__table-scroll { max-height: 460px; }
+.search-dashboard__ads-status { padding: 26px; }
+.search-dashboard__ads-status h3 { margin: 0; font-size: 20px; font-weight: 500; }
+.search-dashboard__ads-status p { color: var(--search-muted); font-size: 12px; line-height: 1.7; max-width: 620px; }
+.search-dashboard__ads-status a { display: inline-block; margin-top: 12px; font-size: 12px; color: inherit; }
+
+/* 50% search, 25% Trends, 25% Ads, excluding the even gutters. */
+.search-dashboard__summary-grid { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; }
+.search-dashboard__summary-grid .search-dashboard__coverage { min-height: 350px; grid-area: auto; }
+.search-dashboard__summary-grid .search-dashboard__tile { padding: 24px; }
+.search-dashboard__summary-grid .search-dashboard__number { margin-top: 24px; font-size: clamp(56px, 7cqw, 80px); }
+.search-dashboard__summary-grid .search-dashboard__tile-bottom button { font-size: 11px; gap: 10px; padding: 11px 12px; }
+.search-dashboard__summary-grid .search-dashboard__tile p { font-size: 11px; }
+.search-dashboard__trends-summary { background: #e8ece5; }
+.search-dashboard__ads-summary { background: linear-gradient(160deg, #fff 25%, #f9e9d9); }
+.search-dashboard__mini-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 22px; }
+.search-dashboard__mini-metrics button { display: flex; align-items: center; justify-content: start; gap: 10px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; }
+.search-dashboard__mini-metrics strong { font-size: 24px; font-weight: 450; letter-spacing: -.04em; }
+.search-dashboard__mini-metrics span { font-size: 10px; color: var(--search-muted); }
+.search-dashboard__summary-grid .search-dashboard__tile-bottom { padding-top: 18px; }
+.search-dashboard__summary-grid .search-dashboard__query-mosaic { margin-top: 20px; }
+
+.pulse-dashboard--web > .pagespeed-panel { margin: 0; border: 0; border-radius: 0; background: transparent; }
+.pulse-dashboard--web .pagespeed-panel__header { padding: 0 0 28px; }
+.pulse-dashboard--web .pagespeed-panel h2 { font-size: clamp(27px, 3vw, 38px); font-weight: 500; }
+.pulse-dashboard--web .pagespeed-panel__scores { padding: 0; gap: 12px; grid-template-columns: 2fr 1fr 1fr; }
+.pulse-dashboard--web .pagespeed-panel__scores > div { border: 0; border-radius: 16px; padding: 26px; background: white; min-height: 140px; }
+.pulse-dashboard--web .pagespeed-panel__scores > div:first-child { grid-row: span 2; min-height: 292px; display: flex; flex-direction: column; justify-content: space-between; background: linear-gradient(135deg, #fff 50%, #f6f5ec); }
+.pulse-dashboard--web .pagespeed-panel__scores > div:last-child { grid-column: span 2; background: #e8ece5; }
+.pulse-dashboard--web .pagespeed-panel__scores strong { font-size: 46px; font-weight: 450; }
+.pulse-dashboard--web .pagespeed-panel__scores > div:first-child strong { font-size: 90px; }
+.pulse-dashboard--web .pagespeed-panel__metrics { border: 0; margin: 12px 0; padding: 0; gap: 12px; }
+.pulse-dashboard--web .pagespeed-panel__metrics > div { background: white; border-radius: 12px; padding: 22px; }
+.pulse-dashboard--web .pagespeed-panel__metrics dd { font-size: 28px; font-weight: 450; letter-spacing: -.04em; }
+.pulse-dashboard--web .pagespeed-panel .pagespeed-panel__timestamp { padding: 12px 0; }
+.pulse-dashboard--web .pagespeed-panel footer { border: 0; background: transparent; padding-inline: 0; }
+.pulse-dashboard--web .public-signals, .pulse-dashboard--web .site-audit-panel, .pulse-dashboard--web .weekly-report-panel { border: 0; margin: 0; padding-inline: 0; }
+.pulse-dashboard--web .public-signals__devices article { background: #f7f7f4; border: 0; border-radius: 12px; }
+.pulse-dashboard--web .public-signals dd { font-size: 30px; font-weight: 450; }
+.pulse-dashboard--web .public-signals__source { padding: 20px; border: 0; background: #f8f8f5; border-radius: 12px; margin-top: 12px; }
+.pulse-dashboard.web-vitals-panel .web-vitals-panel__groups article { padding: 24px; border: 0; border-radius: 16px; background: #fff; }
+.pulse-dashboard.web-vitals-panel .web-vitals-panel__groups dd { font-size: 36px; font-weight: 450; letter-spacing: -.04em; }
+
+@container (max-width: 760px) {
+  .search-dashboard__summary-grid { grid-template-columns: 1fr 1fr; }
+  .search-dashboard__summary-grid .search-dashboard__coverage { grid-column: 1 / -1; min-height: 300px; }
+}
+@media (max-width: 760px) {
+  .marketing-pulse .pulse-dashboard { padding: 20px; border-radius: 18px; }
+  .pulse-dashboard .analytics-panel__cards { grid-template-columns: 1fr 1fr; }
+  .pulse-dashboard .analytics-panel__cards article:first-child { grid-row: auto; grid-column: 1 / -1; min-height: 220px; }
+  .pulse-dashboard .analytics-panel__cards article { padding: 22px; border: 0; }
+  .pulse-dashboard--clarity .analytics-panel__cards article:last-child { grid-column: 1 / -1; }
+  .pulse-report-disclosure > summary { padding: 20px; }
+  .pulse-report-disclosure__body { padding: 18px; }
+  .pulse-dashboard--web .pagespeed-panel__scores { grid-template-columns: 1fr 1fr; }
+  .pulse-dashboard--web .pagespeed-panel__scores > div:first-child { grid-row: auto; grid-column: 1 / -1; min-height: 230px; }
+  .pulse-dashboard--web .pagespeed-panel__scores > div:last-child { grid-column: 1 / -1; }
+}
+@media (max-width: 480px) {
+  .search-dashboard__summary-grid { grid-template-columns: minmax(0, 1fr); }
+  .pulse-dashboard .analytics-panel__cards, .pulse-dashboard--web .pagespeed-panel__scores, .pulse-dashboard--web .pagespeed-panel__metrics { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) { .pulse-report-disclosure > summary > svg { transition: none; } }

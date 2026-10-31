@@ -1,0 +1,9 @@
+# W2-U58 progress (WS17.C2, restore): BUILT, compile-checked, NOT run
+
+Committed: 8f47e6f2d (feature code: profile_restore.rs, profile_restore_live.rs, chromiumoxide.rs, browser lib.rs, profile_snapshot.rs, session.rs, quarry-core contracts.rs, edge types.rs and projection.rs), 9706d03ec (openapi.yaml and RUNBOOKS.md, hunk-only: both carry other units' uncommitted hunks), plus the notes commit with this file.
+Uncommitted by this unit: nothing of ours. `docs/RUNBOOKS.md`, `docs/openapi.yaml`, `docs/CONTRACTS.md` still show other units' hunks.
+Verified: `cargo check -p quarry-core -p quarry-browser --tests`, `cargo check -p quarry-browser --tests --features chromiumoxide`, `cargo check -p quarry-runtime -p quarry-edge --tests`: no errors, no new warnings. `node --check` of the seeding script (template with a sample map) and a node mock run of it (sentinel, once-only, other origin does nothing, IndexedDB created in upgradeneeded).
+Not run: the 9 unit tests (`profile_restore.rs` x8, `profile_snapshot.rs` x1) and the 7 live tests.
+Not built: the `profile_restore` timeline event (see depth), CONTRACTS.md paragraph, SDK regeneration.
+Test commands for the final phase: `cargo test -p quarry-browser profile_restore journal_carries`; `CHROMIUMOXIDE_TEST=1 QUARRY_BROWSER_NO_SANDBOX=1 CHROME=/usr/bin/chromium cargo test -p quarry-browser --features chromiumoxide restore_ -- --test-threads=1 --ignored --nocapture` (the two store-failure tests run without `--ignored` and need no network); also `cargo test -p quarry-browser --features chromiumoxide bounded_calls` (the CDP-bound lint over chromiumoxide.rs) and the existing live tests at `reopening_a_session_with_a_saved_profile_restores_cookies_without_erroring`, `distinct_sessions_do_not_share_cookies`, `second_tab_on_same_session_shares_that_sessions_cookies`.
+Depth bullets: depth/W2-U58.md. Hand-over: wf-W2-U58.md.

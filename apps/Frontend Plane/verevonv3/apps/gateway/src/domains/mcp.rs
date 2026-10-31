@@ -525,7 +525,7 @@ async fn oauth_callback(
         url.push_str(&query);
     }
     if !same_upstream_origin(&url, &state.model_gateway_url) {
-        tracing::warn!(%org_id, %url, "mcp oauth callback: target failed the upstream-origin check");
+        tracing::warn!(%org_id, "mcp oauth callback: target failed the upstream-origin check");
         return Redirect::to(&fallback).into_response();
     }
 
@@ -548,7 +548,7 @@ async fn oauth_callback(
     let upstream = match request.send().await {
         Ok(upstream) => upstream,
         Err(error) => {
-            tracing::warn!(%org_id, error = %error, "mcp oauth callback: model-gateway request failed");
+            tracing::warn!(%org_id, error_class = crate::zdr_log::class_reqwest(&error), "mcp oauth callback: model-gateway request failed");
             return Redirect::to(&fallback).into_response();
         }
     };
@@ -568,6 +568,7 @@ async fn oauth_callback(
     {
         Ok(response) => response,
         Err(error) => {
+            // zdr-log-ok: an http::Error from building a redirect response out of a header value the model-gateway returned; it names the header problem, not a page or query
             tracing::warn!(%org_id, error = %error, "mcp oauth callback: could not build the redirect response");
             return Redirect::to(&fallback).into_response();
         }

@@ -1,6 +1,7 @@
 use axum::{
+    body::Body,
     extract::{Extension, Path, State},
-    http::{HeaderMap, StatusCode, Uri},
+    http::{header, HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
     Json,
 };
@@ -9,25 +10,69 @@ use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
 use crate::{
-    cache,
+    cache_admission::{variant_digest, CacheAdmission},
     config::AppState,
+    domains::browser::{
+        is_valid_artifact_id, scrape_artifact_content_type, BrowserArtifactAbsence, CallerClass,
+        MAX_BROWSER_ARTIFACT_BYTES,
+    },
     domains::knowledge::shared,
     envelope::{error, ok},
     middleware::AuthenticatedUser,
     public_url::normalize_public_http_url,
-    upstream::{proxy_bearer_json, proxy_sse_stream},
+    upstream::{proxy_bearer_json, proxy_bearer_json_with_timeout, proxy_sse_stream},
 };
 
 const PREVIEW_MARKDOWN_CHAR_LIMIT: usize = 80_000;
 
-/// Default freshness window for a cached scrape preview, used when the caller
-/// sends no `max_age_s`. Matches `cache::FRESH_SECS`, which this replaced for
-/// this route so the caller's policy can override it.
-const PREVIEW_FRESH_SECS: u64 = 4 * 60 * 60;
+/// WS13.5: the ceiling for a scrape that drives the browser (actions, a screenshot, a
+/// PDF). The edge bounds an actions run at 115 s and its router at 125 s, so the edge
+/// answers with its typed timeout before this one fires. Every other scrape keeps the
+/// standard client's 25 s.
+const SCRAPE_BROWSER_TIMEOUT: Duration = Duration::from_secs(125);
+
+/// Whether a scrape body asks for work that outlasts the standard 25 s: a non-empty
+/// `actions` list, an object-form format, or a `screenshot` or `pdf` format.
+fn scrape_needs_browser_budget(body: &Value) -> bool {
+    let has_actions = body
+        .get("actions")
+        .and_then(Value::as_array)
+        .is_some_and(|actions| !actions.is_empty());
+    let has_capture_format = body
+        .get("formats")
+        .and_then(Value::as_array)
+        .is_some_and(|formats| {
+            formats.iter().any(|format| match format {
+                Value::Object(_) => true,
+                Value::String(name) => matches!(name.as_str(), "screenshot" | "pdf"),
+                _ => false,
+            })
+        });
+    has_actions || has_capture_format
+}
+
+/// WS13.5: stamp who proposed this scrape, from the caller the gateway verified.
+/// The edge reads `initiated_by` as a tighten-only hint: `"agent"` makes it refuse
+/// `actions`, so a Model-authored list relayed under a person's bearer is refused as a
+/// service principal's would be. A verified service principal is always the agent,
+/// whatever the body says; a person's session keeps a stated `"agent"` (it can only
+/// tighten) and nothing else: any other client value is dropped, never forwarded.
+fn stamp_scrape_origin(body: &mut Value, caller: CallerClass) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    let stated_agent = object.get("initiated_by").and_then(Value::as_str) == Some("agent");
+    if caller == CallerClass::ServicePrincipal || stated_agent {
+        object.insert("initiated_by".to_owned(), json!("agent"));
+    } else {
+        object.remove("initiated_by");
+    }
+}
 
 pub(super) async fn scrape(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    caller: Option<Extension<CallerClass>>,
     headers: HeaderMap,
     Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
@@ -44,10 +89,23 @@ pub(super) async fn scrape(
         Err(message) => return (StatusCode::BAD_REQUEST, Json(error("invalid_url", message))),
     };
     body["url"] = Value::String(normalized);
+    stamp_scrape_origin(&mut body, caller.map(|Extension(class)| class).unwrap_or_default());
 
     let cookie = shared::cookie_header(&headers);
     let token = shared::quarry_token(&state, &user, &cookie).await;
     let url = format!("{}/v1/scrape", state.quarry_edge_url);
+    if scrape_needs_browser_budget(&body) {
+        return proxy_bearer_json_with_timeout(
+            &state,
+            Method::POST,
+            &url,
+            Some(body),
+            token.as_deref(),
+            &user.user_id,
+            SCRAPE_BROWSER_TIMEOUT,
+        )
+        .await;
+    }
     proxy_bearer_json(
         &state,
         Method::POST,
@@ -90,6 +148,17 @@ pub(super) async fn scrape_preview(
         }
     };
     body["url"] = Value::String(target.clone());
+    // WS13.7: the cached preview is text only (no actions, viewport or capture
+    // formats), so the cache key and the browser-failure retry never see them.
+    strip_preview_only_fields(&mut body);
+    // Ask for the text inline. Without `formats` quarry-edge answers a
+    // non-ZDR scrape with an artifact reference, which costs a second
+    // `/v1/extract` call below to read back; a caller that sent its own
+    // `formats` keeps them. Set before the variant digest so the cache key
+    // describes the request that is actually forwarded.
+    if body.get("formats").is_none() {
+        body["formats"] = json!(["markdown"]);
+    }
 
     // Cache admission MIRRORS quarry-edge's (`routes.rs` `should_read` /
     // `should_write` / `effective_ttl`) rather than inventing a second policy.
@@ -100,21 +169,31 @@ pub(super) async fn scrape_preview(
     // one boundary the ownership matrix says must not hold this. The caller's
     // `cache` policy was ignored the same way: `{mode: "bypass"}` was honoured
     // upstream and silently overridden here.
-    let admission = CacheAdmission::resolve(&state, &user, &headers, &body).await;
-    let key = cache::cache_key("scrape-preview", &[&target]);
+    //
+    // The entry is keyed by ORG and by the request variant (formats, render
+    // hints, waits...), and a request that carries headers, actions, a profile
+    // or a session is never cached at all: its response depends on state the
+    // key does not capture.
+    let admission = CacheAdmission::resolve(&state, &user, &headers, &body, true).await;
+    admission.record_bypass("scrape-preview");
+    let variant = variant_digest(&body);
+    let key = admission.key("scrape-preview", &[&target, &variant]);
     let mut stale: Option<Value> = None;
-    if admission.may_read {
+    if let (Some(key), Some(scope), true) = (key.as_deref(), admission.scope(), admission.may_read)
+    {
         if let Some(hit) = state
             .cache
-            .lookup_within(&key, admission.max_age_secs)
+            .lookup_within_scoped(key, scope, admission.max_age_secs)
             .await
         {
+            crate::observability::record_result_cache("scrape-preview", "hit");
             return (StatusCode::OK, Json(ok(hit))).into_response();
         }
+        crate::observability::record_result_cache("scrape-preview", "miss");
         // Outside the freshness window a copy is still worth keeping as an
         // outage fallback, exactly as before — but only within the store window
         // the caller's policy allows.
-        if let Some(hit) = state.cache.lookup(&key).await {
+        if let Some(hit) = state.cache.lookup_scoped(key, scope).await {
             stale = Some(hit.data);
         }
     }
@@ -146,7 +225,6 @@ pub(super) async fn scrape_preview(
         && browser_elapsed < Duration::from_secs(12);
     if !status.is_success() && retry_worthwhile {
         tracing::warn!(
-            target = %target,
             %status,
             "quarry browser render failed fast; retrying scrape preview as a static fetch"
         );
@@ -166,7 +244,7 @@ pub(super) async fn scrape_preview(
 
     if !status.is_success() {
         if let Some(data) = stale {
-            tracing::warn!(target = %target, "quarry scrape failed; serving stale cached preview");
+            tracing::warn!("quarry scrape failed; serving stale cached preview");
             return (StatusCode::OK, Json(ok(data))).into_response();
         }
         // A Quarry refusal is final. This is where a commercial stealth-proxy
@@ -183,9 +261,9 @@ pub(super) async fn scrape_preview(
         //
         // Always return a clear, typed error promptly — never let a slow or
         // bot-walled upstream collapse into an empty response at the client.
-        let (code, message) = classify_scrape_failure(status, browser_elapsed);
-        tracing::warn!(target = %target, %status, code, "scrape preview unavailable");
-        return (status, Json(error(code, message))).into_response();
+        let (code, message) = classify_scrape_failure(status, browser_elapsed, &scrape_body);
+        tracing::warn!(%status, code, "scrape preview unavailable");
+        return scrape_failure_response(status, code, message, &scrape_body);
     }
 
     let extract_target = preview_url(&target, &scrape_body);
@@ -196,99 +274,255 @@ pub(super) async fn scrape_preview(
     };
 
     let preview = build_scrape_preview(&target, &scrape_body, extract_markdown.as_deref());
-    if admission.may_write {
-        state.cache.store(&key, &preview).await;
+    if let (Some(key), Some(scope), true) = (key.as_deref(), admission.scope(), admission.may_write)
+    {
+        state.cache.store_scoped(key, scope, &preview).await;
+        crate::observability::record_result_cache("scrape-preview", "store");
     }
     (StatusCode::OK, Json(ok(preview))).into_response()
 }
 
-/// Whether the BFF may read and write its own copy of a page preview, and for
-/// how long a cached copy counts as fresh.
+/// `GET /api/v1/knowledge/scrape-artifacts/{artifact_id}` (WS13.7): one artifact of
+/// a scrape capture (a screenshot or a PDF) as bytes the SPA can show or download.
 ///
-/// Deliberately shaped like quarry-edge's three admission helpers so the two
-/// layers cannot drift: `may_read`/`may_write` correspond to `should_read` /
-/// `should_write` (both additionally gated on `!zdr.is_active()`), and
-/// `max_age_secs` to `effective_ttl`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CacheAdmission {
-    may_read: bool,
-    may_write: bool,
-    max_age_secs: u64,
-}
+/// Quarry's `GET /v1/artifacts/{id}` answers only for the caller's own org, so the
+/// org-scoped token is the isolation boundary here. A capture belongs to an org, not
+/// to a browser run, so the browser route's per-run gate does not apply. Quarry's
+/// refusals are normalised: a missing or aged-out artifact (and another org's id) is
+/// one 404, and a ZDR org gets the `withheld` shape. Only the image types and
+/// `application/pdf` are served, with no-store caching.
+pub(super) async fn scrape_artifact(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(artifact_id): Path<String>,
+) -> Response {
+    if !is_valid_artifact_id(&artifact_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_scrape_artifact",
+                "The requested scrape artifact id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+    // Zero Data Retention: Quarry writes no artifact for a ZDR org, so there is
+    // nothing to fetch. The posture is read before anything is sent upstream, and
+    // an unknown posture counts as ZDR (`crate::zdr::org_zdr_enabled`).
+    if crate::zdr::org_zdr_enabled(&state, &user).await {
+        return BrowserArtifactAbsence::Withheld.into_response();
+    }
 
-impl CacheAdmission {
-    /// Nothing in, nothing out. Used for a ZDR-posture caller: page content
-    /// fetched under ZDR must not touch Frontend-Plane storage in either
-    /// direction — not written, and not served from an entry some earlier
-    /// non-ZDR request happened to leave behind.
-    const DENIED: Self = Self {
-        may_read: false,
-        may_write: false,
-        max_age_secs: 0,
+    let cookie = shared::cookie_header(&headers);
+    let token = shared::quarry_token(&state, &user, &cookie).await;
+    let url = format!(
+        "{}/v1/artifacts/{}",
+        state.quarry_edge_url,
+        urlencoding::encode(&artifact_id)
+    );
+    let mut req =
+        crate::request_id::apply(state.client.get(&url)).header("x-user-id", &user.user_id);
+    if let Some(token) = token {
+        req = req.bearer_auth(token);
+    }
+    let upstream = match req.send().await {
+        Ok(upstream) => upstream,
+        Err(_) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(crate::envelope::upstream_unavailable()),
+            )
+                .into_response()
+        }
     };
-
-    /// Resolve admission for this request.
-    ///
-    /// The ZDR posture is derived SERVER-side ([`crate::zdr`]): the `x-zdr`
-    /// header, a `zdr: true` body field, or the organisation's standing posture
-    /// in org-core. The org check is what makes this hold for a client that
-    /// never sets either — and it is skipped when the request already declares
-    /// ZDR, since the answer cannot change.
-    async fn resolve(
-        state: &AppState,
-        user: &AuthenticatedUser,
-        headers: &HeaderMap,
-        body: &Value,
-    ) -> Self {
-        if crate::zdr::request_zdr(headers, Some(body)) {
-            return Self::DENIED;
-        }
-        if crate::zdr::org_zdr_enabled(state, user).await {
-            return Self::DENIED;
-        }
-        Self::from_policy(body.get("cache"))
+    let status = upstream.status();
+    if matches!(status.as_u16(), 404 | 410) {
+        return scrape_artifact_not_found();
+    }
+    if !status.is_success() {
+        return scrape_artifact_failed();
+    }
+    if upstream
+        .content_length()
+        .is_some_and(|length| length > MAX_BROWSER_ARTIFACT_BYTES)
+    {
+        return scrape_artifact_too_large();
+    }
+    let upstream_content_type = upstream
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let Some(content_type) = scrape_artifact_content_type(upstream_content_type.as_deref()) else {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(error(
+                "scrape_artifact_unsupported",
+                "This artifact type cannot be shown or downloaded.",
+            )),
+        )
+            .into_response();
+    };
+    let bytes = match upstream.bytes().await {
+        Ok(bytes) => bytes,
+        Err(_) => return scrape_artifact_failed(),
+    };
+    if bytes.len() as u64 > MAX_BROWSER_ARTIFACT_BYTES {
+        return scrape_artifact_too_large();
     }
 
-    /// Read the caller's `CachePolicy` (quarry-core's `{mode, max_age_s, …}`) out
-    /// of the same body the BFF forwards to quarry-edge. An absent or
-    /// unrecognised policy keeps the previous defaults, so a client that sends
-    /// no policy behaves exactly as before.
-    fn from_policy(policy: Option<&Value>) -> Self {
-        let mode = policy
-            .and_then(|policy| policy.get("mode"))
-            .and_then(Value::as_str)
-            .map(str::trim);
-        let (may_read, may_write) = match mode {
-            None => (true, true),
-            Some("read_write") => (true, true),
-            Some("read_only") => (true, false),
-            Some("write_only") => (false, true),
-            Some("bypass") => (false, false),
-            // An unknown mode is not a licence to cache: quarry-edge would
-            // reject the body outright, so the safe local reading is "no".
-            Some(_) => (false, false),
-        };
-        let max_age_secs = policy
-            .and_then(|policy| policy.get("max_age_s"))
-            .and_then(Value::as_u64)
-            .filter(|value| *value > 0)
-            .unwrap_or(PREVIEW_FRESH_SECS);
-        Self {
-            may_read,
-            may_write,
-            max_age_secs,
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    if content_type == "application/pdf" {
+        // A PDF is downloaded, never rendered inline by the SPA, and a browser that
+        // opens it anyway runs it under the sandbox policy.
+        response = response
+            .header(
+                header::CONTENT_DISPOSITION,
+                r#"attachment; filename="page.pdf""#,
+            )
+            .header(header::CONTENT_SECURITY_POLICY, "sandbox");
+    }
+    response
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| scrape_artifact_failed())
+}
+
+fn scrape_artifact_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(error(
+            "scrape_artifact_not_found",
+            "The scrape artifact is no longer available.",
+        )),
+    )
+        .into_response()
+}
+
+fn scrape_artifact_failed() -> Response {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(error(
+            "scrape_artifact_failed",
+            "The scrape artifact could not be returned.",
+        )),
+    )
+        .into_response()
+}
+
+fn scrape_artifact_too_large() -> Response {
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        Json(error(
+            "scrape_artifact_too_large",
+            "The scrape artifact is too large to show.",
+        )),
+    )
+        .into_response()
+}
+
+/// Keys a cached scrape preview never forwards (WS13.7). Browser actions, the
+/// viewport and the capture options make the response depend on per-request browser
+/// state, and the browser-failure retry in `scrape_preview` would replay them. The
+/// captures are served by `/v1/knowledge/scrape`, which is not cached.
+const PREVIEW_DROPPED_KEYS: [&str; 4] = ["actions", "actionsOnError", "viewport", "capture"];
+
+/// The `formats` entries that request a capture. A non-string format (an options
+/// object such as `{"type":"pdf"}`) is dropped as well.
+const PREVIEW_DROPPED_FORMATS: [&str; 2] = ["screenshot", "pdf"];
+
+/// Remove the preview-only-excluded fields from a scrape-preview body. A `formats`
+/// list left empty is removed, so the default `["markdown"]` applies again.
+fn strip_preview_only_fields(body: &mut Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    for key in PREVIEW_DROPPED_KEYS {
+        object.remove(key);
+    }
+    let formats_empty = match object.get_mut("formats").and_then(Value::as_array_mut) {
+        Some(formats) => {
+            formats.retain(|format| {
+                format
+                    .as_str()
+                    .is_some_and(|name| !PREVIEW_DROPPED_FORMATS.contains(&name))
+            });
+            formats.is_empty()
         }
+        None => false,
+    };
+    if formats_empty {
+        object.remove("formats");
     }
 }
 
-/// Map a failed upstream scrape into a clear, user-facing (code, message). A long
-/// elapsed time means a hung render or a bot-wall stall — the common case for
-/// JS-heavy, protected retailer pages — while 403/429 is an explicit block.
-fn classify_scrape_failure(status: StatusCode, elapsed: Duration) -> (&'static str, String) {
-    if matches!(status.as_u16(), 403 | 429) {
+/// `details.block_reason` values Quarry sends on a scrape's `403
+/// CHALLENGE_DETECTED` (the closed `BlockReason` enum in `quarry-core`). The
+/// gateway reads the field and nothing else of the upstream body: a value that is
+/// not in this list is treated as if the field were absent, so a new or garbled
+/// reason falls back to the bare-403 class instead of being echoed.
+const SCRAPE_BLOCK_REASONS: [&str; 4] = [
+    "captcha_widget",
+    "waf_interstitial",
+    "unexpected_bot_error",
+    "challenge_loop",
+];
+
+/// The typed block reason Quarry attached to a refused scrape, as one of this
+/// file's own static strings. `None` unless the upstream error is a
+/// `CHALLENGE_DETECTED` carrying a known `details.block_reason`. The returned
+/// value is never upstream text.
+fn scrape_block_reason(upstream: &Value) -> Option<&'static str> {
+    if upstream.pointer("/error/code").and_then(Value::as_str) != Some("CHALLENGE_DETECTED") {
+        return None;
+    }
+    let reason = upstream
+        .pointer("/error/details/block_reason")?
+        .as_str()?;
+    SCRAPE_BLOCK_REASONS
+        .iter()
+        .copied()
+        .find(|known| *known == reason)
+}
+
+/// Map a failed upstream scrape into a clear, user-facing (code, message). Only
+/// a Quarry-supplied strong `block_reason` means the site put a bot wall in
+/// front of the page (`site_blocked`); a bare 403 is a refusal we cannot
+/// explain (`scrape_refused`: login, geo, policy, a plain "no"), and a 429 is
+/// the site or Quarry asking us to slow down (`scrape_rate_limited`). A long
+/// elapsed time means a hung render or a stall. None of the messages offers a
+/// proxy, and none carries the host, the page text or the upstream message.
+fn classify_scrape_failure(
+    status: StatusCode,
+    elapsed: Duration,
+    upstream: &Value,
+) -> (&'static str, String) {
+    if status == StatusCode::FORBIDDEN && scrape_block_reason(upstream).is_some() {
         return (
             "site_blocked",
-            "Dette nettstedet blokkerer automatisert henting. Prøv en annen kilde, eller be om proxy-tilgang for å hente beskyttede nettsteder.".to_owned(),
+            "Dette nettstedet stopper automatisert henting med en bot-sperre. Prøv en annen kilde, eller åpne siden selv i nettleseren.".to_owned(),
+        );
+    }
+    if status == StatusCode::FORBIDDEN {
+        return (
+            "scrape_refused",
+            "Nettstedet avviste forespørselen om å hente siden. Siden kan kreve innlogging eller være stengt for automatisk henting. Prøv en annen kilde.".to_owned(),
+        );
+    }
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        return (
+            "scrape_rate_limited",
+            "Nettstedet mottar for mange forespørsler akkurat nå. Vent litt og prøv igjen.".to_owned(),
+        );
+    }
+    if status.as_u16() == 415 {
+        return (
+            "unsupported_media",
+            "Dette innholdet kan ikke vises som forhåndsvisning (for eksempel et bilde, et arkiv eller en annen filtype uten tekst). Prøv en lenke til en nettside eller et dokument.".to_owned(),
         );
     }
     if elapsed >= Duration::from_secs(20) || matches!(status.as_u16(), 408 | 504) {
@@ -301,6 +535,126 @@ fn classify_scrape_failure(status: StatusCode, elapsed: Duration) -> (&'static s
         "scrape_failed",
         "Kunne ikke hente forhåndsvisning av siden. Sjekk lenken og prøv igjen.".to_owned(),
     )
+}
+
+/// Seconds Quarry asked the caller to wait on a scrape's 429, bounded to
+/// 1..=3600. quarry-edge answers a `/v1/scrape` `RATE_LIMITED` with the flat
+/// `ApiError` (`retry_after_seconds` at the top of the body), other 429s with
+/// the canonical envelope (`error.details.retry_after_seconds`); both are read,
+/// the envelope first. `None` for a missing, non-numeric or out-of-range value.
+fn scrape_retry_after_seconds(upstream: &Value) -> Option<u64> {
+    upstream
+        .pointer("/error/details/retry_after_seconds")
+        .and_then(Value::as_u64)
+        .filter(|seconds| (1..=3600).contains(seconds))
+        .or_else(|| {
+            upstream
+                .pointer("/retry_after_seconds")
+                .and_then(Value::as_u64)
+                .filter(|seconds| (1..=3600).contains(seconds))
+        })
+}
+
+/// The refusal the caller sees for a failed scrape preview: the typed gateway
+/// code and a fixed message, plus the two typed hints the SPA has copy for. The
+/// block reason is one of this file's static strings (`scrape_block_reason`);
+/// the retry hint is a number in 1..=3600 seconds, read from either shape
+/// Quarry answers a scrape's 429 with (`scrape_retry_after_seconds`). Nothing
+/// else of the upstream body is forwarded.
+fn scrape_failure_response(
+    status: StatusCode,
+    code: &'static str,
+    message: String,
+    upstream: &Value,
+) -> Response {
+    let mut body = error(code, message);
+    if code == "site_blocked" {
+        if let Some(reason) = scrape_block_reason(upstream) {
+            body["error"]["blockReason"] = json!(reason);
+        }
+    }
+    if code == "scrape_rate_limited" {
+        if let Some(seconds) = scrape_retry_after_seconds(upstream) {
+            body["error"]["retryAfterSeconds"] = json!(seconds);
+            return (
+                status,
+                [(axum::http::header::RETRY_AFTER, seconds.to_string())],
+                Json(body),
+            )
+                .into_response();
+        }
+    }
+    (status, Json(body)).into_response()
+}
+
+/// The `org_backlog_full` refusal from Quarry's error envelope as a gateway
+/// `crawl_backlog_full` 429 with `Retry-After`. Only the numbers survive
+/// (limit, queued, seconds); nothing else from the upstream body is echoed.
+/// `None` for any other 429.
+fn crawl_backlog_full_response(resp: &Value) -> Option<Response> {
+    let details = resp.pointer("/error/details")?;
+    if details.get("reason")?.as_str()? != "org_backlog_full" {
+        return None;
+    }
+    let count = |key: &str| {
+        details
+            .get(key)
+            .and_then(Value::as_u64)
+            .filter(|n| *n <= 1_000_000)
+    };
+    let retry_after = count("retry_after_seconds")
+        .filter(|seconds| (1..=3600).contains(seconds))
+        .unwrap_or(30);
+    let mut body = error(
+        "crawl_backlog_full",
+        "Too many crawls are waiting for this organization. Try again shortly.",
+    );
+    body["error"]["retryAfterSeconds"] = json!(retry_after);
+    if let Some(limit) = count("limit") {
+        body["error"]["limit"] = json!(limit);
+    }
+    if let Some(queued) = count("queued") {
+        body["error"]["queued"] = json!(queued);
+    }
+    Some(
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(axum::http::header::RETRY_AFTER, retry_after.to_string())],
+            Json(body),
+        )
+            .into_response(),
+    )
+}
+
+/// The organization's crawl or batch allowance is spent: Quarry's
+/// `BUDGET_EXHAUSTED` 402 with `details.dimension = org_allowance` as a gateway
+/// `crawl_allowance_exhausted` 402. Only the metric (one of two known names) and a
+/// sane retry hint survive; nothing else from the upstream body is echoed.
+/// `None` for any other 402.
+fn crawl_allowance_exhausted_response(resp: &Value) -> Option<Response> {
+    let details = resp.pointer("/error/details")?;
+    if details.get("dimension")?.as_str()? != "org_allowance" {
+        return None;
+    }
+    let mut body = error(
+        "crawl_allowance_exhausted",
+        "This organization has used up its crawl allowance.",
+    );
+    if let Some(metric) = details
+        .get("metric")
+        .and_then(Value::as_str)
+        .filter(|metric| matches!(*metric, "quarry.crawl.page" | "quarry.batch.url"))
+    {
+        body["error"]["metric"] = json!(metric);
+    }
+    if let Some(seconds) = details
+        .get("retry_after_seconds")
+        .and_then(Value::as_u64)
+        .filter(|seconds| (1..=2_592_000).contains(seconds))
+    {
+        body["error"]["retryAfterSeconds"] = json!(seconds);
+    }
+    Some((StatusCode::PAYMENT_REQUIRED, Json(body)).into_response())
 }
 
 pub(super) async fn start_crawl(
@@ -344,6 +698,21 @@ pub(super) async fn start_crawl(
     .await;
 
     if !status.is_success() {
+        // The organization's own crawl queue is full: say so in a code the app
+        // has copy for, with when to try again, instead of passing the
+        // upstream envelope through.
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            if let Some(response) = crawl_backlog_full_response(&resp) {
+                return response;
+            }
+        }
+        // The organization's configured allowance is spent (WS6.D): the same, with the
+        // metric that ran out and no other upstream detail.
+        if status == StatusCode::PAYMENT_REQUIRED {
+            if let Some(response) = crawl_allowance_exhausted_response(&resp) {
+                return response;
+            }
+        }
         return (status, Json(resp)).into_response();
     }
 
@@ -369,6 +738,10 @@ pub(super) async fn start_crawl(
             "/data/acceptedAt",
         ]),
         "eventStream": format!("/api/v1/knowledge/jobs/{}/events", job_id),
+        // The bounds the crawl will actually run with and why they differ from
+        // the request (an absent or zero page limit takes the default; a value
+        // above the ceiling is clamped). Surfaced so a clamp is never silent.
+        "limits": resp.pointer("/data/limits").cloned().unwrap_or(Value::Null),
         "upstream": resp,
     });
 
@@ -383,7 +756,27 @@ fn invalid_crawl(message: String) -> Response {
         .into_response()
 }
 
-fn normalize_crawl_body(input: &Value) -> Result<Value, String> {
+/// Who proposed a crawl. The UI may set every scope switch the page offers. A Model
+/// proposal (the `knowledge.crawl_site` action) may not set `allowExternalLinks`, and
+/// no robots key is forwarded from either surface (WS14.S6; the robots override is WS14.S7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Surface {
+    Ui,
+    Model,
+}
+
+/// The caps the edge enforces again (CRAWL_SCOPE_ROBOTS.md section 12). Gateway and edge
+/// share these numbers; a test in each tree pins them.
+pub(crate) const CRAWL_MAX_DEPTH: u64 = 10;
+pub(crate) const CRAWL_MAX_PATTERNS: usize = 100;
+pub(crate) const CRAWL_MAX_PATTERN_CHARS: usize = 512;
+pub(crate) const CRAWL_MAX_PATTERN_TOTAL_CHARS: usize = 8_192;
+
+pub(crate) fn normalize_crawl_body(input: &Value) -> Result<Value, String> {
+    normalize_crawl_body_for(input, Surface::Ui)
+}
+
+pub(crate) fn normalize_crawl_body_for(input: &Value, surface: Surface) -> Result<Value, String> {
     let raw_url = input
         .get("url")
         .and_then(Value::as_str)
@@ -410,6 +803,42 @@ fn normalize_crawl_body(input: &Value) -> Result<Value, String> {
     if let Some(ingest) = input.get("ingest").and_then(Value::as_bool) {
         body["ingest"] = json!(ingest);
     }
+    // WS14.S3: the two scope switches, camel or snake case. Absent means the edge default (false).
+    if let Some(allow) = input.get("allowSubdomains").or_else(|| input.get("allow_subdomains")).and_then(Value::as_bool) {
+        body["allow_subdomains"] = json!(allow);
+    }
+    // The external-links switch is UI-only: a Model proposal never carries it.
+    if surface == Surface::Ui {
+        if let Some(allow) = input.get("allowExternalLinks").or_else(|| input.get("allow_external_links")).and_then(Value::as_bool) {
+            body["allow_external_links"] = json!(allow);
+        }
+    }
+    // WS14.S6: the depth bound (zero takes the default; the ceiling is 10) and the pattern
+    // lists, capped as the edge caps them.
+    if let Some(depth) = input.get("maxDepth").or_else(|| input.get("max_depth")).and_then(Value::as_u64) {
+        if depth > 0 {
+            body["max_depth"] = json!(depth.min(CRAWL_MAX_DEPTH));
+        }
+    }
+    let include = pattern_list(input, "includePaths", "include_paths")?;
+    let exclude = pattern_list(input, "excludePaths", "exclude_paths")?;
+    if include.len() + exclude.len() > CRAWL_MAX_PATTERNS {
+        return Err(format!(
+            "include and exclude patterns together are limited to {CRAWL_MAX_PATTERNS}."
+        ));
+    }
+    let total: usize = include.iter().chain(exclude.iter()).map(|p| p.chars().count()).sum();
+    if total > CRAWL_MAX_PATTERN_TOTAL_CHARS {
+        return Err(format!(
+            "patterns are limited to {CRAWL_MAX_PATTERN_TOTAL_CHARS} characters in total."
+        ));
+    }
+    if !include.is_empty() {
+        body["include_paths"] = json!(include);
+    }
+    if !exclude.is_empty() {
+        body["exclude_paths"] = json!(exclude);
+    }
 
     Ok(body)
 }
@@ -420,6 +849,36 @@ fn normalize_crawl_body(input: &Value) -> Result<Value, String> {
 /// entries are dropped, duplicates collapse, and the set is capped so one batch
 /// stays within quarry's body budget (it documents "a few hundred URLs"). Errors
 /// when nothing valid remains — we never hand quarry an empty batch.
+/// A list of crawl patterns from either spelling. Each entry is kept as sent, but may
+/// not be blank or longer than the per-pattern cap.
+fn pattern_list(input: &Value, camel: &str, snake: &str) -> Result<Vec<String>, String> {
+    let Some(raw) = input.get(camel).or_else(|| input.get(snake)) else {
+        return Ok(Vec::new());
+    };
+    if raw.is_null() {
+        return Ok(Vec::new());
+    }
+    let items = raw
+        .as_array()
+        .ok_or_else(|| format!("{snake} must be a list of patterns."))?;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let text = item
+            .as_str()
+            .ok_or_else(|| format!("{snake} entries must be strings."))?;
+        if text.trim().is_empty() {
+            return Err(format!("{snake} entries must not be empty."));
+        }
+        if text.chars().count() > CRAWL_MAX_PATTERN_CHARS {
+            return Err(format!(
+                "{snake} entries are limited to {CRAWL_MAX_PATTERN_CHARS} characters."
+            ));
+        }
+        out.push(text.to_owned());
+    }
+    Ok(out)
+}
+
 fn normalize_batch_body(input: &Value) -> Result<Value, String> {
     const MAX_BATCH_URLS: usize = 200;
     let raw = input
@@ -591,7 +1050,7 @@ async fn fetch_extract_markdown(
     let (status, Json(response)) =
         proxy_bearer_json(state, Method::POST, &url, Some(body), token, user_id).await;
     if !status.is_success() {
-        tracing::warn!(%status, target, "quarry extract fallback failed for scrape preview");
+        tracing::warn!(%status, "quarry extract fallback failed for scrape preview");
         return None;
     }
     extract_markdown_from_response(&response).map(truncate_markdown)
@@ -770,8 +1229,228 @@ fn crawl_job_status(value: &Value) -> Option<&str> {
 mod tests {
     use super::*;
 
-    fn preview_user() -> AuthenticatedUser {
-        AuthenticatedUser {
+    /// WS13.5: only work that drives the browser gets the long ceiling.
+    #[test]
+    fn scrape_actions_timeout_budget_applies_to_browser_work_only() {
+        let long = |body: Value| scrape_needs_browser_budget(&body);
+        assert!(long(json!({ "url": "https://e.test/", "actions": [{ "type": "click" }] })));
+        assert!(long(json!({ "formats": ["markdown", "screenshot"] })));
+        assert!(long(json!({ "formats": ["pdf"] })));
+        assert!(long(json!({ "formats": [{ "type": "screenshot", "fullPage": true }] })));
+        assert!(!long(json!({ "url": "https://e.test/" })));
+        assert!(!long(json!({ "url": "https://e.test/", "actions": [] })));
+        assert!(!long(json!({ "formats": ["markdown", "html"] })));
+        assert_eq!(SCRAPE_BROWSER_TIMEOUT, Duration::from_secs(125));
+    }
+
+    /// WS13.5: the origin stamp is tighten-only and comes from the verified caller.
+    #[test]
+    fn model_originated_scrape_carries_initiated_by_agent() {
+        // A verified service principal is the agent whatever the body says.
+        for stated in [None, Some("human"), Some("agent"), Some("anything")] {
+            let mut body = json!({ "url": "https://e.test/", "actions": [{ "type": "wait" }] });
+            if let Some(stated) = stated {
+                body["initiated_by"] = json!(stated);
+            }
+            stamp_scrape_origin(&mut body, CallerClass::ServicePrincipal);
+            assert_eq!(body["initiated_by"], "agent", "stated {stated:?}");
+        }
+        // A person's own call carries no hint, and a client-chosen value is dropped.
+        let mut person = json!({ "url": "https://e.test/" });
+        stamp_scrape_origin(&mut person, CallerClass::User);
+        assert!(person.get("initiated_by").is_none());
+        let mut forged = json!({ "url": "https://e.test/", "initiated_by": "human" });
+        stamp_scrape_origin(&mut forged, CallerClass::User);
+        assert!(forged.get("initiated_by").is_none(), "only the enum is forwarded");
+        // A person may label their own request as the agent's: it can only tighten.
+        let mut stated = json!({ "url": "https://e.test/", "initiated_by": "agent" });
+        stamp_scrape_origin(&mut stated, CallerClass::User);
+        assert_eq!(stated["initiated_by"], "agent");
+    }
+
+    /// WS13.5: end to end through the handler. The upstream is slower than a 1 s client
+    /// default: a plain scrape times out (502), the same scrape with actions waits it out
+    /// under the 125 s ceiling, and the forwarded body carries the stamp for a service
+    /// principal only.
+    #[tokio::test]
+    async fn scrape_actions_timeout_is_per_request_and_the_stamp_reaches_the_edge() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(1500))
+                    .set_body_json(json!({ "data": { "status": 200 } })),
+            )
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        state.client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let call = |body: Value, caller: Option<CallerClass>| {
+            let state = state.clone();
+            async move {
+                scrape(
+                    State(state),
+                    Extension(preview_user()),
+                    caller.map(Extension),
+                    HeaderMap::new(),
+                    Json(body),
+                )
+                .await
+                .into_response()
+                .status()
+            }
+        };
+
+        let plain = call(json!({ "url": "https://example.com/" }), None).await;
+        assert_eq!(plain, StatusCode::BAD_GATEWAY, "the client default still applies to a plain scrape");
+
+        let with_actions = call(
+            json!({ "url": "https://example.com/", "actions": [{ "type": "wait", "milliseconds": 100 }] }),
+            Some(CallerClass::ServicePrincipal),
+        )
+        .await;
+        assert_eq!(with_actions, StatusCode::OK, "an actions scrape runs under the long ceiling");
+
+        let received = quarry.received_requests().await.unwrap();
+        let bodies: Vec<Value> = received
+            .iter()
+            .filter(|request| request.url.path() == "/v1/scrape")
+            .map(|request| serde_json::from_slice(&request.body).unwrap())
+            .collect();
+        let actions_body = bodies
+            .iter()
+            .find(|body| body.get("actions").is_some())
+            .expect("the actions request reached the edge");
+        assert_eq!(actions_body["initiated_by"], "agent");
+        let plain_body = bodies
+            .iter()
+            .find(|body| body.get("actions").is_none())
+            .expect("the plain request reached the edge");
+        assert!(plain_body.get("initiated_by").is_none(), "a direct call carries no stamp");
+    }
+
+    /// WS14.S3: the scope switches are forwarded in snake case from either spelling, and
+    /// are absent when the caller sends neither.
+    #[test]
+    fn crawl_body_forwards_scope_switches_in_both_spellings() {
+        let camel = normalize_crawl_body(&json!({
+            "url": "https://example.com/",
+            "allowSubdomains": true,
+            "allowExternalLinks": true,
+        }))
+        .unwrap();
+        assert_eq!(camel["allow_subdomains"], json!(true));
+        assert_eq!(camel["allow_external_links"], json!(true));
+
+        let snake = normalize_crawl_body(&json!({
+            "url": "https://example.com/",
+            "allow_subdomains": false,
+        }))
+        .unwrap();
+        assert_eq!(snake["allow_subdomains"], json!(false));
+        assert!(snake.get("allow_external_links").is_none());
+    }
+
+    /// WS14.S6: a Model proposal carries neither the external-links switch nor any robots key.
+    #[test]
+    fn model_surface_drops_external_and_robots_keys() {
+        let body = normalize_crawl_body_for(
+            &json!({
+                "url": "https://example.com/",
+                "allowExternalLinks": true,
+                "allow_external_links": true,
+                "ignoreRobots": true,
+                "ignore_robots_txt": true,
+                "robots_mode": "ignore",
+                "allowSubdomains": true,
+            }),
+            Surface::Model,
+        )
+        .unwrap();
+        assert!(body.get("allow_external_links").is_none());
+        assert!(body.as_object().unwrap().keys().all(|key| !key.contains("robot")));
+        assert_eq!(body["allow_subdomains"], json!(true));
+    }
+
+    #[test]
+    fn ui_surface_forwards_scope_fields() {
+        let body = normalize_crawl_body_for(
+            &json!({
+                "url": "https://example.com/",
+                "maxDepth": 99,
+                "includePaths": ["/docs/*"],
+                "excludePaths": ["re:^/blog/"],
+                "allowExternalLinks": true,
+            }),
+            Surface::Ui,
+        )
+        .unwrap();
+        assert_eq!(body["max_depth"], json!(CRAWL_MAX_DEPTH));
+        assert_eq!(body["include_paths"], json!(["/docs/*"]));
+        assert_eq!(body["exclude_paths"], json!(["re:^/blog/"]));
+        assert_eq!(body["allow_external_links"], json!(true));
+    }
+
+    /// The action path keeps the SSRF guard: a private-address seed is refused before the call.
+    #[test]
+    fn crawl_site_action_goes_through_the_ssrf_normalizer() {
+        assert!(normalize_crawl_body_for(&json!({ "url": "http://127.0.0.1/" }), Surface::Model).is_err());
+        assert!(normalize_crawl_body_for(&json!({ "url": "http://localhost/" }), Surface::Model).is_err());
+    }
+
+    #[test]
+    fn max_pages_is_clamped_on_the_action_path() {
+        let body = normalize_crawl_body_for(
+            &json!({ "url": "https://example.com/", "maxPages": 999_999 }),
+            Surface::Model,
+        )
+        .unwrap();
+        assert_eq!(body["max_pages"], json!(5_000));
+    }
+
+    #[test]
+    fn pattern_caps_match_the_edge_boundaries() {
+        let at_cap: Vec<String> = (0..CRAWL_MAX_PATTERNS).map(|i| format!("/p{i}")).collect();
+        assert!(normalize_crawl_body_for(&json!({ "url": "https://example.com/", "includePaths": at_cap }), Surface::Ui).is_ok());
+        let over: Vec<String> = (0..=CRAWL_MAX_PATTERNS).map(|i| format!("/p{i}")).collect();
+        assert!(normalize_crawl_body_for(&json!({ "url": "https://example.com/", "includePaths": over }), Surface::Ui).is_err());
+        let long = "a".repeat(CRAWL_MAX_PATTERN_CHARS + 1);
+        assert!(normalize_crawl_body_for(&json!({ "url": "https://example.com/", "includePaths": [long] }), Surface::Ui).is_err());
+    }
+
+    #[tokio::test]
+    async fn start_crawl_maps_backlog_429() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/crawl"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+                "request_id": "req_edge",
+                "success": false,
+                "error": {
+                    "code": "RATE_LIMITED",
+                    "message": "internal text that must not be echoed",
+                    "details": {
+                        "reason": "org_backlog_full", "limit": 200, "queued": 200,
+                        "retry_after_seconds": 45, "internal": "postgres://leak"
+                    }
+                }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let user = AuthenticatedUser {
             user_id: "user-1".to_owned(),
             user_email: "user@example.invalid".to_owned(),
             user_name: "User".to_owned(),
@@ -779,136 +1458,175 @@ mod tests {
             email_verified: true,
             auth_role: Some("member".to_owned()),
             active_org_id: Some("org-1".to_owned()),
-            authorized_membership: Some(crate::middleware::AuthorizedMembership {
-                organization_id: "org-1".to_owned(),
-                role: "member".to_owned(),
-            }),
-        }
+            authorized_membership: None,
+        };
+
+        let response = start_crawl(
+            State(state),
+            Extension(user),
+            HeaderMap::new(),
+            Json(json!({ "url": "https://example.com/" })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "45");
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "crawl_backlog_full");
+        assert_eq!(body["error"]["retryAfterSeconds"], 45);
+        assert_eq!(body["error"]["limit"], 200);
+        assert_eq!(body["error"]["queued"], 200);
+        let rendered = body.to_string();
+        assert!(
+            !rendered.contains("internal text") && !rendered.contains("postgres://leak"),
+            "{rendered}"
+        );
     }
 
-    async fn state_with_org_zdr(zdr: bool) -> (AppState, wiremock::MockServer) {
+    #[tokio::test]
+    async fn start_crawl_maps_org_allowance_402() {
         use wiremock::matchers::{method as wm_method, path as wm_path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let org_core = MockServer::start().await;
-        Mock::given(wm_method("GET"))
-            .and(wm_path("/api/v1/organizations/org-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "id": "org-1",
-                "metadata": { "interactiveRetention": { "zdr": zdr } }
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/crawl"))
+            .respond_with(ResponseTemplate::new(402).set_body_json(json!({
+                "request_id": "req_edge",
+                "success": false,
+                "error": {
+                    "code": "BUDGET_EXHAUSTED",
+                    "message": "internal text that must not be echoed",
+                    "details": {
+                        "dimension": "org_allowance", "metric": "quarry.crawl.page",
+                        "limit_source": "entitlement", "retry_after_seconds": 3600,
+                        "internal": "postgres://leak"
+                    }
+                }
             })))
-            .mount(&org_core)
+            .mount(&quarry)
             .await;
         let mut state = crate::tests::test_state(false);
-        state.org_core_url = org_core.uri();
-        (state, org_core)
-    }
+        state.quarry_edge_url = quarry.uri();
+        let user = AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        };
 
-    /// The BI-2 defect verbatim: a `zdr: true` scrape is forwarded to Quarry,
-    /// Quarry refuses to cache it — and the BFF wrote the rendered page content
-    /// into Frontend-Plane Redis for 24h regardless. Admission must be denied in
-    /// BOTH directions, so a ZDR request also cannot be answered from an entry
-    /// an earlier non-ZDR request left behind. An explicit `read_write` policy
-    /// must not re-open it: the posture is resolved before the policy is read.
-    #[tokio::test]
-    async fn a_zdr_request_neither_reads_nor_writes_the_local_preview_cache() {
-        let (state, _org_core) = state_with_org_zdr(false).await;
-        let body = json!({
-            "url": "https://example.invalid/",
-            "zdr": true,
-            "cache": { "mode": "read_write", "max_age_s": 3600 }
-        });
-        let admission =
-            CacheAdmission::resolve(&state, &preview_user(), &HeaderMap::new(), &body).await;
-        assert_eq!(admission, CacheAdmission::DENIED);
-
-        // The `x-zdr` header alone does it too, with no `zdr` in the body.
-        let mut headers = HeaderMap::new();
-        headers.insert("x-zdr", axum::http::HeaderValue::from_static("true"));
-        let admission = CacheAdmission::resolve(
-            &state,
-            &preview_user(),
-            &headers,
-            &json!({ "url": "https://example.invalid/" }),
+        let response = start_crawl(
+            State(state),
+            Extension(user),
+            HeaderMap::new(),
+            Json(json!({ "url": "https://example.com/" })),
         )
         .await;
-        assert_eq!(admission, CacheAdmission::DENIED);
-    }
-
-    /// Org-wide ZDR is invisible to the request body — a client under a ZDR
-    /// workspace sends an ordinary scrape. The posture has to be derived
-    /// server-side or the page content lands in Frontend-Plane Redis anyway.
-    #[tokio::test]
-    async fn an_org_under_zdr_caches_no_page_content_at_all() {
-        let (state, _org_core) = state_with_org_zdr(true).await;
-        let admission = CacheAdmission::resolve(
-            &state,
-            &preview_user(),
-            &HeaderMap::new(),
-            &json!({ "url": "https://example.invalid/" }),
-        )
-        .await;
-        assert_eq!(admission, CacheAdmission::DENIED);
-    }
-
-    #[tokio::test]
-    async fn an_ordinary_request_in_a_non_zdr_org_still_caches() {
-        let (state, _org_core) = state_with_org_zdr(false).await;
-        let admission = CacheAdmission::resolve(
-            &state,
-            &preview_user(),
-            &HeaderMap::new(),
-            &json!({ "url": "https://example.invalid/" }),
-        )
-        .await;
-        assert!(admission.may_read && admission.may_write);
-        assert_eq!(admission.max_age_secs, PREVIEW_FRESH_SECS);
-    }
-
-    /// quarry-edge honours `{mode: "bypass"}`; this layer silently ignored it,
-    /// so a caller who asked for a live fetch got a preview up to 4h old.
-    #[test]
-    fn the_callers_cache_mode_is_honoured_the_way_quarry_edge_honours_it() {
-        let admission = |mode: &str| CacheAdmission::from_policy(Some(&json!({ "mode": mode })));
-
-        let bypass = admission("bypass");
-        assert!(!bypass.may_read && !bypass.may_write);
-
-        let read_only = admission("read_only");
-        assert!(read_only.may_read && !read_only.may_write);
-
-        let write_only = admission("write_only");
-        assert!(!write_only.may_read && write_only.may_write);
-
-        let read_write = admission("read_write");
-        assert!(read_write.may_read && read_write.may_write);
-
-        // An unknown mode must not read as permission. quarry-edge rejects the
-        // body outright; the safe local reading is "cache nothing".
-        let unknown = admission("write_through");
-        assert!(!unknown.may_read && !unknown.may_write);
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "crawl_allowance_exhausted");
+        assert_eq!(body["error"]["metric"], "quarry.crawl.page");
+        assert_eq!(body["error"]["retryAfterSeconds"], 3600);
+        let rendered = body.to_string();
+        assert!(
+            !rendered.contains("internal text") && !rendered.contains("postgres://leak"),
+            "{rendered}"
+        );
     }
 
     #[test]
-    fn no_policy_keeps_the_previous_defaults() {
-        let default = CacheAdmission::from_policy(None);
-        assert!(default.may_read && default.may_write);
-        assert_eq!(default.max_age_secs, PREVIEW_FRESH_SECS);
-        // An empty policy object is the same as none.
-        let empty = CacheAdmission::from_policy(Some(&json!({})));
-        assert!(empty.may_read && empty.may_write);
-        assert_eq!(empty.max_age_secs, PREVIEW_FRESH_SECS);
+    fn only_the_org_allowance_402_is_remapped() {
+        // Another budget dimension, a missing detail or a non-envelope body stays as it came.
+        assert!(crawl_allowance_exhausted_response(
+            &json!({ "error": { "details": { "dimension": "runtime" } } })
+        )
+        .is_none());
+        assert!(crawl_allowance_exhausted_response(&json!({ "error": "pay up" })).is_none());
+        assert!(crawl_allowance_exhausted_response(&json!({})).is_none());
+        // An unknown metric and an absurd retry hint are dropped, not echoed.
+        let response = crawl_allowance_exhausted_response(&json!({
+            "error": { "details": {
+                "dimension": "org_allowance", "metric": "postgres://leak", "retry_after_seconds": 99999999999u64
+            } }
+        }))
+        .expect("typed");
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
     }
 
-    /// `max_age_s` is the caller's freshness window, matching quarry-edge's
-    /// `effective_ttl`. A zero/absent value falls back to the default rather
-    /// than meaning "instantly stale".
     #[test]
-    fn max_age_s_narrows_the_freshness_window() {
-        let tight = CacheAdmission::from_policy(Some(&json!({ "max_age_s": 60 })));
-        assert_eq!(tight.max_age_secs, 60);
-        let zero = CacheAdmission::from_policy(Some(&json!({ "max_age_s": 0 })));
-        assert_eq!(zero.max_age_secs, PREVIEW_FRESH_SECS);
+    fn only_the_backlog_429_is_remapped() {
+        assert!(crawl_backlog_full_response(
+            &json!({ "error": { "details": { "reason": "other" } } })
+        )
+        .is_none());
+        assert!(crawl_backlog_full_response(&json!({ "error": "slow down" })).is_none());
+        assert!(crawl_backlog_full_response(&json!({})).is_none());
+        // An absent or absurd retry hint takes the default; nothing negative or huge is echoed.
+        let response = crawl_backlog_full_response(&json!({
+            "error": { "details": { "reason": "org_backlog_full", "retry_after_seconds": 99999999 } }
+        }))
+        .expect("typed");
+        assert_eq!(response.headers().get("retry-after").unwrap(), "30");
+    }
+
+    #[tokio::test]
+    async fn start_crawl_exposes_upstream_limits() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/crawl"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "job_id": "job_1",
+                    "accepted_at": "2026-01-01T00:00:00Z",
+                    "limits": {
+                        "max_pages": { "requested": 0, "effective": 1000, "clamped_by": ["default"] },
+                        "max_depth": { "requested": null, "effective": 5, "clamped_by": ["default"] }
+                    }
+                }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let user = AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        };
+
+        let response = start_crawl(
+            State(state),
+            Extension(user),
+            HeaderMap::new(),
+            Json(json!({ "url": "https://example.com/" })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        let limits = &value["data"]["limits"];
+        assert_eq!(limits["max_pages"]["effective"], json!(1000));
+        assert_eq!(limits["max_pages"]["clamped_by"], json!(["default"]));
+        assert_eq!(limits["max_depth"]["effective"], json!(5));
     }
 
     #[test]
@@ -955,6 +1673,254 @@ mod tests {
         assert_eq!(preview["source"], "inline");
         assert_eq!(preview["markdown"], "# Inline\n\nContent");
         assert_eq!(preview["title"], "Inline page");
+    }
+
+    fn preview_user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        }
+    }
+
+    async fn preview_body(response: Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// The preview asks for `formats: ["markdown"]`, so quarry-edge inlines the
+    /// text and the second `/v1/extract` call has nothing left to do. The mock
+    /// mounts no `/v1/extract`: a request to it would 404 and show up below.
+    #[tokio::test]
+    async fn preview_makes_one_quarry_call_when_markdown_is_inline() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "status": 200,
+                    "markdown": "# Inline\n\nContent",
+                    "metadata": { "title": "Inline page", "content_kind": "html" },
+                    "formats": { "markdown": { "artifact_id": "art-md", "bytes": 17 } }
+                }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        let response = scrape_preview(
+            State(state),
+            Extension(preview_user()),
+            HeaderMap::new(),
+            Json(json!({ "url": "https://example.com/a" })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = preview_body(response).await;
+        assert_eq!(value["data"]["source"], "inline");
+        assert_eq!(value["data"]["markdown"], "# Inline\n\nContent");
+
+        let requests = quarry.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "one quarry call per preview");
+        assert_eq!(requests[0].url.path(), "/v1/scrape");
+        let sent: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(sent["formats"], json!(["markdown"]));
+    }
+
+    /// A caller that names its own formats keeps them.
+    #[tokio::test]
+    async fn preview_keeps_the_formats_the_caller_sent() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "status": 200, "markdown": "# Hi" }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        let response = scrape_preview(
+            State(state),
+            Extension(preview_user()),
+            HeaderMap::new(),
+            Json(json!({ "url": "https://example.com/a", "formats": ["markdown", "html"] })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let requests = quarry.received_requests().await.unwrap();
+        let sent: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(sent["formats"], json!(["markdown", "html"]));
+    }
+
+    #[test]
+    fn a_415_is_classified_as_unsupported_media() {
+        let (code, message) = classify_scrape_failure(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Duration::ZERO,
+            &Value::Null,
+        );
+        assert_eq!(code, "unsupported_media");
+        assert!(!message.is_empty());
+        // A static sentence: no host, page text or upstream message in it.
+        assert_no_proxy_or_leak(&message);
+        // Even when the upstream body carries a message of its own, the
+        // classifier does not echo it.
+        let (_, with_body) = classify_scrape_failure(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Duration::ZERO,
+            &json!({ "error": { "code": "UNSUPPORTED_MEDIA", "message": "image/png secret.example" } }),
+        );
+        assert_eq!(with_body, message);
+        assert!(!with_body.contains("image/png"));
+        // The neighbours are unchanged.
+        assert_eq!(
+            classify_scrape_failure(StatusCode::FORBIDDEN, Duration::ZERO, &Value::Null).0,
+            "scrape_refused"
+        );
+        assert_eq!(
+            classify_scrape_failure(StatusCode::BAD_GATEWAY, Duration::ZERO, &Value::Null).0,
+            "scrape_failed"
+        );
+    }
+
+    /// End to end through the handler: quarry-edge's typed 415 reaches the
+    /// caller as the same status with the typed code.
+    #[tokio::test]
+    async fn preview_of_an_unsupported_media_type_is_a_typed_415() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(415).set_body_json(json!({
+                "error": { "code": "UNSUPPORTED_MEDIA", "message": "image/png" }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        let response = scrape_preview(
+            State(state),
+            Extension(preview_user()),
+            HeaderMap::new(),
+            Json(json!({ "url": "https://example.com/logo.png" })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let value = preview_body(response).await;
+        assert_eq!(value["error"]["code"], "unsupported_media");
+        let message = value["error"]["message"].as_str().unwrap();
+        assert_no_proxy_or_leak(message);
+        assert!(
+            !message.contains("image/png"),
+            "the upstream message is not echoed: {message}"
+        );
+        assert_eq!(
+            quarry.received_requests().await.unwrap().len(),
+            1,
+            "a typed refusal is final: no static retry"
+        );
+    }
+
+    /// The formats default is set before the variant digest, so the cache key
+    /// describes the request that is forwarded: a preview with no `formats`
+    /// and one that names `["markdown"]` share ONE entry (the second is a
+    /// hit, quarry is asked once), and `["html"]` is a different request with
+    /// its own entry. Moving the default below the digest makes the first two
+    /// differ, which fails the key and call counts below.
+    #[tokio::test]
+    async fn preview_cache_key_describes_the_forwarded_formats() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let org_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "org-1",
+                "metadata": { "interactiveRetention": { "zdr": false } }
+            })))
+            .mount(&org_core)
+            .await;
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "status": 200, "markdown": "# Hi" }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.org_core_url = org_core.uri();
+        state.quarry_edge_url = quarry.uri();
+        state.cache = crate::cache::ResultCache::in_memory();
+        let mut user = preview_user();
+        user.authorized_membership = Some(crate::middleware::AuthorizedMembership {
+            organization_id: "org-1".to_owned(),
+            role: "member".to_owned(),
+        });
+
+        let preview_keys = |state: &AppState| -> Vec<String> {
+            state
+                .cache
+                .mem_keys()
+                .into_iter()
+                .filter(|key| key.contains("scrape-preview"))
+                .collect()
+        };
+        let run = |body: Value| {
+            let state = state.clone();
+            let user = user.clone();
+            async move {
+                let response =
+                    scrape_preview(State(state), Extension(user), HeaderMap::new(), Json(body))
+                        .await;
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+        };
+
+        run(json!({ "url": "https://example.com/a" })).await;
+        let first = preview_keys(&state);
+        assert_eq!(first.len(), 1, "the first preview is stored: {first:?}");
+        assert_eq!(quarry.received_requests().await.unwrap().len(), 1);
+
+        run(json!({ "url": "https://example.com/a", "formats": ["markdown"] })).await;
+        assert_eq!(
+            preview_keys(&state),
+            first,
+            "no formats and [markdown] are the same forwarded request: one key"
+        );
+        assert_eq!(
+            quarry.received_requests().await.unwrap().len(),
+            1,
+            "the second preview is a cache hit"
+        );
+
+        run(json!({ "url": "https://example.com/a", "formats": ["html"] })).await;
+        assert_eq!(
+            preview_keys(&state).len(),
+            2,
+            "[html] is a different request with its own entry"
+        );
+        assert_eq!(quarry.received_requests().await.unwrap().len(), 2);
     }
 
     #[test]
@@ -1069,6 +2035,254 @@ mod tests {
         assert_eq!(discovery["count"], 1);
         assert_eq!(discovery["pages"][0]["url"], "https://x.io/p");
     }
+
+    // ---- scrape refusals: classify_scrape_failure reads details.block_reason (WS3.J) ----
+
+    fn challenge_body(reason: Value) -> Value {
+        json!({
+            "success": false,
+            "error": {
+                "code": "CHALLENGE_DETECTED",
+                "message": "blocked https://secret.example/private?q=1 <html>wall</html>",
+                "retryable": false,
+                "details": { "reason": reason.clone(), "block_reason": reason, "recovery": "not_applicable", "next": "other_source" }
+            }
+        })
+    }
+
+    fn assert_no_proxy_or_leak(message: &str) {
+        let lowered = message.to_lowercase();
+        assert!(!message.is_empty());
+        assert!(!lowered.contains("proxy"), "no proxy suggestion: {message}");
+        assert!(!lowered.contains("secret.example") && !lowered.contains("<html"), "no host or page text: {message}");
+    }
+
+    #[test]
+    fn a_strong_block_reason_from_quarry_is_site_blocked() {
+        for reason in ["captcha_widget", "waf_interstitial", "unexpected_bot_error", "challenge_loop"] {
+            let (code, message) = classify_scrape_failure(
+                StatusCode::FORBIDDEN,
+                Duration::ZERO,
+                &challenge_body(json!(reason)),
+            );
+            assert_eq!(code, "site_blocked", "{reason}");
+            assert_no_proxy_or_leak(&message);
+        }
+    }
+
+    #[test]
+    fn a_bare_403_is_scrape_refused_not_site_blocked() {
+        let bodies = [
+            Value::Null,
+            json!({}),
+            json!({ "error": { "code": "FORBIDDEN", "message": "body_too_large" } }),
+            json!({ "error": { "code": "SECURITY_BLOCKED", "message": "ssrf secret.example" } }),
+            // a CHALLENGE_DETECTED that names no reason is not a verdict
+            json!({ "error": { "code": "CHALLENGE_DETECTED", "details": {} } }),
+        ];
+        for body in bodies {
+            let (code, message) = classify_scrape_failure(StatusCode::FORBIDDEN, Duration::ZERO, &body);
+            assert_eq!(code, "scrape_refused", "{body}");
+            assert_no_proxy_or_leak(&message);
+        }
+        // Slow or not, a refusal stays a refusal.
+        assert_eq!(
+            classify_scrape_failure(StatusCode::FORBIDDEN, Duration::from_secs(30), &Value::Null).0,
+            "scrape_refused"
+        );
+    }
+
+    #[test]
+    fn an_unknown_or_malformed_block_reason_falls_back_to_scrape_refused() {
+        let reasons = [
+            json!("made_up_reason"),
+            json!("https://secret.example/wall"),
+            json!("WAF_INTERSTITIAL"),
+            json!(""),
+            json!(7),
+            json!(null),
+            json!(["captcha_widget"]),
+        ];
+        for reason in reasons {
+            let body = challenge_body(reason.clone());
+            let (code, message) = classify_scrape_failure(StatusCode::FORBIDDEN, Duration::ZERO, &body);
+            assert_eq!(code, "scrape_refused", "{reason}");
+            assert_no_proxy_or_leak(&message);
+            assert!(scrape_block_reason(&body).is_none(), "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_block_reason_counts_only_beside_the_challenge_code_and_a_403() {
+        let other_code = json!({ "error": { "code": "RATE_LIMITED", "details": { "block_reason": "captcha_widget" } } });
+        assert_eq!(
+            classify_scrape_failure(StatusCode::FORBIDDEN, Duration::ZERO, &other_code).0,
+            "scrape_refused"
+        );
+        // Only the `block_reason` field is read, not the agent path's `reason`.
+        let reason_only = json!({ "error": { "code": "CHALLENGE_DETECTED", "details": { "reason": "captcha_widget" } } });
+        assert_eq!(
+            classify_scrape_failure(StatusCode::FORBIDDEN, Duration::ZERO, &reason_only).0,
+            "scrape_refused"
+        );
+        // On any other status the reason does not turn a failure into a bot wall.
+        let wall = challenge_body(json!("captcha_widget"));
+        assert_eq!(classify_scrape_failure(StatusCode::TOO_MANY_REQUESTS, Duration::ZERO, &wall).0, "scrape_rate_limited");
+        assert_eq!(classify_scrape_failure(StatusCode::BAD_GATEWAY, Duration::ZERO, &wall).0, "scrape_failed");
+        assert_eq!(classify_scrape_failure(StatusCode::GATEWAY_TIMEOUT, Duration::ZERO, &wall).0, "scrape_timeout");
+    }
+
+    #[test]
+    fn a_429_is_scrape_rate_limited_and_the_rest_keep_their_codes() {
+        let (code, message) =
+            classify_scrape_failure(StatusCode::TOO_MANY_REQUESTS, Duration::ZERO, &Value::Null);
+        assert_eq!(code, "scrape_rate_limited");
+        assert_no_proxy_or_leak(&message);
+        assert_eq!(classify_scrape_failure(StatusCode::GATEWAY_TIMEOUT, Duration::ZERO, &Value::Null).0, "scrape_timeout");
+        assert_eq!(classify_scrape_failure(StatusCode::BAD_GATEWAY, Duration::from_secs(21), &Value::Null).0, "scrape_timeout");
+        assert_eq!(classify_scrape_failure(StatusCode::BAD_GATEWAY, Duration::ZERO, &Value::Null).0, "scrape_failed");
+    }
+
+    fn refusal_user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        }
+    }
+
+    /// Run `scrape_preview` against a mock Quarry that answers `status` and
+    /// `upstream`; returns the gateway's status, `Retry-After` and body text.
+    async fn refused_preview(status: u16, upstream: Value) -> (StatusCode, Option<String>, String, usize) {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(upstream))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let response = scrape_preview(
+            State(state),
+            Extension(refusal_user()),
+            HeaderMap::new(),
+            Json(json!({ "url": "https://example.com/a" })),
+        )
+        .await;
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let calls = quarry.received_requests().await.unwrap().len();
+        (status, retry_after, String::from_utf8(bytes.to_vec()).unwrap(), calls)
+    }
+
+    #[tokio::test]
+    async fn a_scrape_the_site_walled_reaches_the_caller_as_site_blocked_with_the_typed_reason_only() {
+        let (status, retry_after, text, calls) =
+            refused_preview(403, challenge_body(json!("waf_interstitial"))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(retry_after.is_none());
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["error"]["code"], "site_blocked");
+        assert_eq!(body["error"]["blockReason"], "waf_interstitial");
+        assert_no_proxy_or_leak(body["error"]["message"].as_str().unwrap());
+        assert!(!text.contains("secret.example") && !text.contains("CHALLENGE_DETECTED") && !text.contains("<html"), "{text}");
+        assert_eq!(calls, 1, "a refusal is final: no static retry");
+    }
+
+    #[tokio::test]
+    async fn a_bare_403_scrape_reaches_the_caller_as_scrape_refused_without_a_block_reason() {
+        let (status, _, text, calls) = refused_preview(
+            403,
+            json!({ "error": { "code": "FORBIDDEN", "message": "denied by https://secret.example" } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["error"]["code"], "scrape_refused");
+        assert!(body["error"].get("blockReason").is_none());
+        assert!(!text.contains("secret.example"), "{text}");
+        assert_eq!(calls, 1);
+
+        // A made-up reason is dropped, not echoed.
+        let (_, _, text, _) = refused_preview(403, challenge_body(json!("https://secret.example/x"))).await;
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["error"]["code"], "scrape_refused");
+        assert!(body["error"].get("blockReason").is_none());
+        assert!(!text.contains("secret.example"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_429_scrape_carries_retry_after_only_when_quarry_sent_a_sane_number() {
+        let upstream = |seconds: Value| json!({
+            "error": { "code": "RATE_LIMITED", "message": "secret.example", "details": { "reason": "org_render_cap", "retry_after_seconds": seconds } }
+        });
+        let (status, retry_after, text, _) = refused_preview(429, upstream(json!(17))).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(retry_after.as_deref(), Some("17"));
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["error"]["code"], "scrape_rate_limited");
+        assert_eq!(body["error"]["retryAfterSeconds"], 17);
+        assert!(!text.contains("secret.example") && !text.contains("org_render_cap"), "{text}");
+
+        for bad in [json!(0), json!(99999), json!("soon"), json!(null)] {
+            let (_, retry_after, text, _) = refused_preview(429, upstream(bad.clone())).await;
+            assert!(retry_after.is_none(), "{bad}");
+            let body: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(body["error"]["code"], "scrape_rate_limited");
+            assert!(body["error"].get("retryAfterSeconds").is_none(), "{bad}");
+        }
+    }
+
+    // The body quarry-edge really sends for a /v1/scrape RATE_LIMITED
+    // (`ApiError::rate_limited`): flat, `error` is a string, the hint is top-level.
+    #[tokio::test]
+    async fn a_429_scrape_in_quarry_edges_flat_shape_carries_its_retry_hint() {
+        let flat = |seconds: Value| json!({
+            "error": "rate limited on secret.example",
+            "code": "RATE_LIMITED",
+            "hint": "reduce request rate or retry after the indicated window",
+            "window": "1m",
+            "retry_after_seconds": seconds,
+            "next_actions": ["retry after 60 seconds", "reduce concurrent request rate"],
+        });
+        let (status, retry_after, text, calls) = refused_preview(429, flat(json!(60))).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(retry_after.as_deref(), Some("60"));
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["error"]["code"], "scrape_rate_limited");
+        assert_eq!(body["error"]["retryAfterSeconds"], 60);
+        assert!(
+            !text.contains("secret.example") && !text.contains("next_actions") && !text.contains("window"),
+            "{text}"
+        );
+        assert_eq!(calls, 1);
+
+        for bad in [json!(0), json!(3601), json!("soon"), json!(null)] {
+            let (_, retry_after, text, _) = refused_preview(429, flat(bad.clone())).await;
+            assert!(retry_after.is_none(), "{bad}");
+            let body: Value = serde_json::from_str(&text).unwrap();
+            assert!(body["error"].get("retryAfterSeconds").is_none(), "{bad}");
+        }
+        // The envelope wins when both are present.
+        let both = json!({
+            "error": { "code": "RATE_LIMITED", "details": { "retry_after_seconds": 5 } },
+            "retry_after_seconds": 60,
+        });
+        assert_eq!(scrape_retry_after_seconds(&both), Some(5));
+    }
 }
 
 pub(super) async fn list_crawl_jobs(
@@ -1155,4 +2369,343 @@ pub(super) async fn crawl_job_events(
         false,
     )
     .await
+}
+
+/// WS15.L3: the knowledge job-event proxy forwards `follow=true` in the query and
+/// the caller's `Last-Event-ID` header to quarry-edge, and returns the upstream
+/// SSE bytes unchanged.
+#[cfg(test)]
+mod job_event_tests {
+    use super::*;
+    use wiremock::matchers::{
+        header as wm_header, method as wm_method, path as wm_path, query_param,
+    };
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const JOB: &str = "job_01J9SSSSSSSSSSSSSSSSSSSSSS";
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn crawl_job_events_forwards_follow_and_last_event_id() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path(format!("/v1/jobs/{JOB}/events")))
+            .and(query_param("follow", "true"))
+            .and(wm_header("last-event-id", "7"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string("id: 8\nevent: page_fetched\ndata: {}\n\ndata: done\n\n"),
+            )
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        let uri: Uri = format!("/api/v1/knowledge/jobs/{JOB}/events?follow=true")
+            .parse()
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", "7".parse().unwrap());
+        let response = crawl_job_events(
+            State(state),
+            Extension(user()),
+            headers,
+            Path(JOB.to_owned()),
+            uri,
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("id: 8"), "{body}");
+        assert!(body.contains("data: done"), "{body}");
+    }
+}
+
+#[cfg(test)]
+mod scrape_artifact_tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn caller() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    /// State whose org-core answers the org's ZDR posture and whose Quarry is the
+    /// given mock. The posture lookup is mocked because an unknown posture counts
+    /// as ZDR (fail closed).
+    async fn state_for(quarry: &MockServer, zdr: bool) -> (AppState, MockServer) {
+        let org_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "org-1",
+                "metadata": { "interactiveRetention": { "zdr": zdr } }
+            })))
+            .mount(&org_core)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.org_core_url = org_core.uri();
+        state.quarry_edge_url = quarry.uri();
+        (state, org_core)
+    }
+
+    async fn body_of(response: Response) -> (StatusCode, HeaderMap, Value) {
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let body = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
+        (status, headers, body)
+    }
+
+    #[tokio::test]
+    async fn scrape_artifact_serves_png_with_nosniff() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/artifacts/art_01"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(vec![0x89, b'P', b'N', b'G']),
+            )
+            .mount(&quarry)
+            .await;
+        let (state, _org_core) = state_for(&quarry, false).await;
+
+        let response = scrape_artifact(
+            State(state),
+            Extension(caller()),
+            HeaderMap::new(),
+            Path("art_01".to_owned()),
+        )
+        .await;
+        let (status, headers, _) = body_of(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers.get("content-type").unwrap(), "image/png");
+        assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
+        assert_eq!(headers.get("cache-control").unwrap(), "private, no-store");
+        assert!(headers.get("content-disposition").is_none());
+    }
+
+    #[tokio::test]
+    async fn scrape_artifact_serves_pdf_as_attachment_with_csp_sandbox() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/artifacts/art_02"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/pdf")
+                    .set_body_bytes(b"%PDF-1.7\n".to_vec()),
+            )
+            .mount(&quarry)
+            .await;
+        let (state, _org_core) = state_for(&quarry, false).await;
+
+        let response = scrape_artifact(
+            State(state),
+            Extension(caller()),
+            HeaderMap::new(),
+            Path("art_02".to_owned()),
+        )
+        .await;
+        let (status, headers, _) = body_of(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers.get("content-type").unwrap(), "application/pdf");
+        assert_eq!(
+            headers.get("content-disposition").unwrap(),
+            r#"attachment; filename="page.pdf""#
+        );
+        assert_eq!(headers.get("content-security-policy").unwrap(), "sandbox");
+        assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
+    }
+
+    #[tokio::test]
+    async fn scrape_artifact_rejects_unknown_content_type_with_415() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/artifacts/art_03"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/html")
+                    .set_body_bytes(b"<script>x</script>".to_vec()),
+            )
+            .mount(&quarry)
+            .await;
+        let (state, _org_core) = state_for(&quarry, false).await;
+
+        let response = scrape_artifact(
+            State(state),
+            Extension(caller()),
+            HeaderMap::new(),
+            Path("art_03".to_owned()),
+        )
+        .await;
+        let (status, _, body) = body_of(response).await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(body["error"]["code"], "scrape_artifact_unsupported");
+    }
+
+    #[tokio::test]
+    async fn scrape_artifact_never_falls_back_to_image_png() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/artifacts/art_04"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/octet-stream")
+                    .set_body_bytes(b"\x89PNG\r\n\x1a\n".to_vec()),
+            )
+            .mount(&quarry)
+            .await;
+        let (state, _org_core) = state_for(&quarry, false).await;
+
+        let response = scrape_artifact(
+            State(state),
+            Extension(caller()),
+            HeaderMap::new(),
+            Path("art_04".to_owned()),
+        )
+        .await;
+        let (status, headers, _) = body_of(response).await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        // The refusal is a JSON error, never the PNG bytes under an image type.
+        assert!(!headers.get("content-type").is_some_and(|value| value == "image/png"));
+    }
+
+    #[tokio::test]
+    async fn foreign_org_artifact_is_normalised_to_not_found() {
+        // Quarry binds the artifact to the caller's org and answers 404 for another
+        // tenant's id; the gateway returns the same not-found shape as a missing one.
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/artifacts/art_05"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "error": { "code": "NOT_FOUND", "message": "internal org-2 detail" }
+            })))
+            .mount(&quarry)
+            .await;
+        let (state, _org_core) = state_for(&quarry, false).await;
+
+        let response = scrape_artifact(
+            State(state),
+            Extension(caller()),
+            HeaderMap::new(),
+            Path("art_05".to_owned()),
+        )
+        .await;
+        let (status, _, body) = body_of(response).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "scrape_artifact_not_found");
+        assert!(!body.to_string().contains("org-2"));
+    }
+
+    #[tokio::test]
+    async fn zdr_org_gets_withheld() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/artifacts/art_06"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&quarry)
+            .await;
+        let (state, _org_core) = state_for(&quarry, true).await;
+
+        let response = scrape_artifact(
+            State(state),
+            Extension(caller()),
+            HeaderMap::new(),
+            Path("art_06".to_owned()),
+        )
+        .await;
+        let (status, _, body) = body_of(response).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "browser_artifact_withheld");
+        quarry.verify().await;
+    }
+
+    #[tokio::test]
+    async fn invalid_artifact_id_is_400() {
+        let quarry = MockServer::start().await;
+        let (state, _org_core) = state_for(&quarry, false).await;
+
+        let response = scrape_artifact(
+            State(state),
+            Extension(caller()),
+            HeaderMap::new(),
+            Path("../etc/passwd".to_owned()),
+        )
+        .await;
+        let (status, _, body) = body_of(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_scrape_artifact");
+    }
+
+    #[test]
+    fn scrape_preview_strips_actions_and_capture_keys_before_cache_and_retry() {
+        let mut body = json!({
+            "url": "https://example.com/",
+            "formats": ["markdown", "screenshot", { "type": "pdf" }],
+            "actions": [{ "type": "click" }],
+            "actionsOnError": true,
+            "viewport": { "width": 1280, "height": 720 },
+            "capture": { "screenshot": true }
+        });
+        strip_preview_only_fields(&mut body);
+        assert!(body.get("actions").is_none());
+        assert!(body.get("actionsOnError").is_none());
+        assert!(body.get("viewport").is_none());
+        assert!(body.get("capture").is_none());
+        assert_eq!(body["formats"], json!(["markdown"]));
+
+        // The retry body is built from the stripped body, so it cannot replay them.
+        let retry = without_browser_rendering(&body);
+        assert!(retry.get("actions").is_none());
+        assert!(retry.get("viewport").is_none());
+    }
+
+    #[test]
+    fn scrape_preview_cache_key_is_unchanged_for_plain_bodies() {
+        let original = json!({ "url": "https://example.com/", "formats": ["markdown"] });
+        let mut body = original.clone();
+        strip_preview_only_fields(&mut body);
+        assert_eq!(body, original);
+        assert_eq!(variant_digest(&body), variant_digest(&original));
+    }
+
+    #[test]
+    fn scrape_preview_drops_formats_list_that_only_held_captures() {
+        let mut body = json!({ "url": "https://example.com/", "formats": ["pdf"] });
+        strip_preview_only_fields(&mut body);
+        assert!(body.get("formats").is_none());
+    }
 }

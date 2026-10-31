@@ -66,6 +66,12 @@ services:
       context: ../..
       dockerfile: deploy/compose/Dockerfile.edge
       args: *build-metadata
+    # Lets Chromium keep its own sandbox inside the container: it needs
+    # unprivileged user/PID namespaces (clone, unshare), which Docker's default
+    # seccomp profile blocks. Allow-by-default plus a deny-list of escape
+    # syscalls; scoped to this service only. See seccomp-chromium.json.
+    security_opt:
+      - seccomp=./seccomp-chromium.json
     environment:
       QUARRY_EDGE__PORT: "8082"
       # The standalone stack includes Postgres, so keep crawl frontier,
@@ -87,6 +93,23 @@ services:
       # Read only when the explicit cross-plane development bypass is enabled.
       QUARRY_EDGE__DATA_PLANE_SERVICE_TOKEN: ${DATA_PLANE_SERVICE_TOKEN:-}
       QUARRY_EDGE__MODEL_PLANE_TOKEN: ${MODEL_PLANE_TOKEN:-}
+      # Model Plane gateway, opt-in: empty (the default) keeps it off, and quarry-edge reads
+      # an empty value as unset. Set MODEL_PLANE_URL, with QUARRY_SERVICE_API_KEY, to opt in.
+      QUARRY_EDGE__MODEL_PLANE_URL: ${MODEL_PLANE_URL:-}
+      # Model Plane switches, off (decision 3.12 of 2026-10-27). Each one also needs MODEL_PLANE_URL.
+      QUARRY_EDGE__AUTOPROMPT: "${QUARRY_EDGE_AUTOPROMPT:-0}"
+      QUARRY_EDGE__LLM_CLASSIFY_INTENT: "${QUARRY_EDGE_LLM_CLASSIFY_INTENT:-0}"
+      QUARRY_EDGE__PAGE_TITLE_ENRICH: "${QUARRY_EDGE_PAGE_TITLE_ENRICH:-0}"
+      # QB-T17 switches, off until the search_suggest ZDR and token-retention review.
+      QUARRY_EDGE__ANSWER_SYNTHESIS: "${QUARRY_EDGE_ANSWER_SYNTHESIS:-0}"
+      QUARRY_EDGE__AI_FORMATS: "${QUARRY_EDGE_AI_FORMATS:-0}"
+      QUARRY_EDGE__SEARCH_SUGGEST: "${QUARRY_EDGE_SEARCH_SUGGEST:-0}"
+      QUARRY_EDGE__MODEL_AUDIO: "${QUARRY_EDGE_MODEL_AUDIO:-0}"
+      # Semantic rerank is option B: Data Plane's /v1/rerank (needs DATA_PLANE_URL and the
+      # cross-plane tokens), not Model Plane. Off; see the Ingestion compose.
+      QUARRY_EDGE__SEMANTIC_RERANK: "${QUARRY_EDGE_SEMANTIC_RERANK:-0}"
+      # ADR-6 (owner ruling 2026-10-28): scrape-time actions default off; see the Ingestion compose.
+      QUARRY_EDGE__SCRAPE_ACTIONS: "${QUARRY_EDGE_SCRAPE_ACTIONS:-off}"
       # SmartRouter web-search primary. Quarry-v2 owns its searxng (defined
       # below) so this dev stack does web search self-contained — no reliance
       # on a searxng started by another plane / the root mega-stack.
@@ -94,9 +117,15 @@ services:
       # Explicit development-only bypass. It defaults off; enable it only for
       # a deliberately isolated stack without Auth Core.
       QUARRY_EDGE_AUTH_DEV_BYPASS: ${QUARRY_EDGE_AUTH_DEV_BYPASS:-0}
-      # Chromium sandboxing also defaults on. Disabling it is an explicit
-      # local compatibility escape hatch, never a production setting.
-      QUARRY_BROWSER_NO_SANDBOX: ${QUARRY_BROWSER_NO_SANDBOX:-1}
+      # Chromium keeps its sandbox: the seccomp profile above is what lets it
+      # build one in a container. Setting this to 1 is an explicit local
+      # compatibility escape hatch (old kernels, WSL2 without user namespaces);
+      # the edge refuses to launch Chromium with it when ENVIRONMENT is
+      # production, and logs a warning otherwise.
+      QUARRY_BROWSER_NO_SANDBOX: ${QUARRY_BROWSER_NO_SANDBOX:-0}
+      # WS13.1: per-fetch session isolation (on unless 0) and the heavy lane.
+      QUARRY_SCRAPE_SESSION_ISOLATION: ${QUARRY_SCRAPE_SESSION_ISOLATION:-on}
+      QUARRY_SCRAPE_HEAVY_PERMITS: ${QUARRY_SCRAPE_HEAVY_PERMITS:-1}
       QUARRY_EDGE__INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET is required}
       QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
       # Isolated OpenCV sidecar for deterministic visual evidence artifacts.
@@ -172,9 +201,18 @@ services:
       context: ../..
       dockerfile: deploy/compose/Dockerfile.orchestrator
       args: *build-metadata
+    # A stop cancels in-flight activities and waits up to
+    # QUARRY_ORCH_WORKER_STOP_TIMEOUT_S per base worker (workflow, then activity),
+    # plus 5 s slack: at most 2 x 25 + 5 = 55 s with the bound at its 25 s maximum.
+    # Docker's default grace period is 10 s, which would kill the worker first and
+    # leave the bound inert (D2-062), so the grace period must stay above that
+    # total. Same values as apps/Ingestion Plane/docker-compose.yml: keep the two
+    # in step.
+    stop_grace_period: 60s
     environment:
       TEMPORAL_ADDR: "temporal:7233"
       QUARRY_TEMPORAL_HOSTPORT: "temporal:7233"
+      QUARRY_ORCH_WORKER_STOP_TIMEOUT_S: "${QUARRY_ORCH_WORKER_STOP_TIMEOUT_S:-20}"
       RUNTIME_BASE_URL: "http://quarry-edge:8082"
       EDGE_BASE_URL: "http://quarry-edge:8082"
       CONTROL_BASE_URL: "http://quarry-control:8081"

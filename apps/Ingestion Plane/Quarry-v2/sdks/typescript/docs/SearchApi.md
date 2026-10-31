@@ -70,7 +70,8 @@ No authorization required
 ### HTTP response details
 | Status code | Description | Response headers |
 |-------------|-------------|------------------|
-| **200** | Ranked results (plus optional answer/context/facets) |  -  |
+| **200** | Ranked results (plus optional answer/context/facets; score_kind and rerank when a rerank ran) |  -  |
+| **400** | Refused before any search runs. ZDR_REQUIRED: a service caller did not send zdr. SCORE_KIND_UNSUPPORTED: score_kinds names a score kind this edge does not produce. |  -  |
 | **429** | Rate limited (structured retry envelope) |  -  |
 | **501** | No search backend configured |  -  |
 

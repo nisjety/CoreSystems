@@ -26,7 +26,15 @@ impl RobotsTxt {
         let mut out = RobotsTxt::default();
         let mut current_agents: Vec<String> = Vec::new();
         let mut after_agents = false;
+        // A UTF-8 byte order mark is not White_Space, so `trim` would leave it on the first line
+        // and hide a leading `User-agent:` line. The sitemap scanner strips it the same way.
+        let input = input.strip_prefix('\u{feff}').unwrap_or(input);
 
+        // RFC 9309 section 2.2 grammar: a group is `startgroupline *(startgroupline / emptyline)
+        // *(rule / emptyline)`. A blank line is skipped and never ends a group. Consecutive
+        // user-agent lines share the rules that follow them; only a rule line ends that list,
+        // so the next user-agent line after a rule starts a new group. Other records, such as
+        // Crawl-delay, do not end the list (RFC 9309 section 2.2.4).
         for raw in input.lines() {
             let line = strip_comment(raw).trim();
             if line.is_empty() {
@@ -46,8 +54,14 @@ impl RobotsTxt {
                         after_agents = false;
                     }
                     current_agents.push(value.to_ascii_lowercase());
+                    // A named group exists even with no rule under it.
+                    out.groups
+                        .entry(value.to_ascii_lowercase())
+                        .or_default();
                 }
                 "allow" => {
+                    // An empty Allow is a rule line (RFC 9309 2.2, empty-pattern), so it ends the
+                    // user-agent list. It adds no pattern: an empty path would match every path.
                     if !value.is_empty() {
                         for ua in &current_agents {
                             out.groups
@@ -56,8 +70,8 @@ impl RobotsTxt {
                                 .allow
                                 .push(value.clone());
                         }
-                        after_agents = true;
                     }
+                    after_agents = true;
                 }
                 "disallow" => {
                     // Empty Disallow means allow-all; record the group anyway
@@ -70,12 +84,12 @@ impl RobotsTxt {
                     after_agents = true;
                 }
                 "crawl-delay" => {
+                    // An other record (RFC 9309 2.2.4) does not end the user-agent list.
                     if let Ok(n) = value.parse::<f64>() {
                         for ua in &current_agents {
                             out.groups.entry(ua.clone()).or_default().crawl_delay_s = Some(n);
                         }
                     }
-                    after_agents = true;
                 }
                 "sitemap" => {
                     out.sitemaps.push(value);
@@ -111,6 +125,46 @@ impl RobotsTxt {
     }
 }
 
+impl RobotsTxt {
+    /// Check `path_and_query` against every product token and allow it only when
+    /// every token allows it: the most restrictive answer wins. `path_and_query`
+    /// is the URL's path followed by `?query` when there is one (RFC 9309 2.2.2
+    /// matches the rule against both). A token with no group of its own falls
+    /// back to `*`, so a file that names only `*` is read once per token and
+    /// gives the same answer.
+    pub fn is_allowed_any(&self, tokens: &[&str], path_and_query: &str) -> bool {
+        self.denying_token(tokens, path_and_query).is_none()
+    }
+
+    /// The first token (in the order given) whose rules deny `path_and_query`,
+    /// or `None` when every token allows it.
+    pub fn denying_token<'t>(&self, tokens: &[&'t str], path_and_query: &str) -> Option<&'t str> {
+        tokens
+            .iter()
+            .copied()
+            .find(|token| !self.is_allowed(token, path_and_query))
+    }
+
+    /// The longest `Crawl-delay` any of the tokens' groups asks for, in seconds.
+    /// Negative, NaN and infinite values read as no delay.
+    pub fn crawl_delay_any(&self, tokens: &[&str]) -> Option<f64> {
+        tokens
+            .iter()
+            .filter_map(|token| self.rules_for(token).and_then(|r| r.crawl_delay_s))
+            .filter(|d| d.is_finite() && *d > 0.0)
+            .fold(None, |best: Option<f64>, d| Some(best.map_or(d, |b| b.max(d))))
+    }
+}
+
+/// The path of `url` followed by `?query` when it has one: the string a robots
+/// rule is matched against.
+pub fn path_and_query(url: &url::Url) -> String {
+    match url.query() {
+        Some(q) => format!("{}?{}", url.path(), q),
+        None => url.path().to_string(),
+    }
+}
+
 fn strip_comment(line: &str) -> &str {
     match line.find('#') {
         Some(i) => &line[..i],
@@ -138,9 +192,13 @@ fn path_matches(pattern: &str, path: &str) -> bool {
         None => (pattern, false),
     };
     if core.contains('*') {
-        // wildcard_match is an anchored full-string match; behaves correctly
-        // both with and without `$`.
-        return wildcard_match(core, path);
+        // wildcard_match matches the whole string. A pattern without `$` is a prefix match
+        // (RFC 9309), so it gets a trailing `*` that takes whatever follows it in the path.
+        return if anchored {
+            wildcard_match(core, path)
+        } else {
+            wildcard_match(&format!("{core}*"), path)
+        };
     }
     if anchored {
         path == core
@@ -158,7 +216,7 @@ fn wildcard_match(pattern: &str, path: &str) -> bool {
     let s = path.as_bytes();
 
     while path_idx < s.len() {
-        if p_idx < p.len() && (p[p_idx] == s[path_idx] || p[p_idx] == b'?') {
+        if p_idx < p.len() && p[p_idx] == s[path_idx] {
             p_idx += 1;
             path_idx += 1;
         } else if p_idx < p.len() && p[p_idx] == b'*' {
@@ -253,10 +311,252 @@ mod tests {
     }
 
     #[test]
+    fn question_mark_is_a_literal_not_a_wildcard() {
+        assert!(!wildcard_match("/a?c*", "/abc"));
+        assert!(wildcard_match("/a?c*", "/a?cd"));
+    }
+
+    #[test]
+    fn query_aware_rules_match_path_and_query() {
+        let r = RobotsTxt::parse("User-agent: *\nDisallow: /*?session=\nDisallow: /search$\n");
+        assert!(!r.is_allowed("quarry", "/page?session=1"));
+        assert!(!r.is_allowed("quarry", "/a/b?session=2"));
+        // `?` is literal, so the rule needs the text "?session=". A later parameter is not matched.
+        assert!(r.is_allowed("quarry", "/a/b?x=1&session=2"));
+        assert!(r.is_allowed("quarry", "/page?id=1"));
+        // `$` anchors the end of path and query together.
+        assert!(!r.is_allowed("quarry", "/search"));
+        assert!(r.is_allowed("quarry", "/search?q=x"));
+    }
+
+    #[test]
+    fn is_allowed_any_takes_the_most_restrictive_token() {
+        let r = RobotsTxt::parse(
+            "User-agent: quarrybot\nDisallow: /a\n\nUser-agent: quarry\nDisallow: /b\n\nUser-agent: *\nDisallow: /c\n",
+        );
+        let tokens = ["quarrybot", "quarry"];
+        assert!(!r.is_allowed_any(&tokens, "/a"));
+        assert!(!r.is_allowed_any(&tokens, "/b"));
+        // Each token has its own group, so `*` does not apply to either.
+        assert!(r.is_allowed_any(&tokens, "/c"));
+        assert_eq!(r.denying_token(&tokens, "/b"), Some("quarry"));
+        assert_eq!(r.denying_token(&tokens, "/a"), Some("quarrybot"));
+        assert_eq!(r.denying_token(&tokens, "/z"), None);
+    }
+
+    #[test]
+    fn star_group_applies_to_every_token_without_its_own_group() {
+        let r = RobotsTxt::parse("User-agent: *\nDisallow: /private\n");
+        assert!(!r.is_allowed_any(&["quarrybot", "quarry"], "/private/x"));
+        assert!(r.is_allowed_any(&["quarrybot", "quarry"], "/public"));
+    }
+
+    #[test]
+    fn a_named_group_with_no_rules_allows_everything() {
+        // A rule line ends the `*` group, so the named group after it has no rules of its
+        // own: it allows everything, while every other agent still falls back to `*`.
+        let r = RobotsTxt::parse("User-agent: *\nDisallow: /\n\nUser-agent: quarrybot\n");
+        assert!(r.is_allowed("quarrybot", "/anything"));
+        assert!(!r.is_allowed("other", "/anything"));
+    }
+
+    #[test]
+    fn a_blank_line_between_user_agent_lines_keeps_one_group() {
+        // RFC 9309 section 2.2: `*(startgroupline / emptyline)`. The two user-agent lines form
+        // one group, so the Disallow after them applies to quarrybot as well as to `*`.
+        let r = RobotsTxt::parse("User-agent: quarrybot\n\nUser-agent: *\n\nDisallow: /\n");
+        assert!(!r.is_allowed("quarrybot", "/anything"));
+        assert!(!r.is_allowed("other", "/anything"));
+    }
+
+    #[test]
+    fn crawl_delay_any_takes_the_longest_and_ignores_garbage() {
+        let r = RobotsTxt::parse(
+            "User-agent: quarrybot\nCrawl-delay: 2\nDisallow:\n\nUser-agent: quarry\nCrawl-delay: 5\n",
+        );
+        assert_eq!(r.crawl_delay_any(&["quarrybot", "quarry"]), Some(5.0));
+        let neg = RobotsTxt::parse("User-agent: *\nCrawl-delay: -3\n");
+        assert_eq!(neg.crawl_delay_any(&["quarry"]), None);
+        let none = RobotsTxt::parse("User-agent: *\nDisallow: /x\n");
+        assert_eq!(none.crawl_delay_any(&["quarry"]), None);
+    }
+
+    #[test]
+    fn longest_match_and_allow_wins_a_tie() {
+        let r = RobotsTxt::parse("User-agent: *\nDisallow: /p\nAllow: /p\n");
+        assert!(r.is_allowed("quarry", "/p/x"));
+        let r = RobotsTxt::parse("User-agent: *\nDisallow: /p/secret\nAllow: /p\n");
+        assert!(!r.is_allowed("quarry", "/p/secret/a"));
+        assert!(r.is_allowed("quarry", "/p/open"));
+    }
+
+    #[test]
+    fn rules_before_any_user_agent_line_are_ignored() {
+        let r = RobotsTxt::parse("Disallow: /x\nUser-agent: *\nDisallow: /y\n");
+        assert!(r.is_allowed("quarry", "/x"));
+        assert!(!r.is_allowed("quarry", "/y"));
+    }
+
+    #[test]
+    fn groups_for_the_same_agent_merge() {
+        let r = RobotsTxt::parse(
+            "User-agent: quarry\nDisallow: /a\n\nUser-agent: other\nDisallow: /o\n\nUser-agent: quarry\nDisallow: /b\n",
+        );
+        assert!(!r.is_allowed("quarry", "/a"));
+        assert!(!r.is_allowed("quarry", "/b"));
+    }
+
+    #[test]
+    fn path_and_query_joins_query_when_present() {
+        let u = url::Url::parse("https://example.test/a/b?x=1&y=2#frag").unwrap();
+        assert_eq!(path_and_query(&u), "/a/b?x=1&y=2");
+        let u = url::Url::parse("https://example.test/a/b").unwrap();
+        assert_eq!(path_and_query(&u), "/a/b");
+    }
+
+    #[test]
     fn dollar_anchors_path_end() {
         let txt = "User-agent: *\nDisallow: /file.pdf$\n";
         let r = RobotsTxt::parse(txt);
         assert!(!r.is_allowed("Quarry", "/file.pdf"));
         assert!(r.is_allowed("Quarry", "/file.pdf.html"));
+    }
+
+    #[test]
+    fn a_leading_utf8_bom_does_not_hide_the_first_user_agent_line() {
+        // U+FEFF is not White_Space, so `trim` keeps it on the first line and the `user-agent`
+        // key is never recognised. The rules below it then belong to no group, so a file that
+        // disallows everything would allow everything.
+        let with_bom = RobotsTxt::parse("\u{feff}User-agent: *\nDisallow: /\n");
+        assert!(!with_bom.is_allowed("quarrybot", "/private/x"));
+        assert_eq!(with_bom, RobotsTxt::parse("User-agent: *\nDisallow: /\n"));
+    }
+
+    #[test]
+    fn a_crawl_delay_line_does_not_end_the_user_agent_list() {
+        // RFC 9309 section 2.2.4: other records MUST NOT interfere with the defined records, and
+        // a Sitemaps record MUST NOT terminate a group. Crawl-delay is such a record here.
+        let shared = RobotsTxt::parse(
+            "User-agent: quarrybot\nCrawl-delay: 2\nUser-agent: *\nDisallow: /private\n",
+        );
+        assert!(!shared.is_allowed("quarrybot", "/private/x"));
+        assert!(!shared.is_allowed("other", "/private/x"));
+        assert_eq!(shared.crawl_delay_any(&["quarrybot"]), Some(2.0));
+        // A Crawl-delay after a rule line still leaves the next user-agent line a new group.
+        let split = RobotsTxt::parse(
+            "User-agent: quarrybot\nDisallow: /a\nCrawl-delay: 2\nUser-agent: *\nDisallow: /b\n",
+        );
+        assert!(!split.is_allowed("quarrybot", "/a/x"));
+        assert!(split.is_allowed("quarrybot", "/b/x"));
+        assert!(!split.is_allowed("other", "/b/x"));
+    }
+
+    #[test]
+    fn an_empty_allow_line_ends_the_user_agent_list() {
+        // RFC 9309 section 2.2: `rule` includes `empty-pattern`, so an `Allow:` with no path is a
+        // rule line, like `Disallow:`. It ends the list, so the next user-agent line starts a new
+        // group and the Disallow below applies to `*` only.
+        let r = RobotsTxt::parse("User-agent: quarrybot\nAllow:\nUser-agent: *\nDisallow: /x\n");
+        assert!(r.is_allowed("quarrybot", "/x"));
+        assert!(!r.is_allowed("other", "/x"));
+    }
+
+    #[test]
+    fn real_file_shapes_decide_as_the_rfc_grammar_reads() {
+        // Each row is (robots.txt body, user agent, path, allowed). The bodies have shapes that
+        // real files have: a UTF-8 byte order mark, CRLF line ends, trailing comments, blank
+        // lines between user-agent lines, Crawl-delay before the rules, and an empty Allow.
+        let cases: [(&str, &str, &str, bool); 12] = [
+            (
+                "\u{feff}User-agent: *\nDisallow: /private\n",
+                "quarrybot",
+                "/private/x",
+                false,
+            ),
+            (
+                "\u{feff}User-agent: *\nDisallow: /private\n",
+                "quarrybot",
+                "/public",
+                true,
+            ),
+            (
+                "\u{feff}# header\r\nSitemap: https://example.test/s.xml\r\n\
+                 User-agent: * # all\r\nDisallow: /admin # staff\r\n",
+                "quarrybot",
+                "/admin/x",
+                false,
+            ),
+            (
+                "\u{feff}# header\r\nSitemap: https://example.test/s.xml\r\n\
+                 User-agent: * # all\r\nDisallow: /admin # staff\r\n",
+                "quarrybot",
+                "/docs",
+                true,
+            ),
+            (
+                "User-agent: quarrybot\nCrawl-delay: 2\nUser-agent: *\nDisallow: /private/\n",
+                "quarrybot",
+                "/private/x",
+                false,
+            ),
+            (
+                "User-agent: quarrybot\nCrawl-delay: 2\nUser-agent: *\nDisallow: /private/\n",
+                "other",
+                "/private/x",
+                false,
+            ),
+            (
+                "User-agent: quarrybot\nCrawl-delay: 2\nUser-agent: *\nDisallow: /private/\n",
+                "other",
+                "/public",
+                true,
+            ),
+            (
+                "User-agent: quarrybot\nAllow:\nUser-agent: *\nDisallow: /x\n",
+                "quarrybot",
+                "/x",
+                true,
+            ),
+            (
+                "User-agent: *\r\nAllow:\r\nDisallow: /tmp\r\n",
+                "quarrybot",
+                "/tmp/a",
+                false,
+            ),
+            (
+                "User-agent: quarrybot\n\nUser-agent: *\n\nDisallow: /\n",
+                "other",
+                "/anything",
+                false,
+            ),
+            (
+                "User-agent: QuarryBot\nDisallow: /q\n",
+                "quarrybot",
+                "/q/x",
+                false,
+            ),
+            (
+                "User-agent: QuarryBot\nDisallow: /q\n",
+                "QUARRYBOT",
+                "/q/x",
+                false,
+            ),
+        ];
+        for (body, agent, path, allowed) in cases {
+            let r = RobotsTxt::parse(body);
+            assert_eq!(
+                r.is_allowed(agent, path),
+                allowed,
+                "{agent} {path} in {body:?}"
+            );
+        }
+        let header =
+            RobotsTxt::parse("\u{feff}# header\r\nSitemap: https://example.test/s.xml\r\n");
+        assert_eq!(
+            header.sitemaps,
+            vec!["https://example.test/s.xml".to_string()]
+        );
+        let delay = RobotsTxt::parse("User-agent: quarrybot\nCrawl-delay: 2\nUser-agent: *\n");
+        assert_eq!(delay.crawl_delay_any(&["quarrybot"]), Some(2.0));
     }
 }

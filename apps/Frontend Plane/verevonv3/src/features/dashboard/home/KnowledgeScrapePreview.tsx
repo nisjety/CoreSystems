@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createMemo, createSignal, untrack } from 'solid-js'
+import { For, Match, Show, Switch, createMemo, createSignal, onCleanup, untrack } from 'solid-js'
 import {
   AlertCircle,
   Check,
@@ -16,8 +16,11 @@ import type {
   BrowserProfileRestoreProbe,
 } from '@/shared/api/browser-client'
 import type { ApprovalDecision } from '@/shared/api/orchestration-client'
+import type { ScrapeCaptureView } from '@/shared/api/knowledge-client'
 import type { BrowserLoopState } from './browser-loop'
 import { BrowserChrome, type BrowserProfileManagerProps } from './BrowserChrome'
+import type { BrowserNavigationFailure } from '@/features/browser/session/browser-navigation-error'
+import type { KeepAliveOutcome } from '@/features/browser/session/session-keepalive'
 import { browserSessionFromPreview, type BrowserApprovalEntry, type BrowserStepRationale } from './browser-session'
 import { hostnameOf, type ScrapeBlock, type ScrapePreview } from './knowledge-preview'
 
@@ -203,6 +206,63 @@ function ScrapeRegion(props: {
   )
 }
 
+/** WS13.7: the screenshot and PDF of a scrape. Renders only when the preview carries a
+ * capture. The screenshot is the gateway artifact route or, under ZDR, the inline bytes
+ * shown through a blob: URL that is revoked on unmount (nothing is stored). */
+export function ScrapeCapturesSection(props: { captures?: ScrapeCaptureView; title: string }) {
+  const [broken, setBroken] = createSignal(false)
+  const inlineUrl = createMemo<string | undefined>((previous) => {
+    if (previous) URL.revokeObjectURL(previous)
+    const inline = props.captures?.screenshotInline
+    if (!inline) return undefined
+    try {
+      const binary = atob(inline.dataBase64)
+      const bytes = new Uint8Array(binary.length)
+      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+      return URL.createObjectURL(new Blob([bytes], { type: inline.contentType }))
+    } catch {
+      return undefined
+    }
+  })
+  onCleanup(() => {
+    const url = inlineUrl()
+    if (url) URL.revokeObjectURL(url)
+  })
+  const screenshotSrc = () => props.captures?.screenshotUrl ?? inlineUrl()
+
+  return (
+    <Show when={screenshotSrc() || props.captures?.pdfUrl}>
+      <section class="knowledge-scrape-captures" aria-label="Skjermbilde og PDF">
+        <h4 class="knowledge-scrape-captures__title">Skjermbilde / PDF</h4>
+        <Show when={screenshotSrc()}>
+          <Show
+            when={!broken()}
+            fallback={
+              <p class="knowledge-browser-artifact__error">
+                <AlertCircle class="size-3.5" /> Bildet kunne ikke lastes.
+              </p>
+            }
+          >
+            <img
+              class="knowledge-scrape-captures__img"
+              src={screenshotSrc()}
+              alt={props.title}
+              loading="lazy"
+              decoding="async"
+              onError={() => setBroken(true)}
+            />
+          </Show>
+        </Show>
+        <Show when={props.captures?.pdfUrl}>
+          <a class="knowledge-scrape-captures__pdf" href={props.captures?.pdfUrl} download="page.pdf">
+            Last ned PDF
+          </a>
+        </Show>
+      </section>
+    </Show>
+  )
+}
+
 function BrowserSessionSurface(props: {
   browserApprovals?: BrowserApprovalEntry[]
   browserBusy?: boolean
@@ -210,17 +270,23 @@ function BrowserSessionSurface(props: {
   browserLoopRationale?: BrowserStepRationale | null
   browserRationales?: BrowserStepRationale[]
   decidingBrowserApprovalKeys?: string[]
+  browserNavigationError?: BrowserNavigationFailure | null
   hovered: number | null
   onBrowserAction?: (action: BrowserAction) => void
+  onKeepAlive?: () => Promise<KeepAliveOutcome>
+  onBrowserNavigationDismiss?: () => void
+  onBrowserNavigationRetry?: (url: string) => void
   onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
-  onBrowserControlMode?: (mode: BrowserControlMode) => void
+  onBrowserControlMode?: (mode: BrowserControlMode, expectedEpoch?: number | null) => void
   onBrowserLoopPause?: () => void
   onBrowserLoopResume?: () => void
   onBrowserLoopStop?: () => void
+  onAskVerevon?: (text: string) => void
   onBrowserNewTab?: () => Promise<void> | void
   onBrowserSelectTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserSocketObservation?: (observation: BrowserObservation) => void
+  onBrowserTryOtherSource?: () => void
   onDecideBrowserApproval?: (approvalKey: string, decision: ApprovalDecision) => void
   onEnter: (index: number) => void
   onLeave: (index: number) => void
@@ -257,6 +323,10 @@ function BrowserSessionSurface(props: {
         browserLoopRationale={props.browserLoopRationale}
         browserRationales={props.browserRationales}
         decidingBrowserApprovalKeys={props.decidingBrowserApprovalKeys}
+        browserNavigationError={props.browserNavigationError}
+        onBrowserNavigationDismiss={props.onBrowserNavigationDismiss}
+        onBrowserNavigationRetry={props.onBrowserNavigationRetry}
+        onKeepAlive={props.onKeepAlive}
         frameControls={
           <div class="knowledge-browser-frame__controls">
             <button
@@ -285,10 +355,12 @@ function BrowserSessionSurface(props: {
         onBrowserLoopPause={props.onBrowserLoopPause}
         onBrowserLoopResume={props.onBrowserLoopResume}
         onBrowserLoopStop={props.onBrowserLoopStop}
+        onAskVerevon={props.onAskVerevon}
         onBrowserNewTab={props.onBrowserNewTab}
         onBrowserSelectTab={props.onBrowserSelectTab}
         onBrowserSuggestAction={props.onBrowserSuggestAction}
         onBrowserSocketObservation={props.onBrowserSocketObservation}
+        onBrowserTryOtherSource={props.onBrowserTryOtherSource}
         onDecideBrowserApproval={props.onDecideBrowserApproval}
         profileManager={props.profileManager}
         profileProbe={props.profileProbe}
@@ -330,6 +402,7 @@ function BrowserSessionSurface(props: {
                 <p>{props.preview.description}</p>
               </Show>
             </header>
+            <ScrapeCapturesSection captures={props.preview.captures} title={props.preview.title} />
             <For each={props.preview.blocks}>
               {(block, index) => (
                 <ScrapeRegion
@@ -407,17 +480,23 @@ export function ScrapePreviewPanel(props: {
   browserLoop?: BrowserLoopState
   browserLoopRationale?: BrowserStepRationale | null
   browserRationales?: BrowserStepRationale[]
+  browserNavigationError?: BrowserNavigationFailure | null
   decidingBrowserApprovalKeys?: string[]
   onBrowserAction?: (action: BrowserAction) => void
+  onKeepAlive?: () => Promise<KeepAliveOutcome>
+  onBrowserNavigationDismiss?: () => void
+  onBrowserNavigationRetry?: (url: string) => void
   onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
-  onBrowserControlMode?: (mode: BrowserControlMode) => void
+  onBrowserControlMode?: (mode: BrowserControlMode, expectedEpoch?: number | null) => void
   onBrowserLoopPause?: () => void
   onBrowserLoopResume?: () => void
   onBrowserLoopStop?: () => void
+  onAskVerevon?: (text: string) => void
   onBrowserNewTab?: () => Promise<void> | void
   onBrowserSelectTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserSocketObservation?: (observation: BrowserObservation) => void
+  onBrowserTryOtherSource?: () => void
   onDecideBrowserApproval?: (approvalKey: string, decision: ApprovalDecision) => void
   onAdd: (selectedMarkdown: string, allSelected: boolean) => void
   onDiscard: () => void
@@ -463,18 +542,24 @@ export function ScrapePreviewPanel(props: {
         browserLoopRationale={props.browserLoopRationale}
         browserRationales={props.browserRationales}
         decidingBrowserApprovalKeys={props.decidingBrowserApprovalKeys}
+        browserNavigationError={props.browserNavigationError}
         expanded={browserExpanded()}
         hovered={hovered()}
         onBrowserAction={props.onBrowserAction}
+        onBrowserNavigationDismiss={props.onBrowserNavigationDismiss}
+        onBrowserNavigationRetry={props.onBrowserNavigationRetry}
+        onKeepAlive={props.onKeepAlive}
         onBrowserAutoRun={props.onBrowserAutoRun}
         onBrowserControlMode={props.onBrowserControlMode}
         onBrowserLoopPause={props.onBrowserLoopPause}
         onBrowserLoopResume={props.onBrowserLoopResume}
         onBrowserLoopStop={props.onBrowserLoopStop}
+        onAskVerevon={props.onAskVerevon}
         onBrowserNewTab={props.onBrowserNewTab}
         onBrowserSelectTab={props.onBrowserSelectTab}
         onBrowserSuggestAction={props.onBrowserSuggestAction}
         onBrowserSocketObservation={props.onBrowserSocketObservation}
+        onBrowserTryOtherSource={props.onBrowserTryOtherSource}
         onDecideBrowserApproval={props.onDecideBrowserApproval}
         onEnter={enter}
         onLeave={leave}

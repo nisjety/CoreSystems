@@ -38,6 +38,6 @@ describe('translateApiError for the zero-retention refusals', () => {
 
   it('still uses the caller fallback for a zero-retention code the SPA does not know', () => {
     const fallback = { no: 'Reservekopi', en: 'Fallback copy' }
-    expect(translateApiError({ code: 'zdr_recurrence_forbidden' }, en, fallback)).toBe('Fallback copy')
+    expect(translateApiError({ code: 'zdr_a_future_code' }, en, fallback)).toBe('Fallback copy')
   })
 })

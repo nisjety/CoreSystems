@@ -47,6 +47,10 @@ pub enum EventType {
     ObservationReady,
     AgentCompleted,
     AgentFailed,
+    /// A live agent run was released by the sweeper (idle, over its lifetime, or a
+    /// takeover nobody came back to). Payload: `reason`, `idle_s`, `age_s`; no URL.
+    /// A non-ZDR run's checkpoint stays `active`, so it can be resumed.
+    AgentExpired,
     /// Cycle 19 / cluster #19: emitted by `/v1/search` route on every
     /// query. Reserved for future `autocomplete-core` Sonic ingest into
     /// the `queries` bucket. Payload includes `query` + `provider` +
@@ -78,6 +82,27 @@ pub enum EventType {
     /// into its snippet cards so a crawl shows real titles and text instead
     /// of `N utdrag samlet` over empty excerpts.
     PageExtracted,
+    /// WS6.B: an agent run reached a budget bound while enforcement is `on`
+    /// (once per segment of the run). Payload: `dimension`, `limit`, `spent`,
+    /// `unit`, `estimated`, `limit_source`. User-facing (X-12): the run's SSE
+    /// stream sends it as `agent.budget_exhausted`; the run trace still needs a
+    /// projection row (WS10).
+    AgentBudgetExhausted,
+    /// WS15.L2: a caller asked for a pause, resume or cancel of a job. Written by
+    /// control when the request is recorded; the workflow acts on it later.
+    /// Payload: `action`, `actor`, `actor_type`.
+    ControlRequested,
+    /// WS15.L2: a job's workflow ran past its execution timeout. Payload:
+    /// `timeout_type`, `limit_s`.
+    RunTimedOut,
+    /// WS15.S4 mirror: a scheduled fire that did not start a job. Payload: `reason`.
+    ScheduleSkipped,
+    /// WS8.F: an agent attached to a live run and was given a tab. Payload: `attach_id`,
+    /// `tab_id`. No URL and no title.
+    AgentAttached,
+    /// WS8.F: an agent attachment ended (released, aborted, revoked, idle or session ended).
+    /// Payload: `attach_id`, `disposition`. No URL and no title.
+    AgentDetached,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

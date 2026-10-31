@@ -212,7 +212,132 @@ impl EventBus for NatsEventBus {
         })?;
         let payload_bytes = Bytes::from(bytes);
 
-        let primary_subject = self.subject_for(&run_id, &event_type);
+        self.publish_encoded(&run_id, event_type, payload_bytes).await
+    }
+
+    async fn publish_event(&self, event: Event) -> QuarryResult<()> {
+        let Some(run_id) = event.run_id.clone() else {
+            return Ok(());
+        };
+        let event_type = event.event_type;
+        let bytes = serde_json::to_vec(&event).map_err(|e| {
+            QuarryError::new(ErrorCode::Internal, format!("event serialize failed: {e}"))
+        })?;
+        self.publish_encoded(&run_id, event_type, Bytes::from(bytes))
+            .await
+    }
+
+    async fn subscribe(&self, run_id: &RunKind) -> QuarryResult<Box<dyn EventReceiver>> {
+        let filter_subject = format!("{}.run.{}.>", self.config.subject_prefix, run_id);
+
+        // Ephemeral consumer — when the receiver drops, JetStream cleans up.
+        let consumer_cfg = jetstream::consumer::pull::Config {
+            filter_subject,
+            ..Default::default()
+        };
+
+        let stream = self
+            .js
+            .get_stream(&self.config.stream_name)
+            .await
+            .map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, format!("get stream failed: {e}"))
+            })?;
+        let consumer: PullConsumer = stream.create_consumer(consumer_cfg).await.map_err(|e| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                format!("create consumer failed: {e}"),
+            )
+        })?;
+
+        let (tx, rx) = mpsc::channel::<Event>(64);
+        let consumer_arc = Arc::new(consumer);
+        let consumer_clone = consumer_arc.clone();
+
+        tokio::spawn(async move {
+            let mut messages = match consumer_clone.messages().await {
+                Ok(m) => m,
+                Err(e) => {
+                    // zdr-log-ok: a NATS client error (subject, connection state); the event payload is not part of it; spawned consumer task, no request span
+                    tracing::error!(error = %e, "nats consumer messages stream failed");
+                    return;
+                }
+            };
+            while let Some(next) = messages.next().await {
+                match next {
+                    Ok(msg) => {
+                        // Decode FIRST, ack only on success. Previously the
+                        // ack ran unconditionally so a malformed event on the
+                        // stream was permanently dropped with no signal —
+                        // exactly the kind of silent data loss that hides
+                        // serialization regressions for weeks.
+                        match serde_json::from_slice::<Event>(&msg.payload) {
+                            Ok(event) => {
+                                if tx.send(event).await.is_err() {
+                                    break;
+                                }
+                                let _ = msg.ack().await;
+                            }
+                            Err(e) => {
+                                // Don't ack — let JetStream redeliver
+                                // and eventually push the message to the
+                                // configured DLQ. A spike in this log line
+                                // means a producer is emitting bad payloads.
+                                // The serde category and position, not its text: a data
+                                // error quotes the offending value, which can be a URL.
+                                tracing::warn!(
+                                    error_class = ?e.classify(),
+                                    line = e.line(),
+                                    column = e.column(),
+                                    payload_bytes = msg.payload.len(),
+                                    "nats event deserialize failed; not acking, JetStream will retry"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // zdr-log-ok: a NATS client error (subject, connection state); the event payload is not part of it; spawned consumer task, no request span
+                        tracing::warn!(error = %e, "nats consumer error");
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Box::new(NatsReceiver { rx }))
+    }
+
+    async fn unsubscribe(&self, run_id: &RunKind) -> QuarryResult<()> {
+        // Ephemeral consumers self-cleanup when the spawned task drops.
+        // Also drop the per-run sequence counter so we don't leak memory
+        // on long-lived buses with many short-lived runs.
+        let mut map = self.seq_per_run.write().await;
+        map.remove(&run_id.to_string());
+        Ok(())
+    }
+}
+
+struct NatsReceiver {
+    rx: mpsc::Receiver<Event>,
+}
+
+#[async_trait]
+impl EventReceiver for NatsReceiver {
+    async fn recv(&mut self) -> Option<Event> {
+        self.rx.recv().await
+    }
+}
+
+impl NatsEventBus {
+    /// Publish one encoded event on its per-run subject and on the aggregate subject
+    /// (WS10.S3: shared by `publish` and `publish_event`).
+    async fn publish_encoded(
+        &self,
+        run_id: &RunKind,
+        event_type: EventType,
+        payload_bytes: Bytes,
+    ) -> QuarryResult<()> {
+        let primary_subject = self.subject_for(run_id, &event_type);
         let aggregate_subject = self.aggregate_subject_for(&event_type);
 
         // Publish per-run AND aggregate concurrently — neither should block
@@ -248,6 +373,7 @@ impl EventBus for NatsEventBus {
         match (primary_err, aggregate_err) {
             (None, None) => Ok(()),
             (Some(p_err), None) => {
+                // zdr-log-ok: a NATS client error (subject, connection state); the event payload is not part of it
                 tracing::warn!(error = %p_err, subject = %primary_subject, "primary subject failed; aggregate ok");
                 Err(QuarryError::new(
                     ErrorCode::DriverFailed,
@@ -255,6 +381,7 @@ impl EventBus for NatsEventBus {
                 ))
             }
             (None, Some(a_err)) => {
+                // zdr-log-ok: a NATS client error (subject, connection state); the event payload is not part of it
                 tracing::warn!(error = %a_err, subject = %aggregate_subject, "aggregate subject failed; primary ok");
                 // Per-run consumers got the event; degrade gracefully.
                 Ok(())
@@ -264,100 +391,6 @@ impl EventBus for NatsEventBus {
                 format!("nats publish both subjects failed (primary: {p_err}; aggregate: {a_err})"),
             )),
         }
-    }
-
-    async fn subscribe(&self, run_id: &RunKind) -> QuarryResult<Box<dyn EventReceiver>> {
-        let filter_subject = format!("{}.run.{}.>", self.config.subject_prefix, run_id);
-
-        // Ephemeral consumer — when the receiver drops, JetStream cleans up.
-        let consumer_cfg = jetstream::consumer::pull::Config {
-            filter_subject,
-            ..Default::default()
-        };
-
-        let stream = self
-            .js
-            .get_stream(&self.config.stream_name)
-            .await
-            .map_err(|e| {
-                QuarryError::new(ErrorCode::DriverFailed, format!("get stream failed: {e}"))
-            })?;
-        let consumer: PullConsumer = stream.create_consumer(consumer_cfg).await.map_err(|e| {
-            QuarryError::new(
-                ErrorCode::DriverFailed,
-                format!("create consumer failed: {e}"),
-            )
-        })?;
-
-        let (tx, rx) = mpsc::channel::<Event>(64);
-        let consumer_arc = Arc::new(consumer);
-        let consumer_clone = consumer_arc.clone();
-
-        tokio::spawn(async move {
-            let mut messages = match consumer_clone.messages().await {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::error!(error = %e, "nats consumer messages stream failed");
-                    return;
-                }
-            };
-            while let Some(next) = messages.next().await {
-                match next {
-                    Ok(msg) => {
-                        // Decode FIRST, ack only on success. Previously the
-                        // ack ran unconditionally so a malformed event on the
-                        // stream was permanently dropped with no signal —
-                        // exactly the kind of silent data loss that hides
-                        // serialization regressions for weeks.
-                        match serde_json::from_slice::<Event>(&msg.payload) {
-                            Ok(event) => {
-                                if tx.send(event).await.is_err() {
-                                    break;
-                                }
-                                let _ = msg.ack().await;
-                            }
-                            Err(e) => {
-                                // Don't ack — let JetStream redeliver
-                                // and eventually push the message to the
-                                // configured DLQ. A spike in this log line
-                                // means a producer is emitting bad payloads.
-                                tracing::warn!(
-                                    error = %e,
-                                    payload_bytes = msg.payload.len(),
-                                    "nats event deserialize failed; not acking, JetStream will retry"
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "nats consumer error");
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(Box::new(NatsReceiver { rx }))
-    }
-
-    async fn unsubscribe(&self, run_id: &RunKind) -> QuarryResult<()> {
-        // Ephemeral consumers self-cleanup when the spawned task drops.
-        // Also drop the per-run sequence counter so we don't leak memory
-        // on long-lived buses with many short-lived runs.
-        let mut map = self.seq_per_run.write().await;
-        map.remove(&run_id.to_string());
-        Ok(())
-    }
-}
-
-struct NatsReceiver {
-    rx: mpsc::Receiver<Event>,
-}
-
-#[async_trait]
-impl EventReceiver for NatsReceiver {
-    async fn recv(&mut self) -> Option<Event> {
-        self.rx.recv().await
     }
 }
 
@@ -393,10 +426,17 @@ fn event_type_token(t: &EventType) -> &'static str {
         EventType::ObservationReady => "observation_ready",
         EventType::AgentCompleted => "agent_completed",
         EventType::AgentFailed => "agent_failed",
+        EventType::AgentExpired => "agent_expired",
         EventType::SearchIssued => "search_issued",
         EventType::HostDiscovered => "host_discovered",
         EventType::BrandingExtracted => "branding_extracted",
         EventType::PageExtracted => "page_extracted",
+        EventType::AgentBudgetExhausted => "agent_budget_exhausted",
+        EventType::ControlRequested => "control_requested",
+        EventType::RunTimedOut => "run_timed_out",
+        EventType::ScheduleSkipped => "schedule_skipped",
+        EventType::AgentAttached => "agent_attached",
+        EventType::AgentDetached => "agent_detached",
     }
 }
 

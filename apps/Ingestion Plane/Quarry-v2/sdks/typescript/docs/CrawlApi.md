@@ -71,6 +71,8 @@ No authorization required
 | Status code | Description | Response headers |
 |-------------|-------------|------------------|
 | **200** | Crawl job accepted |  -  |
+| **402** | The organization\&#39;s configured crawl page (quarry.crawl.page) allowance is spent (WS6.D-s; only a source that reports an allowance produces this, the default static source never does). Body is BUDGET_EXHAUSTED with details dimension org_allowance, metric, limit_source entitlement and resumable false. No job is created. |  -  |
+| **429** | Backlog full (QUARRY_JOB_ADMISSION on): the organization already has its bound of waiting jobs. Body is RATE_LIMITED with details reason org_backlog_full, limit, queued and retry_after_seconds, and a Retry-After header. Nothing is stored. |  -  |
 | **502** | Orchestrator unreachable |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)

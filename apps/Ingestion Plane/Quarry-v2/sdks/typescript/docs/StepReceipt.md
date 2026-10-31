@@ -17,6 +17,10 @@ Name | Type
 `observation` | [BrowserObservation](BrowserObservation.md)
 `correctionOf` | string
 `costMicroUsd` | number
+`initiatedBy` | string
+`controlEpoch` | number
+`agent` | [AgentIdentity](AgentIdentity.md)
+`redactionRuleVersion` | string
 
 ## Example
 
@@ -36,6 +40,10 @@ const example = {
   "observation": null,
   "correctionOf": null,
   "costMicroUsd": null,
+  "initiatedBy": null,
+  "controlEpoch": null,
+  "agent": null,
+  "redactionRuleVersion": null,
 } satisfies StepReceipt
 
 console.log(example)

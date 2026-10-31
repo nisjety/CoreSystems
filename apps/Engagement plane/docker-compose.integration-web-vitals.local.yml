@@ -1,0 +1,14 @@
+# Site export credentials stay in Integration Core; browser/Core receive none.
+services:
+  integration-api:
+    environment:
+      WEB_VITALS_BINDINGS_FILE: /run/secrets/web_vitals_bindings
+    secrets:
+      - web_vitals_bindings
+      - web_vitals_triodelab_development_export_token
+
+secrets:
+  web_vitals_bindings:
+    file: ${INTEGRATION_LOCAL_WEB_VITALS_BINDINGS_FILE:?set protected Web Vitals bindings}
+  web_vitals_triodelab_development_export_token:
+    file: ${INTEGRATION_LOCAL_WEB_VITALS_TOKEN_FILE:?set protected per-site development export token}

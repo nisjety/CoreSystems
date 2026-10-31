@@ -9,7 +9,7 @@ use axum::{
     Extension, Json,
 };
 use serde_json::{json, Value};
-use tracing::error;
+use tracing::{error, Instrument};
 
 use crate::{
     audience_tokens::get_onboarding_preview_token,
@@ -23,6 +23,16 @@ use crate::{
     },
     public_url::normalize_public_http_url,
 };
+
+/// A closed label for a crawl-preview upstream error. The error's own text embeds
+/// the URL the visitor asked about (a reqwest error names it, and the seed-scrape
+/// failure carries the upstream body), so it is classed, never printed.
+fn crawl_error_class(error: &anyhow::Error) -> &'static str {
+    match error.downcast_ref::<reqwest::Error>() {
+        Some(error) => crate::zdr_log::class_reqwest(error),
+        None => "upstream",
+    }
+}
 
 pub(crate) async fn crawl_preview(
     State(state): State<AppState>,
@@ -91,7 +101,7 @@ pub(crate) async fn crawl_preview(
                         }
                     }
                     Err(error) => {
-                        error!(?error, "seed scrape failed");
+                        error!(error_class = crawl_error_class(&error), "seed scrape failed");
                     }
                 }
                 // Stream events live: a background task polls quarry-control and pushes
@@ -99,12 +109,15 @@ pub(crate) async fn crawl_preview(
                 // it arrives (instead of buffering the whole crawl).
                 let (tx, mut rx) =
                     tokio::sync::mpsc::channel::<crate::onboarding::crawl_preview::types::CrawlPayload>(64);
-                let poll_handle = tokio::spawn({
+                // The task carries the request span, so the ZDR mark and the log
+                // filter reach its events (lint rule R4).
+                let poll_task = {
                     let poll_state = state_clone.clone();
                     let poll_job = job_id.clone();
                     let poll_token = token.clone();
                     async move { poll_crawl_events(&poll_state, poll_token.as_deref(), &poll_job, tx).await }
-                });
+                };
+                let poll_handle = tokio::spawn(poll_task.in_current_span());
 
                 while let Some(payload) = rx.recv().await {
                     match payload.kind.as_str() {
@@ -160,7 +173,7 @@ pub(crate) async fn crawl_preview(
                     }
                     poll_result => {
                         if let Ok(Err(error)) = &poll_result {
-                            error!(?error, "crawl event polling failed");
+                            error!(error_class = crawl_error_class(error), "crawl event polling failed");
                         } else if poll_result.is_err() {
                             error!("crawl event polling task failed to join");
                         }
@@ -170,7 +183,7 @@ pub(crate) async fn crawl_preview(
                 }
             }
             Err(error) => {
-                error!(?error, "crawl job create failed");
+                error!(error_class = crawl_error_class(&error), "crawl job create failed");
                 yield Ok::<Event, std::convert::Infallible>(sse_json("warning", json!({ "code": "control_unreachable", "message": "Could not start crawl." })));
                 yield Ok(sse_json("done", json!({ "count": 0, "pages": 0, "elements": 0, "status": "failed" })));
             }

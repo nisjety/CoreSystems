@@ -202,7 +202,7 @@ function FeatureOutputCard({
 	return (
 		<a
 			aria-label={card.link}
-			className="group flex min-w-0 flex-col gap-3"
+			className="verevon-cta-card group flex min-w-0 flex-col gap-3"
 			href={card.href}
 			{...(animated ? { "data-feature-card": "" } : {})}
 		>
@@ -332,15 +332,15 @@ function FeatureHandoffIntro() {
 				className="absolute left-1/2 top-[clamp(150px,16.5vh,172px)] w-[min(760px,calc(100%-48px))] -translate-x-1/2 text-center"
 				data-trust-feature-copy=""
 			>
-				<p className="mb-4 font-geist text-[0.72rem] font-medium uppercase leading-none tracking-[0.34em] text-verevon-j-text/38">
+				<p className="mb-4 font-geist text-[0.7rem] font-medium uppercase leading-none tracking-[0.08em] text-verevon-j-text/38">
 					Forankret handling
 				</p>
 
-				<h2 className="m-0 font-manrope text-[clamp(2.75rem,4vw,5.35rem)] font-light leading-[0.94] tracking-[-0.068em] text-verevon-j-text">
+				<h2 className="m-0 font-manrope text-[clamp(2.35rem,3.4vw,3.5rem)] font-light leading-[0.94] tracking-[-0.045em] text-verevon-j-text">
 					Tenking, satt i arbeid
 				</h2>
 
-				<p className="mx-auto mt-4 max-w-[540px] font-geist text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.42] text-verevon-text-muted">
+				<p className="mx-auto mt-4 max-w-[42ch] font-manrope text-[clamp(1rem,1.05vw,1.125rem)] font-light leading-[1.5] tracking-[-0.015em] text-verevon-text-muted">
 					Ett kundesignal kan bli et svar, en rute, en policy-sjekk og
 					en revidert handling — alt med kildene synlige.
 				</p>
@@ -391,13 +391,13 @@ function FeatureMobileFallback() {
 	return (
 		<div className="hidden max-[899px]:grid max-[899px]:gap-10 max-[899px]:pt-10">
 			<div className="text-center">
-				<p className="mb-4 font-geist text-[0.7rem] font-medium uppercase leading-none tracking-[0.3em] text-verevon-j-text/38">
+				<p className="mb-4 font-geist text-[0.7rem] font-medium uppercase leading-none tracking-[0.08em] text-verevon-j-text/38">
 					Forankret handling
 				</p>
-				<h2 className="m-0 font-manrope text-[clamp(3rem,14vw,5rem)] font-light leading-[0.95] tracking-[-0.07em] text-verevon-j-text">
+				<h2 className="m-0 font-manrope text-[clamp(2rem,7vw,2.75rem)] font-light leading-[0.96] tracking-[-0.045em] text-verevon-j-text">
 					Kundearbeid, klart til godkjenning
 				</h2>
-				<p className="mx-auto mt-5 max-w-[34rem] font-geist text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
+				<p className="mx-auto mt-5 max-w-[34rem] font-manrope text-[1rem] font-light leading-[1.5] tracking-[-0.015em] text-verevon-text-muted">
 					Verevon samler kilder, lager forslag og viser hva som må godkjennes
 					før noe skjer ute hos kunden.
 				</p>

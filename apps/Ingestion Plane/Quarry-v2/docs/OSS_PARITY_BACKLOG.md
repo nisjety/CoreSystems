@@ -19,14 +19,14 @@ runtime dep for us (Rust/Go), but its *practice* — read source, not marketing 
 ### Firecrawl (closest competitor: scrape/crawl/map/search/extract/agent/batch)
 | Capability | Quarry-v2 today | Verdict | Action |
 |---|---|---|---|
-| scrape → markdown/json/screenshot/links/html/summary | full (quarry-transform + AiFormatRunner) | ✅ | — |
-| actions (click/scroll/write/wait/press) before extract | ActionRuntime, 13 variants | ✅ | — |
+| scrape → markdown/html/rawHtml/links/metadata inline (`formats[]`) | markdown, html and rawHtml come back inline when asked for (markdown by default under ZDR); links and metadata are accepted and change nothing, since both are in every response; screenshot and pdf are built behind `QUARRY_EDGE__SCRAPE_CAPTURE` (off by default; 400 `feature_disabled` until it is on; local browser driver only; not measured); json, summary, question and highlights are reserved and refused with 400 `reserved_format` (CONTRACTS.md 9.1 and 10) | partial | the evidence run (`make test-scrape-capture`) and the flag decision, before any parity claim |
+| actions (click/scroll/write/wait/press) before extract | each agent step takes one of 33 `AgentAction` variants (`quarry-core/src/contracts.rs`), and the driver refuses some by capability (uploads, for one); `/v1/scrape` takes `actions[]` (wait, click, write, press, scroll, select, screenshot, pdf) behind `QUARRY_EDGE__SCRAPE_ACTIONS` (off by default; local browser driver only; remote providers unsupported; the denied types are refused by name; not measured; per-action outcomes on success not yet returned; CONTRACTS.md 10) | partial | the ADR-6 ruling and a live denial check before the flag goes on anywhere |
 | batch scrape | `/v1/batch` | ✅ | — |
 | change tracking | change_history + baseline store + `/v1/change/*` | ✅ | — |
 | **`/map`** — fast whole-site URL discovery, relevance-ranked | sitemap.rs + frontier exist, **no endpoint** | ❌ | **P0 `/v1/map`** (reuse sitemap+robots+links+LexicalRanker) |
 | **`/extract`** — prompt+schema across `domain/*` wildcards | per-page StructuredExtractClient only | 🟡 | **P1** multi-URL/wildcard extract fan-out |
 | `agent` (FIRE-1) NL extraction | AgentLoop + Planner exist, not exposed as one call | 🟡 | fold into P1 `/v1/extract {prompt,schema}` |
-| media parsing (PDF/DOCX) | pdf.rs (text) | 🟡 | P2 add DOCX |
+| media parsing (PDF/DOCX) | PDF and DOCX text on `/v1/scrape` (`pdf.rs`, `docx.rs`) when `QUARRY_EDGE__DOC_ROUTING=on`; the default `shadow` only detects. The parse runs in a child process under address-space, CPU and file-descriptor limits (`QUARRY_EDGE__DOC_PARSE_ISOLATION`, default `process` on Unix for the edge binary). No OCR, no XLSX, PPTX, ODF or EPUB | 🟡 | OCR for scans; XLSX, PPTX, ODF and EPUB extraction |
 | MCP server (agents connect in 1 cmd) | none | ⛔ | deferred — **Verevon** is Quarry-v2's client, not external agents |
 | reliability claims (96% web, P95 3.4s) | unproven | 🟡 | benchmark lens → P2 live runs |
 
@@ -60,7 +60,7 @@ runtime dep for us (Rust/Go), but its *practice* — read source, not marketing 
 |---|---|---|---|
 | durable request queue + dedupe | PostgresRequestQueue + frontier + checkpoints | ✅ | — |
 | **AutoscaledPool** (global concurrency by CPU/mem) | per-host AIMD only | 🟡 | **P1** global resource-aware autoscaler |
-| SessionPool + auto fingerprint rotation on block | profiles + TLS fp, manual | 🟡 | P1 auto-rotate on block detection |
+| SessionPool + auto fingerprint rotation on block | profiles + TLS fp, manual | ❌ declined (ADR-5, WS3.I) | a block never changes the identity Quarry presents; transport failures still rotate the proxy |
 | **enqueueLinks glob/regex + strategy** (same-domain/subdomain) | domain scope only | ❌ | **P1** crawl include/exclude path patterns |
 | Dataset / KeyValueStore / RequestQueue storages | artifact store + control-plane stores | ✅ | — |
 | statistics / failedRequestHandler | retry + StepReceipts | ✅ | — |
@@ -96,12 +96,12 @@ runtime dep for us (Rust/Go), but its *practice* — read source, not marketing 
 6. **Crawl path include/exclude glob/regex** + enqueue strategy (same-domain/subdomain/all).
 7. **Search highlighting/snippets + facets** (host/date/content-type aggregations).
 8. **AutoscaledPool** — global concurrency governed by CPU/mem, layered over per-host AIMD.
-9. **Auto session/fingerprint rotation on block detection** (429/403 → rotate profile+TLS).
+9. ~~**Auto session/fingerprint rotation on block detection** (429/403 → rotate profile+TLS).~~ Declined by ADR-5 (WS3.I): Quarry classifies a block and refuses; it does not change identity to get past it.
 
 ### P2
 10. Tantivy index lifecycle (snapshot/reindex/aliases) + per-language analyzers + synonyms.
 11. DOM-for-LLM serialization upgrade + agent memory/scratchpad + sensitive_data redaction.
-12. DOCX/extended media parsing.
+12. Extended media parsing: OCR for scans, XLSX, PPTX, ODF and EPUB. PDF and DOCX text ships behind `QUARRY_EDGE__DOC_ROUTING=on`.
 13. Structured rate-limit error envelope (code/window/retry_after/next_actions).
 14. **Live benchmark corpus** vs Firecrawl/Tavily/Trafilatura/Readability → publish SCOREBOARD.md
     (reference projects publish benchmarks; we must too to claim parity). *Lens:* benchmark.

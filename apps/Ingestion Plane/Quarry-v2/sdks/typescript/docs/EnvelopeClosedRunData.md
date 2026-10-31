@@ -7,6 +7,7 @@
 Name | Type
 ------------ | -------------
 `closed` | boolean
+`usage` | [EnvelopeClosedRunDataUsage](EnvelopeClosedRunDataUsage.md)
 
 ## Example
 
@@ -16,6 +17,7 @@ import type { EnvelopeClosedRunData } from '@quarry/client'
 // TODO: Update the object below with actual values
 const example = {
   "closed": null,
+  "usage": null,
 } satisfies EnvelopeClosedRunData
 
 console.log(example)

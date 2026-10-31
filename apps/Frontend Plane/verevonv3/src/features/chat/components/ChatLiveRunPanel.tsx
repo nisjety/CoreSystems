@@ -14,14 +14,7 @@
  * each renders its own honest copy plus whatever metadata IS present.
  */
 
-import {
-  For,
-  Show,
-  createEffect,
-  createMemo,
-  createSignal,
-  untrack,
-} from 'solid-js'
+import { For, Show, createEffect, createMemo, createSignal, untrack } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import {
   CameraOff,
@@ -64,7 +57,7 @@ import {
   type ChatRunScreenshotState,
   type ChatRunWatchState,
 } from '@/features/chat/lib/chat-run-watch'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError } from '@/shared/i18n'
 import { isSafeLinkHref } from '../lib/safe-href'
 import { RunNotifyButton } from './RunNotifyButton'
 import { RunCostMeter } from './RunCostMeter'
@@ -460,7 +453,7 @@ export function ChatLiveRunPanel(props: {
       // response cannot make the UI claim that a pause took effect.
       await controlBrowserAiRun(orgId, currentRunId, action)
     } catch (error) {
-      setControlError(error instanceof Error ? error.message : 'Nettleserkontrollen kunne ikke sendes.')
+      setControlError(translateApiError(error, i18n.tr, { no: 'Nettleserkontrollen kunne ikke sendes.', en: 'The browser control could not be sent.' }))
     } finally {
       setControlPending(null)
     }

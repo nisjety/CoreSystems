@@ -3,12 +3,21 @@
 //! Tests that the browser driver blocks requests to internal/reserved ranges
 //! (169.254.169.254, 127.0.0.1, localhost, etc.) and allows public URLs.
 //!
-//! Note: These tests are marked #[ignore] because they require:
-//! 1. The chromiumoxide feature to be enabled
-//! 2. A Chromium/Chrome binary available on the system
-//! 3. Network access (for public URL tests)
+//! What these prove: `ChromiumoxideDriver::goto` refuses the URL in Rust
+//! (`guard_navigation_target`) with `SecurityBlocked` before it sends anything
+//! over CDP. The browser launched by `acquire` is never asked to navigate; the
+//! egress boundary a running Chromium sits behind is proven in
+//! `quarry-runtime/tests/browser_egress_boundary.rs`.
 //!
-//! To run: `cargo test --test ssrf --features chromiumoxide -- --ignored`
+//! The four blocking tests run in the live Chromium lane
+//! (`CHROMIUMOXIDE_TEST=1`, `--features chromiumoxide`) through
+//! `quarry_browser::live_gate`: without the flag they return early, with it they
+//! FAIL when Chromium cannot be launched. `test_valid_public_url` stays
+//! `#[ignore]`d on purpose: it needs DNS for a public host (offline, the guard
+//! reports a resolution failure as `SecurityBlocked`), and this driver has no
+//! pinned proxy here, so it can only assert a negative.
+//!
+//! To run: `CHROMIUMOXIDE_TEST=1 cargo test -p quarry-browser --features chromiumoxide --test ssrf`
 
 #[cfg(all(feature = "chromiumoxide", test))]
 mod ssrf_tests {
@@ -35,22 +44,22 @@ mod ssrf_tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires chromiumoxide + browser binary
     async fn test_ssrf_block_metadata_endpoint() {
         use quarry_browser::chromiumoxide::ChromiumoxideDriver;
         use quarry_browser::BrowserDriver;
 
+        if !quarry_browser::live_gate::live_enabled() {
+            return;
+        }
         let driver = ChromiumoxideDriver::new();
         let lease = make_test_lease();
 
-        // Acquire a session first
-        let session = match driver.acquire(&lease).await {
-            Ok(s) => s,
-            Err(_) => {
-                // If browser not available, just skip (marked ignore anyway)
-                return;
-            }
-        };
+        // Acquire a session first. A browser that cannot start is a failure of
+        // the live run, not a reason to pass.
+        let session = driver
+            .acquire(&lease)
+            .await
+            .expect("acquire session (this launches Chromium)");
 
         // Attempt to fetch metadata endpoint — should be blocked
         let result = driver.goto(&session, "http://169.254.169.254/").await;
@@ -70,18 +79,20 @@ mod ssrf_tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires chromiumoxide + browser binary
     async fn test_ssrf_block_localhost() {
         use quarry_browser::chromiumoxide::ChromiumoxideDriver;
         use quarry_browser::BrowserDriver;
 
+        if !quarry_browser::live_gate::live_enabled() {
+            return;
+        }
         let driver = ChromiumoxideDriver::new();
         let lease = make_test_lease();
 
-        let session = match driver.acquire(&lease).await {
-            Ok(s) => s,
-            Err(_) => return,
-        };
+        let session = driver
+            .acquire(&lease)
+            .await
+            .expect("acquire session (this launches Chromium)");
 
         let result = driver.goto(&session, "http://localhost:3000/").await;
         let _ = driver.release(session).await;
@@ -98,18 +109,20 @@ mod ssrf_tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires chromiumoxide + browser binary
     async fn test_ssrf_block_127_0_0_1() {
         use quarry_browser::chromiumoxide::ChromiumoxideDriver;
         use quarry_browser::BrowserDriver;
 
+        if !quarry_browser::live_gate::live_enabled() {
+            return;
+        }
         let driver = ChromiumoxideDriver::new();
         let lease = make_test_lease();
 
-        let session = match driver.acquire(&lease).await {
-            Ok(s) => s,
-            Err(_) => return,
-        };
+        let session = driver
+            .acquire(&lease)
+            .await
+            .expect("acquire session (this launches Chromium)");
 
         let result = driver.goto(&session, "http://127.0.0.1:8080/").await;
         let _ = driver.release(session).await;
@@ -126,18 +139,20 @@ mod ssrf_tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires chromiumoxide + browser binary
     async fn test_ssrf_block_private_ranges() {
         use quarry_browser::chromiumoxide::ChromiumoxideDriver;
         use quarry_browser::BrowserDriver;
 
+        if !quarry_browser::live_gate::live_enabled() {
+            return;
+        }
         let driver = ChromiumoxideDriver::new();
         let lease = make_test_lease();
 
-        let session = match driver.acquire(&lease).await {
-            Ok(s) => s,
-            Err(_) => return,
-        };
+        let session = driver
+            .acquire(&lease)
+            .await
+            .expect("acquire session (this launches Chromium)");
 
         let result = driver.goto(&session, "http://10.0.0.1/").await;
         let _ = driver.release(session).await;
@@ -154,18 +169,21 @@ mod ssrf_tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires chromiumoxide + browser binary
+    #[ignore = "needs DNS for a public host; see the file header"]
     async fn test_valid_public_url() {
         use quarry_browser::chromiumoxide::ChromiumoxideDriver;
         use quarry_browser::BrowserDriver;
 
+        if !quarry_browser::live_gate::live_enabled() {
+            return;
+        }
         let driver = ChromiumoxideDriver::new();
         let lease = make_test_lease();
 
-        let session = match driver.acquire(&lease).await {
-            Ok(s) => s,
-            Err(_) => return,
-        };
+        let session = driver
+            .acquire(&lease)
+            .await
+            .expect("acquire session (this launches Chromium)");
 
         let result = driver.goto(&session, "https://example.com/").await;
         let _ = driver.release(session).await;

@@ -18,7 +18,7 @@ type orgScanner interface {
 	Scan(dest ...any) error
 }
 
-// scanOrg scans the 14 standard org columns into an Organization.
+// scanOrg scans the standard org columns, the website last, into an Organization.
 // Column order must match all SELECT statements in this file.
 func scanOrg(row orgScanner) (Organization, error) {
 	var org Organization
@@ -39,6 +39,8 @@ func scanOrg(row orgScanner) (Organization, error) {
 		&org.OrgNumber,
 		&org.VerificationStatus,
 		&brregRaw,
+		&org.WebsiteURL,
+		&org.WebsiteUpdatedAt,
 	)
 	if err != nil {
 		return Organization{}, err
@@ -125,7 +127,7 @@ func (r *Repository) Ping(ctx context.Context) error {
 func (r *Repository) GetOrganization(ctx context.Context, id string) (*Organization, error) {
 	const q = `
 SELECT id, name, COALESCE(slug, ''), plan, status, COALESCE(primary_domain, ''), COALESCE(region, 'eu'), COALESCE(default_locale, 'nb-NO'), metadata, created_at, updated_at,
-       org_number, COALESCE(verification_status, 'unverified'), brreg_data
+       org_number, COALESCE(verification_status, 'unverified'), brreg_data, website_url, website_updated_at
 FROM organizations
 WHERE id = $1 AND deleted_at IS NULL`
 
@@ -145,6 +147,20 @@ WHERE id = $1 AND deleted_at IS NULL`
 		return nil, fmt.Errorf("query org: %w", err)
 	}
 	return out, nil
+}
+
+// SetWebsite records the organisation's website and when it was recorded.
+func (r *Repository) SetWebsite(ctx context.Context, orgID, website string) error {
+	return r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE organizations SET website_url = $2, website_updated_at = NOW(), updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL`, orgID, website)
+		if err != nil {
+			return fmt.Errorf("update website: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
 }
 
 func (r *Repository) UpsertOrganization(ctx context.Context, org Organization) error {
@@ -997,7 +1013,7 @@ func (r *Repository) ListOrganizations(ctx context.Context, limit, offset int) (
 	}
 	const q = `
 SELECT id, name, COALESCE(slug, ''), plan, status, COALESCE(primary_domain, ''), COALESCE(region, 'eu'), COALESCE(default_locale, 'nb-NO'), metadata, created_at, updated_at,
-       org_number, COALESCE(verification_status, 'unverified'), brreg_data
+       org_number, COALESCE(verification_status, 'unverified'), brreg_data, website_url, website_updated_at
 FROM organizations
 WHERE deleted_at IS NULL
 ORDER BY created_at DESC
@@ -1027,7 +1043,7 @@ LIMIT $1 OFFSET $2`
 func (r *Repository) ListUserOrganizations(ctx context.Context, userID string) ([]Organization, error) {
 	const q = `
 SELECT o.id, o.name, COALESCE(o.slug, ''), o.plan, o.status, COALESCE(o.primary_domain, ''), COALESCE(o.region, 'eu'), COALESCE(o.default_locale, 'nb-NO'), o.metadata, o.created_at, o.updated_at,
-       o.org_number, COALESCE(o.verification_status, 'unverified'), o.brreg_data
+       o.org_number, COALESCE(o.verification_status, 'unverified'), o.brreg_data, o.website_url, o.website_updated_at
 FROM organizations o
 INNER JOIN organization_members om ON o.id = om.org_id
 WHERE om.user_id = $1
@@ -1099,7 +1115,7 @@ DO UPDATE SET role = EXCLUDED.role, invited_email = EXCLUDED.invited_email, upda
 func (r *Repository) GetOrganizationByTenant(ctx context.Context, provider, tenantID string) (*Organization, error) {
 	const q = `
 SELECT o.id, o.name, COALESCE(o.slug, ''), o.plan, o.status, COALESCE(o.primary_domain, ''), COALESCE(o.region, 'eu'), COALESCE(o.default_locale, 'nb-NO'), o.metadata, o.created_at, o.updated_at,
-       o.org_number, COALESCE(o.verification_status, 'unverified'), o.brreg_data
+       o.org_number, COALESCE(o.verification_status, 'unverified'), o.brreg_data, o.website_url, o.website_updated_at
 FROM organizations o
 INNER JOIN org_tenant_links otl ON otl.org_id = o.id
 WHERE otl.provider = $1

@@ -67,6 +67,19 @@ func (r *Routed) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 	return r.byID(p.ParentGrantID).Derive(ctx, p)
 }
 
+// CreateHumanBrowse routes by the ZDR decision the server already made.
+func (r *Routed) CreateHumanBrowse(ctx context.Context, p CreateHumanBrowseParams) (*Grant, error) {
+	if p.Zdr {
+		return r.ephemeral.CreateHumanBrowse(ctx, p)
+	}
+	return r.persistent.CreateHumanBrowse(ctx, p)
+}
+
+// Renew lives in the store of the grant it extends.
+func (r *Routed) Renew(ctx context.Context, p RenewParams) (*Grant, error) {
+	return r.byID(p.GrantID).Renew(ctx, p)
+}
+
 // GetScoped routes by the id prefix.
 func (r *Routed) GetScoped(ctx context.Context, id, orgID, ownerID string) (*Grant, error) {
 	return r.byID(id).GetScoped(ctx, id, orgID, ownerID)

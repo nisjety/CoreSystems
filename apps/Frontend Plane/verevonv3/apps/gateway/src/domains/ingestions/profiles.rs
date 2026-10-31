@@ -48,7 +48,10 @@ pub(super) async fn list_profiles(
         .map(|arr| {
             arr.iter()
                 .filter_map(|v| {
+                    // WS17.P0: the edge lists object rows ({profile_id, name, scope, ...}); a
+                    // bare string row is still accepted.
                     v.as_str()
+                        .or_else(|| v.get("profile_id").and_then(Value::as_str))
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
                         .map(str::to_owned)

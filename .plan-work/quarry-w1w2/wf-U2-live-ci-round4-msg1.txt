@@ -1,0 +1,36 @@
+test(quarry-browser): the fail-instead-of-skip mapping is pinned, and the four SSRF tests run in the live lane (U2)
+
+Review findings on the live Chromium lane.
+
+live_gate: the mapping from a gate decision to "run, skip or fail the test"
+is now its own function, enforce(), and is unit-tested with injected
+outcomes (no environment mutation). Two #[should_panic] tests pin that
+CHROMIUMOXIDE_TEST=1 with no Chromium, and with a CHROME that names a
+missing file, fail the test; a third pins skip and run. The decide-level test
+that was named as if it covered the failure is renamed to what it checks.
+
+tests/ssrf.rs: the four blocking tests (metadata endpoint, localhost,
+127.0.0.1, 10.0.0.1) lose #[ignore], go through live_gate, and use expect on
+acquire instead of silently returning Ok when the browser cannot start, so
+the lane runs them and a broken browser fails them. The header now says what
+they prove: the driver refuses the URL in Rust before any CDP command; the
+launched browser is never asked to navigate. test_valid_public_url stays
+#[ignore]d with the reason (needs DNS for a public host; with no pinned proxy
+it can only assert a negative).
+
+Verified (host, native cargo, target dir outside the repo):
+- cargo test -p quarry-browser --features chromiumoxide --lib live_gate:
+  9 passed.
+- Mutation: changing enforce's Err arm to return false makes 2 of the 9 fail
+  (the two should_panic tests); reverted, 9 passed again.
+- cargo test -p quarry-browser --features chromiumoxide --test ssrf, no flag:
+  4 passed, 1 ignored. With CHROMIUMOXIDE_TEST=1 CHROME=/nonexistent (MSYS_NO_PATHCONV=1, so Git Bash passes the string unrewritten; the panic message names "/nonexistent"): the 4
+  fail with the live_gate message. With CHROMIUMOXIDE_TEST=1 and the host's
+  real Chrome: 4 passed, 1 ignored (2.0 s).
+
+Not done: the tests were not run in the quarry-rust-env container (Docker
+Desktop was not answering; qtest reported DOCKER IS NOT ANSWERING), so the
+Chromium used was the host's Chrome, not 155.0.8059.79. Not run on GitHub
+Actions.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>

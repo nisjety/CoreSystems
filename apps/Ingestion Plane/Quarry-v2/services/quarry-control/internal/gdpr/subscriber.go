@@ -23,7 +23,7 @@ const DurableConsumerName = "quarry-control-org-erasure"
 // Control-Plane-originated lifecycle events). Mirrors the
 // controlSharedStream constant documents-api-go's and conversation-core-go's
 // org-purge consumers bind against.
-const controlSharedStream = "AQENCIA_CONTROLPLANE"
+const controlSharedStream = "CONTROLPLANE"
 
 // StartSubscriber binds quarry-control's pre-provisioned durable JetStream
 // push consumer (DurableConsumerName, on controlSharedStream) and purges the
@@ -45,7 +45,7 @@ const controlSharedStream = "AQENCIA_CONTROLPLANE"
 // JetStream durable consumer — explicit ack and nak-triggered redelivery —
 // the real at-least-once guarantee the fixed contract's idempotency
 // requirement is written against.
-func StartSubscriber(nc *nats.Conn, purger OrgPurger, logger zerolog.Logger) (*nats.Subscription, error) {
+func StartSubscriber(nc *nats.Conn, purger OrgPurger, edge EdgePurger, logger zerolog.Logger) (*nats.Subscription, error) {
 	if nc == nil {
 		return nil, fmt.Errorf("gdpr: StartSubscriber requires a NATS connection")
 	}
@@ -57,7 +57,7 @@ func StartSubscriber(nc *nats.Conn, purger OrgPurger, logger zerolog.Logger) (*n
 		return nil, fmt.Errorf("gdpr: init JetStream context: %w", err)
 	}
 	sub, err := js.QueueSubscribe(ErasureRequestedSubject, DurableConsumerName,
-		func(msg *nats.Msg) { handleDelivery(msg, purger, logger) },
+		func(msg *nats.Msg) { handleDelivery(msg, purger, edge, logger) },
 		nats.Bind(controlSharedStream, DurableConsumerName),
 		nats.ManualAck(),
 	)
@@ -82,8 +82,8 @@ func StartSubscriber(nc *nats.Conn, purger OrgPurger, logger zerolog.Logger) (*n
 //
 // This mirrors the ack/nak split the sibling org-purge consumers
 // (documents-api-go, conversation-core-go) use for the same event.
-func handleDelivery(msg *nats.Msg, purger OrgPurger, logger zerolog.Logger) {
-	result, err := HandleErasure(purger, msg.Data)
+func handleDelivery(msg *nats.Msg, purger OrgPurger, edge EdgePurger, logger zerolog.Logger) {
+	result, edgeResult, err := HandleErasureWithEdge(purger, edge, msg.Data)
 	var poison *poisonEventError
 	if err != nil && !errors.As(err, &poison) {
 		logger.Error().Err(err).Str("subject", msg.Subject).Msg("gdpr: erasure purge failed — will retry")
@@ -93,16 +93,45 @@ func handleDelivery(msg *nats.Msg, purger OrgPurger, logger zerolog.Logger) {
 	switch {
 	case err != nil:
 		logger.Warn().Err(err).Str("subject", msg.Subject).Msg("gdpr: dropping unprocessable erasure event")
-	case result.Total() > 0:
+	case result.Total() > 0 || edgeResult.Total() > 0:
 		logger.Info().
 			Int64("jobs_deleted", result.JobsDeleted).
 			Int64("schedules_deleted", result.SchedulesDeleted).
 			Int64("sources_deleted", result.SourcesDeleted).
 			Int64("benchmarks_deleted", result.BenchmarksDeleted).
 			Int64("idempotency_keys_deleted", result.IdempotencyKeysDeleted).
+			Int64("zdr_tombstones_deleted", result.ZdrTombstonesDeleted).
+			Int("edge_families", len(edgeResult.Families)).
+			Int64("edge_rows_deleted", sumEdgeRows(edgeResult)).
+			Int64("edge_tombstones_deleted", sumEdgeTombstones(edgeResult)).
+			Int64("edge_cache_keys_deleted", sumEdgeCacheKeys(edgeResult)).
 			Msg("gdpr: org-scoped crawl data purged")
 	}
 	if ackErr := msg.Ack(); ackErr != nil {
 		logger.Error().Err(ackErr).Str("subject", msg.Subject).Msg("gdpr: ack failed")
 	}
+}
+
+func sumEdgeRows(r EdgePurgeResult) int64 {
+	var n int64
+	for _, f := range r.Families {
+		n += f.RowsDeleted
+	}
+	return n
+}
+
+func sumEdgeTombstones(r EdgePurgeResult) int64 {
+	var n int64
+	for _, f := range r.Families {
+		n += f.TombstonesDeleted
+	}
+	return n
+}
+
+func sumEdgeCacheKeys(r EdgePurgeResult) int64 {
+	var n int64
+	for _, f := range r.Families {
+		n += f.CacheKeysDeleted
+	}
+	return n
 }

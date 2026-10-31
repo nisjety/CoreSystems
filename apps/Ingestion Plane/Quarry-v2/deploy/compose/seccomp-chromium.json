@@ -1,0 +1,54 @@
+{
+  "_comment": "Scoped seccomp profile for quarry-edge so Chromium keeps its OWN sandbox inside the container. Chromium builds its sandbox from unprivileged user and PID namespaces (clone/unshare with CLONE_NEWUSER/CLONE_NEWPID) and a setuid-free namespace sandbox; Docker's DEFAULT profile blocks that, which is why the dev compose used to run Chromium with --no-sandbox. This profile is allow-by-default plus an explicit deny-list of escape/escalation syscalls (derived from apps/Model Plane/deploy/seccomp-bwrap.json), strictly safer than seccomp=unconfined and than --no-sandbox. clone, clone3, unshare and setns are intentionally NOT in the deny-list. Wire via: security_opt: [ seccomp=./seccomp-chromium.json ] on quarry-edge ONLY (path relative to the compose file).",
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "archMap": [
+    {
+      "architecture": "SCMP_ARCH_X86_64",
+      "subArchitectures": [
+        "SCMP_ARCH_X86",
+        "SCMP_ARCH_X32"
+      ]
+    },
+    {
+      "architecture": "SCMP_ARCH_AARCH64",
+      "subArchitectures": [
+        "SCMP_ARCH_ARM"
+      ]
+    }
+  ],
+  "syscalls": [
+    {
+      "names": [
+        "ptrace",
+        "kcmp",
+        "process_vm_readv",
+        "process_vm_writev",
+        "perf_event_open",
+        "bpf",
+        "add_key",
+        "keyctl",
+        "request_key",
+        "open_by_handle_at",
+        "name_to_handle_at",
+        "init_module",
+        "finit_module",
+        "delete_module",
+        "kexec_load",
+        "kexec_file_load",
+        "reboot",
+        "swapon",
+        "swapoff",
+        "settimeofday",
+        "clock_settime",
+        "acct",
+        "quotactl",
+        "nfsservctl",
+        "_sysctl",
+        "personality"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "comment": "Block container-escape / host-compromise / kernel-module / time / keyring primitives. clone, clone3, unshare and setns are intentionally NOT here so Chromium can build its namespace sandbox."
+    }
+  ]
+}

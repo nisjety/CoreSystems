@@ -1,0 +1,11 @@
+config {
+  type: "view",
+  schema: "visma_silver",
+  name: "fact_inventory_issue",
+  description: "Inventory issue headers filtered from the unified inventory movement fact.",
+  tags: ["silver", "visma", "fact", "inventory", "issue"]
+}
+
+SELECT *
+FROM ${ref("visma_silver", "fact_inventory_movement")}
+WHERE movement_type = 'ISSUE'

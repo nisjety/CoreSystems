@@ -1,0 +1,67 @@
+config {
+  type: "table",
+  schema: "xero_gold_operations",
+  description: "Xero Project time-entry operational fact. Duration stays in native minutes and does not imply a financial cost or revenue amount.",
+  assertions: {
+    nonNull: ["tenant_id", "project_id", "time_entry_id", "project_time_entry_key", "project_key", "company_key"],
+    uniqueKey: ["project_time_entry_key"]
+  }
+}
+
+WITH direct_detail AS (
+  SELECT
+    tenant_id,
+    project_id,
+    time_entry_id,
+    direct_detail_observed_at,
+    direct_detail_source_run_id,
+    direct_detail_source_version_id,
+    is_direct_detail_reconciled
+  FROM ${ref("dw_1_silver_xero", "audit_project_time_entry_direct_detail_reconciliation")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, project_id, time_entry_id
+    ORDER BY direct_detail_observed_at DESC, direct_detail_source_run_id DESC,
+             direct_detail_source_version_id DESC
+  ) = 1
+)
+SELECT
+  FARM_FINGERPRINT(CONCAT(entry.tenant_id, '|', entry.project_id, '|', entry.time_entry_id))
+    AS project_time_entry_key,
+  FARM_FINGERPRINT(CONCAT(entry.tenant_id, '|', entry.project_id)) AS project_key,
+  IF(entry.task_id IS NULL, NULL,
+     FARM_FINGERPRINT(CONCAT(entry.tenant_id, '|', entry.project_id, '|', entry.task_id)))
+    AS project_task_key,
+  IF(entry.user_id IS NULL, NULL,
+     FARM_FINGERPRINT(CONCAT(entry.tenant_id, '|', entry.user_id))) AS project_user_key,
+  FARM_FINGERPRINT(entry.tenant_id) AS company_key,
+  FARM_FINGERPRINT(CAST(entry.entry_date AS STRING)) AS date_key,
+  entry.tenant_id,
+  entry.project_id,
+  entry.task_id,
+  entry.user_id,
+  entry.time_entry_id,
+  entry.time_entry_status,
+  entry.entry_date,
+  entry.entered_at,
+  entry.duration_minutes,
+  entry.is_duration_valid,
+  IF(entry.is_duration_valid, entry.duration_minutes, NULL) AS reportable_duration_minutes,
+  entry.is_current,
+  entry.is_removed,
+  entry.removed_in_run_id,
+  entry.removed_observed_at,
+  entry.record_state,
+  entry.first_seen_at,
+  entry.last_seen_at,
+  entry.project_observed_at,
+  entry.source_run_id,
+  direct_detail.time_entry_id IS NOT NULL AS has_direct_detail_evidence,
+  direct_detail.is_direct_detail_reconciled,
+  direct_detail.direct_detail_observed_at,
+  direct_detail.direct_detail_source_run_id,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_project_time_entry")} AS entry
+LEFT JOIN direct_detail
+  ON entry.tenant_id = direct_detail.tenant_id
+ AND entry.project_id = direct_detail.project_id
+ AND entry.time_entry_id = direct_detail.time_entry_id

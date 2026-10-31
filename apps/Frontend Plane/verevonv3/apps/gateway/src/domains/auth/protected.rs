@@ -11,7 +11,9 @@ use crate::{
     config::AppState,
     envelope::{error, ok, unwrap_data},
     middleware::AuthenticatedUser,
-    upstream::{browser_origin, proxy_auth, proxy_json, user_core_delegation_headers},
+    upstream::{
+        browser_origin, proxy_auth, proxy_json, proxy_session_json, user_core_delegation_headers,
+    },
 };
 
 use super::shared::{actor_for, cookie_header};
@@ -19,7 +21,29 @@ use super::shared::{actor_for, cookie_header};
 pub(super) async fn session_current(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-) -> impl IntoResponse {
+) -> Response {
+    let (status, Json(body)) = proxy_session_json(
+        &state,
+        Method::GET,
+        &format!("{}/api/v1/sessions/current", state.session_core_url),
+        None,
+        Some(&actor_for(&user)),
+        user.active_org_id.as_deref(),
+    )
+    .await;
+    let control = unwrap_data(&body);
+    if !status.is_success()
+        || control.pointer("/user/id").and_then(Value::as_str) != Some(user.user_id.as_str())
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "control_session_unavailable",
+                "Control session is temporarily unavailable.",
+            )),
+        )
+            .into_response();
+    }
     // user-core's session-context, scoped to the session's active org (role,
     // onboardingStatus for the org the user is acting as); cached per
     // (user, active-org) in `upstream` so this is round-trip-free when paired with
@@ -40,6 +64,17 @@ pub(super) async fn session_current(
         .unwrap_or_default()
         .to_owned();
     let permissions = permission_hints(user.auth_role.as_deref(), role.as_str());
+    // Never use another organization's snapshot after an active-org switch.
+    let control_matches_org =
+        control.pointer("/organization/id").and_then(Value::as_str) == org_id.as_deref();
+    let onboarding_status = if control_matches_org {
+        control.get("onboardingStatus")
+    } else {
+        None
+    }
+    .or_else(|| ctx.get("onboardingStatus"))
+    .and_then(Value::as_str)
+    .unwrap_or("CREATED");
     let org = match org_id {
         Some(id) if !id.is_empty() => {
             let name = resolve_org_name(&state, &user, &id).await;
@@ -59,12 +94,10 @@ pub(super) async fn session_current(
         },
         "org": org,
         "permissions": permissions,
-        "onboardingStatus": ctx
-            .get("onboardingStatus")
-            .and_then(Value::as_str)
-            .unwrap_or("CREATED"),
+        "onboardingStatus": onboarding_status,
         "status": "authenticated",
     })))
+    .into_response()
 }
 
 /// Resolve an organization's display name from org-core. Returns an empty string

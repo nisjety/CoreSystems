@@ -39,8 +39,13 @@ func mapErr(err error) error {
 	case errors.Is(err, grant.ErrInvalidBudget):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, grant.ErrParentNotDerivable), errors.Is(err, grant.ErrApprovalParentInvalid),
-		errors.Is(err, grant.ErrZdrPostureChanged):
+		errors.Is(err, grant.ErrZdrPostureChanged), errors.Is(err, grant.ErrAbsoluteCapReached),
+		errors.Is(err, grant.ErrRenewNotAllowed), errors.Is(err, grant.ErrAttachZdrRefused):
 		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, grant.ErrHumanBrowseDisabled), errors.Is(err, grant.ErrAttachNeedsOwner):
+		return status.Error(codes.PermissionDenied, err.Error())
+	case errors.Is(err, grant.ErrAttachResourceInvalid):
+		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, grant.ErrDeriveConflict):
 		return status.Error(codes.AlreadyExists, err.Error())
 	case errors.Is(err, grant.ErrInvalidGrantText):
@@ -83,6 +88,18 @@ func grantOutcome(err error) string {
 		return "parent_not_derivable"
 	case errors.Is(err, grant.ErrZdrPostureChanged):
 		return "zdr_posture_changed"
+	case errors.Is(err, grant.ErrAbsoluteCapReached):
+		return "absolute_cap_reached"
+	case errors.Is(err, grant.ErrRenewNotAllowed):
+		return "renew_not_allowed"
+	case errors.Is(err, grant.ErrHumanBrowseDisabled):
+		return "human_browse_disabled"
+	case errors.Is(err, grant.ErrAttachZdrRefused):
+		return "attach_zdr_refused"
+	case errors.Is(err, grant.ErrAttachNeedsOwner):
+		return "attach_needs_owner"
+	case errors.Is(err, grant.ErrAttachResourceInvalid):
+		return "attach_resource_invalid"
 	case errors.Is(err, grant.ErrDeriveConflict):
 		return "derive_conflict"
 	case errors.Is(err, grant.ErrInvalidGrantText):

@@ -14,13 +14,26 @@ pub enum Determinism { Strict, BestEffort, Off }
 | `BestEffort` | Yes (warn on drift)     | Yes                | Default for everyday scrapes                   |
 | `Off`        | No                      | No                 | Exploratory one-shot; no durable ingest        |
 
+## Three policy names (WS7.F)
+
+- `JobPolicy` (`quarry_core::policy`, Go `quarrycontracts.RunPolicy`): the job-level
+  policy a preset or a job stamps. Its serde shape is the one in CONTRACTS section 7.
+  The Rust type was called `RunPolicy` until WS7.F; the Go name is not renamed yet.
+- `ResolvedPolicy` (`quarry_core::web_policy`): the web-policy decision made from the
+  layers (invariant, ZDR floor, org, grant, operator baseline, request). Meet only tightens.
+- `RunPolicy` (`quarry_runtime::policy`): the bag the pipeline enforces for one run
+  (determinism plus sub-policies, below).
+
+`/v1/blocklists` answers 410 Gone (error code `GONE`) since WS7.F; the org web
+policy API replaces it (WS7.H, not built yet).
+
 ## RunPolicy sub-policies
 
 `crates/quarry-runtime/src/policy.rs`:
 
 | Sub-policy          | Pins                                                    |
 | ------------------- | -------------------------------------------------------- |
-| `DiscoveryPolicy`   | `respect_robots`, `respect_meta_robots`, `include_subdomains`, `use_sitemap` |
+| `DiscoveryPolicy`   | `respect_robots`, `respect_meta_robots`, `include_subdomains`, `use_sitemap`. These are stamps: nothing enforces `respect_robots` on the crawl path, and no sitemap or subdomain rule reads the other three (corrected 2026-10-23, WS14.S0) |
 | `FetchPolicy`       | `user_agent`, `driver_kind` (static\|tls\|browserless\|kernel), `timeout_s`, headers |
 | `RetryPolicy`       | `max_attempts`, `base_delay_ms`, `transient_codes`        |
 | `BlockPolicy`       | `block_codes`, `block_body_markers`                       |
@@ -152,14 +165,20 @@ the documented trust boundary in place of one.
   plan for each `(org, host)` request.
 - Proxy ordering is sticky by `(org, host)` first, then rotates through the
   remaining approved proxy candidates.
-- HTTP `401`, `403`, `407`, `429`, and `503` from a proxy mark that
-  `(host, proxy)` unhealthy for a cooldown and move the request to the next
-  approved proxy, up to the broker attempt limit.
-- Retryable transport errors from a proxy also mark the `(host, proxy)`
-  unhealthy and rotate when another approved candidate exists.
-- If every approved proxy is blocked, Quarry returns `RateLimited` for final
-  `429` responses and `UpstreamBlocked` for other block statuses, with
-  `egress_attempts` in the error details for audit/debugging.
+- Retryable transport errors from a proxy (connect, timeout, reset) mark the
+  `(host, proxy)` unhealthy for a cooldown and rotate to the next approved
+  proxy, up to the broker attempt limit. This holds in both escalation modes.
+- HTTP `401`, `403`, `407`, `429`, and `503` from a proxy: under
+  `QUARRY_BLOCK_ESCALATION=honest` (ADR-5) the proxy carried the request and the
+  origin answered, so Quarry does not rotate, does not mark the proxy unhealthy
+  and returns `RateLimited` (`429`) or `UpstreamBlocked` (other statuses) after
+  one attempt. Under `legacy` (the behaviour before WS3.I) the status marks the
+  `(host, proxy)` unhealthy and moves the request to the next approved proxy.
+  Which mode is the build default is stated in `docs/RUNBOOKS.md`, "Block
+  escalation".
+- When the request is refused, `egress_attempts` in the error details lists the
+  attempts for audit/debugging (one under `honest`, up to the attempt limit
+  under `legacy`).
 - Direct-only egress remains direct. Quarry does not call a managed unblocker
   in GDPR/default mode unless the request explicitly allows the matching
   processor.

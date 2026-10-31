@@ -1,0 +1,42 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Atomic Xero Bank Summary report snapshots. Opening, received, spent, FX and closing values are source report outputs and non-additive both within report metrics and across report snapshots.",
+  assertions: {
+    nonNull: ["tenant_id", "report_snapshot_key", "bank_balance_snapshot_key", "report_metric"],
+    uniqueKey: ["bank_balance_snapshot_key"]
+  }
+}
+
+SELECT
+  report_cell_key AS bank_balance_snapshot_key,
+  report_snapshot_key,
+  tenant_id,
+  report_snapshot_id,
+  report_name,
+  report_from,
+  report_to,
+  report_date,
+  COALESCE(report_to, SAFE_CAST(report_date AS DATE)) AS snapshot_as_of_date,
+  report_index,
+  section_index,
+  section_title,
+  row_index,
+  row_type,
+  row_label,
+  cell_index,
+  column_header AS report_metric,
+  attribute_id,
+  attribute_value,
+  IF(attribute_id = 'account', attribute_value, NULL) AS bank_account_id,
+  is_summary_row,
+  is_orphan_snapshot,
+  source_numeric_value AS source_bank_amount,
+  TRUE AS is_report_snapshot,
+  TRUE AS is_non_additive,
+  TRUE AS is_non_additive_within_snapshot,
+  report_synced_at
+FROM ${ref("dw_1_silver_xero", "fact_financial_report_cell")}
+WHERE report_type = 'BankSummary'
+  AND is_numeric_value
+  AND NOT is_percentage_value

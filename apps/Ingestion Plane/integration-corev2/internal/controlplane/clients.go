@@ -375,6 +375,38 @@ func (c *OrgClient) GetOrgPlan(ctx context.Context, orgID, _ string) (auth.OrgPl
 	}, nil
 }
 
+// EffectiveZDR reads org-core's interactive-retention posture for one organisation: the stored ZDR
+// intent AND the plan entitlement, the rule org-core itself applies. Every failure is an error and
+// never a value, so a caller that cannot learn the posture refuses rather than assuming either way.
+func (c *OrgClient) EffectiveZDR(ctx context.Context, orgID string) (bool, error) {
+	if c.baseURL == "" {
+		return false, auth.NewError(http.StatusServiceUnavailable, "org_core_unconfigured", "ORG_CORE_URL is not configured")
+	}
+	endpoint := c.baseURL + "/internal/orgs/" + url.PathEscape(orgID) + "/retention-posture"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false, err
+	}
+	setServicePrincipal(req, c.serviceID, c.serviceToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, auth.NewError(http.StatusServiceUnavailable, "org_core_unreachable", "Unable to reach org-core for the retention posture")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, auth.NewError(http.StatusBadGateway, "org_core_error", fmt.Sprintf("org-core returned HTTP %d for the retention posture", resp.StatusCode))
+	}
+	var posture struct {
+		ZDRIntent bool `json:"zdrIntent"`
+		Entitled  bool `json:"entitled"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&posture); err != nil {
+		return false, auth.NewError(http.StatusBadGateway, "org_core_bad_response", "org-core returned a non-JSON retention posture")
+	}
+	return posture.ZDRIntent && posture.Entitled, nil
+}
+
 func (c *BillingClient) RecordUsage(ctx context.Context, orgID string, event UsageEvent) error {
 	if c == nil || c.baseURL == "" || strings.TrimSpace(orgID) == "" || strings.TrimSpace(event.Metric) == "" || event.Quantity <= 0 {
 		return nil

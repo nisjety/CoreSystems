@@ -166,6 +166,42 @@ export function listIngestionSchedules(signal?: AbortSignal) {
   return requestJson<ScheduleItem[]>('/api/ingestions/schedules', { signal })
 }
 
+/** What this installation can honour on the Schedules surface (WS15.S0). */
+export type ScheduleCapabilities = {
+  trigger: boolean
+  backfill: boolean
+  overlap: boolean
+  /** Schedule kinds that have a backend workflow here. Empty means none, so Save stays disabled. */
+  kinds: string[]
+  needsActivation: boolean
+}
+
+/** Every capability off: what the page shows when the capability read fails. */
+export const NO_SCHEDULE_CAPABILITIES: ScheduleCapabilities = {
+  trigger: false,
+  backfill: false,
+  overlap: false,
+  kinds: [],
+  needsActivation: false,
+}
+
+/** Reads GET /api/ingestions/schedules/capabilities. Any failure yields the all-off default. */
+export async function getScheduleCapabilities(signal?: AbortSignal): Promise<ScheduleCapabilities> {
+  try {
+    const data: Partial<ScheduleCapabilities> =
+      (await requestJson<Partial<ScheduleCapabilities>>('/api/ingestions/schedules/capabilities', { signal })) ?? {}
+    return {
+      trigger: data.trigger === true,
+      backfill: data.backfill === true,
+      overlap: data.overlap === true,
+      kinds: Array.isArray(data.kinds) ? data.kinds.filter((kind): kind is string => typeof kind === 'string') : [],
+      needsActivation: data.needsActivation === true,
+    }
+  } catch {
+    return { ...NO_SCHEDULE_CAPABILITIES, kinds: [] }
+  }
+}
+
 export function listIngestionSources(signal?: AbortSignal) {
   return requestJson<SourcePayload>('/api/ingestions/sources', { signal })
 }

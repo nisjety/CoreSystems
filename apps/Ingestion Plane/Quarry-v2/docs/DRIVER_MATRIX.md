@@ -66,6 +66,8 @@ Browserless (REST fallback)
 | VM isolation | ❌ | ❌ | ❌ | shared pool | shared pool | ✅ per-session |
 | Per-page cost (typical) | $0 | $0 | $0 | ~$0.001 | ~$0.005 | ~$0.01 |
 
+Scrape captures and actions (`POST /v1/scrape`, WS13.4b to WS13.6) run only on the Local driver (`chromiumoxide`). The other browser adapters inherit the trait defaults, so a capture or an action sent to them is refused with 501 `browser_capability_unavailable`. The table above describes what each provider offers in general, not what `/v1/scrape` uses today. The switches are `QUARRY_EDGE__SCRAPE_CAPTURE`, `QUARRY_EDGE__SCRAPE_ACTIONS` and `QUARRY_EDGE__SCRAPE_STITCH`, all off by default (CONTRACTS.md section 10).
+
 ## Cost guards
 
 When `max_cost_usd` is set on a request:

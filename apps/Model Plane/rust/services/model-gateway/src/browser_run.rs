@@ -16,8 +16,10 @@
 //! including why this calls `ExecuteStep` directly rather than routing
 //! through the generic multi-tool chat loop.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::net::IpAddr;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::{Path, State},
@@ -192,7 +194,7 @@ async fn browser_run_replay(
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct BrowserRunStartRequest {
     #[serde(default)]
     thread_id: Option<String>,
@@ -232,6 +234,170 @@ struct BrowserRunStartRequest {
     /// the safe fallback for any other caller.
     #[serde(default)]
     zdr: bool,
+}
+
+/// How long a presented run grant stays claimed by the run it started when the
+/// run's end is never observed (an approval pause, a dispatch that failed). The
+/// claim is released earlier when the run ends or its start fails.
+const PRESENTED_GRANT_CLAIM_TTL: Duration = Duration::from_secs(2 * 60 * 60);
+/// How long the request fingerprint of a keyed start is remembered.
+const START_FINGERPRINT_TTL: Duration = Duration::from_secs(60 * 60);
+/// Upper bound on remembered entries of each kind; past it a new entry is not
+/// remembered (the start then behaves as it did before the guard).
+const START_GUARD_MAX_ENTRIES: usize = 10_000;
+
+/// What a keyed start's remembered fingerprint says about a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FingerprintCheck {
+    /// Nothing remembered for this key (first request, expiry, or a restart).
+    Unknown,
+    Match,
+    Mismatch,
+}
+
+/// How a claim on a presented run grant came out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrantClaim {
+    /// No run held the grant; this run holds it now.
+    Fresh,
+    /// The same run (a keyed retry) already holds it.
+    Held,
+    /// Another run holds it.
+    Refused,
+}
+
+/// Process-local bookkeeping for `POST /v1/browser/runs` (WS1.B depth, D1-001
+/// and D1-019 limit c). The broker's run-grant record carries no session key and
+/// Session Core compares only the goal of a keyed start, so neither can tell
+/// that a presented run grant already backs a live run, or that a keyed retry
+/// changed the run's limits. This guard answers both inside one gateway
+/// process; it is not durable and not shared between replicas. The durable
+/// half of the grant claim is `run_grant_is_bound_to_another_run` (the broker
+/// reports the run key a run grant was derived for); the durable half of the
+/// fingerprint (Session Core storing the start fingerprint) is recorded in the
+/// depth register.
+#[derive(Debug, Default)]
+pub(crate) struct RunStartGuard {
+    inner: Mutex<StartGuardInner>,
+}
+
+#[derive(Debug, Default)]
+struct StartGuardInner {
+    /// presented run grant id -> (run key of the run that holds it, claimed at)
+    grants: HashMap<String, (String, Instant)>,
+    /// run key -> (request fingerprint, remembered at)
+    fingerprints: HashMap<String, (String, Instant)>,
+}
+
+impl RunStartGuard {
+    fn claim_grant(&self, grant_id: &str, run_key: &str) -> GrantClaim {
+        self.claim_grant_at(grant_id, run_key, Instant::now())
+    }
+
+    fn claim_grant_at(&self, grant_id: &str, run_key: &str, now: Instant) -> GrantClaim {
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner
+            .grants
+            .retain(|_, (_, at)| now.saturating_duration_since(*at) < PRESENTED_GRANT_CLAIM_TTL);
+        match inner.grants.get(grant_id) {
+            Some((holder, _)) if holder == run_key => GrantClaim::Held,
+            Some(_) => GrantClaim::Refused,
+            None => {
+                if inner.grants.len() >= START_GUARD_MAX_ENTRIES {
+                    // Full: fail open to the behaviour before this guard rather
+                    // than refuse every presented run grant.
+                    return GrantClaim::Fresh;
+                }
+                inner
+                    .grants
+                    .insert(grant_id.to_owned(), (run_key.to_owned(), now));
+                GrantClaim::Fresh
+            }
+        }
+    }
+
+    fn release_grant(&self, grant_id: &str) {
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.grants.remove(grant_id);
+    }
+
+    fn check_fingerprint(&self, run_key: &str, fingerprint: &str) -> FingerprintCheck {
+        self.check_fingerprint_at(run_key, fingerprint, Instant::now())
+    }
+
+    fn check_fingerprint_at(&self, run_key: &str, fingerprint: &str, now: Instant) -> FingerprintCheck {
+        let inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match inner.fingerprints.get(run_key) {
+            Some((_, at)) if now.saturating_duration_since(*at) >= START_FINGERPRINT_TTL => {
+                FingerprintCheck::Unknown
+            }
+            Some((known, _)) if known == fingerprint => FingerprintCheck::Match,
+            Some(_) => FingerprintCheck::Mismatch,
+            None => FingerprintCheck::Unknown,
+        }
+    }
+
+    fn remember_fingerprint(&self, run_key: &str, fingerprint: &str) {
+        self.remember_fingerprint_at(run_key, fingerprint, Instant::now());
+    }
+
+    fn remember_fingerprint_at(&self, run_key: &str, fingerprint: &str, now: Instant) {
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner
+            .fingerprints
+            .retain(|_, (_, at)| now.saturating_duration_since(*at) < START_FINGERPRINT_TTL);
+        if inner.fingerprints.len() >= START_GUARD_MAX_ENTRIES
+            && !inner.fingerprints.contains_key(run_key)
+        {
+            return;
+        }
+        inner
+            .fingerprints
+            .entry(run_key.to_owned())
+            .or_insert_with(|| (fingerprint.to_owned(), now));
+    }
+}
+
+/// A digest of what in a start request shapes the run it makes: the goal, the
+/// step limit, the stop criteria, the start page, the approval and profile
+/// settings and the requested host policy. A keyed retry that changes any of
+/// them is a different request under the same key. Left out on purpose:
+/// `thread_id` (a keyed start refuses one), the grant id (the run key already
+/// names it), `plan_id`, and the cost and runtime limits: those are bounded by
+/// the grant's budget claim, which may move between a request and its retry, and
+/// a retry that only differs there still answers the same run (pinned by
+/// `a_keyed_retry_whose_claim_moved_still_answers_the_same_run`).
+fn run_request_fingerprint(req: &BrowserRunStartRequest) -> String {
+    use std::fmt::Write as _;
+    let mut domains: Vec<&str> = req
+        .allowed_domains
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(String::as_str)
+        .collect();
+    domains.sort_unstable();
+    let mut hasher = Sha256::new();
+    let mut part = |label: &str, value: &str| {
+        for piece in [label, value] {
+            hasher.update((piece.len() as u64).to_be_bytes());
+            hasher.update(piece.as_bytes());
+        }
+    };
+    part("v", "model-gateway/browser-run-fp/v1");
+    part("goal", &req.goal);
+    part("max_steps", &format!("{:?}", req.max_steps));
+    part("stop_criteria", req.stop_criteria.as_deref().unwrap_or(""));
+    part("start_url", req.start_url.as_deref().unwrap_or(""));
+    part("require_approval", &format!("{:?}", req.require_approval));
+    part("profile_id", req.profile_id.as_deref().unwrap_or(""));
+    part("allowed_domains", &domains.join(","));
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(32);
+    for byte in &digest[..16] {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 /// Broker-issued browser authority resolved before the gateway creates a
@@ -446,6 +612,10 @@ fn presented_run_budget(
 
 /// The only `DeriveRunGrant` purpose this route asks for.
 const DERIVE_PURPOSE_AI_RUN: &str = "ai_run";
+/// Most hosts a run may be derived with from a `human_browse` parent (WS8.C).
+/// The broker applies its own bound (`BROWSER_BROKER_MAX_RUN_DOMAINS`); this
+/// keeps an oversized list from reaching it.
+const MAX_HUMAN_BROWSE_RUN_DOMAINS: usize = 8;
 
 /// Resolves the caller's grant into the run grant the browser run executes
 /// under. `run_key` names both the managed run and the derived grant, so the
@@ -486,6 +656,47 @@ async fn resolve_browser_grant(
         // Never distinguish forged, expired, revoked, or cross-tenant grants.
         return Err(browser_grant_forbidden());
     }
+    // A `human_browse` grant (WS8.C) is a person's own open web: it has no host
+    // list to canonicalize and is never lent to a run as it is. The run must name
+    // its hosts (at most MAX_HUMAN_BROWSE_RUN_DOMAINS); the broker also refuses a
+    // host under its deny-list. The hosts the broker hands back must not exceed
+    // the ones asked for, which stand in for the parent policy below.
+    if response.kind == "human_browse" {
+        // A ZDR grant must never back a durable run, whatever the request says.
+        if response.zdr {
+            return Err(browser_run_zdr_refusal());
+        }
+        let hosts = match request.allowed_domains.as_deref() {
+            None | Some([]) => {
+                return Err(bad_request(
+                    "allowed_domains required: a human_browse session never lends open web",
+                ))
+            }
+            Some(requested) => canonical_browser_domains(requested)
+                .map_err(|()| bad_request("allowed_domains must be a bounded hostname policy"))?,
+        };
+        if hosts.len() > MAX_HUMAN_BROWSE_RUN_DOMAINS {
+            return Err(bad_request(
+                "allowed_domains names too many hosts for a human_browse session",
+            ));
+        }
+        return derive_run_grant(
+            state,
+            request,
+            browser_bearer,
+            org_id,
+            run_key,
+            grant_id,
+            &hosts,
+            mint,
+            BudgetClaim::from_wire(
+                response.budget_micro_usd,
+                response.budget_max_steps,
+                response.budget_max_runtime_s,
+            ),
+        )
+        .await;
+    }
     let broker_policy = canonical_browser_domains(&response.allowed_domains)
         .map_err(|()| browser_grant_forbidden())?;
     // A broker response must already be canonical. Accepting a loosely parsed
@@ -518,8 +729,16 @@ async fn resolve_browser_grant(
             .await;
         }
         // A run grant (or a grant from a broker that predates kinds) keeps
-        // the exact-equality path below.
-        "run" | "" => {}
+        // the exact-equality path below. One this gateway derived for an
+        // earlier run is bound to that run and backs no other (D1-001).
+        "run" | "" => {
+            if run_grant_is_bound_to_another_run(&response.session_key, run_key) {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "browser_grant_in_use" })),
+                ));
+            }
+        }
         "sensitive_approval" => {
             return Err(bad_request(
                 "a sensitive approval grant cannot start a browser run",
@@ -576,6 +795,19 @@ async fn resolve_browser_grant(
     })
 }
 
+/// True when a presented run grant was derived (by this gateway) for a run other than
+/// the one starting (D1-001). The broker reports the key a grant was issued under
+/// (`ValidateGrantResponse.session_key`); for a run grant this gateway derived it is
+/// that run's `run_key` (`browser-<ulid>` or `browser-idem-<hash>`). The check
+/// survives a restart, a second replica and the end of the first run, which the
+/// process-local `RunStartGuard` claim does not. A key of any other shape (a caller
+/// that derived the grant itself) or none (a broker that predates the field) is not
+/// bound here and keeps only the guard's live-run claim.
+fn run_grant_is_bound_to_another_run(grant_session_key: &str, run_key: &str) -> bool {
+    let key = grant_session_key.trim();
+    key.starts_with("browser-") && key != run_key
+}
+
 /// Derives a run grant from a validated session grant. The broker enforces
 /// that the run grant is never wider than its parent; the response is checked
 /// again here so a misbehaving broker cannot widen what reaches execution-core.
@@ -628,6 +860,7 @@ async fn derive_run_grant(
             budget_max_runtime_s: claim.map_or(0, |claim| claim.max_runtime_s),
             budget_source: source.unwrap_or_default().to_owned(),
             budget_minted_at_unix: 0,
+            resource_id: String::new(),
         }
     };
     let mut broker = state.browser_client.clone();
@@ -747,6 +980,9 @@ async fn revoke_derived_run_grant(
     reason: &'static str,
 ) -> bool {
     if grant.parent_grant_id.is_none() {
+        // Not ours to revoke, but the run that held it is over: let the grant
+        // back another run (D1-001 claim, see `RunStartGuard`).
+        state.run_start_guard.release_grant(&grant.grant_id);
         return false;
     }
     let Ok(request) = authenticated_browser_request(
@@ -1034,9 +1270,42 @@ async fn browser_run_start_inner(
     // Validate the opaque caller-provided id before *any* thread/run write.
     // A cross-tenant/forged/missing policy grant must not create a durable run
     // that later fails asynchronously in execution-core.
+    let fingerprint = run_request_fingerprint(&req);
+    if idempotency_key.is_some()
+        && state.run_start_guard.check_fingerprint(&run_key, &fingerprint)
+            == FingerprintCheck::Mismatch
+    {
+        // The same key with a different body (limits, stop criteria, start
+        // page ...) is not a retry of the first request (D1-019 limit c).
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "idempotency_key_reused" })),
+        ));
+    }
     let mint = mint_budget(&state, &req, &org_id).await;
     let browser_grant =
         resolve_browser_grant(&state, &req, &browser_bearer, &org_id, &run_key, &mint).await?;
+    // A run grant the caller presented may back one live run at a time: the
+    // broker's record of it carries no session key to bind it to the run being
+    // started (D1-001). A keyed retry of the run that holds it is not a second
+    // run.
+    let claimed_presented_grant = if browser_grant.parent_grant_id.is_none() {
+        match state
+            .run_start_guard
+            .claim_grant(&browser_grant.grant_id, &run_key)
+        {
+            GrantClaim::Refused => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "browser_grant_in_use" })),
+                ));
+            }
+            GrantClaim::Fresh => true,
+            GrantClaim::Held => false,
+        }
+    } else {
+        false
+    };
 
     let run = match idempotency_key {
         Some(_) => {
@@ -1075,6 +1344,9 @@ async fn browser_run_start_inner(
     let run = match run {
         Ok(run) => run,
         Err(error) => {
+            if claimed_presented_grant {
+                state.run_start_guard.release_grant(&browser_grant.grant_id);
+            }
             if idempotency_key.is_some() {
                 // The derived grant stays. This request may be a retry of a
                 // start whose run is live, and a same-key retry needs the
@@ -1109,7 +1381,11 @@ async fn browser_run_start_inner(
         if idempotency_key.is_some() {
             // A retry of a keyed start: the same run, no second dispatch, and
             // the grant it shares with the live run is left alone.
-            return browser_run_replay(&state, &run, &plan_id, &session_bearer).await;
+            let replay = browser_run_replay(&state, &run, &plan_id, &session_bearer).await;
+            if replay.is_err() && claimed_presented_grant {
+                state.run_start_guard.release_grant(&browser_grant.grant_id);
+            }
+            return replay;
         }
         revoke_derived_run_grant(
             &state,
@@ -1125,6 +1401,11 @@ async fn browser_run_start_inner(
                 "run_id": run.run_id,
             })),
         ));
+    }
+    if idempotency_key.is_some() {
+        state
+            .run_start_guard
+            .remember_fingerprint(&run_key, &fingerprint);
     }
     // The browser endpoint has a GatewayBrowser managed-run obligation even
     // though Execution Core performs the action. Fail before dispatch if the
@@ -1606,8 +1887,8 @@ mod tests {
         AcquireGrantRequest, AcquireGrantResponse, BrowserHealthRequest, BrowserHealthResponse,
         CancelRunRequest, CancelRunResponse, DeriveRunGrantResponse, ExecuteStepRequest,
         ExecuteStepResponse, PauseRunRequest, PauseRunResponse, ResumeRunRequest,
-        ResumeRunResponse, RevokeGrantRequest, RevokeGrantResponse, RunAgentRequest,
-        RunAgentResponse, ValidateGrantResponse,
+        RenewGrantRequest, RenewGrantResponse, ResumeRunResponse, RevokeGrantRequest,
+        RevokeGrantResponse, RunAgentRequest, RunAgentResponse, ValidateGrantResponse,
     };
     use tonic::{Response, Status};
 
@@ -1745,6 +2026,13 @@ mod tests {
                 Some(Ok(response)) => Ok(Response::new(response.clone())),
                 Some(Err(code)) => Err(Status::new(*code, "test broker rejection")),
             }
+        }
+
+        async fn renew_grant(
+            &self,
+            _request: tonic::Request<RenewGrantRequest>,
+        ) -> Result<Response<RenewGrantResponse>, Status> {
+            Err(Status::unimplemented("not used by validation test"))
         }
 
         async fn health(
@@ -2318,6 +2606,127 @@ mod tests {
         );
     }
 
+    fn human_browse_validation(grant_id: &str) -> ValidateGrantResponse {
+        ValidateGrantResponse {
+            grant_id: grant_id.to_owned(),
+            active: true,
+            // An open-web grant has no host list: the policy is its mode.
+            allowed_domains: Vec::new(),
+            kind: "human_browse".to_owned(),
+            policy_mode: "open_web".to_owned(),
+            denied_domains: vec![".internal".to_owned(), "metadata.goog".to_owned()],
+            owner_id: "user-a".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn human_browse_broker(
+        derive: Result<DeriveRunGrantResponse, tonic::Code>,
+    ) -> TestBrowserBroker {
+        TestBrowserBroker {
+            derive: Some(derive),
+            ..TestBrowserBroker::validating(Ok(human_browse_validation("human-1")))
+        }
+    }
+
+    #[tokio::test]
+    async fn derive_from_human_browse_without_domains_is_400() {
+        for allowed in [None, Some(Vec::new())] {
+            let mut request = browser_request("human-1");
+            request.allowed_domains = allowed;
+            let (result, broker) = resolve_with(
+                human_browse_broker(Ok(derived_run("run-1", "human-1", &["example.com"]))),
+                request,
+            )
+            .await;
+            let error = result.expect_err("a human_browse session never lends open web");
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+            assert!(
+                error.1 .0["error"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("never lends open web")),
+                "{:?}",
+                error.1 .0
+            );
+            assert!(
+                broker.derive_requests.lock().expect("recorder").is_empty(),
+                "nothing reaches the broker's derive"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn derive_from_human_browse_passes_the_named_hosts_and_the_ai_run_purpose() {
+        let mut request = browser_request("human-1");
+        request.allowed_domains = Some(vec![" API.example.com ".to_owned()]);
+        request.start_url = Some("https://api.example.com/start".to_owned());
+        let (result, broker) = resolve_with(
+            human_browse_broker(Ok(derived_run("run-1", "human-1", &["api.example.com"]))),
+            request,
+        )
+        .await;
+        let grant = result.expect("derived run grant");
+        assert_eq!(grant.grant_id, "run-1");
+        assert_eq!(grant.allowed_domains, ["api.example.com"]);
+        assert_eq!(grant.parent_grant_id.as_deref(), Some("human-1"));
+        let derives = broker.derive_requests.lock().expect("derive recorder");
+        assert_eq!(derives.len(), 1);
+        assert_eq!(derives[0].allowed_domains, ["api.example.com"]);
+        assert_eq!(derives[0].purpose, "ai_run");
+        assert!(derives[0].resource_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn derive_from_human_browse_refuses_too_many_hosts_and_a_widening_answer() {
+        let mut request = browser_request("human-1");
+        request.allowed_domains = Some(
+            (0..=MAX_HUMAN_BROWSE_RUN_DOMAINS)
+                .map(|i| format!("h{i}.example.com"))
+                .collect(),
+        );
+        let (result, broker) = resolve_with(
+            human_browse_broker(Ok(derived_run("run-1", "human-1", &["h0.example.com"]))),
+            request,
+        )
+        .await;
+        assert_eq!(result.expect_err("nine hosts").0, StatusCode::BAD_REQUEST);
+        assert!(broker.derive_requests.lock().expect("recorder").is_empty());
+
+        // A broker that answers with a host the run did not ask for is refused:
+        // the requested hosts stand in for the (absent) parent policy.
+        let mut request = browser_request("human-1");
+        request.allowed_domains = Some(vec!["api.example.com".to_owned()]);
+        request.start_url = None;
+        let (result, _) = resolve_with(
+            human_browse_broker(Ok(derived_run(
+                "run-2",
+                "human-1",
+                &["api.example.com", "evil.example.net"],
+            ))),
+            request,
+        )
+        .await;
+        assert_eq!(result.expect_err("widened").0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn a_zdr_human_browse_grant_never_backs_a_run() {
+        let mut validation = human_browse_validation("human-1");
+        validation.zdr = true;
+        let mut request = browser_request("human-1");
+        request.allowed_domains = Some(vec!["api.example.com".to_owned()]);
+        let (result, broker) = resolve_with(
+            TestBrowserBroker {
+                derive: Some(Ok(derived_run("run-1", "human-1", &["api.example.com"]))),
+                ..TestBrowserBroker::validating(Ok(validation))
+            },
+            request,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(broker.derive_requests.lock().expect("recorder").is_empty());
+    }
+
     #[tokio::test]
     async fn a_session_grant_without_requested_hosts_asks_the_broker_to_inherit() {
         for allowed in [None, Some(Vec::new())] {
@@ -2678,6 +3087,39 @@ mod tests {
         )
         .await;
         assert_eq!(result.expect("a presented run grant").budget, None);
+    }
+
+    /// D1-001, the durable half: a run grant the broker says was derived for another run
+    /// is refused without any live-run claim, so a restart, a second replica or the end
+    /// of the first run does not free it. Other key shapes are not bound.
+    #[tokio::test]
+    async fn a_presented_run_grant_derived_for_another_run_is_refused() {
+        let run_grant = |session_key: &str| ValidateGrantResponse {
+            kind: "run".to_owned(),
+            session_key: session_key.to_owned(),
+            ..session_validation("run-9", &["example.com"])
+        };
+        for (session_key, refused) in [
+            ("browser-01J0OTHERRUN", true),
+            ("browser-idem-0123456789abcdef", true),
+            ("browser-run-key", false),
+            ("caller-derived-key", false),
+            ("", false),
+        ] {
+            let (result, _) = resolve_with_mint(
+                TestBrowserBroker::validating(Ok(run_grant(session_key))),
+                browser_request("run-9"),
+                BudgetMint::default(),
+            )
+            .await;
+            if refused {
+                let error = result.expect_err(session_key);
+                assert_eq!(error.0, StatusCode::CONFLICT, "{session_key}");
+                assert_eq!(error.1 .0["error"], "browser_grant_in_use", "{session_key}");
+            } else {
+                result.unwrap_or_else(|_| panic!("{session_key:?} must be accepted"));
+            }
+        }
     }
 
     /// The parent's own claim is the second ceiling on what the broker may return
@@ -3112,7 +3554,10 @@ mod tests {
     async fn approval_unknown_and_zdr_grants_cannot_start_a_run() {
         for (kind, zdr, want) in [
             ("sensitive_approval", false, StatusCode::BAD_REQUEST),
-            ("human_browse", false, StatusCode::FORBIDDEN),
+            // WS8.C: a human_browse parent may seed a run, but only when the request
+            // names its hosts (this request names none), so it is a 400 here. The
+            // run-from-a-human_browse-parent paths are tested next to WS8.C.
+            ("human_browse", false, StatusCode::BAD_REQUEST),
             ("session", true, StatusCode::PRECONDITION_FAILED),
             ("run", true, StatusCode::PRECONDITION_FAILED),
         ] {
@@ -4235,5 +4680,168 @@ mod tests {
             assert!(h.session.creates.lock().expect("creates").is_empty());
             assert!(h.lifecycle.starts.lock().expect("starts").is_empty());
         }
+
+        /// D1-019 limit c: a keyed retry that changes a limit, the stop criteria or
+        /// the start page is not a replay of the first request; it is a 409 that
+        /// reaches Session Core and the broker no more than the first start did.
+        #[tokio::test]
+        async fn a_keyed_retry_with_a_changed_body_is_a_409_and_the_same_body_still_replays() {
+            let h = Harness::new(true).await;
+            let mut first = browser_request("session-1");
+            first.max_steps = Some(20);
+            first.stop_criteria = Some("a receipt is shown".to_owned());
+            h.start(Some("retry-1"), first.clone()).await.expect("first start");
+            assert!(eventually(|| h.dispatches().len() == 1).await, "one dispatch");
+
+            let changes: [fn(&mut BrowserRunStartRequest); 5] = [
+                |r| r.max_steps = Some(200),
+                |r| r.stop_criteria = Some("something else".to_owned()),
+                |r| r.start_url = Some("https://example.com/other".to_owned()),
+                |r| r.profile_id = Some("profile-1".to_owned()),
+                |r| r.goal = "another goal".to_owned(),
+            ];
+            for change in changes {
+                let mut retry = first.clone();
+                change(&mut retry);
+                let error = h
+                    .start(Some("retry-1"), retry)
+                    .await
+                    .expect_err("a changed body under the same key");
+                assert_eq!(error.0, StatusCode::CONFLICT);
+                assert_eq!(error.1 .0["error"], "idempotency_key_reused");
+            }
+            assert_eq!(h.derive_keys().len(), 1, "no second derive");
+            assert_eq!(h.lifecycle.starts.lock().expect("starts").len(), 1);
+            assert_eq!(h.dispatches().len(), 1, "no second dispatch");
+
+            let Json(replay) = h
+                .start(Some("retry-1"), first)
+                .await
+                .expect("the identical body is a replay");
+            assert_eq!(replay["idempotent_replay"], true);
+        }
+
+        /// D1-001: a run grant the caller presents backs one live run. The broker's
+        /// record of it carries no session key, so the gateway holds the claim; a
+        /// second run with the same grant is refused before anything is created.
+        #[tokio::test]
+        async fn a_second_run_with_the_same_presented_run_grant_is_refused() {
+            let run_grant = ValidateGrantResponse {
+                kind: "run".to_owned(),
+                parent_grant_id: "session-1".to_owned(),
+                ..session_validation("run-9", &["example.com"])
+            };
+            let h = Harness::with_broker(true, TestBrowserBroker::validating(Ok(run_grant))).await;
+            h.start(None, browser_request("run-9")).await.expect("first run");
+            assert!(eventually(|| h.dispatches().len() == 1).await, "one dispatch");
+
+            let error = h
+                .start(None, browser_request("run-9"))
+                .await
+                .expect_err("the grant already backs a live run");
+            assert_eq!(error.0, StatusCode::CONFLICT);
+            assert_eq!(error.1 .0["error"], "browser_grant_in_use");
+            assert_eq!(h.lifecycle.starts.lock().expect("starts").len(), 1);
+            assert_eq!(h.dispatches().len(), 1);
+            assert_eq!(h.revokes(), 0, "a presented grant is never revoked here");
+        }
+
+        /// D1-001 durable: a run grant derived for an earlier run is refused by a start
+        /// with an empty guard (a restart, another replica, the first run long over).
+        #[tokio::test]
+        async fn a_run_grant_derived_for_an_earlier_run_is_refused_with_an_empty_guard() {
+            let run_grant = ValidateGrantResponse {
+                kind: "run".to_owned(),
+                parent_grant_id: "session-1".to_owned(),
+                session_key: "browser-01J0EARLIERRUN".to_owned(),
+                ..session_validation("run-9", &["example.com"])
+            };
+            let h = Harness::with_broker(true, TestBrowserBroker::validating(Ok(run_grant))).await;
+            let error = h
+                .start(None, browser_request("run-9"))
+                .await
+                .expect_err("the grant belongs to another run");
+            assert_eq!(error.0, StatusCode::CONFLICT);
+            assert_eq!(error.1 .0["error"], "browser_grant_in_use");
+            assert!(h.lifecycle.starts.lock().expect("starts").is_empty());
+            assert!(h.dispatches().is_empty());
+            assert_eq!(h.revokes(), 0);
+        }
+
+        /// A keyed retry of the run that holds a presented run grant is the same
+        /// run, not a second one.
+        #[tokio::test]
+        async fn a_keyed_retry_of_the_run_holding_a_presented_run_grant_is_not_refused() {
+            let run_grant = ValidateGrantResponse {
+                kind: "run".to_owned(),
+                parent_grant_id: "session-1".to_owned(),
+                ..session_validation("run-9", &["example.com"])
+            };
+            let h = Harness::with_broker(true, TestBrowserBroker::validating(Ok(run_grant))).await;
+            h.start(Some("retry-1"), browser_request("run-9"))
+                .await
+                .expect("first keyed run");
+            let Json(replay) = h
+                .start(Some("retry-1"), browser_request("run-9"))
+                .await
+                .expect("the retry of the holder");
+            assert_eq!(replay["idempotent_replay"], true);
+        }
+    }
+
+    #[test]
+    fn the_start_guard_claims_releases_and_expires() {
+        let guard = RunStartGuard::default();
+        let t0 = Instant::now();
+        assert_eq!(guard.claim_grant_at("g", "run-a", t0), GrantClaim::Fresh);
+        assert_eq!(guard.claim_grant_at("g", "run-a", t0), GrantClaim::Held);
+        assert_eq!(guard.claim_grant_at("g", "run-b", t0), GrantClaim::Refused);
+        guard.release_grant("g");
+        assert_eq!(guard.claim_grant_at("g", "run-b", t0), GrantClaim::Fresh);
+        let later = t0 + PRESENTED_GRANT_CLAIM_TTL + Duration::from_secs(1);
+        assert_eq!(
+            guard.claim_grant_at("g", "run-c", later),
+            GrantClaim::Fresh,
+            "an unobserved run's claim lapses"
+        );
+        assert_eq!(guard.check_fingerprint_at("k", "f1", t0), FingerprintCheck::Unknown);
+        guard.remember_fingerprint_at("k", "f1", t0);
+        assert_eq!(guard.check_fingerprint_at("k", "f1", t0), FingerprintCheck::Match);
+        assert_eq!(guard.check_fingerprint_at("k", "f2", t0), FingerprintCheck::Mismatch);
+        let expired = t0 + START_FINGERPRINT_TTL + Duration::from_secs(1);
+        assert_eq!(guard.check_fingerprint_at("k", "f2", expired), FingerprintCheck::Unknown);
+    }
+
+    #[test]
+    fn the_request_fingerprint_follows_every_field_that_shapes_the_run() {
+        let base = browser_request("session-1");
+        let same = browser_request("session-1");
+        assert_eq!(run_request_fingerprint(&base), run_request_fingerprint(&same));
+        let mut domains_a = base.clone();
+        domains_a.allowed_domains = Some(vec!["b.example".to_owned(), "a.example".to_owned()]);
+        let mut domains_b = base.clone();
+        domains_b.allowed_domains = Some(vec!["a.example".to_owned(), "b.example".to_owned()]);
+        assert_eq!(
+            run_request_fingerprint(&domains_a),
+            run_request_fingerprint(&domains_b),
+            "host order is not a change"
+        );
+        let mut changed = base.clone();
+        changed.max_steps = Some(3);
+        assert_ne!(run_request_fingerprint(&base), run_request_fingerprint(&changed));
+        let mut moved = base.clone();
+        moved.max_cost_usd = Some(2.0);
+        moved.max_runtime_s = Some(30);
+        assert_eq!(
+            run_request_fingerprint(&base),
+            run_request_fingerprint(&moved),
+            "the budget claim may move between a request and its retry"
+        );
+        let mut changed = base.clone();
+        changed.require_approval = Some(true);
+        assert_ne!(run_request_fingerprint(&base), run_request_fingerprint(&changed));
+        let mut changed = base.clone();
+        changed.profile_id = Some("profile-1".to_owned());
+        assert_ne!(run_request_fingerprint(&base), run_request_fingerprint(&changed));
     }
 }

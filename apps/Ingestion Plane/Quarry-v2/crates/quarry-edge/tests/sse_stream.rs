@@ -41,6 +41,7 @@ impl Driver for StubPageDriver {
             body: b"<html><body><a href=\"/x\">x</a></body></html>".to_vec(),
             duration_ms: 1,
             served_by: DriverKind::Static,
+            captures: None,
         })
     }
 }

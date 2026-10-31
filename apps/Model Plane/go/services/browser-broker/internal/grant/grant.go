@@ -81,13 +81,15 @@ type derivePolicy struct {
 // derivableParents lists the parent kinds a run grant may derive from. A run
 // grant is not here (no chains), nor is an approval (single-use authority).
 var derivableParents = map[Kind]derivePolicy{
-	KindSession: {explicitHosts: false},
+	KindSession:     {explicitHosts: false},
+	KindHumanBrowse: {explicitHosts: true},
 }
 
 // approvalParents lists the kinds a sensitive approval may bind to.
 var approvalParents = map[Kind]struct{}{
 	KindSession: {},
 	KindRun:     {},
+	KindAttach:  {},
 }
 
 const maxAllowedDomains = 32
@@ -116,6 +118,13 @@ const (
 	// KindSensitiveApproval is a one-time approval for one irreversible
 	// action, bound to its parent grant.
 	KindSensitiveApproval Kind = "sensitive_approval"
+	// KindHumanBrowse is a signed-in person's own open-web session (WS8.C): no
+	// allow-list, a deny-list instead, renewable to an absolute cap. It is never
+	// lent to an agent as it is; a child must name its hosts.
+	KindHumanBrowse Kind = "human_browse"
+	// KindAttach is derived from a session or human_browse grant for one run
+	// (resource_id): a few hosts, a short lifetime, never renewable (WS8.C).
+	KindAttach Kind = "attach"
 )
 
 // Grant is a trusted browser access grant.
@@ -136,6 +145,14 @@ type Grant struct {
 	// AllowedDomains is the broker-owned, canonical navigation policy. It is
 	// copied at every storage boundary so no caller can mutate a persisted grant.
 	AllowedDomains []string
+	// PolicyMode is PolicyModeAllowlist (AllowedDomains is the whole policy) or
+	// PolicyModeOpenWeb (a human_browse grant: all public hosts but DeniedDomains).
+	PolicyMode string
+	// DeniedDomains is an open-web grant's deny-list (entries with a leading dot
+	// are suffixes); empty for an allowlist grant.
+	DeniedDomains []string
+	// ResourceID is the run an attach grant is bound to; empty otherwise.
+	ResourceID string
 	// Sensitive scopes are empty for a normal run grant. When present they
 	// authorize only the exact action and observed opaque resources below.
 	AllowedActions     []string
@@ -149,7 +166,10 @@ type Grant struct {
 	// cleared by a derive: a run grant is never wider than its parent.
 	ReadOnly  bool
 	ExpiresAt time.Time
-	Revoked   bool
+	// AbsoluteExpiresAt is the hard backstop a renewal can never pass. It equals
+	// ExpiresAt for every kind that is not renewed past its first expiry.
+	AbsoluteExpiresAt time.Time
+	Revoked           bool
 	// RevokedReason is a short caller-supplied label, never a domain or URL.
 	RevokedReason string
 }
@@ -199,6 +219,12 @@ type DeriveParams struct {
 	// parent's (ErrDeriveWidensBudget otherwise); an empty one inherits it.
 	// MintedAtUnix must be zero; the store stamps it.
 	Budget Budget
+	// Purpose is "" or PurposeAIRun (a run grant) or PurposeAttach (an attach
+	// grant bound to ResourceID). Anything else is ErrParentNotDerivable.
+	Purpose string
+	// ResourceID is the run an attach grant is bound to; it is required for
+	// PurposeAttach and refused otherwise.
+	ResourceID string
 	// MaxRunDomains bounds the run's hosts; zero or negative uses
 	// DefaultMaxRunDomains.
 	MaxRunDomains int
@@ -217,6 +243,12 @@ type Repository interface {
 	CreateScopedSensitiveApproval(ctx context.Context, p ApprovalParams) (*Grant, error)
 	// Derive issues a run grant narrower than its session grant (WS1.B).
 	Derive(ctx context.Context, p DeriveParams) (*Grant, error)
+	// CreateHumanBrowse issues an open-web grant for a person's own browsing
+	// (WS8.C).
+	CreateHumanBrowse(ctx context.Context, p CreateHumanBrowseParams) (*Grant, error)
+	// Renew extends a session or human_browse grant by one TTL, never past its
+	// absolute expiry (WS8.C).
+	Renew(ctx context.Context, p RenewParams) (*Grant, error)
 	GetScoped(ctx context.Context, id, orgID, ownerID string) (*Grant, error)
 	// RevokeScoped revokes the grant and every grant derived from it.
 	RevokeScoped(ctx context.Context, id, orgID, ownerID, reason string) error
@@ -276,8 +308,10 @@ func (s *MemoryRepository) CreateSession(_ context.Context, p CreateSessionParam
 		ReadOnly:       p.ReadOnly,
 		Budget:         budget,
 		AllowedDomains: domains,
+		PolicyMode:     PolicyModeAllowlist,
 		ExpiresAt:      s.now().Add(p.TTL),
 	}
+	g.AbsoluteExpiresAt = g.ExpiresAt
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if p.MaxActivePerOwner > 0 && s.activeLocked(p.OrgID, p.OwnerID) >= p.MaxActivePerOwner {
@@ -337,6 +371,7 @@ func (s *MemoryRepository) CreateScopedSensitiveApproval(_ context.Context, p Ap
 		ScopeURL:           p.ScopeURL,
 		Zdr:                zdr,
 		AllowedDomains:     domains,
+		PolicyMode:         PolicyModeAllowlist,
 		AllowedActions:     scopes.actions,
 		AllowedFrameIDs:    scopes.frames,
 		AllowedDialogIDs:   scopes.dialogs,
@@ -356,6 +391,7 @@ func (s *MemoryRepository) CreateScopedSensitiveApproval(_ context.Context, p Ap
 	if parent.ExpiresAt.Before(g.ExpiresAt) {
 		g.ExpiresAt = parent.ExpiresAt
 	}
+	g.AbsoluteExpiresAt = g.ExpiresAt
 	s.grants[id] = clone(g)
 	return clone(g), nil
 }
@@ -381,31 +417,9 @@ func (s *MemoryRepository) Derive(ctx context.Context, p DeriveParams) (*Grant, 
 	if err != nil {
 		return nil, err
 	}
-	policy, ok := derivableParents[parent.Kind]
-	if !ok || len(parent.AllowedActions) != 0 {
-		return nil, ErrParentNotDerivable
-	}
-	// ZDR follows the parent. A ZDR caller deriving from a non-ZDR grant
-	// would obtain a grant whose run may be retained: refuse it.
-	if p.PrincipalZdr && !parent.Zdr {
-		return nil, ErrZdrPostureChanged
-	}
-	maxRun := p.MaxRunDomains
-	if maxRun <= 0 {
-		maxRun = DefaultMaxRunDomains
-	}
-	domains, err := deriveDomains(parent.AllowedDomains, p.RunDomains, maxRun, policy.explicitHosts)
+	plan, err := planDerive(ctx, p, parent)
 	if err != nil {
 		return nil, err
-	}
-	requestedBudget, err := NormalizeBudget(p.Budget)
-	if err != nil {
-		return nil, err
-	}
-	if p.Policy != nil {
-		if err := p.Policy.CheckSession(ctx, p.OrgID, domains); err != nil {
-			return nil, err
-		}
 	}
 	id, err := newID(parent.Zdr)
 	if err != nil {
@@ -426,22 +440,23 @@ func (s *MemoryRepository) Derive(ctx context.Context, p DeriveParams) (*Grant, 
 	now := s.now()
 	// The parent's claim is fixed at its creation, so the child's is a pure
 	// function of it and the request; a replay is checked against it below.
-	budget, err := tightenBudget(parent.Budget, requestedBudget, now.Unix())
+	budget, err := tightenBudget(parent.Budget, plan.requestedBudget, now.Unix())
 	if err != nil {
 		return nil, err
 	}
-	if existing := s.derivedLocked(parent.ID, p.OrgID, p.SessionKey); existing != nil {
+	if existing := s.derivedLocked(plan.kind, parent.ID, p.OrgID, p.SessionKey); existing != nil {
 		switch {
 		case existing.Revoked:
 			return nil, ErrGrantRevoked
 		case now.After(existing.ExpiresAt):
 			return nil, ErrGrantExpired
-		case !equalStrings(existing.AllowedDomains, domains), !sameDeriveBudget(requestedBudget, existing.Budget, budget):
+		case !equalStrings(existing.AllowedDomains, plan.domains), existing.ResourceID != plan.resourceID,
+			!sameDeriveBudget(plan.requestedBudget, existing.Budget, budget):
 			return nil, ErrDeriveConflict
 		}
 		return clone(existing), nil
 	}
-	expires := now.Add(p.TTL)
+	expires := now.Add(plan.ttl)
 	if parent.ExpiresAt.Before(expires) {
 		expires = parent.ExpiresAt
 	}
@@ -452,32 +467,35 @@ func (s *MemoryRepository) Derive(ctx context.Context, p DeriveParams) (*Grant, 
 	if maxRuns <= 0 {
 		maxRuns = DefaultMaxActiveRunsPerParent
 	}
-	if s.activeRunsLocked(parent.ID, parent.OrgID) >= maxRuns {
+	if s.activeChildrenLocked(plan.kind, parent.ID, parent.OrgID) >= maxRuns {
 		return nil, ErrTooManyGrants
 	}
 	g := &Grant{
-		ID:             id,
-		Kind:           KindRun,
-		OrgID:          parent.OrgID,
-		OwnerID:        parent.OwnerID,
-		SessionKey:     p.SessionKey,
-		ScopeURL:       parent.ScopeURL,
-		Zdr:            parent.Zdr,
-		ReadOnly:       parent.ReadOnly,
-		Budget:         budget,
-		AllowedDomains: domains,
-		ParentGrantID:  parent.ID,
-		ExpiresAt:      expires,
+		ID:                id,
+		Kind:              plan.kind,
+		OrgID:             parent.OrgID,
+		OwnerID:           parent.OwnerID,
+		SessionKey:        p.SessionKey,
+		ScopeURL:          parent.ScopeURL,
+		Zdr:               parent.Zdr,
+		ReadOnly:          parent.ReadOnly,
+		Budget:            budget,
+		AllowedDomains:    plan.domains,
+		PolicyMode:        PolicyModeAllowlist,
+		ResourceID:        plan.resourceID,
+		ParentGrantID:     parent.ID,
+		ExpiresAt:         expires,
+		AbsoluteExpiresAt: expires,
 	}
 	s.grants[id] = clone(g)
 	return clone(g), nil
 }
 
-// derivedLocked returns the run grant already derived from parentID under
-// sessionKey, revoked or not, or nil.
-func (s *MemoryRepository) derivedLocked(parentID, orgID, sessionKey string) *Grant {
+// derivedLocked returns the child of the given kind already derived from
+// parentID under sessionKey, revoked or not, or nil.
+func (s *MemoryRepository) derivedLocked(kind Kind, parentID, orgID, sessionKey string) *Grant {
 	for _, g := range s.grants {
-		if g.Kind == KindRun && g.ParentGrantID == parentID && g.OrgID == orgID && g.SessionKey == sessionKey {
+		if g.Kind == kind && g.ParentGrantID == parentID && g.OrgID == orgID && g.SessionKey == sessionKey {
 			return g
 		}
 	}
@@ -627,19 +645,20 @@ func (s *MemoryRepository) activeLocked(orgID, ownerID string) int {
 	active := 0
 	for _, g := range s.grants {
 		if g.OrgID == orgID && g.OwnerID == ownerID && g.Kind != KindSensitiveApproval && g.Kind != KindRun &&
-			!g.Revoked && !now.After(g.ExpiresAt) {
+			g.Kind != KindAttach && !g.Revoked && !now.After(g.ExpiresAt) {
 			active++
 		}
 	}
 	return active
 }
 
-// activeRunsLocked counts the live run grants derived from parentID.
-func (s *MemoryRepository) activeRunsLocked(parentID, orgID string) int {
+// activeChildrenLocked counts the live grants of one kind (run or attach)
+// derived from parentID.
+func (s *MemoryRepository) activeChildrenLocked(kind Kind, parentID, orgID string) int {
 	now := s.now()
 	active := 0
 	for _, g := range s.grants {
-		if g.Kind == KindRun && g.ParentGrantID == parentID && g.OrgID == orgID &&
+		if g.Kind == kind && g.ParentGrantID == parentID && g.OrgID == orgID &&
 			!g.Revoked && !now.After(g.ExpiresAt) {
 			active++
 		}
@@ -671,6 +690,7 @@ func truncateReason(reason string) string {
 func clone(grant *Grant) *Grant {
 	copy := *grant
 	copy.AllowedDomains = append([]string(nil), grant.AllowedDomains...)
+	copy.DeniedDomains = append([]string(nil), grant.DeniedDomains...)
 	copy.AllowedActions = append([]string(nil), grant.AllowedActions...)
 	copy.AllowedFrameIDs = append([]string(nil), grant.AllowedFrameIDs...)
 	copy.AllowedDialogIDs = append([]string(nil), grant.AllowedDialogIDs...)

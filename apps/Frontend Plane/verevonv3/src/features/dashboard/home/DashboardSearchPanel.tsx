@@ -48,7 +48,7 @@ import {
 } from '@/features/dashboard/home/dashboard-search-utils'
 import { currentSearchSnapshotKey, query, registerSearchRunner, setQuery } from '@/features/dashboard/home/dashboard-search-session'
 import { recordWebPage, recordWebQuery } from '@/features/dashboard/home/web-history'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError } from '@/shared/i18n'
 import { isLocalRetentionAllowed } from '@/features/chat/lib/chat-retention'
 import { readClientJson, removeClientValue, writeClientJson } from '@/shared/session/client-storage'
 
@@ -324,7 +324,7 @@ export function SearchPanel(props: {
       )
     } catch (reason) {
       if (controller.signal.aborted) return
-      setWebError(reason instanceof Error ? reason.message : 'Søket kunne ikke fullføres.')
+      setWebError(translateApiError(reason, i18n.tr, { no: 'Søket kunne ikke fullføres.', en: 'The search could not be completed.' }))
     } finally {
       if (!controller.signal.aborted) setWebLoading(false)
     }
@@ -420,7 +420,7 @@ export function SearchPanel(props: {
       })
       .catch((reason) => {
         if (controller.signal.aborted) return
-        setVideosError(reason instanceof Error ? reason.message : 'Videosøk kunne ikke fullføres.')
+        setVideosError(translateApiError(reason, i18n.tr, { no: 'Videosøk kunne ikke fullføres.', en: 'The video search could not be completed.' }))
         setVideosStatus('error')
       })
   }
@@ -442,7 +442,7 @@ export function SearchPanel(props: {
       })
       .catch((reason) => {
         if (controller.signal.aborted) return
-        setImagesError(reason instanceof Error ? reason.message : i18n.tr('Bildesøk kunne ikke fullføres.', 'Image search could not be completed.'))
+        setImagesError(translateApiError(reason, i18n.tr, { no: 'Bildesøk kunne ikke fullføres.', en: 'Image search could not be completed.' }))
         setImagesStatus('error')
       })
   }
@@ -472,7 +472,7 @@ export function SearchPanel(props: {
       })
       .catch((reason) => {
         if (controller.signal.aborted) return
-        setSimilarError(reason instanceof Error ? reason.message : 'Kunne ikke finne lignende sider.')
+        setSimilarError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke finne lignende sider.', en: 'Could not find similar pages.' }))
         setSimilarStatus('error')
       })
   }
@@ -614,7 +614,7 @@ export function SearchPanel(props: {
           .catch((reason) => {
             if (controller.signal.aborted) return
             setPreviewResults([])
-            setPreviewError(reason instanceof Error ? reason.message : 'Søket kunne ikke fullføres.')
+            setPreviewError(translateApiError(reason, i18n.tr, { no: 'Søket kunne ikke fullføres.', en: 'The search could not be completed.' }))
           })
           .finally(() => {
             if (!controller.signal.aborted) setPreviewLoading(false)

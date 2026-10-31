@@ -2585,6 +2585,7 @@ dependencies = [
  "http-body-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "rand 0.8.6",
  "redis",
  "reqwest",
  "serde",

@@ -70,7 +70,7 @@ impl ModelPlaneClient {
             .map_err(|e| {
                 QuarryError::new(
                     ErrorCode::Internal,
-                    format!("http client build failed: {e}"),
+                    format!("http client build failed: {}", e.without_url()),
                 )
             })?;
         Ok(Self {
@@ -171,7 +171,7 @@ impl ModelPlaneClient {
         builder.send().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("model-plane invoke transport failure: {e}"),
+                format!("model-plane invoke transport failure: {}", e.without_url()),
             )
         })
     }
@@ -195,7 +195,7 @@ impl ModelPlaneClient {
         resp.json::<ModelPlaneInvokeResponse>().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("model-plane invoke decode failure: {e}"),
+                format!("model-plane invoke decode failure: {}", e.without_url()),
             )
         })
     }
@@ -301,7 +301,7 @@ impl ModelPlaneClient {
         builder.send().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("model-plane invoke/stream transport failure: {e}"),
+                format!("model-plane invoke/stream transport failure: {}", e.without_url()),
             )
         })
     }
@@ -379,8 +379,6 @@ impl ModelPlanePlanner {
              {{\"type\": \"wait\", \"ms\": 1000}}\n\
              {{\"type\": \"wait_for\", \"selector\": \"...\", \"timeout_ms\": 5000}}\n\
              {{\"type\": \"screenshot\", \"full_page\": false}}\n\
-             {{\"type\": \"pdf\"}}\n\
-             {{\"type\": \"evaluate\", \"script\": \"...\"}}\n\
              {{\"type\": \"back\"}}\n\
              {{\"type\": \"get_content\"}}\n\n\
              When `snapshot` is present, prefer its `@e…` refs for any effectful\n\
@@ -498,6 +496,7 @@ mod tests {
             proof_bundle: None,
             target_resolution: None,
             telemetry: quarry_core::contracts::BrowserTelemetry::default(),
+            redaction: None,
             observed_at: Utc::now(),
         }
     }

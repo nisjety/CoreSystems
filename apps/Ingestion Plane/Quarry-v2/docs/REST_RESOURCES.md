@@ -110,3 +110,18 @@ Defined in `crates/quarry-core/src/resources.rs`:
   default impl returns empty)
 - 3 `resource_routes::ListQuery` parsing tests (RFC3339, sort
   validation, bad-input rejection)
+
+## Job lifecycle resource paths (WS15.L1, unit W2-U11, built, NOT run, 2026-10-23)
+
+| Path | Kind | Notes |
+|---|---|---|
+| `GET /v1/jobs/{id}` | any job | status document; foreign id 404 |
+| `GET /v1/jobs/{id}/errors` | any job | final failures and blocked pages; 403 under the ZDR floor |
+| `GET /v1/crawl/{id}`, `/v1/batch/{id}` | crawl, batch | kind mismatch 404 |
+| `GET /v1/crawl/{id}/errors`, `/v1/batch/{id}/errors` | crawl, batch | paged by `after_seq`, `limit` (max 500) |
+| `GET /v1/crawl/ongoing`, `/v1/batch/ongoing` | crawl, batch | in-flight jobs, oldest first |
+| `GET /v1/{kind}/jobs?status=a,b` | crawl and the other kinds | status filter; unknown status 400 |
+
+Shapes, origin set, status vocabulary and the errors rules are in `CONTRACTS.md`
+("Job lifecycle reads and origin"). Tenant isolation: every read is scoped by the
+verified org; a service principal has no route to these paths.

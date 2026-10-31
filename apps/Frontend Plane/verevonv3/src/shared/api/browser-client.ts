@@ -1,3 +1,4 @@
+import { describeApiError, type ApiErrorDescription } from '@/shared/i18n/errors'
 import { requestJson } from './http'
 
 export type BrowserAction =
@@ -15,6 +16,8 @@ export type BrowserAction =
   | { type: 'back' }
   | { type: 'forward' }
   | { type: 'get_content' }
+  /** Human-only (WS9.B): the gateway refuses it for agent actors. */
+  | { type: 'reload'; ignore_cache?: boolean }
 
 export type BrowserInteractiveElement = {
   role?: string | null
@@ -29,7 +32,29 @@ export type BrowserDomSummary = {
   text_snippet?: string | null
 }
 
+/**
+ * Quarry's `ChallengeSignal` as it arrives on an observation (snake_case: the gateway
+ * passes the observation through). Only `strength === 'strong'` is a verdict that a bot
+ * wall stands in front of the page; `weak` and `non_signal` (a login form, a cookie
+ * banner, a paywall, a rate limit, a bare status) are ordinary access states. A signal
+ * from before the taxonomy has no `strength`. `evidence` is deliberately not typed:
+ * it is never shown.
+ */
+export type BrowserChallengeStrength = 'strong' | 'weak' | 'non_signal'
+
+export type BrowserChallenge = {
+  /** Why a strong signal is strong: `captcha_widget`, `waf_interstitial`, `challenge_loop` or `unexpected_bot_error`. */
+  block_reason?: string | null
+  confidence?: number
+  kind: string
+  /** `available` while one wait or reload is still allowed, `exhausted` once it is spent. */
+  recovery?: string
+  requires_escalation?: boolean
+  strength?: BrowserChallengeStrength | string
+}
+
 export type BrowserObservation = {
+  challenge?: BrowserChallenge | null
   console_summary?: Array<{ level: string; text: string }>
   dom_summary?: BrowserDomSummary | null
   network_summary?: Array<{ content_type?: string | null; method: string; status: number; url: string }>
@@ -144,6 +169,10 @@ export type BrowserReplayEvent = {
   actor?: BrowserActionActor | 'system' | string | null
   consoleCount?: number | null
   controlMode?: BrowserControlMode | string | null
+  /** Which takeover the owner is in; counts real control changes. */
+  controlEpoch?: number | null
+  /** Who drove the action: set by Quarry on timeline items. */
+  initiatedBy?: 'human' | 'agent' | 'system' | string | null
   domInteractiveCount?: number | null
   domNodeCount?: number | null
   id: string
@@ -206,6 +235,8 @@ export type BrowserTab = {
   tabId: string
   title?: string | null
   url?: string | null
+  /** Who opened the tab (WS8.F). Absent until Quarry reports it; the agent marker needs it. */
+  openedBy?: 'human' | 'agent' | null
 }
 
 export type BrowserSession = {
@@ -225,6 +256,8 @@ export type BrowserSession = {
   }
   control?: {
     mode: BrowserControlMode
+    /** Quarry's control epoch (WS9.I): the compare-and-set token for Take over and Give back. */
+    epoch?: number | null
   } | null
   renderMode: BrowserRenderMode
   status: BrowserSessionStatus
@@ -263,8 +296,77 @@ export type BrowserTabsResponse = {
 
 export type BrowserDevtoolsResponse = {
   events: BrowserDevtoolsEvent[]
+  /** Resume cursor: the last event the read examined (WS9.C). */
+  nextSequence?: number
   session?: BrowserSession
   zdr?: boolean
+}
+
+/** A receipt as the browser may see it (WS9.C). Observations and typed text are never sent. */
+export type BrowserReceiptView = {
+  receiptId: string
+  step: number
+  startedAt?: string
+  finishedAt?: string
+  actionType: string
+  actionLabel: string
+  url?: string
+  outcome: { status: string; latencyMs?: number; errorCode?: string }
+  costMicroUsd?: number
+  actionOutcome?: string
+  correctionOf?: string
+  initiatedBy?: string
+  controlEpoch?: number
+}
+
+export type BrowserReceiptsResponse = {
+  receipts: BrowserReceiptView[]
+  truncated: boolean
+  zdr: boolean
+}
+
+/** A redacted egress decision (WS9.C). The URL keeps only origin and path. */
+export type BrowserEgressReceiptView = {
+  sequence: number
+  tabId?: string
+  method: string
+  url: string
+  decision: 'allow' | 'block'
+  policy: string
+  timestampMs: number
+}
+
+export type BrowserEgressReceiptsResponse = {
+  receipts: BrowserEgressReceiptView[]
+  counts: { allow: number; block: number }
+  nextSequence: number
+  zdr: boolean
+}
+
+export type BrowserProcedureStepView = {
+  step: number
+  /** The action; a typed `text` is replaced by `{ redacted: true, length }`. */
+  action: Record<string, unknown>
+  expectedOutcome: string
+}
+
+export type BrowserProcedureView = {
+  procedureId: string
+  version: number
+  sourceReceiptIds: string[]
+  steps: BrowserProcedureStepView[]
+}
+
+export type BrowserProcedureQuality = {
+  stepCount: number
+  verifiedStepCount: number
+  promotionAllowed: boolean
+  reasons?: string[]
+}
+
+export type BrowserProcedureResponse = {
+  procedure: BrowserProcedureView
+  quality: BrowserProcedureQuality
 }
 
 export type BrowserSuggestedAction = {
@@ -308,6 +410,42 @@ export type CreateBrowserSessionRequest = {
   zdr?: boolean
 }
 
+/**
+ * A failed browser call as the person should see it and as the caller should
+ * react to it. The gateway's typed envelope (`{ error: { code, message,
+ * details } }`) survives the client as an `ApiError` (`code`, `status`,
+ * `retryAfterSeconds`, `resumable`, `blockReason`); this turns it into copy
+ * by `code` and tells the cases apart by `kind`:
+ *
+ * - 401 `unauthenticated`: sign in again (the transport already signals session expiry).
+ * - 403 `forbidden`: not allowed; ask an administrator.
+ * - 409 `USER_TOOK_OVER` / `browser_human_takeover_active` -> `takeover`: a person
+ *   holds the browser, the agent step is not retried.
+ * - 403 `browser_site_blocked` / `site_blocked` -> `blocked`: take over or use another source.
+ * - 429 `rate_limited`: wait `retryAfterSeconds` (from `Retry-After`), then retry.
+ * - 410 / a reaped or lost session -> `session_lost`: start a new session.
+ * - 5xx `server`: a backing service failed; retry later.
+ *
+ * An unknown code is never shown: it falls back to `fallback`, then to a
+ * generic message. The raw `message` of the response is never used.
+ */
+export function describeBrowserError(
+  err: unknown,
+  tr: (noText: string, enText: string) => string,
+  fallback?: { no: string; en: string },
+): ApiErrorDescription {
+  return describeApiError(err, tr, fallback)
+}
+
+/** The text of {@link describeBrowserError}, for a toast or an inline notice. */
+export function browserErrorMessage(
+  err: unknown,
+  tr: (noText: string, enText: string) => string,
+  fallback?: { no: string; en: string },
+): string {
+  return describeBrowserError(err, tr, fallback).message
+}
+
 function orgHeaders(orgId: string): Record<string, string> {
   return { 'x-verevon-org-id': orgId }
 }
@@ -340,15 +478,47 @@ export async function runBrowserAction(
   })
 }
 
+/**
+ * Takes over or hands back browser control. With `expectedEpoch` the change is a
+ * compare-and-set (WS9.I): when the run has moved on the gateway answers 409
+ * `browser_control_epoch_stale` and nothing changes.
+ */
 export async function setBrowserControlMode(
   orgId: string,
   sessionId: string,
   mode: BrowserControlMode,
-  signal?: AbortSignal,
+  options?: { expectedEpoch?: number | null; signal?: AbortSignal },
 ): Promise<BrowserSessionResponse> {
+  const body: { mode: BrowserControlMode; expectedEpoch?: number } = { mode }
+  if (typeof options?.expectedEpoch === 'number') body.expectedEpoch = options.expectedEpoch
   return requestJson<BrowserSessionResponse>(`/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/control`, {
     method: 'POST',
-    body: JSON.stringify({ mode }),
+    body: JSON.stringify(body),
+    headers: orgHeaders(orgId),
+    signal: options?.signal,
+  })
+}
+
+/** Extends a person's browser session grant by one broker interval (WS8.D). Returns only the new expiry. */
+export async function keepAliveBrowserSession(
+  orgId: string,
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<{ expiresAt: string | null }> {
+  return requestJson<{ expiresAt: string | null }>(
+    `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/keepalive`,
+    { method: 'POST', headers: orgHeaders(orgId), signal },
+  )
+}
+
+/** Reads one browser session projection (WS9.I: the refetch after a stale control epoch). */
+export async function getBrowserSession(
+  orgId: string,
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<BrowserSessionResponse> {
+  return requestJson<BrowserSessionResponse>(`/api/v1/browser/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'GET',
     headers: orgHeaders(orgId),
     signal,
   })
@@ -434,20 +604,185 @@ export async function closeBrowserTab(
   )
 }
 
+/** Filters for the devtools read (WS9.C). Levels are normalised by the server. */
+export type BrowserDevtoolsFilterOptions = {
+  afterSequence?: number
+  limit?: number
+  levels?: string[]
+  filter?: string
+  category?: 'console' | 'network' | 'lifecycle'
+  tabId?: string
+}
+
 export async function getBrowserDevtoolsEvents(
   orgId: string,
   sessionId: string,
-  options?: { afterSequence?: number; limit?: number },
+  options?: BrowserDevtoolsFilterOptions,
   signal?: AbortSignal,
 ): Promise<BrowserDevtoolsResponse> {
   const params = new URLSearchParams()
   if (typeof options?.afterSequence === 'number') params.set('afterSequence', String(options.afterSequence))
   if (typeof options?.limit === 'number') params.set('limit', String(options.limit))
+  if (options?.levels && options.levels.length > 0) params.set('levels', options.levels.join(','))
+  if (options?.filter) params.set('filter', options.filter)
+  if (options?.category) params.set('category', options.category)
+  if (options?.tabId) params.set('tabId', options.tabId)
   const query = params.toString()
   return requestJson<BrowserDevtoolsResponse>(
     `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/devtools${query ? `?${query}` : ''}`,
     {
       method: 'GET',
+      headers: orgHeaders(orgId),
+      signal,
+    },
+  )
+}
+
+/** One event of a run's trace as the events stream sends it (WS10.S3). `seq` is per run. */
+export type BrowserTraceEvent = {
+  event_id: string
+  run_id?: string | null
+  job_id?: string | null
+  /** The envelope's snake_case type (`action_started`); the SSE name is in `onEvent`. */
+  type: string
+  ts: string
+  seq: number
+  payload: Record<string, unknown>
+  idempotency_key: string
+}
+
+/** The resume point is older than the ring: read the durable timeline for the missed part. */
+export type BrowserReplayGap = {
+  requested: number
+  oldest_retained: number
+  fallback: string
+}
+
+export type BrowserEventsStreamOptions = {
+  /** Replay the retained events after this seq before the live tail. */
+  fromSeq?: number
+  /** Stop after this many user-facing events. */
+  maxEvents?: number
+}
+
+export type BrowserEventsStreamHandlers = {
+  /** One user-facing event in seq order; `name` is the SSE event name (e.g. `action.started`). */
+  onEvent: (name: string, event: BrowserTraceEvent) => void
+  onReplayGap?: (gap: BrowserReplayGap) => void
+  /** The stream is finished: `run_closed` or `max_events`. */
+  onDone?: (reason: string) => void
+  /** A connection problem. EventSource reconnects on its own with `Last-Event-ID`. */
+  onError?: () => void
+}
+
+const BROWSER_EVENT_NAMES = [
+  'agent.started',
+  'action.started',
+  'action.completed',
+  'action.failed',
+  'observation.ready',
+  'agent.completed',
+  'agent.expired',
+  'agent.failed',
+] as const
+
+function parseSseJson<T>(raw: string): T | null {
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Open the typed event stream of a browser session's run (WS10.S3). Cookie-authenticated
+ * like the live-frame stream, since EventSource cannot send the org header. The browser
+ * reconnects with `Last-Event-ID`, which the gateway forwards, so a reconnect continues
+ * after the last seq it saw. Returns a handle that closes the stream.
+ */
+export function streamBrowserEvents(
+  sessionId: string,
+  options: BrowserEventsStreamOptions,
+  handlers: BrowserEventsStreamHandlers,
+): { close: () => void } {
+  const params = new URLSearchParams()
+  if (typeof options.fromSeq === 'number') params.set('from_seq', String(options.fromSeq))
+  if (typeof options.maxEvents === 'number') params.set('max_events', String(options.maxEvents))
+  const query = params.toString()
+  const source = new EventSource(
+    `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/events/stream${query ? `?${query}` : ''}`,
+  )
+  for (const name of BROWSER_EVENT_NAMES) {
+    source.addEventListener(name, (message) => {
+      const event = parseSseJson<BrowserTraceEvent>((message as MessageEvent<string>).data)
+      if (event) handlers.onEvent(name, event)
+    })
+  }
+  source.addEventListener('replay_gap', (message) => {
+    const gap = parseSseJson<BrowserReplayGap>((message as MessageEvent<string>).data)
+    if (gap) handlers.onReplayGap?.(gap)
+  })
+  source.addEventListener('done', (message) => {
+    handlers.onDone?.((message as MessageEvent<string>).data)
+    source.close()
+  })
+  source.onerror = () => handlers.onError?.()
+  return { close: () => source.close() }
+}
+
+/** The receipts of a session, newest `limit` only (WS9.C). Refused for ZDR sessions. */
+export async function listBrowserReceipts(
+  orgId: string,
+  sessionId: string,
+  options?: { limit?: number },
+  signal?: AbortSignal,
+): Promise<BrowserReceiptsResponse> {
+  const params = new URLSearchParams()
+  if (typeof options?.limit === 'number') params.set('limit', String(options.limit))
+  const query = params.toString()
+  return requestJson<BrowserReceiptsResponse>(
+    `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/receipts${query ? `?${query}` : ''}`,
+    {
+      method: 'GET',
+      headers: orgHeaders(orgId),
+      signal,
+    },
+  )
+}
+
+/** Redacted live egress decisions after a cursor (WS9.C). Allowed for ZDR sessions. */
+export async function listBrowserEgressReceipts(
+  orgId: string,
+  sessionId: string,
+  options?: { afterSequence?: number; limit?: number },
+  signal?: AbortSignal,
+): Promise<BrowserEgressReceiptsResponse> {
+  const params = new URLSearchParams()
+  if (typeof options?.afterSequence === 'number') params.set('afterSequence', String(options.afterSequence))
+  if (typeof options?.limit === 'number') params.set('limit', String(options.limit))
+  const query = params.toString()
+  return requestJson<BrowserEgressReceiptsResponse>(
+    `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/egress-receipts${query ? `?${query}` : ''}`,
+    {
+      method: 'GET',
+      headers: orgHeaders(orgId),
+      signal,
+    },
+  )
+}
+
+/** Compile and promotion-check a replay procedure from the session's receipts (WS9.C). */
+export async function compileBrowserProcedure(
+  orgId: string,
+  sessionId: string,
+  body?: { procedureId?: string },
+  signal?: AbortSignal,
+): Promise<BrowserProcedureResponse> {
+  return requestJson<BrowserProcedureResponse>(
+    `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/procedure`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
       headers: orgHeaders(orgId),
       signal,
     },

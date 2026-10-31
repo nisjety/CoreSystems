@@ -321,6 +321,10 @@ impl AuthContext {
         // per-user grants facade. The flag is boundary-injected only; a request
         // body can never set it (`skip_deserializing`).
         req.service_principal = self.principal.is_service();
+        // The verified service identity, for the corpus confinement that
+        // `pipeline::retrieve` applies (`authz::service_routes::confine_request`).
+        // Boundary-only, like `service_principal`: a body cannot name one.
+        req.service_id = self.principal.service_id().map(str::to_owned);
 
         // Org-admin super-visibility derives ONLY from a verified scope. This is
         // reached only on the JWT HTTP path; the api-key/agent path carries no
@@ -548,6 +552,7 @@ mod tests {
         assert!(request.service_principal);
         assert!(!request.admin_read_all);
         assert_eq!(request.user_id.as_deref(), Some("service:quarry-edge"));
+        assert_eq!(request.service_id.as_deref(), Some("service:quarry-edge"));
 
         // A user with the scope keeps the admin bypass, and is not a service.
         let admin = AuthContext {
@@ -557,6 +562,7 @@ mod tests {
         let mut request = retrieval_request(None);
         admin.apply_to_request(&mut request);
         assert!(!request.service_principal);
+        assert_eq!(request.service_id, None, "a user has no service identity");
         assert!(request.admin_read_all);
     }
 

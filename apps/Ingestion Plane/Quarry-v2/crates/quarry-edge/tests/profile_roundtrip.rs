@@ -49,6 +49,7 @@ fn rich_snapshot() -> SessionSnapshot {
                 secure: true,
                 http_only: true,
                 expires: None,
+                ..Default::default()
             },
             Cookie {
                 name: "csrf".into(),
@@ -58,6 +59,7 @@ fn rich_snapshot() -> SessionSnapshot {
                 secure: false,
                 http_only: false,
                 expires: None,
+                ..Default::default()
             },
         ],
         local_storage: vec![
@@ -75,6 +77,7 @@ fn rich_snapshot() -> SessionSnapshot {
         }),
         locale: Some("en-US".into()),
         timezone: Some("America/Los_Angeles".into()),
+        ..Default::default()
     }
 }
 
@@ -103,39 +106,35 @@ async fn profile_save_load_roundtrip_preserves_all_fields() {
         .unwrap()
         .to_string();
 
-    // Load
+    // Load: the redacted view (WS17.P0). No cookie value and no storage value comes back;
+    // a cookie value is reported as null with its length.
     let load_resp = authed(client.get(format!("http://{addr}/v1/profiles/{profile_id}")))
         .send()
         .await
         .unwrap();
     assert!(load_resp.status().is_success());
     let load_body: Value = load_resp.json().await.unwrap();
-    let loaded: SessionSnapshot =
-        serde_json::from_value(load_body["data"]["snapshot"].clone()).unwrap();
+    let data = &load_body["data"];
+    assert!(data.get("snapshot").is_none(), "{load_body}");
 
-    // Verify every field round-trips
-    assert_eq!(loaded.cookies.len(), 2);
-    assert_eq!(loaded.cookies[0].name, "session");
-    assert_eq!(loaded.cookies[0].value, "abc123");
-    assert_eq!(loaded.cookies[0].domain, ".example.com");
-    assert!(loaded.cookies[0].secure);
-    assert!(loaded.cookies[0].http_only);
-    assert_eq!(loaded.cookies[1].name, "csrf");
-    assert_eq!(loaded.cookies[1].path, "/api");
-    assert!(!loaded.cookies[1].secure);
-
-    assert_eq!(loaded.local_storage.len(), 2);
-    assert_eq!(loaded.local_storage[0], ("theme".into(), "dark".into()));
-    assert_eq!(loaded.session_storage.len(), 1);
-
-    assert_eq!(loaded.user_agent.as_deref(), Some("Quarry/1.0 (test)"));
-    let vp = loaded.viewport.unwrap();
-    assert_eq!(vp.width, 1920);
-    assert_eq!(vp.height, 1080);
-    assert!((vp.device_scale_factor - 2.0).abs() < 1e-9);
-    assert!(!vp.is_mobile);
-    assert_eq!(loaded.locale.as_deref(), Some("en-US"));
-    assert_eq!(loaded.timezone.as_deref(), Some("America/Los_Angeles"));
+    let cookies = data["cookies"].as_array().unwrap();
+    assert_eq!(cookies.len(), 2);
+    assert_eq!(cookies[0]["name"], "session");
+    assert!(cookies[0]["value"].is_null(), "{load_body}");
+    assert_eq!(cookies[0]["value_len"], "abc123".len());
+    assert_eq!(cookies[0]["domain"], ".example.com");
+    assert_eq!(cookies[0]["secure"], true);
+    assert_eq!(cookies[0]["http_only"], true);
+    assert_eq!(cookies[1]["name"], "csrf");
+    assert_eq!(cookies[1]["path"], "/api");
+    assert_eq!(cookies[1]["secure"], false);
+    assert_eq!(data["local_storage_count"], 2);
+    assert_eq!(data["session_storage_count"], 1);
+    assert_eq!(data["has_user_agent"], true);
+    assert_eq!(data["has_viewport"], true);
+    assert_eq!(data["locale"], "en-US");
+    assert_eq!(data["timezone"], "America/Los_Angeles");
+    assert_eq!(data["truncated"], false);
 }
 
 #[tokio::test]
@@ -173,12 +172,13 @@ async fn profile_list_includes_saved_profile() {
         "{ids:?} missing {saved_id}"
     );
     // A profile saved through the plain snapshot path has no metadata
-    // recorded yet — must default to `ephemeral`, not error/omit.
+    // recorded yet — must default to `user_private` (owner decision D16 Q2,
+    // 2026-10-28), not error/omit.
     let saved_summary = profiles
         .iter()
         .find(|p| p["profile_id"].as_str() == Some(saved_id.as_str()))
         .unwrap();
-    assert_eq!(saved_summary["scope"].as_str(), Some("ephemeral"));
+    assert_eq!(saved_summary["scope"].as_str(), Some("user_private"));
     assert!(saved_summary.get("name").is_none() || saved_summary["name"].is_null());
 }
 

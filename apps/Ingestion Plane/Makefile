@@ -28,6 +28,7 @@ help:
 	@echo "  make test-imports       Run imports-core tests"
 	@echo "  make test-quarry        Run Quarry-v2 workspace tests"
 	@echo "  make test-endpoints     Test all endpoints"
+	@echo "  make test-scrape-capture  Opt-in scrape capture and actions e2e (needs a running stack)"
 	@echo "  make test-load          Run load test"
 	@echo "  make smoke-integration  Run integration-api smoke tests (12 checks)"
 	@echo ""
@@ -149,6 +150,10 @@ test-endpoints:
 	compose exec -T temporal temporal operator cluster health --address temporal:7233 >/dev/null; \
 	printf '✓ Temporal\n'; \
 	printf '✓ All Ingestion Plane endpoints are operational\n'
+
+.PHONY: test-scrape-capture
+test-scrape-capture:
+	@bash Quarry-v2/scripts/e2e-scrape-capture.sh
 
 .PHONY: test-load
 test-load:

@@ -181,7 +181,30 @@ async fn fetch_page(
     }
 }
 
+/// `POST /v1/extract`. WS4.J: wraps `extract_run` so a ZDR run's metadata-only tombstone is
+/// sent once, from the response status (off unless the flag is on; fail open). A per-URL
+/// failure inside a 200 batch is not an outcome of the request.
 pub async fn extract(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Json(req): Json<ExtractRequest>,
+) -> axum::response::Response {
+    let pending = crate::zdr_tombstone::Pending::begin(
+        state.tombstones.as_ref(),
+        claims.effective_zdr(req.zdr.unwrap_or(false)),
+        &claims.org_id,
+        crate::zdr_tombstone::Kind::Extract,
+    );
+    let response = extract_run(State(state), Extension(claims), Json(req))
+        .await
+        .into_response();
+    if let Some(pending) = pending {
+        pending.finish_status(response.status().as_u16());
+    }
+    response
+}
+
+async fn extract_run(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<ExtractRequest>,
@@ -202,8 +225,10 @@ pub async fn extract(
 
     // Structured extraction needs Model Plane. Without it, fall back to
     // returning cleaned markdown (still useful), unless a schema was requested.
+    // QB-T17: the runner exists only when QUARRY_EDGE__AI_FORMATS is on and a model path exists.
+    let ai_formats_on = state.model_plane.ai_formats;
     let runner: Option<AiFormatRunner> = match state.model_plane_url.as_deref() {
-        Some(url) if !url.is_empty() => match ModelPlaneClient::new(url) {
+        Some(url) if !url.is_empty() && ai_formats_on => match ModelPlaneClient::new(url) {
             Ok(mut c) => {
                 if let Some(provider) = state.service_token_provider.clone() {
                     c = c.with_token_provider(provider);
@@ -223,8 +248,8 @@ pub async fn extract(
         return (
             StatusCode::NOT_IMPLEMENTED,
             Json(unsupported(
-                "structured extraction requires a Model Plane",
-                "set MODEL_PLANE_URL, or omit `schema` to receive markdown",
+                "structured extraction is not available on this edge",
+                "structured extraction needs QUARRY_EDGE__AI_FORMATS=1 and a granted Model Plane path (MODEL_PLANE_URL); omit `schema` to receive markdown",
             )),
         )
             .into_response();
@@ -233,6 +258,32 @@ pub async fn extract(
     // Body flag raised (never lowered) by the token's ZDR floor: see
     // `Claims::zdr_floor`.
     let zdr = claims.effective_zdr_mode(req.zdr);
+    // WS7.E: every target is gated before the first fetch. One denied URL refuses the whole
+    // request with a 403 that names the capability and never a URL.
+    let decision = match crate::web_policy_edge::decide(
+        &state.policy,
+        &claims,
+        zdr.is_active(),
+        None,
+    ) {
+        Ok(decision) => decision,
+        Err(error) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ApiError::new("FORBIDDEN", error.message)),
+            )
+                .into_response();
+        }
+    };
+    if let Err(error) =
+        crate::web_policy_edge::gate_urls(&decision, targets.iter().map(String::as_str))
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiError::new("FORBIDDEN", error.message)),
+        )
+            .into_response();
+    }
     let privacy = req.privacy.unwrap_or_default().with_zdr(zdr);
     let signals = req.signals.unwrap_or_default();
     let mut results = Vec::with_capacity(targets.len());
@@ -339,23 +390,54 @@ pub async fn extract(
             .into_response();
     }
 
-    // Usage metering — one unit per source attempted.
-    let run_id: quarry_core::ids::kinds::RunKind = quarry_core::ids::Id::new();
-    state
-        .usage
-        .meter(quarry_runtime::UsageEvent::new(
-            run_id.to_string(),
-            claims.org_id.clone(),
-            quarry_runtime::usage_metrics::SEARCH_QUERY,
-            targets.len() as f64,
-            serde_json::json!({
-                "op": "extract",
-                "user_id": claims.user_id,
-                "urls": targets.len(),
-                "structured": req.schema.is_some(),
-            }),
-        ))
-        .await;
+    // Usage metering. WS6.C-e: `quarry.extract.url` counts the URLs fetched or extracted (failures
+    // are free). The gate decides whether it is published (`on`), counted (`shadow`) or dropped
+    // (`off`). Until `on`, the extract is still billed as one search query, as before.
+    let request_id = crate::request_id::current();
+    let billed_urls = results
+        .iter()
+        .filter(|item| matches!(item.status.as_str(), "ok" | "fetched"))
+        .count();
+    let mut attrs = crate::usage_attrs::UsageAttrs::new(
+        crate::usage_attrs::Outcome::Ok,
+        crate::usage_attrs::surface_for(&claims, None),
+    );
+    attrs.user_id = Some(claims.user_id.clone());
+    attrs.counts = Some(serde_json::json!({ "urls": targets.len(), "items": billed_urls }));
+    crate::usage_attrs::emit(
+        &*state.usage,
+        &[request_id.as_str()],
+        &claims.org_id,
+        quarry_runtime::usage_metrics::EXTRACT_URL,
+        billed_urls as f64,
+        &attrs,
+        zdr.is_active(),
+    )
+    .await;
+    if !crate::usage_attrs::corrected_rules(&*state.usage) {
+        // D2-033: this id is server-minted, never the caller's `X-Request-Id`. The request
+        // id is not unique across tenants and a client can repeat or oversize it, so using it
+        // as the billing key let a client suppress its own billing (billing-core's dedupe is
+        // by event id and refuses a repeat with a later `occurred_at`). A retry-safe key
+        // needs the caller's Idempotency-Key and a stable `occurred_at`: see
+        // depth/D-D-B3-egress-caps.md.
+        let run_id: quarry_core::ids::kinds::RunKind = quarry_core::ids::Id::new();
+        state
+            .usage
+            .meter(quarry_runtime::UsageEvent::new(
+                run_id.to_string(),
+                claims.org_id.clone(),
+                quarry_runtime::usage_metrics::SEARCH_QUERY,
+                targets.len() as f64,
+                serde_json::json!({
+                    "op": "extract",
+                    "user_id": claims.user_id,
+                    "urls": targets.len(),
+                    "structured": req.schema.is_some(),
+                }),
+            ))
+            .await;
+    }
 
     let count = results.len();
     (
@@ -396,6 +478,7 @@ mod tests {
                 body: self.0.clone().into_bytes(),
                 duration_ms: 1,
                 served_by: DriverKind::Static,
+                captures: None,
             })
         }
     }
@@ -419,6 +502,76 @@ mod tests {
         .into_response();
         assert_eq!(response.status(), StatusCode::OK);
         crate::test_support::response_json(response).await["results"][0].clone()
+    }
+
+    /// A meter that keeps every event, in the default (`Off`) browser-metrics mode.
+    #[derive(Default)]
+    struct KeptEvents(std::sync::Mutex<Vec<quarry_runtime::UsageEvent>>);
+
+    #[async_trait]
+    impl quarry_runtime::UsageMeter for KeptEvents {
+        async fn meter(&self, event: quarry_runtime::UsageEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    async fn extract_under_request_id(
+        usage: &Arc<KeptEvents>,
+        request_id: &str,
+    ) -> StatusCode {
+        let mut state = crate::test_support::test_state(Arc::new(HtmlDriver(
+            "<html><body><article><p>Prose.</p></article></body></html>".to_string(),
+        )));
+        state.usage = usage.clone();
+        quarry_runtime::request_context::scope(request_id.to_string(), async {
+            extract(
+                State(state),
+                Extension(crate::test_support::claims_for_org("org_alpha")),
+                Json(ExtractRequest {
+                    urls: vec!["https://ssb.example/kommunefakta".into()],
+                    schema: None,
+                    prompt: None,
+                    max_urls: None,
+                    zdr: None,
+                    privacy: None,
+                    signals: None,
+                }),
+            )
+            .await
+            .into_response()
+            .status()
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_client_chosen_request_id_cannot_collapse_legacy_extract_billing() {
+        // D2-033 (verifier finding): the billing event id is server-minted. A client that
+        // repeats one `X-Request-Id` (or sends an oversize one) still produces one distinct,
+        // billing-core-valid event per extract, so it cannot suppress its own billing.
+        let usage = Arc::new(KeptEvents::default());
+        let long_id = "r".repeat(128);
+        for id in ["same_id", "same_id", long_id.as_str()] {
+            assert_eq!(extract_under_request_id(&usage, id).await, StatusCode::OK);
+        }
+        let ids: Vec<String> = usage
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.metric == quarry_runtime::usage_metrics::SEARCH_QUERY)
+            .map(|event| event.event_id.clone())
+            .collect();
+        assert_eq!(ids.len(), 3);
+        let distinct: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(distinct.len(), 3, "each extract is its own billable event");
+        for id in &ids {
+            assert!(!id.contains("same_id") && !id.contains("rrrr"), "caller id must not be the key");
+            assert!(
+                quarry_runtime::usage::validate_event_id(id).is_ok(),
+                "event id must satisfy billing-core's rule"
+            );
+        }
     }
 
     #[tokio::test]
@@ -505,6 +658,58 @@ mod tests {
     fn expand_empty_when_all_invalid() {
         let urls = vec!["nope".into(), "mailto:x@y.com".into()];
         assert!(expand_targets(&urls, 10).is_empty());
+    }
+
+    /// QB-T17: with `QUARRY_EDGE__AI_FORMATS` off, a `schema` request answers 501 before any page
+    /// is fetched, and makes no mint and no Model Plane call (the registry refuses that call).
+    #[tokio::test]
+    async fn structured_extraction_makes_no_model_plane_call_while_its_switch_is_off() {
+        use crate::test_support::{claims_for_org, test_state, StubDriver};
+        use axum::response::IntoResponse;
+        use quarry_runtime::service_tokens::{
+            AuthCoreServiceTokenProvider, SharedServiceTokenProvider,
+        };
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth_core = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "header.payload.signature",
+                "expiresInSeconds": 300
+            })))
+            .mount(&auth_core)
+            .await;
+        let model_plane = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&model_plane)
+            .await;
+        let provider: SharedServiceTokenProvider = Arc::new(
+            AuthCoreServiceTokenProvider::new(auth_core.uri(), "credential-long-enough").unwrap(),
+        );
+        let state = AppState {
+            model_plane_url: Some(model_plane.uri()),
+            service_token_provider: Some(provider),
+            ..test_state(StubDriver::ok())
+        };
+        let request: ExtractRequest = serde_json::from_value(serde_json::json!({
+            "urls": ["https://example.com/structured"],
+            "schema": { "type": "object" }
+        }))
+        .unwrap();
+
+        let response = extract(
+            State(state),
+            axum::Extension(claims_for_org("org_extract")),
+            axum::Json(request),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        assert!(auth_core.received_requests().await.unwrap().is_empty());
+        assert!(model_plane.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]

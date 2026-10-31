@@ -54,9 +54,9 @@ use url::Url;
 use crate::{
     audience_tokens::{
         get_audience_token, get_onboarding_preview_token, require_model_service_token,
-        ModelServiceAudience,
+        ModelServiceAudience, RequiredAudienceTokenError,
     },
-    config::AppState,
+    config::{AppState, BrowserGrantMode},
     domains::chat::shared::{
         data_plane_authorization_value, data_plane_token, delegated_auth_unavailable, model_token,
         proxy_model_json, proxy_model_json_with_data_plane, proxy_model_json_with_session,
@@ -65,6 +65,7 @@ use crate::{
     envelope::{error, ok, unwrap_data},
     middleware::{require_session, AuthenticatedUser},
     public_url::normalize_public_http_url,
+    rate_limit::{with_rate_class, RateClass},
     upstream::{authorized_org_id, proxy_bearer_json, proxy_sse_stream},
 };
 
@@ -261,6 +262,53 @@ pub(crate) enum BrowserActionActor {
     Human,
 }
 
+/// Who is on the other end of a browser call, as the gateway verified it (D2-012). It is
+/// a request extension the authentication layer inserts, never a field of the body.
+///
+/// Decided 2026-10-28 (MP-GATEWAY-AUTH): the Model Plane gets no credential to this
+/// gateway. The gateway authenticates only a person's Better Auth session, and the Model
+/// Plane never calls `/api/v1/browser`: it drives Quarry directly with a `browser:execute`
+/// service token, and Quarry decides who the agent is from that verified token
+/// (`derive_initiator`: a service principal is always the agent, a person's token is the
+/// agent only when it says so). So nothing here produces `ServicePrincipal`; every call
+/// through this gateway is `User`, and the rules below are the gateway's own early
+/// refusals for an agent acting through a person's session (the SPA labels a model's
+/// action `actor: agent`). Each of them is also a Quarry check: reload is refused there
+/// (`agent_reload_denied`), and an agent action during a takeover gets `USER_TOOK_OVER`,
+/// but only while `QUARRY_EDGE__TAKEOVER_ENFORCEMENT` is on (off by default), so until it
+/// is switched on the gateway is the only refusing guard for takeover. Reopen
+/// D2-012 if a Model Plane to gateway browser path is ever planned; the class and
+/// `effective_actor` stay so that path has a place to land.
+///
+/// Accepted residual: a person's session can still state `human`, and no gateway design
+/// can tell a model acting through that session from the person.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum CallerClass {
+    /// A person's session. It cannot prove it is not a model acting through the
+    /// person's own session, so `body.actor` stays advisory and can only tighten.
+    #[default]
+    User,
+    /// A verified service principal. Always the agent. Not produced today (see the type
+    /// docs: the Model Plane goes to Quarry, not through this gateway).
+    // reason: no authentication layer produces this class, by decision (D2-012,
+    // MP-GATEWAY-AUTH); only the tests construct it, to pin the rule a producer would get.
+    #[allow(dead_code)]
+    ServicePrincipal,
+}
+
+/// The actor a browser call acts as. A service principal is always the agent, whatever
+/// its body or query says; under a user session the stated actor is taken, which can
+/// only tighten (a stated `agent` is refused during takeover and cannot reload).
+fn effective_actor(
+    caller: Option<Extension<CallerClass>>,
+    stated: BrowserActionActor,
+) -> BrowserActionActor {
+    match caller.map(|Extension(class)| class).unwrap_or_default() {
+        CallerClass::ServicePrincipal => BrowserActionActor::Agent,
+        CallerClass::User => stated,
+    }
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BrowserControlMode {
@@ -285,15 +333,43 @@ impl BrowserControlMode {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ControlBody {
     pub(crate) mode: BrowserControlMode,
+    /// WS9.I: the control epoch the person saw. Quarry refuses the change with 409 when the
+    /// run has moved on, so a stale Take over or Give back cannot flip control.
+    #[serde(default)]
+    pub(crate) expected_epoch: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+/// The body the gateway sends Quarry for a control change (WS9.I). `expected_epoch` is
+/// forwarded only when the caller sent one; without it the change is unconditional, as before.
+fn control_quarry_body(mode: BrowserControlMode, expected_epoch: Option<u64>) -> Value {
+    let mut body = json!({ "mode": mode.as_str() });
+    if let Some(expected) = expected_epoch {
+        body["expected_epoch"] = json!(expected);
+    }
+    body
+}
+
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NewTabBody {
     #[serde(default)]
     pub(crate) url: Option<String>,
+    /// Who is opening the tab. `agent` is what a model's call carries; Quarry
+    /// refuses it while the person has taken over. Like `ActionBody.actor` it can
+    /// only tighten, and it is never forwarded as anything but the fixed hint.
+    #[serde(default)]
+    pub(crate) actor: BrowserActionActor,
+}
+
+/// The query of a tab select or close: who is asking (`?actor=agent`). Absent is
+/// the person. An unknown value is a 400 here, not read as the person's.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct TabActorQuery {
+    #[serde(default)]
+    pub(crate) actor: BrowserActionActor,
 }
 
 #[derive(Debug, Deserialize)]
@@ -349,7 +425,7 @@ const DEFAULT_VIEWPORT: Viewport = Viewport {
     width: 1280,
     height: 800,
 };
-const MAX_BROWSER_ARTIFACT_BYTES: u64 = 24 * 1024 * 1024;
+pub(super) const MAX_BROWSER_ARTIFACT_BYTES: u64 = 24 * 1024 * 1024;
 const MAX_MODEL_SCREENSHOT_BYTES: u64 = 6 * 1024 * 1024;
 const MAX_MODEL_VISUAL_JSON_BYTES: u64 = 1024 * 1024;
 #[cfg(test)]
@@ -370,8 +446,27 @@ fn default_include_screenshot() -> bool {
 }
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
-    Router::new()
+    classed_routes(&state.rate_limiter)
+        .route_layer(axum::middleware::from_fn_with_state(state, require_session))
+}
+
+/// Every browser route with its rate class applied, before the session layer.
+/// Split out so the route-to-class assignment is testable without a session.
+fn classed_routes(limiter: &crate::rate_limit::RateLimiter) -> Router<AppState> {
+    // Two rate classes, each its own per-organization bucket (see
+    // `rate_limit::RateClass`): starting a session or an AI run is scarce and
+    // expensive; everything done inside an open session is not, and must keep
+    // working while an organization is out of start budget.
+    let browser_start = Router::new()
         .route("/api/v1/browser/sessions", post(create_session))
+        // Phase 2: start a durable, server-side, multi-step browser-agent run.
+        // Progress streams over the existing chat run-event route
+        // (`GET /api/v1/runs/:run_id/events`), unchanged by this facade.
+        .route(
+            "/api/v1/browser/sessions/{session_id}/ai-runs",
+            post(start_ai_run),
+        );
+    let interactive = Router::new()
         .route("/api/v1/browser/sessions/{session_id}", get(get_session))
         .route(
             "/api/v1/browser/sessions/{session_id}/timeline",
@@ -401,13 +496,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/browser/sessions/{session_id}/suggestions",
             post(suggest_action),
         )
-        // Phase 2: start/control a durable, server-side, multi-step
-        // browser-agent run. Progress streams over the existing chat run-event
-        // route (`GET /api/v1/runs/:run_id/events`), unchanged by this facade.
+        // WS8.D: extends a human session's browser grant by one broker TTL.
         .route(
-            "/api/v1/browser/sessions/{session_id}/ai-runs",
-            post(start_ai_run),
+            "/api/v1/browser/sessions/{session_id}/keepalive",
+            post(keepalive_session),
         )
+        // Pause / resume / stop a durable browser-agent run.
         .route(
             "/api/v1/browser/runs/{run_id}/control",
             post(control_ai_run),
@@ -423,6 +517,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/browser/sessions/{session_id}/frames/stream",
             get(stream_live_frames),
+        )
+        // WS10.S3: the run's typed events as SSE, resumable with Last-Event-ID.
+        .route(
+            "/api/v1/browser/sessions/{session_id}/events/stream",
+            get(stream_agent_events),
         )
         .route(
             "/api/v1/browser/sessions/{session_id}/frames/ws",
@@ -447,8 +546,18 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/browser/profiles/{profile_id}",
             patch(rename_browser_profile).delete(delete_profile),
-        )
-        .route_layer(axum::middleware::from_fn_with_state(state, require_session))
+        );
+    Router::new()
+        .merge(with_rate_class(
+            browser_start,
+            limiter,
+            RateClass::BrowserStart,
+        ))
+        .merge(with_rate_class(
+            interactive,
+            limiter,
+            RateClass::Interactive,
+        ))
 }
 
 pub(crate) async fn create_session(
@@ -483,24 +592,42 @@ pub(crate) async fn create_session(
     // the flag is threaded through metadata so the SPA renders persistence
     // state from data instead of assuming it.
     let zdr = body.zdr;
+    // WS8.D: a person's open-web session asks for a human_browse grant (no hosts) when the
+    // switch is on and grants are issued at all. Otherwise the start-host session grant.
+    let human_scope = state.browser_human_browse && state.browser_grant_mode.issues_grants();
+    let grant_scope = if human_scope {
+        SessionGrantScope::HumanBrowse
+    } else {
+        SessionGrantScope::StartHost(allowed_domain.as_deref())
+    };
+    // A BrowserBroker session grant, before Quarry is asked for a lease: in strict
+    // mode no grant means no session.
+    let grant_id = match issue_session_grant(&state, &user, &headers, grant_scope, zdr).await {
+        Ok(grant_id) => grant_id,
+        Err(response) => return response,
+    };
+    // Without a human_browse grant (switch off, or a permissive issuance failure) the
+    // first-host policy applies, as before WS8.D.
+    let human_grant = human_scope && grant_id.is_some();
     let mut start_body = json!({
-        "constraints": {
-            "max_steps": 12,
-            "allowed_domains": allowed_domain.map(|domain| vec![domain]).unwrap_or_default(),
-            "max_runtime_s": 120
-        },
         "viewport": {
             "width": viewport.width,
             "height": viewport.height
         },
         "zdr": zdr
     });
+    if let Some(constraints) = session_start_constraints(human_grant, allowed_domain.as_deref()) {
+        start_body["constraints"] = constraints;
+    }
     start_body["profile_scope"] = Value::String(profile_scope.as_str().to_owned());
     if let Some(profile_id) = profile_id {
         start_body["profile_id"] = Value::String(profile_id.to_owned());
     }
     if requested_persistent_profile {
         start_body["persist_profile"] = Value::Bool(true);
+    }
+    if let Some(grant_id) = grant_id.as_deref() {
+        start_body["grant_id"] = Value::String(grant_id.to_owned());
     }
 
     let (start_status, start_body) = quarry_call(
@@ -513,6 +640,9 @@ pub(crate) async fn create_session(
     )
     .await;
     if !start_status.is_success() {
+        if let Some(grant_id) = grant_id.as_deref() {
+            revoke_session_grant(&state, &user, &headers, grant_id).await;
+        }
         return forward_quarry_failure(start_status, start_body);
     }
 
@@ -554,6 +684,9 @@ pub(crate) async fn create_session(
             &user.user_id,
         )
         .await;
+        if let Some(grant_id) = grant_id.as_deref() {
+            revoke_session_grant(&state, &user, &headers, grant_id).await;
+        }
         return forward_quarry_failure(step_status, step_body);
     }
 
@@ -565,6 +698,104 @@ pub(crate) async fn create_session(
         };
     let response = browser_response_from_owner_projection(&projection, Some(observation));
     (StatusCode::OK, Json(ok(response))).into_response()
+}
+
+/// `POST /api/v1/browser/sessions/:session_id/keepalive` (WS8.D): extends the session's
+/// browser grant by one broker TTL, never past its absolute cap. The owner gate is
+/// Quarry's owner projection, which is where the grant id is read; the id is never sent
+/// back. The answer carries the new expiry only. A grant that cannot be renewed (ended,
+/// revoked, at its cap, or not this person's) is 409 `browser_session_expired`.
+pub(crate) async fn keepalive_session(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> Response {
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let projection =
+        match owner_browser_session_projection(&state, &user, token.as_deref(), &session_id).await
+        {
+            Ok(projection) => projection,
+            Err(response) => return response,
+        };
+    let Some(grant_id) = projection_grant_id(&projection) else {
+        return keepalive_refusal(StatusCode::CONFLICT, "browser_session_expired");
+    };
+    let (model, browser) = tokio::join!(
+        model_token(&state, &user, &headers),
+        browser_broker_token(&state, &user, &headers),
+    );
+    let browser = match browser {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
+    let url = format!(
+        "{}/v1/browser/grants/{}/renew",
+        state.model_gateway_url,
+        urlencoding::encode(&grant_id)
+    );
+    let (status, Json(body)) = proxy_model_json_with_delegated(
+        &state,
+        Method::POST,
+        &url,
+        None,
+        model.as_deref(),
+        &[("x-browser-authorization", browser.as_str())],
+        &user,
+    )
+    .await;
+    match keepalive_outcome(status, &body) {
+        Ok(payload) => (StatusCode::OK, Json(ok(payload))).into_response(),
+        Err((status, code)) => keepalive_refusal(status, code),
+    }
+}
+
+/// The keep-alive answer for a renew response: the expiry, or the refusal's status and
+/// code. Model Gateway does not say why a renewal failed (expired, revoked, capped or
+/// not the caller's), so every 403, 404 and 409 is the same ended session for the SPA.
+/// Anything else is an upstream problem the person cannot act on.
+fn keepalive_outcome(
+    status: StatusCode,
+    body: &Value,
+) -> Result<Value, (StatusCode, &'static str)> {
+    if status.is_success() {
+        return Ok(keepalive_body(&unwrap_data(body)));
+    }
+    if matches!(
+        status,
+        StatusCode::CONFLICT | StatusCode::NOT_FOUND | StatusCode::FORBIDDEN
+    ) {
+        return Err((StatusCode::CONFLICT, "browser_session_expired"));
+    }
+    Err((StatusCode::SERVICE_UNAVAILABLE, "browser_grant_unavailable"))
+}
+
+/// The only field a keep-alive answer carries. The grant id and the absolute cap stay
+/// inside the BFF.
+fn keepalive_body(renewed: &Value) -> Value {
+    json!({
+        "expiresAt": renewed.get("expires_at").cloned().unwrap_or(Value::Null)
+    })
+}
+
+fn keepalive_refusal(status: StatusCode, code: &'static str) -> Response {
+    let message = if code == "browser_session_expired" {
+        "This browser session has ended. Reopen it to keep browsing."
+    } else {
+        "Browser access is temporarily unavailable."
+    };
+    (status, Json(error(code, message))).into_response()
 }
 
 /// Reads Quarry's browser-session projection. This is deliberately not a
@@ -590,7 +821,9 @@ async fn get_session(
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
     match owner_browser_session_projection(&state, &user, token.as_deref(), &session_id).await {
-        Ok(projection) => (StatusCode::OK, Json(ok(projection))).into_response(),
+        // The session grant id is internal to the BFF: strip it here, the one
+        // route that forwards Quarry's projection rather than mapping it.
+        Ok(projection) => (StatusCode::OK, Json(ok(spa_owner_projection(projection)))).into_response(),
         Err(response) => response,
     }
 }
@@ -598,7 +831,7 @@ async fn get_session(
 /// Read the sole owner projection for a direct Quarry browser run. All callers
 /// use this after an owner-authorized mutation instead of rebuilding session
 /// state from BFF-local observations, tabs, or control flags.
-async fn owner_browser_session_projection(
+pub(super) async fn owner_browser_session_projection(
     state: &AppState,
     user: &AuthenticatedUser,
     token: Option<&str>,
@@ -666,6 +899,7 @@ async fn get_owner_timeline(
 pub(crate) async fn run_action(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    caller: Option<Extension<CallerClass>>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
     Json(body): Json<ActionBody>,
@@ -676,7 +910,17 @@ pub(crate) async fn run_action(
             return (StatusCode::BAD_REQUEST, Json(error(code, message))).into_response()
         }
     };
-    let actor = body.actor;
+    let actor = effective_actor(caller, body.actor);
+    if reload_refused_for_actor(&action, actor) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "browser_action_denied",
+                "Reload is available to people, not to agents.",
+            )),
+        )
+            .into_response();
+    }
     if !is_valid_path_segment(&session_id) {
         return (
             StatusCode::BAD_REQUEST,
@@ -736,7 +980,11 @@ pub(crate) async fn run_action(
         &state,
         Method::POST,
         &format!("/v1/agent/runs/{}/step", urlencoding::encode(&session_id)),
-        Some(json!({ "action": action })),
+        Some(step_request_body(
+            action,
+            actor,
+            &AgentAdvisory::from_headers(&headers).for_actor(actor),
+        )),
         token.as_deref(),
         &user.user_id,
     )
@@ -781,6 +1029,7 @@ pub(crate) async fn set_control_mode(
     // Control authority lives in Quarry. A BFF cache must neither authorize a
     // hand-off nor decide whether an owner session exists after a restart.
     let mode = body.mode;
+    let expected_epoch = body.expected_epoch;
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
     let (status, body) = quarry_call(
@@ -790,7 +1039,7 @@ pub(crate) async fn set_control_mode(
             "/v1/agent/runs/{}/browser-session/control",
             urlencoding::encode(&session_id),
         ),
-        Some(json!({ "mode": mode.as_str() })),
+        Some(control_quarry_body(mode, expected_epoch)),
         token.as_deref(),
         &user.user_id,
     )
@@ -846,10 +1095,12 @@ async fn get_tabs(
 pub(crate) async fn new_tab(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    caller: Option<Extension<CallerClass>>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
     Json(body): Json<NewTabBody>,
 ) -> Response {
+    let actor = effective_actor(caller, body.actor);
     if !is_valid_path_segment(&session_id) {
         return (
             StatusCode::BAD_REQUEST,
@@ -869,11 +1120,21 @@ pub(crate) async fn new_tab(
 
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
+    if let Some(refusal) =
+        refuse_agent_tab_call_during_takeover(&state, &user, token.as_deref(), &session_id, actor)
+            .await
+    {
+        return refusal;
+    }
     let (status, body) = quarry_call(
         &state,
         Method::POST,
         &format!("/v1/agent/runs/{}/tabs", urlencoding::encode(&session_id)),
-        Some(json!({ "url": url })),
+        Some(new_tab_request_body(
+            url,
+            actor,
+            &AgentAdvisory::from_headers(&headers).for_actor(actor),
+        )),
         token.as_deref(),
         &user.user_id,
     )
@@ -909,8 +1170,10 @@ pub(crate) async fn new_tab(
 pub(crate) async fn select_tab(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    caller: Option<Extension<CallerClass>>,
     headers: HeaderMap,
     Path((session_id, tab_id)): Path<(String, String)>,
+    Query(call): Query<TabActorQuery>,
 ) -> Response {
     tab_mutation(
         state,
@@ -920,6 +1183,7 @@ pub(crate) async fn select_tab(
         Some(tab_id),
         Method::POST,
         "select",
+        effective_actor(caller, call.actor),
         None,
     )
     .await
@@ -928,8 +1192,10 @@ pub(crate) async fn select_tab(
 pub(crate) async fn close_tab(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    caller: Option<Extension<CallerClass>>,
     headers: HeaderMap,
     Path((session_id, tab_id)): Path<(String, String)>,
+    Query(call): Query<TabActorQuery>,
 ) -> Response {
     tab_mutation(
         state,
@@ -939,9 +1205,139 @@ pub(crate) async fn close_tab(
         Some(tab_id),
         Method::DELETE,
         "close",
+        effective_actor(caller, call.actor),
         None,
     )
     .await
+}
+
+/// The body of a tab-open call. An open the model proposed carries
+/// `initiatedBy: "agent"`, so Quarry can refuse it while the person has taken over;
+/// a person's own carries no hint. Only the enum is forwarded, never a client string.
+fn new_tab_request_body(
+    url: Option<String>,
+    actor: BrowserActionActor,
+    advisory: &AgentAdvisory,
+) -> Value {
+    match actor {
+        BrowserActionActor::Agent => {
+            let mut body = json!({ "url": url, "initiatedBy": "agent" });
+            advisory.put_in(&mut body);
+            body
+        }
+        BrowserActionActor::Human => json!({ "url": url }),
+    }
+}
+
+/// The query suffix of a tab select or close (neither has a body): the same hint as
+/// `new_tab_request_body`, for the same reason.
+fn tab_call_query(actor: BrowserActionActor, advisory: &AgentAdvisory) -> String {
+    match actor {
+        // The advisory values are identifier-shaped (see `AgentAdvisory`), so they
+        // need no percent-encoding.
+        BrowserActionActor::Agent => {
+            let mut query = String::from("?initiatedBy=agent");
+            if let Some(run) = &advisory.ai_run_id {
+                query.push_str("&aiRunId=");
+                query.push_str(run);
+            }
+            if let Some(label) = &advisory.label {
+                query.push_str("&agentLabel=");
+                query.push_str(label);
+            }
+            query
+        }
+        BrowserActionActor::Human => String::new(),
+    }
+}
+
+/// The header an agent's caller may send to say which AI run it acts for.
+const AGENT_RUN_ID_HEADER: &str = "x-agent-run-id";
+/// The header an agent's caller may send to label its agent.
+const AGENT_LABEL_HEADER: &str = "x-agent-label";
+
+/// What a caller says about *which* agent made a browser call, from the two headers
+/// above (the Model Plane's gateway calls and the action surface set them; the
+/// action surface forwards the caller's headers to these handlers unchanged).
+///
+/// Advisory only: Quarry stores it next to the identity its own token check
+/// derived and marks it as the caller's word, and nothing decides on it. Values are
+/// identifier-shaped (`[A-Za-z0-9._:-]`, 1 to 64 characters) or dropped, so a URL or
+/// a page title cannot be smuggled into a record a ZDR run keeps. It rides along only
+/// on a call that is already an agent's (`actor: agent`): a person's own call carries
+/// none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AgentAdvisory {
+    ai_run_id: Option<String>,
+    label: Option<String>,
+}
+
+impl AgentAdvisory {
+    fn from_headers(headers: &HeaderMap) -> Self {
+        let read = |name: &str| {
+            let value = headers.get(name)?.to_str().ok()?.trim();
+            let shaped = !value.is_empty()
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'));
+            shaped.then(|| value.to_owned())
+        };
+        Self {
+            ai_run_id: read(AGENT_RUN_ID_HEADER),
+            label: read(AGENT_LABEL_HEADER),
+        }
+    }
+
+    fn for_actor(self, actor: BrowserActionActor) -> Self {
+        match actor {
+            BrowserActionActor::Agent => self,
+            BrowserActionActor::Human => Self::default(),
+        }
+    }
+
+    /// Add the fields to a JSON object body, under the names Quarry reads.
+    fn put_in(&self, body: &mut Value) {
+        if let Some(run) = &self.ai_run_id {
+            body["aiRunId"] = json!(run);
+        }
+        if let Some(label) = &self.label {
+            body["agentLabel"] = json!(label);
+        }
+    }
+}
+
+/// A tab call the model proposed is refused while the person holds the browser,
+/// the same 409 `run_action` answers, so the rule does not depend on Quarry's
+/// take-over enforcement switch (off by default). Quarry still gets the hint and
+/// stays the authority. `None` lets the call through (always for a person's own).
+async fn refuse_agent_tab_call_during_takeover(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    token: Option<&str>,
+    session_id: &str,
+    actor: BrowserActionActor,
+) -> Option<Response> {
+    if actor != BrowserActionActor::Agent {
+        return None;
+    }
+    let projection = match owner_browser_session_projection(state, user, token, session_id).await {
+        Ok(projection) => projection,
+        Err(response) => return Some(response),
+    };
+    let mode = BrowserControlMode::from_owner_value(
+        projection.get("controlMode").and_then(Value::as_str),
+    );
+    (mode == BrowserControlMode::HumanTakeover).then(|| {
+        (
+            StatusCode::CONFLICT,
+            Json(error(
+                "browser_human_takeover_active",
+                "Human takeover is active for this browser session.",
+            )),
+        )
+            .into_response()
+    })
 }
 
 // reason: shared select/close tab route glue — every argument is a distinct
@@ -956,6 +1352,7 @@ async fn tab_mutation(
     tab_id: Option<String>,
     method: Method,
     operation: &str,
+    actor: BrowserActionActor,
     body: Option<Value>,
 ) -> Response {
     if !is_valid_path_segment(&session_id) {
@@ -990,13 +1387,20 @@ async fn tab_mutation(
     }
     let suffix = if operation == "select" { "/select" } else { "" };
     let path = format!(
-        "/v1/agent/runs/{}/tabs/{}{}",
+        "/v1/agent/runs/{}/tabs/{}{}{}",
         urlencoding::encode(&session_id),
         urlencoding::encode(&tab_id),
-        suffix
+        suffix,
+        tab_call_query(actor, &AgentAdvisory::from_headers(&headers).for_actor(actor))
     );
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
+    if let Some(refusal) =
+        refuse_agent_tab_call_during_takeover(&state, &user, token.as_deref(), &session_id, actor)
+            .await
+    {
+        return refusal;
+    }
     let (status, body) =
         quarry_call(&state, method, &path, body, token.as_deref(), &user.user_id).await;
     if !status.is_success() {
@@ -1041,6 +1445,14 @@ pub(crate) async fn close_session(
     }
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
+    // The session grant is read from the owner projection before the run is
+    // closed, so it can be revoked with it. Best effort: an absent or foreign
+    // run keeps today's idempotent close.
+    let grant_id = owner_browser_session_projection(&state, &user, token.as_deref(), &session_id)
+        .await
+        .ok()
+        .as_ref()
+        .and_then(projection_grant_id);
     let (status, body) = quarry_call(
         &state,
         Method::DELETE,
@@ -1050,6 +1462,12 @@ pub(crate) async fn close_session(
         &user.user_id,
     )
     .await;
+    // The grant is revoked whatever Quarry answered: a person who closed the
+    // session wants its authority gone, and a close that failed upstream must not
+    // leave the session and run grants live until their TTL (D1-020).
+    if let Some(grant_id) = grant_id.as_deref() {
+        revoke_session_grant(&state, &user, &headers, grant_id).await;
+    }
     if !status.is_success() && status != StatusCode::NOT_FOUND {
         return forward_quarry_failure(status, body);
     }
@@ -1236,6 +1654,9 @@ fn build_ai_run_request<S: BrowserSessionRunState>(
         .flatten();
     json!({
         "goal": goal,
+        // The session's BrowserBroker grant (or, behind `BROWSER_AI_RUN_REAL_GRANT`,
+        // one issued for this run). Model Gateway derives the run's own grant
+        // from it; `allowed_domains` below can only narrow it.
         "grant_id": grant_id,
         "profile_id": persistent_profile_id,
         "start_url": start_url,
@@ -1259,15 +1680,26 @@ fn build_ai_run_request<S: BrowserSessionRunState>(
 /// genuinely persistent (see `build_ai_run_request`'s doc comment — Quarry
 /// assigns a working-set `profile_id` to every lease, ephemeral ones
 /// included, so the raw value alone is not evidence of persistence).
+/// `grant_id` is the session's BrowserBroker grant, read from Quarry's owner
+/// projection; Model Gateway derives a narrower run grant from it (WS1.B).
+/// A session without a grant (opened with `BROWSER_GRANT_ENFORCEMENT=off`, or
+/// in `permissive` mode when issuance failed) gets 409
+/// `browser_session_grant_missing` and Model Gateway is never called. A
+/// grant that has expired or been revoked since the session opened is 409
+/// `browser_session_grant_inactive` (see `session_grant_inactive`).
 ///
 /// Behind `BROWSER_AI_RUN_REAL_GRANT` (WS21-S7), and never for a zero-retention
-/// session, the run starts under a real broker grant: model-gateway issues a
-/// session grant over the run's hosts (`POST /v1/browser/grants`), and the run
-/// derives from that grant under the browser bearer minted for this request.
-/// With the switch off the request keeps the interim `session:{id}` string and
-/// sends no browser bearer, which model-gateway refuses. Risk-based HITL
-/// *gating* of individual risky actions is live as of Phase 5 (see
-/// `build_ai_run_request` above and `docs/BROWSER_WORKSPACE_PLAN.md`).
+/// session, a session that has no grant of its own is not refused: model-gateway
+/// issues a session grant over the run's hosts (`POST /v1/browser/grants`), and
+/// the run derives from that grant under the browser bearer minted for this
+/// request. With the switch off, or on a zero-retention session, such a session
+/// gets the 409 above; no session string is ever sent as a grant.
+///
+/// An optional `Idempotency-Key` header makes a retry of this start safe: it
+/// goes to Model Gateway, which answers a repeat with the same run and the same
+/// derived grant (see `client_idempotency_key` and `idempotency_refusal`).
+/// Risk-based HITL *gating* of individual risky actions is live as of Phase 5
+/// (see `build_ai_run_request` above and `docs/BROWSER_WORKSPACE_PLAN.md`).
 pub(crate) async fn start_ai_run(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1317,6 +1749,10 @@ async fn start_ai_run_with_switch(
         )
             .into_response();
     }
+    let idempotency_key = match client_idempotency_key(&headers) {
+        Ok(key) => key,
+        Err(response) => return response,
+    };
 
     let cookie = cookie_header(&headers);
     let quarry_bearer = quarry_token(&state, &user, &cookie).await;
@@ -1343,46 +1779,49 @@ async fn start_ai_run_with_switch(
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
 
-    // A zero-retention session never gets a browser bearer, so it stays on the
-    // session string that model-gateway refuses.
-    let real_grant = real_grant_switch && !metadata.zdr();
-    let requested_domains = if real_grant {
-        let Some(domains) = ai_run_requested_domains(&body, start_url.as_deref()) else {
+    let grant_source = match projection_grant_id(&projection) {
+        Some(grant_id) => AiRunGrantSource::Session(grant_id),
+        // Behind `BROWSER_AI_RUN_REAL_GRANT` (WS21-S7) a session without a grant
+        // asks the broker for one over the run's hosts. A zero-retention session
+        // never does: it gets no browser bearer and no grant here.
+        None if real_grant_switch && !metadata.zdr() => {
+            let Some(domains) = ai_run_requested_domains(&body, start_url.as_deref()) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(error(
+                        "invalid_allowed_domains",
+                        "Name the hosts the run may use, or open a page first.",
+                    )),
+                )
+                    .into_response();
+            };
+            AiRunGrantSource::Issue(domains)
+        }
+        // No grant means no run otherwise: the broker refuses anything that is
+        // not a grant it issued, so there is no placeholder to send.
+        None => {
             return (
-                StatusCode::BAD_REQUEST,
+                StatusCode::CONFLICT,
                 Json(error(
-                    "invalid_allowed_domains",
-                    "Name the hosts the run may use, or open a page first.",
+                    "browser_session_grant_missing",
+                    "This browser session has no browser grant. Reopen it to start an AI run.",
                 )),
             )
-                .into_response();
-        };
-        Some(domains)
-    } else {
-        None
-    };
-    let browser_bearer = if real_grant {
-        match require_model_service_token(
-            &state,
-            &user.user_id,
-            &cookie,
-            ModelServiceAudience::BrowserBroker,
-        )
-        .await
-        {
-            Ok(token) => Some(token),
-            Err(error) => return delegated_auth_unavailable(error).into_response(),
+                .into_response()
         }
-    } else {
-        None
     };
+    let names_hosts = body
+        .allowed_domains
+        .as_ref()
+        .is_some_and(|domains| !domains.is_empty());
 
-    let (token, data_plane, inference, execution, session) = tokio::join!(
+    let (token, data_plane, inference, execution, session, browser) = tokio::join!(
         model_token(&state, &user, &headers),
         data_plane_token(&state, &user, &headers),
         required_inference_token(&state, &user, &headers),
         required_execution_token(&state, &user, &headers),
         required_session_token(&state, &user, &headers),
+        browser_broker_token(&state, &user, &headers),
     );
     let Some(data_plane) = data_plane else {
         return (
@@ -1406,18 +1845,19 @@ async fn start_ai_run_with_switch(
         Ok(token) => token,
         Err(error) => return delegated_auth_unavailable(error).into_response(),
     };
+    let browser = match browser {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
 
-    let (grant_id, allowed_domains) = match (requested_domains, browser_bearer.as_deref()) {
-        (Some(requested), Some(browser)) => {
-            match issue_ai_run_grant(&state, &user, token.as_deref(), browser, &requested).await {
+    let (grant_id, allowed_domains) = match grant_source {
+        AiRunGrantSource::Session(grant_id) => (grant_id, body.allowed_domains.clone()),
+        AiRunGrantSource::Issue(requested) => {
+            match issue_ai_run_grant(&state, &user, token.as_deref(), &browser, &requested).await {
                 Ok(issued) => (issued.grant_id, Some(issued.allowed_domains)),
                 Err(response) => return response,
             }
         }
-        _ => (
-            format!("session:{session_id}"),
-            body.allowed_domains.clone(),
-        ),
     };
     let request_body = build_ai_run_request(
         goal,
@@ -1429,21 +1869,45 @@ async fn start_ai_run_with_switch(
     );
 
     let url = format!("{}/v1/browser/runs", state.model_gateway_url);
-    let (status, Json(response_body)) = proxy_model_json_with_browser(
+    // A retry of this start carries the client's key to Model Gateway, which
+    // scopes it to the user and this session's grant and answers a repeat with
+    // the same run and the same derived grant.
+    let idempotency_header: Vec<(&'static str, &str)> = idempotency_key
+        .as_deref()
+        .map(|key| ("idempotency-key", key))
+        .into_iter()
+        .collect();
+    let (status, Json(response_body)) = proxy_model_json_with_delegated_headers(
         &state,
         Method::POST,
         &url,
         Some(request_body),
         token.as_deref(),
-        browser_bearer.as_deref(),
-        Some(&data_plane),
-        Some(&inference),
-        Some(&execution),
-        Some(&session),
+        &[
+            ("x-data-plane-authorization", data_plane.as_str()),
+            ("x-inference-authorization", inference.as_str()),
+            ("x-execution-authorization", execution.as_str()),
+            ("x-session-authorization", session.as_str()),
+            ("x-browser-authorization", browser.as_str()),
+        ],
+        &idempotency_header,
         &user,
     )
     .await;
     if !status.is_success() {
+        if let Some(response) = idempotency_refusal(status, &response_body) {
+            return response;
+        }
+        if session_grant_inactive(status, &response_body, names_hosts) {
+            return (
+                StatusCode::CONFLICT,
+                Json(error(
+                    "browser_session_grant_inactive",
+                    "This browser session's grant is no longer valid; it may have expired. Reopen the session to start an AI run.",
+                )),
+            )
+                .into_response();
+        }
         return forward_quarry_failure(status, response_body);
     }
 
@@ -1484,6 +1948,14 @@ fn browser_ai_run_real_grant_from(value: Option<&str>) -> bool {
     value == Some("true")
 }
 
+/// Where a workspace AI run's grant comes from.
+enum AiRunGrantSource {
+    /// The session's own BrowserBroker grant, from Quarry's owner projection (WS1.B).
+    Session(String),
+    /// None on the session: ask the broker for one over these hosts (WS21-S7).
+    Issue(Vec<String>),
+}
+
 /// A session grant model-gateway issued for one workspace AI run (WS21-S7).
 struct IssuedAiRunGrant {
     grant_id: String,
@@ -1503,17 +1975,13 @@ async fn issue_ai_run_grant(
     requested: &[String],
 ) -> Result<IssuedAiRunGrant, Response> {
     let url = format!("{}/v1/browser/grants", state.model_gateway_url);
-    let (status, Json(response_body)) = proxy_model_json_with_browser(
+    let (status, Json(response_body)) = proxy_model_json_with_delegated(
         state,
         Method::POST,
         &url,
         Some(json!({ "allowed_domains": requested })),
         token,
-        Some(browser_bearer),
-        None,
-        None,
-        None,
-        None,
+        &[("x-browser-authorization", browser_bearer)],
         user,
     )
     .await;
@@ -1547,82 +2015,6 @@ async fn issue_ai_run_grant(
         grant_id,
         allowed_domains,
     })
-}
-
-/// The model-gateway JSON call of the agent-browser routes that carry the browser
-/// bearer (WS21-S7). `proxy_model_json_with_data_plane` has no browser slot, so
-/// this repeats its headers and adds `x-browser-authorization`; without a browser
-/// bearer the request is the same as that helper's.
-#[allow(clippy::too_many_arguments)]
-async fn proxy_model_json_with_browser(
-    state: &AppState,
-    method: Method,
-    url: &str,
-    body: Option<Value>,
-    bearer_token: Option<&str>,
-    browser_bearer: Option<&str>,
-    data_plane_bearer: Option<&str>,
-    inference_bearer: Option<&str>,
-    execution_bearer: Option<&str>,
-    session_bearer: Option<&str>,
-    user: &AuthenticatedUser,
-) -> (StatusCode, Json<Value>) {
-    let org_id = authorized_org_id(state, user).await;
-    let user_role = user
-        .auth_role
-        .as_deref()
-        .map(str::trim)
-        .filter(|role| !role.is_empty())
-        .unwrap_or("member");
-    let mut req = state
-        .client
-        .request(method, url)
-        .header("x-user-id", &user.user_id)
-        .header("x-user-role", user_role);
-    if !org_id.trim().is_empty() {
-        req = req.header("x-org-id", org_id);
-    }
-    if let Some(token) = bearer_token {
-        req = req.bearer_auth(token);
-    }
-    if let Some(value) = data_plane_bearer.and_then(data_plane_authorization_value) {
-        req = req.header("x-data-plane-authorization", value);
-    }
-    if let Some(value) = inference_bearer.and_then(data_plane_authorization_value) {
-        req = req.header("x-inference-authorization", value);
-    }
-    if let Some(value) = execution_bearer.and_then(data_plane_authorization_value) {
-        req = req.header("x-execution-authorization", value);
-    }
-    if let Some(value) = session_bearer.and_then(data_plane_authorization_value) {
-        req = req.header("x-session-authorization", value);
-    }
-    if let Some(value) = browser_bearer.and_then(data_plane_authorization_value) {
-        req = req.header("x-browser-authorization", value);
-    }
-    if let Some(body) = body {
-        req = req.json(&body);
-    }
-
-    match req.send().await {
-        Ok(resp) => {
-            let status =
-                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            let body = resp.json::<Value>().await.unwrap_or_else(|_| json!({}));
-            (status, Json(body))
-        }
-        Err(cause) if cause.is_timeout() => (
-            StatusCode::GATEWAY_TIMEOUT,
-            Json(error(
-                "model_request_timeout",
-                "The model did not respond before the request deadline",
-            )),
-        ),
-        Err(_) => (
-            StatusCode::BAD_GATEWAY,
-            Json(crate::envelope::upstream_unavailable()),
-        ),
-    }
 }
 
 /// `POST /api/v1/browser/runs/:run_id/control` — pause / resume / stop a
@@ -1704,9 +2096,11 @@ pub(crate) async fn control_ai_run(
 /// authorized by [`owned_browser_artifact_run`]; neither can read the other
 /// tenant's evidence.
 ///
-/// Quarry's own `GET /v1/artifacts/:id` applies no tenant scoping, so the
-/// ownership gate below is the *only* isolation boundary on this path and must
-/// run before any upstream call.
+/// Quarry's `GET /v1/artifacts/:id` binds the artifact to the caller's org
+/// (`resource_routes.rs` `get_artifact`, from the verified claims), so an id
+/// from another tenant reads as not found. The ownership gate below adds the
+/// per-run and per-user binding inside the org, and must run before any upstream
+/// call.
 async fn get_artifact(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1750,7 +2144,7 @@ async fn get_artifact(
         state.quarry_edge_url,
         urlencoding::encode(&artifact_id)
     );
-    let mut req = state.client.get(&url).header("x-user-id", &user.user_id);
+    let mut req = crate::request_id::apply(state.client.get(&url)).header("x-user-id", &user.user_id);
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }
@@ -1769,7 +2163,7 @@ async fn get_artifact(
                     return BrowserArtifactAbsence::NeverStored.into_response();
                 }
                 let body = upstream.json::<Value>().await.unwrap_or_else(
-                    |_| json!({ "error": { "code": "browser_artifact_unavailable" } }),
+                    |_| json!({ "error": { "code": "browser_artifact_failed" } }),
                 );
                 return forward_quarry_failure(status, body);
             }
@@ -2025,7 +2419,12 @@ async fn stream_live_frames(
     .await
 }
 
-async fn get_devtools_events(
+/// `GET /api/v1/browser/sessions/{session_id}/events/stream` (WS10.S3): the run's typed
+/// events as SSE, proxied from Quarry without buffering. The owner check is Quarry's
+/// (the projection call answers 404 to anyone else, and the stream is not opened). The
+/// `Last-Event-ID` header and the query (`from_seq`, `max_events`) pass through; Quarry
+/// owns the replay ring. The live-frame stream is the model.
+async fn stream_agent_events(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -2056,13 +2455,78 @@ async fn get_devtools_events(
         Ok(projection) => projection,
         Err(response) => return response,
     };
+    let url = format!(
+        "{}/v1/agent/runs/{}/events/stream{}",
+        state.quarry_edge_url,
+        urlencoding::encode(&session_id),
+        query_suffix(&uri)
+    );
+
+    proxy_sse_stream(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        headers.get("last-event-id").and_then(|v| v.to_str().ok()),
+        None,
+        projection
+            .get("zdr")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    )
+    .await
+}
+
+async fn get_devtools_events(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    uri: Uri,
+) -> Response {
+    // WS9.C: only the typed filters and cursor reach Quarry; unknown keys are dropped.
+    let devtools_query = match super::browser_evidence::safe_devtools_query(&uri) {
+        Ok(query) => query,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(error("invalid_devtools_query", message)),
+            )
+                .into_response();
+        }
+    };
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let projection = match owner_browser_session_projection(
+        &state,
+        &user,
+        token.as_deref(),
+        &session_id,
+    )
+    .await
+    {
+        Ok(projection) => projection,
+        Err(response) => return response,
+    };
     let (status, body) = quarry_call(
         &state,
         Method::GET,
         &format!(
             "/v1/agent/runs/{}/devtools{}",
             urlencoding::encode(&session_id),
-            query_suffix(&uri)
+            devtools_query
         ),
         None,
         token.as_deref(),
@@ -2085,6 +2549,7 @@ async fn get_devtools_events(
         StatusCode::OK,
         Json(ok(json!({
             "events": events,
+            "nextSequence": data.get("nextSequence").cloned().unwrap_or(Value::Null),
             "session": response["session"],
             "zdr": data
                 .get("zdr")
@@ -2819,7 +3284,7 @@ fn browser_response(
                 "eventCount": metadata.replay_events.len()
             },
             "zdr": metadata.zdr,
-            "capabilities": ["navigate", "back", "forward", "click", "click_point", "type", "press", "scroll", "mouse_wheel", "wait_for", "select", "inspect_dom", "control_state", "human_takeover", "agent_control", "tabs", "live_frame", "live_frame_stream", "live_frame_ws", "devtools_events", "devtools_stream", "replay_timeline", "screenshot_artifact", "visual_observation", "visual_change", "annotate", "persistent_profile"]
+            "capabilities": ["navigate", "back", "forward", "reload", "hard_reload", "click", "click_point", "type", "press", "scroll", "mouse_wheel", "wait_for", "select", "inspect_dom", "control_state", "human_takeover", "agent_control", "tabs", "live_frame", "live_frame_stream", "live_frame_ws", "devtools_events", "devtools_stream", "replay_timeline", "screenshot_artifact", "visual_observation", "visual_change", "annotate", "persistent_profile", "evidence"]
         },
         "observation": observation
     })
@@ -2925,7 +3390,8 @@ fn browser_response_from_owner_projection(projection: &Value, observation: Optio
                 "storage": if projection.get("profileStorage").and_then(Value::as_str) == Some("persistent") { "persistent" } else { "isolated" }
             },
             "control": {
-                "mode": projection.get("controlMode").cloned().unwrap_or_else(|| Value::String("agent_control".to_owned()))
+                "mode": projection.get("controlMode").cloned().unwrap_or_else(|| Value::String("agent_control".to_owned())),
+                "epoch": projection.get("controlEpoch").cloned().unwrap_or(Value::Null)
             },
             "frame": frame,
             "liveFrameUrl": live.then(|| live_frame_url(run_id)),
@@ -2941,10 +3407,57 @@ fn browser_response_from_owner_projection(projection: &Value, observation: Optio
             "timeline": [],
             "replay": { "events": [], "eventCount": 0 },
             "zdr": projection.get("zdr").and_then(Value::as_bool).unwrap_or(false),
-            "capabilities": ["navigate", "back", "forward", "click", "click_point", "type", "press", "scroll", "mouse_wheel", "wait_for", "select", "inspect_dom", "control_state", "human_takeover", "agent_control", "tabs", "live_frame", "live_frame_stream", "devtools_events", "screenshot_artifact", "visual_observation", "visual_change", "annotate", "persistent_profile"]
+            "capabilities": browser_session_capabilities(projection)
         },
         "observation": observation
     })
+}
+
+/// The capabilities the SPA may act on for a session. The three WS8.D additions are read
+/// from Quarry's projection, so none is advertised until Quarry reports it: `human_browsing`
+/// needs `grantKind == "human_browse"`, `tab_control` the boolean `tabControl`, and `attach`
+/// the boolean `attachAvailable` (false until WS8.F).
+fn browser_session_capabilities(projection: &Value) -> Vec<&'static str> {
+    let flag = |key: &str| projection.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let mut capabilities = vec![
+        "navigate",
+        "back",
+        "forward",
+        "reload",
+        "hard_reload",
+        "click",
+        "click_point",
+        "type",
+        "press",
+        "scroll",
+        "mouse_wheel",
+        "wait_for",
+        "select",
+        "inspect_dom",
+        "control_state",
+        "human_takeover",
+        "agent_control",
+        "tabs",
+        "live_frame",
+        "live_frame_stream",
+        "devtools_events",
+        "screenshot_artifact",
+        "visual_observation",
+        "visual_change",
+        "annotate",
+        "persistent_profile",
+        "evidence",
+    ];
+    if projection.get("grantKind").and_then(Value::as_str) == Some("human_browse") {
+        capabilities.push("human_browsing");
+    }
+    if flag("tabControl") {
+        capabilities.push("tab_control");
+    }
+    if flag("attachAvailable") {
+        capabilities.push("attach");
+    }
+    capabilities
 }
 
 /// Temporary typed view for BFF request normalization. It is reconstructed
@@ -3876,7 +4389,7 @@ async fn fetch_quarry_artifact_bytes(
         state.quarry_edge_url,
         urlencoding::encode(artifact_id)
     );
-    let mut req = state.client.get(&url).header("x-user-id", &user.user_id);
+    let mut req = crate::request_id::apply(state.client.get(&url)).header("x-user-id", &user.user_id);
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }
@@ -3943,6 +4456,13 @@ fn normalize_optional_public_url(raw: Option<&str>) -> Result<Option<String>, St
     normalize_public_http_url(raw).map(Some)
 }
 
+/// Reload is a human-only wire action (WS9.B). An agent-actor request for it
+/// is refused before any Quarry call.
+fn reload_refused_for_actor(action: &Value, actor: BrowserActionActor) -> bool {
+    actor == BrowserActionActor::Agent
+        && action.get("type").and_then(Value::as_str) == Some("reload")
+}
+
 fn sanitize_action(mut action: Value) -> Result<Value, (&'static str, String)> {
     let action_type = action
         .get("type")
@@ -3991,6 +4511,33 @@ fn sanitize_action(mut action: Value) -> Result<Value, (&'static str, String)> {
                 ));
             }
             Ok(action)
+        }
+        "reload" => {
+            let known_keys = action
+                .as_object()
+                .map(|object| {
+                    object
+                        .keys()
+                        .all(|key| key == "type" || key == "ignore_cache")
+                })
+                .unwrap_or(false);
+            if !known_keys {
+                return Err((
+                    "invalid_browser_action",
+                    "Reload accepts only ignore_cache.".to_owned(),
+                ));
+            }
+            let ignore_cache = match action.get("ignore_cache") {
+                None => false,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => {
+                    return Err((
+                        "invalid_browser_action",
+                        "ignore_cache must be a boolean.".to_owned(),
+                    ))
+                }
+            };
+            Ok(json!({ "type": "reload", "ignore_cache": ignore_cache }))
         }
         "evaluate" => Err((
             "browser_action_denied",
@@ -4041,7 +4588,7 @@ fn validate_wheel_delta(action: &Value, field: &'static str) -> Result<(), (&'st
     }
 }
 
-async fn quarry_call(
+pub(super) async fn quarry_call(
     state: &AppState,
     method: Method,
     path: &str,
@@ -4054,7 +4601,7 @@ async fn quarry_call(
     (status, value)
 }
 
-async fn quarry_token(state: &AppState, user: &AuthenticatedUser, cookie: &str) -> Option<String> {
+pub(super) async fn quarry_token(state: &AppState, user: &AuthenticatedUser, cookie: &str) -> Option<String> {
     if let Some(token) = get_audience_token(state, &user.user_id, cookie, "quarry").await {
         return Some(token);
     }
@@ -4072,7 +4619,412 @@ fn dev_quarry_token_for(allow_dev_auth_bypass: bool) -> Option<String> {
     allow_dev_auth_bypass.then(|| "dev-bypass".to_owned())
 }
 
-fn cookie_header(headers: &HeaderMap) -> String {
+// ---------------------------------------------------------------------------
+// BrowserBroker session grants (WS1.B)
+// ---------------------------------------------------------------------------
+
+/// Model Gateway JSON call that carries the delegated credentials a browser
+/// grant or browser run needs, each on its own audience-bound header (for
+/// example `x-browser-authorization` for `aud=browser-broker`). Org and role
+/// headers follow `proxy_model_json`; the role is a presentation hint only.
+///
+/// Local to the browser domain until `chat::shared`'s proxy grows a browser
+/// slot (the plan's `proxy_model_json_with_browser`); it never forwards a
+/// credential under a header other than the one named for its audience.
+async fn proxy_model_json_with_delegated(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    delegations: &[(&'static str, &str)],
+    user: &AuthenticatedUser,
+) -> (StatusCode, Json<Value>) {
+    proxy_model_json_with_delegated_headers(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        delegations,
+        &[],
+        user,
+    )
+    .await
+}
+
+/// `proxy_model_json_with_delegated` plus plain request headers
+/// (`extra_headers`: name and the raw value, which a caller has already
+/// checked). They are not credentials and never get a `Bearer ` prefix.
+// reason: one more distinct argument than the plain call; the plain call is
+// the wrapper above and the only other way in.
+#[allow(clippy::too_many_arguments)]
+async fn proxy_model_json_with_delegated_headers(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    delegations: &[(&'static str, &str)],
+    extra_headers: &[(&'static str, &str)],
+    user: &AuthenticatedUser,
+) -> (StatusCode, Json<Value>) {
+    let org_id = authorized_org_id(state, user).await;
+    let user_role = user
+        .auth_role
+        .as_deref()
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .unwrap_or("member");
+    let mut req = state
+        .client
+        .request(method, url)
+        .header("x-user-id", &user.user_id)
+        .header("x-user-role", user_role);
+    req = crate::request_id::apply(req);
+    if !org_id.trim().is_empty() {
+        req = req.header("x-org-id", org_id);
+    }
+    if let Some(token) = bearer_token {
+        req = req.bearer_auth(token);
+    }
+    for (header_name, token) in delegations {
+        if let Some(value) = data_plane_authorization_value(token) {
+            req = req.header(*header_name, value);
+        }
+    }
+    for (header_name, value) in extra_headers {
+        if let Ok(value) = axum::http::HeaderValue::from_str(value) {
+            req = req.header(*header_name, value);
+        }
+    }
+    if let Some(body) = body {
+        req = req.json(&body);
+    }
+    match req.send().await {
+        Ok(resp) => {
+            let status =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let body = resp.json::<Value>().await.unwrap_or_else(|_| json!({}));
+            (status, Json(body))
+        }
+        Err(_) => (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "model_gateway_unreachable",
+                "Model Gateway is temporarily unavailable.",
+            )),
+        ),
+    }
+}
+
+/// The delegated `aud=browser-broker` credential for this user.
+async fn browser_broker_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Result<String, RequiredAudienceTokenError> {
+    require_model_service_token(
+        state,
+        &user.user_id,
+        &cookie_header(headers),
+        ModelServiceAudience::BrowserBroker,
+    )
+    .await
+}
+
+/// Why a session grant could not be issued, as the SPA sees it in strict mode.
+fn session_grant_refusal(upstream: Option<StatusCode>) -> Response {
+    let (status, code, message) = match upstream {
+        Some(StatusCode::BAD_REQUEST) | None => (
+            StatusCode::BAD_REQUEST,
+            "browser_host_not_grantable",
+            "This address cannot be opened in the in-app browser.",
+        ),
+        Some(StatusCode::FORBIDDEN) => (
+            StatusCode::FORBIDDEN,
+            "browser_grant_denied",
+            "Browser access was not granted for this session.",
+        ),
+        Some(StatusCode::TOO_MANY_REQUESTS) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "browser_grant_limit_reached",
+            "Too many browser sessions are open. Close one and try again.",
+        ),
+        Some(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "browser_grant_unavailable",
+            "Browser access is temporarily unavailable.",
+        ),
+    };
+    (status, Json(error(code, message))).into_response()
+}
+
+/// What a session's BrowserBroker grant covers (WS8.D).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionGrantScope<'a> {
+    /// The start host only: the first-host session grant every session had before WS8.D.
+    StartHost(Option<&'a str>),
+    /// A person's own open-web browsing. A `human_browse` grant names no hosts.
+    HumanBrowse,
+}
+
+/// The `POST /v1/browser/grants` body for a scope (WS8.D). `None` means there is no
+/// host to grant (a start URL without one).
+fn session_grant_request_body(scope: SessionGrantScope<'_>, zdr: bool) -> Option<Value> {
+    match scope {
+        SessionGrantScope::StartHost(Some(host)) => {
+            Some(json!({ "allowed_domains": [host], "zdr": zdr }))
+        }
+        SessionGrantScope::StartHost(None) => None,
+        SessionGrantScope::HumanBrowse => Some(json!({ "kind": "human_browse", "zdr": zdr })),
+    }
+}
+
+/// The Quarry start-body `constraints` for a session (WS8.D). A human_browse session
+/// sends none: Quarry takes its bounds from the broker policy, so no step, time or host
+/// literal reaches it. Every other session keeps the first-host policy (12 steps, 120 s).
+fn session_start_constraints(human_grant: bool, start_host: Option<&str>) -> Option<Value> {
+    if human_grant {
+        return None;
+    }
+    Some(json!({
+        "max_steps": 12,
+        "allowed_domains": start_host.map(|domain| vec![domain]).unwrap_or_default(),
+        "max_runtime_s": 120
+    }))
+}
+
+/// Obtains a BrowserBroker grant for a session (WS8.D: the start host, or a person's
+/// open-web `human_browse` grant).
+///
+/// `Ok(None)` means the session opens without a grant: the mode is `Off`, or it is
+/// `Permissive` and issuance failed. In `Strict` every failure is an error response
+/// and no Quarry run is started. Hosts are never logged.
+async fn issue_session_grant(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    scope: SessionGrantScope<'_>,
+    zdr: bool,
+) -> Result<Option<String>, Response> {
+    let mode = state.browser_grant_mode;
+    if !mode.issues_grants() {
+        return Ok(None);
+    }
+    let strict = mode == BrowserGrantMode::Strict;
+    let Some(request_body) = session_grant_request_body(scope, zdr) else {
+        return if strict {
+            Err(session_grant_refusal(None))
+        } else {
+            Ok(None)
+        };
+    };
+    let (model, browser) = tokio::join!(
+        model_token(state, user, headers),
+        browser_broker_token(state, user, headers),
+    );
+    let browser = match browser {
+        Ok(token) => token,
+        Err(error) if strict => return Err(delegated_auth_unavailable(error).into_response()),
+        Err(_) => {
+            tracing::warn!(
+                outcome = "browser_token_unavailable",
+                "browser session opened without a grant (permissive)"
+            );
+            return Ok(None);
+        }
+    };
+    let url = format!("{}/v1/browser/grants", state.model_gateway_url);
+    let (status, Json(body)) = proxy_model_json_with_delegated(
+        state,
+        Method::POST,
+        &url,
+        Some(request_body),
+        model.as_deref(),
+        &[("x-browser-authorization", browser.as_str())],
+        user,
+    )
+    .await;
+    let grant_id = status
+        .is_success()
+        .then(|| str_field(&unwrap_data(&body), "grant_id"))
+        .flatten()
+        .filter(|id| is_valid_path_segment(id));
+    match grant_id {
+        Some(grant_id) => Ok(Some(grant_id)),
+        None if strict => Err(session_grant_refusal(Some(status))),
+        None => {
+            tracing::warn!(
+                status = status.as_u16(),
+                outcome = "grant_not_issued",
+                "browser session opened without a grant (permissive)"
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// Revokes a session grant, best effort: a failure leaves the grant to expire
+/// on its own TTL, and revoking an already-gone grant is a 200 upstream.
+async fn revoke_session_grant(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    grant_id: &str,
+) {
+    if !is_valid_path_segment(grant_id) {
+        return;
+    }
+    let (model, browser) = tokio::join!(
+        model_token(state, user, headers),
+        browser_broker_token(state, user, headers),
+    );
+    let Ok(browser) = browser else {
+        return;
+    };
+    let url = format!(
+        "{}/v1/browser/grants/{}",
+        state.model_gateway_url,
+        urlencoding::encode(grant_id)
+    );
+    let (status, _) = proxy_model_json_with_delegated(
+        state,
+        Method::DELETE,
+        &url,
+        None,
+        model.as_deref(),
+        &[("x-browser-authorization", browser.as_str())],
+        user,
+    )
+    .await;
+    if !status.is_success() {
+        tracing::warn!(
+            status = status.as_u16(),
+            "browser session grant revoke failed; it expires on its TTL"
+        );
+    }
+}
+
+/// Quarry's owner projection as the SPA may see it: unchanged except that the
+/// session grant id (`projection_grant_id`) is removed.
+fn spa_owner_projection(mut projection: Value) -> Value {
+    if let Some(object) = projection.as_object_mut() {
+        object.remove("grantId");
+        object.remove("grant_id");
+    }
+    projection
+}
+
+/// The client's `Idempotency-Key` for an AI-run start: one header, 1 to 128
+/// characters of `A-Z a-z 0-9 - _ . :`. Model Gateway enforces the same shape;
+/// checking it here keeps a malformed key from costing a token mint and a round
+/// trip, and keeps the SPA's error in the gateway's own envelope.
+fn client_idempotency_key(headers: &HeaderMap) -> Result<Option<String>, Response> {
+    let refusal = || {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_idempotency_key",
+                "The Idempotency-Key header must be 1 to 128 letters, digits, '-', '_', '.' or ':'.",
+            )),
+        )
+            .into_response()
+    };
+    let mut values = headers.get_all("idempotency-key").iter();
+    let Some(first) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(refusal());
+    }
+    let key = first.to_str().map_err(|_| refusal())?.trim();
+    if key.is_empty()
+        || key.len() > 128
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(refusal());
+    }
+    Ok(Some(key.to_owned()))
+}
+
+/// Model Gateway's refusals of a keyed AI-run start, in the gateway's own
+/// typed envelope. `None` for anything else. The raw upstream strings
+/// (`idempotency_key_reused`, `idempotency_key_run_ended`,
+/// `idempotency_replay_unverified`) never reach the SPA.
+fn idempotency_refusal(status: StatusCode, body: &Value) -> Option<Response> {
+    let code = body.get("error").and_then(Value::as_str)?;
+    match (status, code) {
+        (StatusCode::CONFLICT, "idempotency_key_reused") => Some(
+            (
+                StatusCode::CONFLICT,
+                Json(error(
+                    "browser_idempotency_key_reused",
+                    "This request key was already used for a different goal. Use a new key to start a new run.",
+                )),
+            )
+                .into_response(),
+        ),
+        (StatusCode::CONFLICT, "idempotency_key_run_ended") => {
+            let mut response = error(
+                "browser_idempotency_key_run_ended",
+                "The run for this request key has already ended. Use a new key to start another run.",
+            );
+            if let Some(run_id) = body
+                .get("run_id")
+                .and_then(Value::as_str)
+                .filter(|id| is_valid_path_segment(id))
+            {
+                response["error"]["details"] = json!({ "runId": run_id });
+            }
+            Some((StatusCode::CONFLICT, Json(response)).into_response())
+        }
+        (StatusCode::SERVICE_UNAVAILABLE, "idempotency_replay_unverified") => Some(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::RETRY_AFTER, "5")],
+                Json(error(
+                    "browser_idempotency_unverified",
+                    "The earlier run for this request key could not be confirmed. Try again shortly.",
+                )),
+            )
+                .into_response(),
+        ),
+        _ => None,
+    }
+}
+
+/// Whether Model Gateway refused an AI run because the session grant can no
+/// longer back one. The session grant is issued once, when the session opens,
+/// for the broker's grant TTL (15 minutes by default, at most an hour), and is
+/// not renewed (WS1.B): a session older than that, or one whose grant was
+/// revoked, lands here. Model Gateway never says which (it does not tell
+/// expired, revoked and unknown grants apart), so a 403 is read this way only
+/// when the request did not name hosts; with explicit hosts a 403 may be a
+/// widening refusal and is forwarded unchanged.
+fn session_grant_inactive(status: StatusCode, body: &Value, names_hosts: bool) -> bool {
+    let code = body.get("error").and_then(Value::as_str);
+    match status {
+        StatusCode::CONFLICT => code == Some("browser_grant_not_derivable"),
+        StatusCode::FORBIDDEN => !names_hosts && code == Some("browser grant is not authorized"),
+        _ => false,
+    }
+}
+
+/// The session grant id from Quarry's owner projection. Internal: it is read
+/// to derive AI-run grants and to revoke on close, never sent to the SPA.
+fn projection_grant_id(projection: &Value) -> Option<String> {
+    projection
+        .get("grantId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && is_valid_path_segment(id))
+        .map(str::to_owned)
+}
+
+pub(super) fn cookie_header(headers: &HeaderMap) -> String {
     headers
         .get("cookie")
         .and_then(|v| v.to_str().ok())
@@ -4089,7 +5041,7 @@ fn cookie_header(headers: &HeaderMap) -> String {
 /// or a transport/upstream failure (`5xx`). A ZDR run must land here, never on
 /// either of those.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BrowserArtifactAbsence {
+pub(super) enum BrowserArtifactAbsence {
     /// Zero Data Retention run: Quarry refused the artifact write at capture
     /// time, so nothing was ever stored and nothing ever will be.
     Withheld,
@@ -4099,7 +5051,7 @@ enum BrowserArtifactAbsence {
 }
 
 impl BrowserArtifactAbsence {
-    fn into_response(self) -> Response {
+    pub(super) fn into_response(self) -> Response {
         let (code, message) = match self {
             Self::Withheld => (
                 "browser_artifact_withheld",
@@ -4114,7 +5066,201 @@ impl BrowserArtifactAbsence {
     }
 }
 
-fn forward_quarry_failure(status: StatusCode, body: Value) -> Response {
+/// The body of a `/step` call for an action the person or the model proposed. An
+/// action the model proposed carries `initiated_by: "agent"`, so Quarry (which owns
+/// the browser) can refuse it while the person has taken over. A person's own action
+/// carries no hint: Quarry already takes it for the person's.
+fn step_request_body(action: Value, actor: BrowserActionActor, advisory: &AgentAdvisory) -> Value {
+    match actor {
+        BrowserActionActor::Agent => {
+            let mut body = json!({ "action": action, "initiated_by": "agent" });
+            advisory.put_in(&mut body);
+            body
+        }
+        BrowserActionActor::Human => json!({ "action": action }),
+    }
+}
+
+/// A start or call Quarry refused because a cap is full, as the gateway's own
+/// 429 with `Retry-After`. Only the retry hint survives; nothing else from the
+/// upstream body is echoed. `None` for any other 429.
+///
+/// - The run caps (`global_run_cap`, `org_run_cap`, `org_interactive_run_cap`,
+///   and the plan's own `org_plan_cap`), the organization's share of the render
+///   pool (`org_render_cap`, WS6.G) and the driver's session cap (`browser_session_cap`, WS3.F) are one thing
+///   to a person: the browser is full, try shortly. `browser_capacity_reached`.
+/// - The driver's page cap (`browser_page_cap`) is a different one: this
+///   browser holds too many tabs, and closing one also helps.
+///   `browser_tab_limit_reached`.
+fn browser_capacity_response(body: &Value) -> Option<Response> {
+    let details = body.pointer("/error/details")?;
+    let reason = details.get("reason")?.as_str()?;
+    let (code, message) = match reason {
+        "global_run_cap"
+        | "org_run_cap"
+        | "org_interactive_run_cap"
+        | "org_plan_cap"
+        | "org_render_cap"
+        | "browser_session_cap" => (
+            "browser_capacity_reached",
+            "Browser capacity is full. Try again shortly.",
+        ),
+        "browser_page_cap" => (
+            "browser_tab_limit_reached",
+            "The browser has too many tabs open. Close a tab or try again shortly.",
+        ),
+        _ => return None,
+    };
+    let retry_after = details
+        .get("retry_after_seconds")
+        .and_then(Value::as_u64)
+        .filter(|seconds| (1..=3600).contains(seconds))
+        .unwrap_or(10);
+    let mut response = error(code, message);
+    response["error"]["retryAfterSeconds"] = json!(retry_after);
+    Some(
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(axum::http::header::RETRY_AFTER, retry_after.to_string())],
+            Json(response),
+        )
+            .into_response(),
+    )
+}
+
+/// A browser session the driver no longer holds (WS3.F), as `410 Gone`: Quarry
+/// answers `502 DRIVER_FAILED` with `details.reason` `session_reaped` (the idle
+/// reaper closed it) or `browser_process_lost` (Chromium exited). Neither is
+/// retryable: repeating the call cannot help, the person starts a new session.
+/// No `Retry-After`. `None` for any other `DRIVER_FAILED` (for example
+/// `viewport_emulation_failed`, `no_current_page`), which passes through.
+fn browser_session_lost_response(body: &Value) -> Option<Response> {
+    if body.pointer("/error/code").and_then(Value::as_str) != Some("DRIVER_FAILED") {
+        return None;
+    }
+    let (code, message) = match body.pointer("/error/details/reason")?.as_str()? {
+        "session_reaped" => (
+            "browser_session_reaped",
+            "This browser session was closed after being idle. Start a new session.",
+        ),
+        "browser_process_lost" => (
+            "browser_process_lost",
+            "The browser behind this session stopped unexpectedly. Start a new session.",
+        ),
+        _ => return None,
+    };
+    Some((StatusCode::GONE, Json(error(code, message))).into_response())
+}
+
+/// Quarry's `403 CHALLENGE_DETECTED` on a browser call (WS3.H/WS3.J): the host
+/// stands behind a bot wall, or the one recovery the run was allowed is spent
+/// and Quarry refuses to act on it. The upstream body names the host and carries
+/// Quarry's own message, so it is never forwarded: the SPA gets the gateway's
+/// own `browser_site_blocked` with the two typed hints it has copy for.
+///
+/// - `blockReason`: `details.block_reason` (scrape path) or `details.reason`
+///   (agent path, where it is `challenge_loop`), only when it is one of the
+///   closed `BlockReason` strings; otherwise absent.
+/// - `recovery`: `details.recovery`, only when it is one of the closed
+///   `ChallengeRecovery` strings; otherwise absent.
+///
+/// `None` for any other code, so a 403 that is not a challenge (`FORBIDDEN`,
+/// `SECURITY_BLOCKED`) passes through as before.
+fn browser_site_blocked_response(body: &Value) -> Option<Response> {
+    if body.pointer("/error/code").and_then(Value::as_str) != Some("CHALLENGE_DETECTED") {
+        return None;
+    }
+    let typed = |pointers: &[&str], known: &[&'static str]| -> Option<&'static str> {
+        pointers.iter().find_map(|pointer| {
+            let value = body.pointer(pointer)?.as_str()?;
+            known.iter().copied().find(|candidate| *candidate == value)
+        })
+    };
+    let block_reason = typed(
+        &["/error/details/block_reason", "/error/details/reason"],
+        &[
+            "captcha_widget",
+            "waf_interstitial",
+            "unexpected_bot_error",
+            "challenge_loop",
+        ],
+    );
+    let recovery = typed(
+        &["/error/details/recovery"],
+        &["available", "exhausted", "not_applicable"],
+    );
+    let mut response = error(
+        "browser_site_blocked",
+        "This site blocks automated browsing. Take over the browser yourself or try another source.",
+    );
+    if let Some(reason) = block_reason {
+        response["error"]["blockReason"] = json!(reason);
+    }
+    if let Some(recovery) = recovery {
+        response["error"]["recovery"] = json!(recovery);
+    }
+    Some((StatusCode::FORBIDDEN, Json(response)).into_response())
+}
+
+pub(super) fn forward_quarry_failure(status: StatusCode, body: Value) -> Response {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        if let Some(response) = browser_capacity_response(&body) {
+            return response;
+        }
+    }
+    if let Some(response) = browser_session_lost_response(&body) {
+        return response;
+    }
+    if status == StatusCode::FORBIDDEN {
+        if let Some(response) = browser_site_blocked_response(&body) {
+            return response;
+        }
+    }
+    // Quarry enforces the takeover itself; the SPA only knows the gateway's own
+    // code for it, so translate (and keep the control epoch for the caller).
+    if body.pointer("/error/code").and_then(Value::as_str) == Some("USER_TOOK_OVER") {
+        let mut response = error(
+            "browser_human_takeover_active",
+            "Human takeover is active for this browser session.",
+        );
+        if let Some(details) = body.pointer("/error/details") {
+            response["error"]["details"] = details.clone();
+        }
+        return (StatusCode::CONFLICT, Json(response)).into_response();
+    }
+    // WS9.I: a control change refused because the epoch moved on. Quarry answers CONFLICT with
+    // the epochs in its details; only that shape maps, any other 409 passes through.
+    if status == StatusCode::CONFLICT
+        && body.pointer("/error/code").and_then(Value::as_str) == Some("CONFLICT")
+        && body.pointer("/error/details/control_epoch").is_some()
+    {
+        let mut response = error(
+            "browser_control_epoch_stale",
+            "Browser control changed elsewhere. Refresh and try again.",
+        );
+        if let Some(details) = body.pointer("/error/details") {
+            response["error"]["details"] = details.clone();
+        }
+        return (StatusCode::CONFLICT, Json(response)).into_response();
+    }
+    // A navigation outside the run's allowed domains (Quarry's 403 for a
+    // cross-host click). WS8 will emit a typed code; until then the match is
+    // on Quarry's message, and the SPA gets the typed code its copy is keyed on.
+    if status == StatusCode::FORBIDDEN
+        && body
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains("outside the run's allowed domains"))
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "browser_navigation_outside_scope",
+                "This session is limited to the domains of its run.",
+            )),
+        )
+            .into_response();
+    }
     if body.get("error").is_some() {
         return (status, Json(body)).into_response();
     }
@@ -4143,7 +5289,7 @@ fn hostname(value: &str) -> Option<String> {
         .and_then(|url| url.host_str().map(str::to_owned))
 }
 
-fn is_valid_path_segment(value: &str) -> bool {
+pub(super) fn is_valid_path_segment(value: &str) -> bool {
     let len = value.len();
     (3..=128).contains(&len)
         && value
@@ -4151,7 +5297,7 @@ fn is_valid_path_segment(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
-fn is_valid_artifact_id(value: &str) -> bool {
+pub(super) fn is_valid_artifact_id(value: &str) -> bool {
     value
         .strip_prefix("art_")
         .is_some_and(|suffix| !suffix.is_empty() && is_valid_path_segment(value))
@@ -4181,6 +5327,27 @@ fn safe_browser_artifact_content_type(value: Option<&str>, bytes: &[u8]) -> Head
     }
 }
 
+/// The content type a knowledge scrape artifact may be served as (WS13.7). Only
+/// the three image types and `application/pdf` pass; an unknown or missing type is
+/// `None` and the caller refuses it. Unlike `safe_browser_artifact_content_type`
+/// there is no `image/png` fallback, so a capture stored under another type is
+/// never served as an image.
+pub(super) fn scrape_artifact_content_type(value: Option<&str>) -> Option<&'static str> {
+    match value
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+    {
+        "image/png" => Some("image/png"),
+        "image/jpeg" => Some("image/jpeg"),
+        "image/webp" => Some("image/webp"),
+        "application/pdf" => Some("application/pdf"),
+        _ => None,
+    }
+}
+
 fn safe_model_screenshot_content_type(value: Option<&str>) -> &'static str {
     match value
         .unwrap_or_default()
@@ -4204,8 +5371,799 @@ fn looks_like_json_payload(bytes: &[u8]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn run_action_forwards_agent_initiator_to_quarry() {
+        let action = json!({ "type": "back" });
+        assert_eq!(
+            step_request_body(action.clone(), BrowserActionActor::Agent, &AgentAdvisory::default()),
+            json!({ "action": { "type": "back" }, "initiated_by": "agent" })
+        );
+        assert_eq!(
+            step_request_body(action, BrowserActionActor::Human, &AgentAdvisory::default()),
+            json!({ "action": { "type": "back" } }),
+            "a person's own action carries no hint"
+        );
+    }
+
+    #[test]
+    fn tab_calls_forward_only_the_fixed_agent_hint_to_quarry() {
+        assert_eq!(
+            new_tab_request_body(
+                Some("https://example.test/".to_owned()),
+                BrowserActionActor::Agent,
+                &AgentAdvisory::default()
+            ),
+            json!({ "url": "https://example.test/", "initiatedBy": "agent" })
+        );
+        assert_eq!(
+            new_tab_request_body(None, BrowserActionActor::Human, &AgentAdvisory::default()),
+            json!({ "url": null }),
+            "a person's own tab open carries no hint"
+        );
+        assert_eq!(
+            tab_call_query(BrowserActionActor::Agent, &AgentAdvisory::default()),
+            "?initiatedBy=agent"
+        );
+        assert_eq!(
+            tab_call_query(BrowserActionActor::Human, &AgentAdvisory::default()),
+            "",
+            "a person's own select or close carries no hint"
+        );
+    }
+
+    fn headers_with(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in pairs {
+            headers.insert(*name, HeaderValue::from_str(value).expect("a header value"));
+        }
+        headers
+    }
+
+    #[test]
+    fn an_agents_tab_and_step_calls_forward_the_advisory_identity_to_quarry() {
+        let headers = headers_with(&[
+            (AGENT_RUN_ID_HEADER, "run_01J9"),
+            (AGENT_LABEL_HEADER, "research-planner"),
+        ]);
+        let advisory = AgentAdvisory::from_headers(&headers).for_actor(BrowserActionActor::Agent);
+        assert_eq!(
+            new_tab_request_body(None, BrowserActionActor::Agent, &advisory),
+            json!({
+                "url": null,
+                "initiatedBy": "agent",
+                "aiRunId": "run_01J9",
+                "agentLabel": "research-planner"
+            })
+        );
+        assert_eq!(
+            tab_call_query(BrowserActionActor::Agent, &advisory),
+            "?initiatedBy=agent&aiRunId=run_01J9&agentLabel=research-planner"
+        );
+        assert_eq!(
+            step_request_body(json!({ "type": "back" }), BrowserActionActor::Agent, &advisory),
+            json!({
+                "action": { "type": "back" },
+                "initiated_by": "agent",
+                "aiRunId": "run_01J9",
+                "agentLabel": "research-planner"
+            })
+        );
+    }
+
+    #[test]
+    fn a_persons_own_call_never_carries_the_advisory_identity() {
+        let headers = headers_with(&[(AGENT_RUN_ID_HEADER, "run_01J9"), (AGENT_LABEL_HEADER, "x")]);
+        let advisory = AgentAdvisory::from_headers(&headers).for_actor(BrowserActionActor::Human);
+        assert_eq!(advisory, AgentAdvisory::default());
+        assert_eq!(
+            new_tab_request_body(None, BrowserActionActor::Human, &advisory),
+            json!({ "url": null })
+        );
+        assert_eq!(tab_call_query(BrowserActionActor::Human, &advisory), "");
+        assert_eq!(
+            step_request_body(json!({ "type": "back" }), BrowserActionActor::Human, &advisory),
+            json!({ "action": { "type": "back" } })
+        );
+    }
+
+    #[test]
+    fn the_advisory_identity_is_identifier_shaped_or_dropped() {
+        let long = "a".repeat(65);
+        for rejected in [
+            "",
+            "has space",
+            "https://example.test/x",
+            "a/b",
+            "a&aiRunId=forged",
+            "a?b",
+            "tab\tname",
+            long.as_str(),
+        ] {
+            // A header value cannot hold every one of these; those that it can are dropped.
+            let Ok(value) = HeaderValue::from_str(rejected) else { continue };
+            let mut headers = HeaderMap::new();
+            headers.insert(AGENT_RUN_ID_HEADER, value.clone());
+            headers.insert(AGENT_LABEL_HEADER, value);
+            assert_eq!(
+                AgentAdvisory::from_headers(&headers),
+                AgentAdvisory::default(),
+                "{rejected:?}"
+            );
+        }
+        // A non-ASCII value is a header the gateway cannot read as text: dropped too.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AGENT_LABEL_HEADER,
+            HeaderValue::from_bytes("caf\u{e9}".as_bytes()).expect("opaque bytes"),
+        );
+        assert_eq!(AgentAdvisory::from_headers(&headers), AgentAdvisory::default());
+    }
+
+    #[test]
+    fn the_tab_actor_query_takes_human_or_agent_and_nothing_else() {
+        let parse = |query: &str| {
+            let uri: Uri = format!("/select{query}").parse().expect("a valid uri");
+            Query::<TabActorQuery>::try_from_uri(&uri).map(|Query(parsed)| parsed.actor)
+        };
+        assert_eq!(parse("").expect("absent"), BrowserActionActor::Human);
+        assert_eq!(parse("?actor=human").expect("human"), BrowserActionActor::Human);
+        assert_eq!(parse("?actor=agent").expect("agent"), BrowserActionActor::Agent);
+        assert!(parse("?actor=system").is_err(), "an unknown actor is refused");
+        assert!(parse("?actor=").is_err(), "an empty actor is refused");
+    }
+
+    /// A Quarry that knows one run (\`run-1\`, one tab \`tab-1\`) in the given control
+    /// mode, answering every tab route.
+    async fn mount_tab_run(quarry: &wiremock::MockServer, control_mode: &str) {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, ResponseTemplate,
+        };
+
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/agent/runs/run-1/browser-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "runId": "run-1", "controlMode": control_mode, "tabs": [] }
+            })))
+            .mount(quarry)
+            .await;
+        let tabs = ResponseTemplate::new(200).set_body_json(json!({ "data": { "tabs": [] } }));
+        let opened = ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "tab": { "tabId": "tab-2" }, "tabs": [] }
+        }));
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/agent/runs/run-1/tabs/tab-1/select"))
+            .respond_with(tabs.clone())
+            .mount(quarry)
+            .await;
+        Mock::given(wm_method("DELETE"))
+            .and(wm_path("/v1/agent/runs/run-1/tabs/tab-1"))
+            .respond_with(tabs)
+            .mount(quarry)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/agent/runs/run-1/tabs"))
+            .respond_with(opened)
+            .mount(quarry)
+            .await;
+    }
+
+    async fn quarry_mutations(quarry: &wiremock::MockServer) -> Vec<(String, String, Value)> {
+        quarry
+            .received_requests()
+            .await
+            .expect("recorded Quarry requests")
+            .into_iter()
+            .filter(|request| request.method.as_str() != "GET")
+            .map(|request| {
+                (
+                    request.method.to_string(),
+                    match request.url.query() {
+                        Some(query) => format!("{}?{query}", request.url.path()),
+                        None => request.url.path().to_owned(),
+                    },
+                    serde_json::from_slice(&request.body).unwrap_or(Value::Null),
+                )
+            })
+            .collect()
+    }
+
+    async fn call_tab_routes(
+        state: &AppState,
+        actor: BrowserActionActor,
+    ) -> [StatusCode; 3] {
+        call_tab_routes_with(state, actor, HeaderMap::new()).await
+    }
+
+    async fn call_tab_routes_with(
+        state: &AppState,
+        actor: BrowserActionActor,
+        headers: HeaderMap,
+    ) -> [StatusCode; 3] {
+        call_tab_routes_as(state, actor, headers, None).await
+    }
+
+    async fn call_tab_routes_as(
+        state: &AppState,
+        actor: BrowserActionActor,
+        headers: HeaderMap,
+        caller: Option<CallerClass>,
+    ) -> [StatusCode; 3] {
+        let user = test_user("user-owner", "org-owner");
+        let select = select_tab(
+            State(state.clone()),
+            Extension(user.clone()),
+            caller.map(Extension),
+            headers.clone(),
+            Path(("run-1".to_owned(), "tab-1".to_owned())),
+            Query(TabActorQuery { actor }),
+        )
+        .await;
+        let close = close_tab(
+            State(state.clone()),
+            Extension(user.clone()),
+            caller.map(Extension),
+            headers.clone(),
+            Path(("run-1".to_owned(), "tab-1".to_owned())),
+            Query(TabActorQuery { actor }),
+        )
+        .await;
+        let open = new_tab(
+            State(state.clone()),
+            Extension(user),
+            caller.map(Extension),
+            headers,
+            Path("run-1".to_owned()),
+            Json(NewTabBody { url: None, actor }),
+        )
+        .await;
+        [select.status(), close.status(), open.status()]
+    }
+
+    #[tokio::test]
+    async fn a_models_tab_calls_reach_quarry_labelled_agent() {
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "agent_control").await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+
+        assert_eq!(
+            call_tab_routes(&state, BrowserActionActor::Agent).await,
+            [StatusCode::OK; 3]
+        );
+        let mutations = quarry_mutations(&quarry).await;
+        assert_eq!(
+            mutations
+                .iter()
+                .map(|(method, target, _)| (method.as_str(), target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("POST", "/v1/agent/runs/run-1/tabs/tab-1/select?initiatedBy=agent"),
+                ("DELETE", "/v1/agent/runs/run-1/tabs/tab-1?initiatedBy=agent"),
+                ("POST", "/v1/agent/runs/run-1/tabs"),
+            ]
+        );
+        assert_eq!(mutations[2].2["initiatedBy"], "agent", "{:?}", mutations[2]);
+    }
+
+    /// An agent's step forwards the identity its headers state as `aiRunId` and
+    /// `agentLabel` in the body (advisory fields; Quarry never decides on them), and a
+    /// person's own step carries neither, whatever the headers say. This drives
+    /// `run_action` itself, so removing its header read fails the test.
+    #[tokio::test]
+    async fn an_agents_step_forwards_its_advisory_identity_and_a_persons_does_not() {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, ResponseTemplate,
+        };
+
+        let headers = headers_with(&[
+            (AGENT_RUN_ID_HEADER, "run_01J9"),
+            (AGENT_LABEL_HEADER, "research-planner"),
+        ]);
+        for (actor, control_mode) in [
+            (BrowserActionActor::Agent, "agent_control"),
+            (BrowserActionActor::Human, "human_takeover"),
+        ] {
+            let quarry = wiremock::MockServer::start().await;
+            mount_tab_run(&quarry, control_mode).await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/agent/runs/run-1/step"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({ "data": { "ok": true } })),
+                )
+                .mount(&quarry)
+                .await;
+            let mut state = test_app_state();
+            state.quarry_edge_url = quarry.uri();
+
+            let response = run_action(
+                State(state),
+                Extension(test_user("user-owner", "org-owner")),
+                None,
+                headers.clone(),
+                Path("run-1".to_owned()),
+                Json(ActionBody {
+                    action: json!({ "type": "wait", "ms": 10 }),
+                    actor,
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{actor:?}");
+
+            let steps: Vec<Value> = quarry_mutations(&quarry)
+                .await
+                .into_iter()
+                .filter(|(_, target, _)| target == "/v1/agent/runs/run-1/step")
+                .map(|(_, _, body)| body)
+                .collect();
+            assert_eq!(steps.len(), 1, "{actor:?}: {steps:?}");
+            match actor {
+                BrowserActionActor::Agent => {
+                    assert_eq!(steps[0]["initiated_by"], "agent");
+                    assert_eq!(steps[0]["aiRunId"], "run_01J9");
+                    assert_eq!(steps[0]["agentLabel"], "research-planner");
+                }
+                BrowserActionActor::Human => {
+                    assert!(steps[0].get("initiated_by").is_none(), "{:?}", steps[0]);
+                    assert!(
+                        steps[0].get("aiRunId").is_none() && steps[0].get("agentLabel").is_none(),
+                        "{:?}",
+                        steps[0]
+                    );
+                }
+            }
+        }
+    }
+
+    /// The agent identity the caller states in its headers reaches Quarry on an agent's
+    /// tab open, select and close as the advisory fields, and only there: a person's own
+    /// calls carry none, and a value that is not identifier-shaped is dropped.
+    #[tokio::test]
+    async fn an_agents_tab_calls_forward_its_advisory_identity_and_a_persons_do_not() {
+        let headers = headers_with(&[
+            (AGENT_RUN_ID_HEADER, "run_01J9"),
+            (AGENT_LABEL_HEADER, "research-planner"),
+        ]);
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "agent_control").await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+        assert_eq!(
+            call_tab_routes_with(&state, BrowserActionActor::Agent, headers.clone()).await,
+            [StatusCode::OK; 3]
+        );
+        let mutations = quarry_mutations(&quarry).await;
+        assert_eq!(
+            mutations
+                .iter()
+                .map(|(method, target, _)| (method.as_str(), target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "POST",
+                    "/v1/agent/runs/run-1/tabs/tab-1/select?initiatedBy=agent&aiRunId=run_01J9&agentLabel=research-planner"
+                ),
+                (
+                    "DELETE",
+                    "/v1/agent/runs/run-1/tabs/tab-1?initiatedBy=agent&aiRunId=run_01J9&agentLabel=research-planner"
+                ),
+                ("POST", "/v1/agent/runs/run-1/tabs"),
+            ]
+        );
+        assert_eq!(mutations[2].2["initiatedBy"], "agent");
+        assert_eq!(mutations[2].2["aiRunId"], "run_01J9");
+        assert_eq!(mutations[2].2["agentLabel"], "research-planner");
+
+        let person = wiremock::MockServer::start().await;
+        mount_tab_run(&person, "human_takeover").await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = person.uri();
+        assert_eq!(
+            call_tab_routes_with(&state, BrowserActionActor::Human, headers).await,
+            [StatusCode::OK; 3]
+        );
+        let mutations = quarry_mutations(&person).await;
+        assert_eq!(
+            mutations
+                .iter()
+                .map(|(method, target, _)| (method.as_str(), target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("POST", "/v1/agent/runs/run-1/tabs/tab-1/select"),
+                ("DELETE", "/v1/agent/runs/run-1/tabs/tab-1"),
+                ("POST", "/v1/agent/runs/run-1/tabs"),
+            ]
+        );
+        assert!(mutations[2].2.get("aiRunId").is_none() && mutations[2].2.get("agentLabel").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_persons_tab_calls_carry_no_initiator_hint() {
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "human_takeover").await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+
+        // The person's own calls are admitted during their take-over, with no hint:
+        // Quarry reads a person's token as the person's.
+        assert_eq!(
+            call_tab_routes(&state, BrowserActionActor::Human).await,
+            [StatusCode::OK; 3]
+        );
+        let mutations = quarry_mutations(&quarry).await;
+        assert_eq!(
+            mutations
+                .iter()
+                .map(|(method, target, _)| (method.as_str(), target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("POST", "/v1/agent/runs/run-1/tabs/tab-1/select"),
+                ("DELETE", "/v1/agent/runs/run-1/tabs/tab-1"),
+                ("POST", "/v1/agent/runs/run-1/tabs"),
+            ]
+        );
+        assert!(mutations[2].2.get("initiatedBy").is_none(), "{:?}", mutations[2]);
+    }
+
+    /// With Quarry's take-over enforcement off (its default) Quarry only logs a
+    /// refusable call, so the gateway refuses a model's tab call itself, as it does a
+    /// model's action: the same 409, and nothing reaches Quarry.
+    #[tokio::test]
+    async fn a_models_tab_call_is_refused_during_a_takeover_before_it_reaches_quarry() {
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "human_takeover").await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+
+        assert_eq!(
+            call_tab_routes(&state, BrowserActionActor::Agent).await,
+            [StatusCode::CONFLICT; 3]
+        );
+        assert!(
+            quarry_mutations(&quarry).await.is_empty(),
+            "a refused tab call never reaches Quarry"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_quarry_failure_maps_cap_denial_to_browser_capacity_reached() {
+        for reason in ["global_run_cap", "org_run_cap", "org_interactive_run_cap"] {
+            assert_capacity_reason_maps(reason).await;
+        }
+        // Any other 429 passes through untouched.
+        let other = json!({ "error": { "code": "RATE_LIMITED", "details": { "reason": "something_else" } } });
+        let response = forward_quarry_failure(StatusCode::TOO_MANY_REQUESTS, other);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "RATE_LIMITED");
+    }
+
+    /// WS6.G: the plan's own cap and the organization's render share are the same
+    /// person-facing thing as the process caps, with the same retry copy.
+    #[tokio::test]
+    async fn forward_quarry_failure_maps_org_caps_to_browser_capacity_reached() {
+        for reason in ["org_plan_cap", "org_render_cap"] {
+            assert_capacity_reason_maps(reason).await;
+        }
+    }
+
+    /// WS9.I: the epoch the person saw travels to Quarry as a compare-and-set; a legacy body
+    /// without it stays unconditional.
+    #[test]
+    fn control_body_forwards_expected_epoch() {
+        let body: ControlBody = serde_json::from_value(json!({
+            "mode": "human_takeover",
+            "expectedEpoch": 2
+        }))
+        .expect("control body with an epoch");
+        assert_eq!(body.expected_epoch, Some(2));
+        let forwarded = control_quarry_body(body.mode, body.expected_epoch);
+        assert_eq!(forwarded["mode"], "human_takeover");
+        assert_eq!(forwarded["expected_epoch"], 2);
+
+        let legacy: ControlBody =
+            serde_json::from_value(json!({ "mode": "agent_control" })).expect("legacy body");
+        assert_eq!(legacy.expected_epoch, None);
+        assert!(control_quarry_body(legacy.mode, legacy.expected_epoch)
+            .get("expected_epoch")
+            .is_none());
+    }
+
+    /// WS9.I: Quarry's CONFLICT with the epochs in its details becomes the typed stale-epoch
+    /// error; a CONFLICT without them is not reclassified.
+    #[tokio::test]
+    async fn stale_epoch_maps_to_typed_conflict() {
+        let quarry = json!({ "error": {
+            "code": "CONFLICT",
+            "message": "the browser's control epoch has moved on",
+            "details": { "control_epoch": 3, "expected_epoch": 2 }
+        }});
+        let response = forward_quarry_failure(StatusCode::CONFLICT, quarry);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "browser_control_epoch_stale");
+        assert_eq!(body["error"]["details"]["control_epoch"], 3);
+
+        let other = json!({ "error": { "code": "CONFLICT", "message": "tab is busy" } });
+        let response = forward_quarry_failure(StatusCode::CONFLICT, other);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_ne!(body["error"]["code"], "browser_control_epoch_stale");
+    }
+
+    async fn assert_capacity_reason_maps(reason: &str) {
+        let quarry = json!({ "error": {
+            "code": "RATE_LIMITED",
+            "message": "browser capacity is full; try again shortly",
+            "details": { "reason": reason, "scope": "org", "limit": 3, "active": 3, "retry_after_seconds": 12 },
+            "retryable": true
+        }});
+        let response = forward_quarry_failure(StatusCode::TOO_MANY_REQUESTS, quarry);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "12");
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "browser_capacity_reached");
+        assert_eq!(body["error"]["retryAfterSeconds"], 12);
+        assert!(!body.to_string().contains("RATE_LIMITED"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn forward_quarry_failure_maps_navigation_scope() {
+        let quarry = json!({ "error": {
+            "code": "SECURITY_BLOCKED",
+            "message": "browser navigation is outside the run's allowed domains"
+        }});
+        let response = forward_quarry_failure(StatusCode::FORBIDDEN, quarry);
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = body_of(response).await;
+        assert_eq!(body["error"]["code"], "browser_navigation_outside_scope");
+        assert!(!body.to_string().contains("SECURITY_BLOCKED"));
+
+        // Another 403 keeps Quarry's own envelope.
+        let other = json!({ "error": { "code": "SECURITY_BLOCKED", "message": "blocked for another reason" } });
+        let response = forward_quarry_failure(StatusCode::FORBIDDEN, other);
+        assert_eq!(body_of(response).await["error"]["code"], "SECURITY_BLOCKED");
+    }
+
+    async fn body_of(response: Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn driver_cap_body(reason: &str, retry_after: Value) -> Value {
+        json!({ "error": {
+            "code": "RATE_LIMITED",
+            "message": "browser capacity exhausted",
+            "details": {
+                "reason": reason, "scope": "driver", "limit": 40, "active": 40,
+                "retry_after_seconds": retry_after
+            },
+            "retryable": true
+        }})
+    }
+
+    #[tokio::test]
+    async fn the_driver_session_cap_is_browser_capacity_reached_with_the_retry_hint() {
+        let response = forward_quarry_failure(
+            StatusCode::TOO_MANY_REQUESTS,
+            driver_cap_body("browser_session_cap", json!(15)),
+        );
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "15");
+        let body = body_of(response).await;
+        assert_eq!(body["error"]["code"], "browser_capacity_reached");
+        assert_eq!(body["error"]["retryAfterSeconds"], 15);
+        let text = body.to_string();
+        assert!(!text.contains("RATE_LIMITED") && !text.contains("browser_session_cap"));
+        assert!(!text.contains("\"limit\"") && !text.contains("\"active\""));
+    }
+
+    #[tokio::test]
+    async fn the_driver_page_cap_is_its_own_code_with_the_retry_hint() {
+        let response = forward_quarry_failure(
+            StatusCode::TOO_MANY_REQUESTS,
+            driver_cap_body("browser_page_cap", json!(15)),
+        );
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "15");
+        let body = body_of(response).await;
+        assert_eq!(body["error"]["code"], "browser_tab_limit_reached");
+        assert_eq!(body["error"]["retryAfterSeconds"], 15);
+        assert!(!body.to_string().contains("browser_page_cap"));
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_absurd_retry_hint_falls_back_to_ten_seconds() {
+        for hint in [json!(null), json!(0), json!(86_400), json!("soon"), json!(-3)] {
+            let response = forward_quarry_failure(
+                StatusCode::TOO_MANY_REQUESTS,
+                driver_cap_body("browser_session_cap", hint.clone()),
+            );
+            assert_eq!(response.headers().get("retry-after").unwrap(), "10", "{hint}");
+            assert_eq!(body_of(response).await["error"]["retryAfterSeconds"], 10);
+        }
+    }
+
+    /// The retry key can be absent altogether (an older Quarry, or a cap that sets none),
+    /// not only null or out of range: `details` has no `retry_after_seconds`.
+    #[tokio::test]
+    async fn an_absent_retry_key_falls_back_to_ten_seconds_for_every_capacity_reason() {
+        for (reason, code) in [
+            ("global_run_cap", "browser_capacity_reached"),
+            ("org_run_cap", "browser_capacity_reached"),
+            ("org_interactive_run_cap", "browser_capacity_reached"),
+            ("org_plan_cap", "browser_capacity_reached"),
+            ("org_render_cap", "browser_capacity_reached"),
+            ("browser_session_cap", "browser_capacity_reached"),
+            ("browser_page_cap", "browser_tab_limit_reached"),
+        ] {
+            let quarry = json!({ "error": {
+                "code": "RATE_LIMITED",
+                "message": "browser capacity exhausted",
+                "details": { "reason": reason, "scope": "org", "limit": 3, "active": 3 },
+                "retryable": true
+            }});
+            let response = forward_quarry_failure(StatusCode::TOO_MANY_REQUESTS, quarry);
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS, "{reason}");
+            assert_eq!(response.headers().get("retry-after").unwrap(), "10", "{reason}");
+            let body = body_of(response).await;
+            assert_eq!(body["error"]["code"], code, "{reason}");
+            assert_eq!(body["error"]["retryAfterSeconds"], 10, "{reason}");
+            assert!(!body.to_string().contains(reason), "{reason}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lost_browser_session_is_410_with_its_own_code_and_no_retry_hint() {
+        for (reason, code) in [
+            ("session_reaped", "browser_session_reaped"),
+            ("browser_process_lost", "browser_process_lost"),
+        ] {
+            let quarry = json!({ "error": {
+                "code": "DRIVER_FAILED",
+                "message": "browser session was closed after being idle too long",
+                "details": { "reason": reason },
+                "retryable": false
+            }});
+            let response = forward_quarry_failure(StatusCode::BAD_GATEWAY, quarry);
+            assert_eq!(response.status(), StatusCode::GONE, "{reason}");
+            assert!(response.headers().get("retry-after").is_none(), "{reason}");
+            let body = body_of(response).await;
+            assert_eq!(body["error"]["code"], code);
+            assert!(body["error"].get("retryAfterSeconds").is_none());
+            assert!(!body.to_string().contains("DRIVER_FAILED"), "{reason}");
+        }
+    }
+
+    #[tokio::test]
+    async fn other_driver_failures_and_lookalike_bodies_pass_through_untouched() {
+        for (status, quarry) in [
+            // Another DRIVER_FAILED reason keeps its upstream body.
+            (
+                StatusCode::BAD_GATEWAY,
+                json!({ "error": { "code": "DRIVER_FAILED", "details": { "reason": "no_current_page" } } }),
+            ),
+            (
+                StatusCode::BAD_GATEWAY,
+                json!({ "error": { "code": "DRIVER_FAILED", "details": { "reason": "viewport_emulation_failed" } } }),
+            ),
+            // A lost-session reason under a different code is not ours to map.
+            (
+                StatusCode::BAD_GATEWAY,
+                json!({ "error": { "code": "INTERNAL", "details": { "reason": "session_reaped" } } }),
+            ),
+            // A driver-cap reason on a non-429 is not a cap.
+            (
+                StatusCode::BAD_GATEWAY,
+                json!({ "error": { "code": "DRIVER_FAILED", "details": { "reason": "browser_session_cap" } } }),
+            ),
+        ] {
+            let response = forward_quarry_failure(status, quarry.clone());
+            assert_eq!(response.status(), status);
+            assert_eq!(body_of(response).await, quarry);
+        }
+    }
+
+    #[tokio::test]
+    async fn quarry_user_took_over_maps_to_browser_human_takeover_active() {
+        let quarry = json!({ "error": {
+            "code": "USER_TOOK_OVER",
+            "message": "the person using the browser has taken control",
+            "details": { "control_mode": "human_takeover", "control_epoch": 3 },
+            "retryable": false
+        }});
+        let response = forward_quarry_failure(StatusCode::CONFLICT, quarry);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "browser_human_takeover_active");
+        assert_eq!(body["error"]["details"]["control_epoch"], 3);
+        assert!(!body.to_string().contains("USER_TOOK_OVER"));
+    }
+
+    #[tokio::test]
+    async fn a_challenge_403_is_browser_site_blocked_with_typed_hints_and_nothing_else() {
+        // The scrape path names the reason in `block_reason`, the agent path in
+        // `reason` (with the host and `recovery: exhausted`).
+        let scrape = json!({ "error": {
+            "code": "CHALLENGE_DETECTED",
+            "message": "blocked https://secret.example/private <html>wall</html>",
+            "details": { "reason": "waf_interstitial", "block_reason": "waf_interstitial", "recovery": "not_applicable", "next": "other_source" },
+            "retryable": false
+        }});
+        let agent = json!({ "error": {
+            "code": "CHALLENGE_DETECTED",
+            "message": "secret.example refused after the recovery",
+            "details": { "reason": "challenge_loop", "host": "secret.example", "recovery": "exhausted" },
+            "retryable": false
+        }});
+        for (quarry, reason, recovery) in [
+            (scrape, "waf_interstitial", "not_applicable"),
+            (agent, "challenge_loop", "exhausted"),
+        ] {
+            let response = forward_quarry_failure(StatusCode::FORBIDDEN, quarry);
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert!(response.headers().get("retry-after").is_none());
+            let body = body_of(response).await;
+            assert_eq!(body["error"]["code"], "browser_site_blocked");
+            assert_eq!(body["error"]["blockReason"], reason);
+            assert_eq!(body["error"]["recovery"], recovery);
+            let text = body.to_string();
+            assert!(
+                !text.contains("secret.example")
+                    && !text.contains("CHALLENGE_DETECTED")
+                    && !text.contains("<html")
+                    && !text.contains("\"host\""),
+                "{text}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_challenge_reason_or_recovery_is_dropped_not_echoed() {
+        let quarry = json!({ "error": {
+            "code": "CHALLENGE_DETECTED",
+            "details": { "reason": "https://secret.example/x", "block_reason": 7, "recovery": "go_around" }
+        }});
+        let response = forward_quarry_failure(StatusCode::FORBIDDEN, quarry);
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = body_of(response).await;
+        assert_eq!(body["error"]["code"], "browser_site_blocked");
+        assert!(body["error"].get("blockReason").is_none());
+        assert!(body["error"].get("recovery").is_none());
+        assert!(!body.to_string().contains("secret.example"));
+        assert!(!body.to_string().contains("go_around"));
+    }
+
+    #[tokio::test]
+    async fn a_403_that_is_not_a_challenge_passes_through_untouched() {
+        for quarry in [
+            json!({ "error": { "code": "FORBIDDEN", "details": { "reason": "waf_interstitial" } } }),
+            json!({ "error": { "code": "SECURITY_BLOCKED", "message": "policy" } }),
+        ] {
+            let response = forward_quarry_failure(StatusCode::FORBIDDEN, quarry.clone());
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(body_of(response).await, quarry);
+        }
+    }
 
     #[test]
     fn browser_run_owner_requires_exact_validated_user_and_org() {
@@ -4251,6 +6209,7 @@ mod tests {
                     "runId": "run-owner",
                     "status": "active",
                     "live": true,
+                    "grantId": "0123456789abcdef0123456789abcdef",
                     "tabs": []
                 }
             })))
@@ -4282,6 +6241,12 @@ mod tests {
         assert_eq!(body["data"]["status"], "active");
         assert!(body["data"].get("observation").is_none());
         assert!(body["data"].get("replay").is_none());
+        // The session grant id is internal to the BFF (WS1.B).
+        assert!(body["data"].get("grantId").is_none(), "{body}");
+        assert!(
+            !body.to_string().contains("0123456789abcdef0123456789abcdef"),
+            "grant id reached the SPA: {body}"
+        );
         assert_eq!(
             quarry
                 .received_requests()
@@ -4450,9 +6415,25 @@ mod tests {
         upstream
     }
 
+    /// Answers `GET /api/{slug}/token` with `test-plane-token-{slug}`, so a
+    /// test can tell which audience a forwarded credential was minted for.
+    struct PerAudienceToken;
+
+    impl wiremock::Respond for PerAudienceToken {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            let slug = request
+                .url
+                .path()
+                .trim_start_matches("/api/")
+                .trim_end_matches("/token");
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(json!({ "token": format!("test-plane-token-{slug}") }))
+        }
+    }
+
     /// Stand in for auth-core's plane-token endpoints so the tests run the real
     /// credential path (`model_token` + `required_session_token`) instead of
-    /// skipping it. `GET /api/{audience}/token` → `{ "token": ... }`.
+    /// skipping it. `GET /api/{audience}/token` → `{ "token": "test-plane-token-{audience}" }`.
     async fn plane_token_issuer() -> wiremock::MockServer {
         use wiremock::{
             matchers::{method as wm_method, path_regex},
@@ -4462,9 +6443,7 @@ mod tests {
         let auth = MockServer::start().await;
         Mock::given(wm_method("GET"))
             .and(path_regex(r"^/api/[a-z-]+/token$"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({ "token": "test-plane-token" })),
-            )
+            .respond_with(PerAudienceToken)
             .mount(&auth)
             .await;
         auth
@@ -4539,6 +6518,39 @@ mod tests {
         .await
         .expect_err("an unknown run id must be denied");
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// WS10.S1: the adopted x-request-id rides on the browser proxy's upstream
+    /// read (the model-gateway run probe), so a support lookup can join the
+    /// gateway log to the upstream log.
+    #[tokio::test]
+    async fn browser_proxy_forwards_request_id_to_quarry() {
+        let upstream = model_plane_run_read_model().await;
+        let auth = plane_token_issuer().await;
+        let state = state_for(&auth, &upstream);
+        let headers = HeaderMap::new();
+        let owner = owner_of("user-owner", "org-owner");
+        let _ = crate::request_id::scope_for_test(
+            "gw-forward-1",
+            owned_orchestration_run(
+                &state,
+                &test_user("user-owner", "org-owner"),
+                &headers,
+                &owner,
+                "run-owned",
+            ),
+        )
+        .await;
+        let received = upstream
+            .received_requests()
+            .await
+            .expect("recorded requests");
+        let last = received.last().expect("the probe must reach the upstream");
+        assert_eq!(
+            last.headers.get("x-request-id").map(|v| v.to_str().unwrap()),
+            Some("gw-forward-1"),
+            "the adopted request id must be forwarded upstream"
+        );
     }
 
     /// Tenant isolation depends on the probe running under the caller's own
@@ -4991,6 +7003,93 @@ mod tests {
         );
     }
 
+    /// WS10.S3: the events stream forwards `Last-Event-ID` and the query to Quarry.
+    #[tokio::test]
+    async fn browser_events_stream_proxies_last_event_id_and_query_to_quarry() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+        Mock::given(method("GET"))
+            .and(path("/v1/agent/runs/run-owned/browser-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"zdr": false}})))
+            .mount(&quarry)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/agent/runs/run-owned/events/stream"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string("id: 4\nevent: action.started\ndata: {}\n\n"),
+            )
+            .mount(&quarry)
+            .await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", "3".parse().unwrap());
+        let response = stream_agent_events(
+            State(state.clone()),
+            Extension(test_user("user-owner", "org-owner")),
+            headers,
+            Path("run-owned".to_owned()),
+            Uri::from_static("/api/v1/browser/sessions/run-owned/events/stream?max_events=5"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let requests = quarry.received_requests().await.unwrap_or_default();
+        let forwarded = requests
+            .iter()
+            .find(|request| request.url.path() == "/v1/agent/runs/run-owned/events/stream")
+            .expect("the events stream reaches Quarry");
+        assert_eq!(forwarded.url.query(), Some("max_events=5"));
+        assert_eq!(
+            forwarded
+                .headers
+                .get("last-event-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("3")
+        );
+    }
+
+    /// WS10.S3: a caller Quarry does not admit to the run never opens the stream.
+    #[tokio::test]
+    async fn browser_events_stream_refuses_a_non_owner() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+        Mock::given(method("GET"))
+            .and(path("/v1/agent/runs/run-owned/browser-session"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "error": { "code": "NOT_FOUND", "message": "agent run not found" }
+            })))
+            .mount(&quarry)
+            .await;
+
+        let response = stream_agent_events(
+            State(state.clone()),
+            Extension(test_user("user-attacker", "org-owner")),
+            HeaderMap::new(),
+            Path("run-owned".to_owned()),
+            Uri::from_static("/api/v1/browser/sessions/run-owned/events/stream"),
+        )
+        .await;
+        assert!(response.status().is_client_error(), "got {}", response.status());
+
+        let requests = quarry.received_requests().await.unwrap_or_default();
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.url.path().ends_with("/events/stream")),
+            "a non-owner must not reach the events stream"
+        );
+    }
+
     #[tokio::test]
     async fn browser_http_operations_use_quarry_owner_denials_not_bff_cache() {
         use wiremock::MockServer;
@@ -5012,6 +7111,7 @@ mod tests {
             run_action(
                 State(state.clone()),
                 Extension(attacker.clone()),
+                None,
                 headers.clone(),
                 Path("run-owned".to_owned()),
                 Json(ActionBody {
@@ -5027,6 +7127,7 @@ mod tests {
                 Path("run-owned".to_owned()),
                 Json(ControlBody {
                     mode: BrowserControlMode::HumanTakeover,
+                    expected_epoch: None,
                 }),
             )
             .await,
@@ -5040,9 +7141,10 @@ mod tests {
             new_tab(
                 State(state.clone()),
                 Extension(attacker.clone()),
+                None,
                 headers.clone(),
                 Path("run-owned".to_owned()),
-                Json(NewTabBody { url: None }),
+                Json(NewTabBody::default()),
             )
             .await,
             tab_mutation(
@@ -5053,6 +7155,7 @@ mod tests {
                 Some("tab-owned".to_owned()),
                 Method::POST,
                 "select",
+                BrowserActionActor::Human,
                 None,
             )
             .await,
@@ -5154,13 +7257,844 @@ mod tests {
         }
     }
 
-    fn test_app_state() -> AppState {
+    // --- WS1.B: BrowserBroker session grants ------------------------------
+
+    mod session_grants {
+        use super::*;
+        use axum::body::to_bytes;
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        const GRANT: &str = "0123456789abcdef0123456789abcdef";
+
+        struct Upstreams {
+            auth: MockServer,
+            model: MockServer,
+            quarry: MockServer,
+        }
+
+        async fn upstreams() -> Upstreams {
+            Upstreams {
+                auth: plane_token_issuer().await,
+                model: MockServer::start().await,
+                quarry: MockServer::start().await,
+            }
+        }
+
+        fn state(up: &Upstreams, mode: BrowserGrantMode) -> AppState {
+            let mut state = test_app_state();
+            state.auth_core_url = up.auth.uri();
+            state.model_gateway_url = up.model.uri();
+            state.quarry_edge_url = up.quarry.uri();
+            state.browser_grant_mode = mode;
+            state
+        }
+
+        async fn mount_quarry_session(quarry: &MockServer, projection: Value) {
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/agent/runs"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({ "data": { "run_id": "run-1" } })),
+                )
+                .mount(quarry)
+                .await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/agent/runs/run-1/step"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    json!({ "data": { "url": "https://example.com/", "title": "Example" } }),
+                ))
+                .mount(quarry)
+                .await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/v1/agent/runs/run-1/browser-session"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({ "data": projection })),
+                )
+                .mount(quarry)
+                .await;
+            Mock::given(wm_method("DELETE"))
+                .and(wm_path("/v1/agent/runs/run-1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {} })))
+                .mount(quarry)
+                .await;
+        }
+
+        fn owner_projection(grant: Option<&str>) -> Value {
+            let mut projection = json!({
+                "runId": "run-1",
+                "status": "active",
+                "live": true,
+                "currentUrl": "https://example.com/",
+                "profileScope": "ephemeral",
+                "zdr": false,
+                "tabs": []
+            });
+            if let Some(grant) = grant {
+                projection["grantId"] = json!(grant);
+            }
+            projection
+        }
+
+        async fn create(state: AppState) -> (StatusCode, Value) {
+            let body: CreateSessionBody =
+                serde_json::from_value(json!({ "url": "https://example.com/" })).expect("body");
+            let response = create_session(
+                State(state),
+                Extension(test_user("user-a", "org-a")),
+                HeaderMap::new(),
+                Json(body),
+            )
+            .await;
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 256 * 1024)
+                .await
+                .expect("body");
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            )
+        }
+
+        async fn requests_to(
+            server: &MockServer,
+            method: &str,
+            path: &str,
+        ) -> Vec<wiremock::Request> {
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| r.method.as_str() == method && r.url.path() == path)
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn create_session_puts_the_issued_grant_on_the_quarry_start_and_never_in_the_response(
+        ) {
+            let up = upstreams().await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/grants"))
+                .respond_with(
+                    ResponseTemplate::new(201).set_body_json(
+                        json!({ "grant_id": GRANT, "kind": "session", "zdr": false }),
+                    ),
+                )
+                .mount(&up.model)
+                .await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+
+            let (status, body) = create(state(&up, BrowserGrantMode::Strict)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(
+                !body.to_string().contains(GRANT),
+                "grant id leaked to the SPA: {body}"
+            );
+
+            let grants = requests_to(&up.model, "POST", "/v1/browser/grants").await;
+            assert_eq!(grants.len(), 1);
+            assert_eq!(
+                grants[0]
+                    .headers
+                    .get("x-browser-authorization")
+                    .and_then(|v| v.to_str().ok()),
+                Some("Bearer test-plane-token-browser-broker")
+            );
+            let grant_body: Value = serde_json::from_slice(&grants[0].body).expect("grant body");
+            assert_eq!(grant_body["allowed_domains"], json!(["example.com"]));
+            assert_eq!(grant_body["zdr"], json!(false));
+
+            let starts = requests_to(&up.quarry, "POST", "/v1/agent/runs").await;
+            let start_body: Value = serde_json::from_slice(&starts[0].body).expect("start body");
+            assert_eq!(start_body["grant_id"], json!(GRANT));
+        }
+
+        #[tokio::test]
+        async fn strict_mode_without_a_grant_never_starts_a_quarry_run() {
+            for (upstream, want_status, want_code) in [
+                (400, StatusCode::BAD_REQUEST, "browser_host_not_grantable"),
+                (403, StatusCode::FORBIDDEN, "browser_grant_denied"),
+                (
+                    429,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "browser_grant_limit_reached",
+                ),
+                (
+                    503,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "browser_grant_unavailable",
+                ),
+                (
+                    502,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "browser_grant_unavailable",
+                ),
+            ] {
+                let up = upstreams().await;
+                Mock::given(wm_method("POST"))
+                    .and(wm_path("/v1/browser/grants"))
+                    .respond_with(
+                        ResponseTemplate::new(upstream)
+                            .set_body_json(json!({ "error": "browser_host_not_grantable" })),
+                    )
+                    .mount(&up.model)
+                    .await;
+                mount_quarry_session(&up.quarry, owner_projection(None)).await;
+
+                let (status, body) = create(state(&up, BrowserGrantMode::Strict)).await;
+                assert_eq!(status, want_status, "upstream {upstream}: {body}");
+                assert_eq!(body["error"]["code"], want_code, "upstream {upstream}");
+                assert!(
+                    up.quarry
+                        .received_requests()
+                        .await
+                        .unwrap_or_default()
+                        .is_empty(),
+                    "upstream {upstream}: Quarry must not be called without a grant"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn permissive_mode_opens_the_session_without_a_grant_when_issuance_fails() {
+            let up = upstreams().await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/grants"))
+                .respond_with(ResponseTemplate::new(503).set_body_json(json!({})))
+                .mount(&up.model)
+                .await;
+            mount_quarry_session(&up.quarry, owner_projection(None)).await;
+
+            let (status, _) = create(state(&up, BrowserGrantMode::Permissive)).await;
+            assert_eq!(status, StatusCode::OK);
+            let starts = requests_to(&up.quarry, "POST", "/v1/agent/runs").await;
+            let start_body: Value = serde_json::from_slice(&starts[0].body).expect("start body");
+            assert!(start_body.get("grant_id").is_none(), "{start_body}");
+        }
+
+        #[tokio::test]
+        async fn off_mode_never_asks_for_a_grant() {
+            let up = upstreams().await;
+            mount_quarry_session(&up.quarry, owner_projection(None)).await;
+            let (status, _) = create(state(&up, BrowserGrantMode::Off)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(up
+                .model
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_failed_quarry_start_revokes_the_grant_it_was_given() {
+            let up = upstreams().await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/grants"))
+                .respond_with(
+                    ResponseTemplate::new(201).set_body_json(json!({ "grant_id": GRANT })),
+                )
+                .mount(&up.model)
+                .await;
+            Mock::given(wm_method("DELETE"))
+                .and(wm_path(format!("/v1/browser/grants/{GRANT}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "revoked": true })))
+                .mount(&up.model)
+                .await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/agent/runs"))
+                .respond_with(ResponseTemplate::new(503).set_body_json(json!({})))
+                .mount(&up.quarry)
+                .await;
+
+            let (status, _) = create(state(&up, BrowserGrantMode::Strict)).await;
+            assert!(!status.is_success());
+            let revokes =
+                requests_to(&up.model, "DELETE", &format!("/v1/browser/grants/{GRANT}")).await;
+            assert_eq!(revokes.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_failed_first_step_revokes_the_grant_it_was_given() {
+            let up = upstreams().await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/grants"))
+                .respond_with(
+                    ResponseTemplate::new(201).set_body_json(json!({ "grant_id": GRANT })),
+                )
+                .mount(&up.model)
+                .await;
+            Mock::given(wm_method("DELETE"))
+                .and(wm_path(format!("/v1/browser/grants/{GRANT}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "revoked": true })))
+                .mount(&up.model)
+                .await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/agent/runs"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({ "data": { "run_id": "run-1" } })),
+                )
+                .mount(&up.quarry)
+                .await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/agent/runs/run-1/step"))
+                .respond_with(ResponseTemplate::new(502).set_body_json(json!({})))
+                .mount(&up.quarry)
+                .await;
+            Mock::given(wm_method("DELETE"))
+                .and(wm_path("/v1/agent/runs/run-1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {} })))
+                .mount(&up.quarry)
+                .await;
+
+            let (status, _) = create(state(&up, BrowserGrantMode::Strict)).await;
+            assert!(!status.is_success());
+            let revokes =
+                requests_to(&up.model, "DELETE", &format!("/v1/browser/grants/{GRANT}")).await;
+            assert_eq!(revokes.len(), 1);
+        }
+
+        fn ai_run_body() -> StartAiRunBody {
+            StartAiRunBody {
+                goal: "find the price".to_owned(),
+                allowed_domains: Some(vec!["shop.example.com".to_owned()]),
+                max_steps: None,
+                max_runtime_s: None,
+                stop_criteria: None,
+                require_approval: None,
+                max_cost_usd: None,
+            }
+        }
+
+        async fn start_run(state: AppState) -> (StatusCode, Value) {
+            let response = start_ai_run(
+                State(state),
+                Extension(test_user("user-a", "org-a")),
+                HeaderMap::new(),
+                Path("run-1".to_owned()),
+                Json(ai_run_body()),
+            )
+            .await;
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 256 * 1024)
+                .await
+                .expect("body");
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            )
+        }
+
+        #[tokio::test]
+        async fn an_ai_run_carries_the_session_grant_and_the_browser_bearer() {
+            let up = upstreams().await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/runs"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({ "run_id": "mp-run-1" })),
+                )
+                .mount(&up.model)
+                .await;
+
+            let (status, body) = start_run(state(&up, BrowserGrantMode::Strict)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let runs = requests_to(&up.model, "POST", "/v1/browser/runs").await;
+            assert_eq!(runs.len(), 1);
+            let sent: Value = serde_json::from_slice(&runs[0].body).expect("run body");
+            assert_eq!(sent["grant_id"], json!(GRANT));
+            assert_eq!(sent["allowed_domains"], json!(["shop.example.com"]));
+            for (header, audience) in [
+                ("x-browser-authorization", "browser-broker"),
+                ("x-session-authorization", "session-core"),
+                ("x-execution-authorization", "execution-core"),
+                ("x-inference-authorization", "inference-core"),
+                ("x-data-plane-authorization", "data-plane"),
+                ("authorization", "model-plane"),
+            ] {
+                assert_eq!(
+                    runs[0].headers.get(header).and_then(|v| v.to_str().ok()),
+                    Some(format!("Bearer test-plane-token-{audience}").as_str()),
+                    "{header}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn an_ai_run_on_a_session_without_a_grant_is_409_in_every_mode() {
+            for mode in [
+                BrowserGrantMode::Strict,
+                BrowserGrantMode::Permissive,
+                BrowserGrantMode::Off,
+            ] {
+                let up = upstreams().await;
+                mount_quarry_session(&up.quarry, owner_projection(None)).await;
+                let (status, body) = start_run(state(&up, mode)).await;
+                assert_eq!(status, StatusCode::CONFLICT, "{mode:?}");
+                assert_eq!(body["error"]["code"], "browser_session_grant_missing");
+                assert!(up
+                    .model
+                    .received_requests()
+                    .await
+                    .unwrap_or_default()
+                    .is_empty());
+            }
+        }
+
+        #[tokio::test]
+        async fn closing_a_session_revokes_its_grant() {
+            let up = upstreams().await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+            Mock::given(wm_method("DELETE"))
+                .and(wm_path(format!("/v1/browser/grants/{GRANT}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "revoked": true })))
+                .mount(&up.model)
+                .await;
+            let response = close_session(
+                State(state(&up, BrowserGrantMode::Strict)),
+                Extension(test_user("user-a", "org-a")),
+                HeaderMap::new(),
+                Path("run-1".to_owned()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let revokes =
+                requests_to(&up.model, "DELETE", &format!("/v1/browser/grants/{GRANT}")).await;
+            assert_eq!(revokes.len(), 1);
+            assert_eq!(
+                revokes[0]
+                    .headers
+                    .get("x-browser-authorization")
+                    .and_then(|v| v.to_str().ok()),
+                Some("Bearer test-plane-token-browser-broker")
+            );
+        }
+
+        /// D1-020: a close Quarry fails (anything but 2xx or 404) still revokes the
+        /// session grant; the person still gets the failure.
+        #[tokio::test]
+        async fn a_close_that_quarry_fails_still_revokes_the_session_grant() {
+            let up = upstreams().await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/v1/agent/runs/run-1/browser-session"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    json!({ "data": owner_projection(Some(GRANT)) }),
+                ))
+                .mount(&up.quarry)
+                .await;
+            Mock::given(wm_method("DELETE"))
+                .and(wm_path("/v1/agent/runs/run-1"))
+                .respond_with(ResponseTemplate::new(500).set_body_json(
+                    json!({ "error": { "code": "INTERNAL", "message": "close failed" } }),
+                ))
+                .mount(&up.quarry)
+                .await;
+            Mock::given(wm_method("DELETE"))
+                .and(wm_path(format!("/v1/browser/grants/{GRANT}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "revoked": true })))
+                .mount(&up.model)
+                .await;
+            let response = close_session(
+                State(state(&up, BrowserGrantMode::Strict)),
+                Extension(test_user("user-a", "org-a")),
+                HeaderMap::new(),
+                Path("run-1".to_owned()),
+            )
+            .await;
+            assert_ne!(response.status(), StatusCode::OK, "the failure is still reported");
+            let revokes =
+                requests_to(&up.model, "DELETE", &format!("/v1/browser/grants/{GRANT}")).await;
+            assert_eq!(revokes.len(), 1, "the grant is revoked all the same");
+        }
+
+        async fn start_run_with(state: AppState, body: StartAiRunBody) -> (StatusCode, Value) {
+            let response = start_ai_run(
+                State(state),
+                Extension(test_user("user-a", "org-a")),
+                HeaderMap::new(),
+                Path("run-1".to_owned()),
+                Json(body),
+            )
+            .await;
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 256 * 1024)
+                .await
+                .expect("body");
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            )
+        }
+
+        // The session grant is issued once and not renewed. When Model Gateway
+        // refuses it as no longer valid (expired or revoked: 403 from
+        // ValidateGrant, or 409 from DeriveRunGrant), the SPA gets one stable
+        // code that says to reopen the session, not "the session has no grant".
+        #[tokio::test]
+        async fn an_expired_or_revoked_session_grant_is_reported_as_inactive() {
+            for (upstream, code) in [
+                (403, "browser grant is not authorized"),
+                (409, "browser_grant_not_derivable"),
+            ] {
+                let up = upstreams().await;
+                mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+                Mock::given(wm_method("POST"))
+                    .and(wm_path("/v1/browser/runs"))
+                    .respond_with(
+                        ResponseTemplate::new(upstream).set_body_json(json!({ "error": code })),
+                    )
+                    .mount(&up.model)
+                    .await;
+                let mut body = ai_run_body();
+                body.allowed_domains = None;
+                let (status, response) =
+                    start_run_with(state(&up, BrowserGrantMode::Strict), body).await;
+                assert_eq!(status, StatusCode::CONFLICT, "{upstream}: {response}");
+                assert_eq!(
+                    response["error"]["code"],
+                    json!("browser_session_grant_inactive"),
+                    "{upstream}: {response}"
+                );
+                assert!(!response.to_string().contains(GRANT), "{response}");
+            }
+        }
+
+        async fn start_run_response(
+            state: AppState,
+            headers: HeaderMap,
+            body: StartAiRunBody,
+        ) -> Response {
+            start_ai_run(
+                State(state),
+                Extension(test_user("user-a", "org-a")),
+                headers,
+                Path("run-1".to_owned()),
+                Json(body),
+            )
+            .await
+        }
+
+        fn key_headers(values: &[&str]) -> HeaderMap {
+            let mut headers = HeaderMap::new();
+            for value in values {
+                headers.append(
+                    "idempotency-key",
+                    axum::http::HeaderValue::from_bytes(value.as_bytes()).expect("header value"),
+                );
+            }
+            headers
+        }
+
+        async fn json_of(response: Response) -> (StatusCode, HeaderMap, Value) {
+            let status = response.status();
+            let headers = response.headers().clone();
+            let bytes = to_bytes(response.into_body(), 256 * 1024)
+                .await
+                .expect("body");
+            (
+                status,
+                headers,
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            )
+        }
+
+        #[tokio::test]
+        async fn a_client_idempotency_key_reaches_model_gateway_and_only_when_sent() {
+            let up = upstreams().await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/runs"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "run_id": "mp-run-1", "thread_id": "t-1", "plan_id": "p-1"
+                })))
+                .mount(&up.model)
+                .await;
+
+            for headers in [key_headers(&["retry-1"]), key_headers(&["  retry-1  "])] {
+                let (status, _, body) = json_of(
+                    start_run_response(state(&up, BrowserGrantMode::Strict), headers, ai_run_body())
+                        .await,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+            }
+            let (status, _, _) = json_of(
+                start_run_response(
+                    state(&up, BrowserGrantMode::Strict),
+                    HeaderMap::new(),
+                    ai_run_body(),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let runs = requests_to(&up.model, "POST", "/v1/browser/runs").await;
+            let sent: Vec<Option<String>> = runs
+                .iter()
+                .map(|run| {
+                    run.headers
+                        .get("idempotency-key")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned)
+                })
+                .collect();
+            assert_eq!(
+                sent,
+                [Some("retry-1".to_owned()), Some("retry-1".to_owned()), None],
+                "the key is forwarded trimmed, and absent when the client sent none"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_malformed_or_repeated_idempotency_key_is_400_before_any_upstream_call() {
+            let long = "k".repeat(129);
+            for values in [
+                vec!["has space"],
+                vec!["semi;colon"],
+                vec![""],
+                vec!["ünicode"],
+                vec![long.as_str()],
+                vec!["one", "two"],
+            ] {
+                let up = upstreams().await;
+                mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+                let (status, _, body) = json_of(
+                    start_run_response(
+                        state(&up, BrowserGrantMode::Strict),
+                        key_headers(&values),
+                        ai_run_body(),
+                    )
+                    .await,
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{values:?}: {body}");
+                assert_eq!(body["error"]["code"], "invalid_idempotency_key");
+                for server in [&up.model, &up.quarry] {
+                    assert!(
+                        server
+                            .received_requests()
+                            .await
+                            .unwrap_or_default()
+                            .is_empty(),
+                        "{values:?} reached an upstream"
+                    );
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn a_replayed_start_returns_the_same_run_the_first_one_reported() {
+            let up = upstreams().await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+            let first = json!({ "run_id": "mp-run-1", "thread_id": "t-1", "plan_id": "p-1" });
+            let replay = json!({
+                "run_id": "mp-run-1", "thread_id": "t-1", "plan_id": "p-1",
+                "idempotent_replay": true
+            });
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/runs"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(first))
+                .up_to_n_times(1)
+                .mount(&up.model)
+                .await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/runs"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(replay))
+                .mount(&up.model)
+                .await;
+
+            let (_, _, one) = json_of(
+                start_run_response(
+                    state(&up, BrowserGrantMode::Strict),
+                    key_headers(&["retry-1"]),
+                    ai_run_body(),
+                )
+                .await,
+            )
+            .await;
+            let (status, _, two) = json_of(
+                start_run_response(
+                    state(&up, BrowserGrantMode::Strict),
+                    key_headers(&["retry-1"]),
+                    ai_run_body(),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            for field in ["run_id", "thread_id", "plan_id"] {
+                assert_eq!(one["data"][field], two["data"][field], "{field}");
+            }
+            assert_eq!(two["data"]["idempotent_replay"], true);
+            assert!(one["data"].get("idempotent_replay").is_none());
+        }
+
+        #[tokio::test]
+        async fn model_gateways_keyed_start_refusals_get_typed_gateway_codes() {
+            for (upstream, body, want_status, want_code, retry_after) in [
+                (
+                    409,
+                    json!({ "error": "idempotency_key_reused" }),
+                    StatusCode::CONFLICT,
+                    "browser_idempotency_key_reused",
+                    None,
+                ),
+                (
+                    409,
+                    json!({ "error": "idempotency_key_run_ended", "run_id": "mp-run-1" }),
+                    StatusCode::CONFLICT,
+                    "browser_idempotency_key_run_ended",
+                    None,
+                ),
+                (
+                    503,
+                    json!({ "error": "idempotency_replay_unverified" }),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "browser_idempotency_unverified",
+                    Some("5"),
+                ),
+            ] {
+                let up = upstreams().await;
+                mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+                Mock::given(wm_method("POST"))
+                    .and(wm_path("/v1/browser/runs"))
+                    .respond_with(ResponseTemplate::new(upstream).set_body_json(body.clone()))
+                    .mount(&up.model)
+                    .await;
+                let (status, headers, response) = json_of(
+                    start_run_response(
+                        state(&up, BrowserGrantMode::Strict),
+                        key_headers(&["retry-1"]),
+                        ai_run_body(),
+                    )
+                    .await,
+                )
+                .await;
+                assert_eq!(status, want_status, "{response}");
+                assert_eq!(response["error"]["code"], want_code);
+                assert_eq!(
+                    headers.get("retry-after").and_then(|v| v.to_str().ok()),
+                    retry_after
+                );
+                // The upstream strings are exact JSON values; the gateway's own
+                // codes only contain them as a suffix.
+                let text = response.to_string();
+                for raw in [
+                    "\"idempotency_key_reused\"",
+                    "\"idempotency_key_run_ended\"",
+                    "\"idempotency_replay_unverified\"",
+                ] {
+                    assert!(!text.contains(raw), "an upstream string leaked: {response}");
+                }
+            }
+            // The run id of an ended run is the person's own, and is offered as a detail.
+            let up = upstreams().await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/runs"))
+                .respond_with(ResponseTemplate::new(409).set_body_json(
+                    json!({ "error": "idempotency_key_run_ended", "run_id": "mp-run-1" }),
+                ))
+                .mount(&up.model)
+                .await;
+            let (_, _, response) = json_of(
+                start_run_response(
+                    state(&up, BrowserGrantMode::Strict),
+                    key_headers(&["retry-1"]),
+                    ai_run_body(),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(response["error"]["details"]["runId"], "mp-run-1");
+        }
+
+        // With explicit hosts a 403 may be a widening refusal, so it is not
+        // relabelled as an inactive grant; other failures pass through too.
+        #[tokio::test]
+        async fn other_ai_run_refusals_are_not_called_an_inactive_grant() {
+            for (upstream, code, names_hosts) in [
+                (403, "browser grant is not authorized", true),
+                (409, "managed browser run already exists", false),
+                (400, "browser_grant_hosts_invalid", false),
+            ] {
+                let up = upstreams().await;
+                mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+                Mock::given(wm_method("POST"))
+                    .and(wm_path("/v1/browser/runs"))
+                    .respond_with(
+                        ResponseTemplate::new(upstream).set_body_json(json!({ "error": code })),
+                    )
+                    .mount(&up.model)
+                    .await;
+                let mut body = ai_run_body();
+                if !names_hosts {
+                    body.allowed_domains = None;
+                }
+                let (status, response) =
+                    start_run_with(state(&up, BrowserGrantMode::Strict), body).await;
+                assert_eq!(status.as_u16(), upstream, "{response}");
+                assert_ne!(
+                    response["error"]["code"],
+                    json!("browser_session_grant_inactive"),
+                    "{response}"
+                );
+            }
+        }
+
+        #[test]
+        fn the_spa_owner_projection_drops_only_the_grant_id() {
+            let projection = owner_projection(Some(GRANT));
+            let spa = spa_owner_projection(projection.clone());
+            assert!(!spa.to_string().contains(GRANT), "{spa}");
+            let mut expected = projection;
+            expected.as_object_mut().expect("object").remove("grantId");
+            assert_eq!(spa, expected);
+        }
+
+        #[test]
+        fn the_spa_projection_mapping_never_exposes_the_grant_id() {
+            let mapped =
+                browser_response_from_owner_projection(&owner_projection(Some(GRANT)), None);
+            let text = mapped.to_string();
+            assert!(!text.contains(GRANT) && !text.contains("grantId"), "{text}");
+        }
+
+        #[test]
+        fn a_projection_grant_id_must_be_a_plain_path_segment() {
+            assert_eq!(
+                projection_grant_id(&owner_projection(Some(GRANT))).as_deref(),
+                Some(GRANT)
+            );
+            assert_eq!(
+                projection_grant_id(&owner_projection(Some("z_abc123"))).as_deref(),
+                Some("z_abc123")
+            );
+            for bad in ["", "../x", "a/b", "g?x=1"] {
+                assert_eq!(
+                    projection_grant_id(&owner_projection(Some(bad))),
+                    None,
+                    "{bad:?}"
+                );
+            }
+            assert_eq!(projection_grant_id(&owner_projection(None)), None);
+        }
+    }
+
+    pub(crate) fn test_app_state() -> AppState {
         let cache = crate::cache::ResultCache::disabled();
         AppState {
             client: reqwest::Client::new(),
             streaming_client: reqwest::Client::new(),
             internal_api_key: "test-key".into(),
             enforcement_mode: "off".to_string(),
+            browser_grant_mode: BrowserGrantMode::Permissive,
+            browser_human_browse: false,
             auth_core_url: "http://127.0.0.1:1".into(),
             verevon_public_origin: "http://localhost:5173".into(),
             session_core_url: "http://127.0.0.1:1".into(),
@@ -5176,6 +8110,12 @@ mod tests {
             audit_core_service_token: "audit-test-secret-at-least-32-bytes".into(),
             insight_core_url: "http://127.0.0.1:1".into(),
             leads_core_url: "http://127.0.0.1:1".into(),
+            anbud_core_url: "http://127.0.0.1:1".into(),
+            anbud_api_key: String::new(),
+            anbud_api_key_header: "X-API-Key".into(),
+            marketing_core_url: "http://127.0.0.1:1".into(),
+            marketing_core_service_key: String::new(),
+            marketing_core_organization_id: String::new(),
             shipping_core_url: "http://127.0.0.1:1".into(),
             user_core_url: "http://127.0.0.1:1".into(),
             application_convex_url: String::new(),
@@ -5212,6 +8152,7 @@ mod tests {
             cache: cache.clone(),
             rate_limiter: crate::rate_limit::RateLimiter::from_cache(&cache),
             studio_store: crate::domains::studio::StudioStore::new(),
+            schedule_capabilities: crate::config::ScheduleCapabilities::default(),
             allow_dev_actor_headers: true,
             allow_dev_auth_bypass: true,
             mail_task_ingest_service_token: "mail-task-test-secret-at-least-32-bytes".into(),
@@ -5225,6 +8166,89 @@ mod tests {
             continue_park_form: false,
             model_entitlement_admin_enabled: false,
             mail_task_pipeline: None,
+        }
+    }
+
+    /// The real browser route table, behind a stand-in session layer: the
+    /// session-create and AI-run routes share one small per-org budget, and
+    /// nothing done inside an open session spends it.
+    #[tokio::test]
+    async fn browser_start_routes_have_their_own_bucket_and_session_use_is_not_limited() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let app = {
+            let _env = crate::config::TEST_ENV_LOCK.lock().await;
+            std::env::remove_var("GATEWAY_RATE_CLASSES");
+            std::env::set_var("GATEWAY_RATE_LIMIT_RPM_BROWSER_START", "1");
+            let state = test_app_state();
+            let app = classed_routes(&state.rate_limiter)
+                .route_layer(axum::middleware::from_fn(
+                    |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+                        // What `require_session` does for a member of org_a.
+                        request.extensions_mut().insert(AuthenticatedUser {
+                            user_id: "user-a".into(),
+                            user_email: String::new(),
+                            user_name: String::new(),
+                            user_image: None,
+                            email_verified: true,
+                            auth_role: None,
+                            active_org_id: Some("org_a".into()),
+                            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                                organization_id: "org_a".into(),
+                                role: "member".into(),
+                            }),
+                        });
+                        next.run(request).await
+                    },
+                ))
+                .with_state(state);
+            std::env::remove_var("GATEWAY_RATE_LIMIT_RPM_BROWSER_START");
+            app
+        };
+        let call = |method: &'static str, uri: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("authorization", "Bearer dev-bypass")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"url":"https://example.com","goal":"x"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let first = call("POST", "/api/v1/browser/sessions").await;
+        assert_ne!(
+            first.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "the first create is allowed"
+        );
+        let second = call("POST", "/api/v1/browser/sessions").await;
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(second.headers().contains_key("retry-after"));
+        // The AI-run start shares the same start budget.
+        let ai_run = call("POST", "/api/v1/browser/sessions/s1/ai-runs").await;
+        assert_eq!(ai_run.status(), StatusCode::TOO_MANY_REQUESTS);
+        // Everything inside an open session is a different class.
+        for (method, uri) in [
+            ("GET", "/api/v1/browser/sessions/s1"),
+            ("GET", "/api/v1/browser/sessions/s1/frame"),
+            ("POST", "/api/v1/browser/sessions/s1/actions"),
+            ("DELETE", "/api/v1/browser/sessions/s1"),
+            ("POST", "/api/v1/browser/runs/r1/control"),
+        ] {
+            let response = call(method, uri).await;
+            assert_ne!(
+                response.status(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "{method} {uri} must not spend the browser_start budget"
+            );
         }
     }
 
@@ -5247,6 +8271,168 @@ mod tests {
         let err = sanitize_action(json!({ "type": "evaluate", "script": "document.cookie" }))
             .expect_err("evaluate should be denied");
         assert_eq!(err.0, "browser_action_denied");
+    }
+
+    #[test]
+    fn sanitize_action_allows_reload_without_extra_keys() {
+        let hard = sanitize_action(json!({ "type": "reload", "ignore_cache": true }))
+            .expect("valid action");
+        assert_eq!(hard, json!({ "type": "reload", "ignore_cache": true }));
+        let soft = sanitize_action(json!({ "type": "reload" })).expect("valid action");
+        assert_eq!(soft, json!({ "type": "reload", "ignore_cache": false }));
+    }
+
+    #[test]
+    fn sanitize_action_rejects_reload_with_url() {
+        let err = sanitize_action(json!({ "type": "reload", "url": "https://example.com" }))
+            .expect_err("reload with a url must be refused");
+        assert_eq!(err.0, "invalid_browser_action");
+        let typed = sanitize_action(json!({ "type": "reload", "ignore_cache": "yes" }))
+            .expect_err("non-boolean ignore_cache must be refused");
+        assert_eq!(typed.0, "invalid_browser_action");
+    }
+
+    /// D2-012: a verified service principal is the agent whatever it states, a person's
+    /// session keeps the stated actor, and a call with no class is a person's.
+    #[test]
+    fn a_service_principal_is_the_agent_whatever_it_states() {
+        let sp = || Some(Extension(CallerClass::ServicePrincipal));
+        for stated in [BrowserActionActor::Human, BrowserActionActor::Agent] {
+            assert_eq!(effective_actor(sp(), stated), BrowserActionActor::Agent, "{stated:?}");
+        }
+        for caller in [None, Some(Extension(CallerClass::User))] {
+            assert_eq!(
+                effective_actor(caller, BrowserActionActor::Human),
+                BrowserActionActor::Human
+            );
+            assert_eq!(
+                effective_actor(caller, BrowserActionActor::Agent),
+                BrowserActionActor::Agent
+            );
+        }
+    }
+
+    /// D2-012: a service principal stating `human` still cannot reload (WS9.B). It is
+    /// refused before any upstream call, so the test needs no Quarry.
+    #[tokio::test]
+    async fn a_service_principal_stating_human_cannot_reload() {
+        let response = run_action(
+            State(test_app_state()),
+            Extension(test_user("user-owner", "org-owner")),
+            Some(Extension(CallerClass::ServicePrincipal)),
+            HeaderMap::new(),
+            Path("run-1".to_owned()),
+            Json(ActionBody {
+                action: json!({ "type": "reload" }),
+                actor: BrowserActionActor::Human,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// D2-012: during a person's takeover a service principal stating `human` is refused
+    /// like any agent, and nothing reaches Quarry (no step, no control change).
+    #[tokio::test]
+    async fn a_service_principal_stating_human_is_refused_during_takeover() {
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "human_takeover").await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+
+        let response = run_action(
+            State(state.clone()),
+            Extension(test_user("user-owner", "org-owner")),
+            Some(Extension(CallerClass::ServicePrincipal)),
+            HeaderMap::new(),
+            Path("run-1".to_owned()),
+            Json(ActionBody {
+                action: json!({ "type": "wait", "ms": 10 }),
+                actor: BrowserActionActor::Human,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            call_tab_routes_as(
+                &state,
+                BrowserActionActor::Human,
+                HeaderMap::new(),
+                Some(CallerClass::ServicePrincipal)
+            )
+            .await,
+            [StatusCode::CONFLICT; 3]
+        );
+        assert!(
+            quarry_mutations(&quarry).await.is_empty(),
+            "a refused call never reaches Quarry"
+        );
+    }
+
+    /// D2-012: outside a takeover a service principal stating `human` neither flips the
+    /// run into takeover nor sends a person's step: Quarry gets the agent's step only.
+    #[tokio::test]
+    async fn a_service_principal_stating_human_cannot_start_a_takeover() {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, ResponseTemplate,
+        };
+
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "agent_control").await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/agent/runs/run-1/step"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": { "ok": true } })))
+            .mount(&quarry)
+            .await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+
+        let response = run_action(
+            State(state.clone()),
+            Extension(test_user("user-owner", "org-owner")),
+            Some(Extension(CallerClass::ServicePrincipal)),
+            HeaderMap::new(),
+            Path("run-1".to_owned()),
+            Json(ActionBody {
+                action: json!({ "type": "wait", "ms": 10 }),
+                actor: BrowserActionActor::Human,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mutations = quarry_mutations(&quarry).await;
+        assert_eq!(mutations.len(), 1, "{mutations:?}");
+        assert_eq!(mutations[0].1, "/v1/agent/runs/run-1/step");
+        assert_eq!(mutations[0].2["initiated_by"], "agent", "{:?}", mutations[0]);
+
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "agent_control").await;
+        state.quarry_edge_url = quarry.uri();
+        assert_eq!(
+            call_tab_routes_as(
+                &state,
+                BrowserActionActor::Human,
+                HeaderMap::new(),
+                Some(CallerClass::ServicePrincipal)
+            )
+            .await,
+            [StatusCode::OK; 3]
+        );
+        let mutations = quarry_mutations(&quarry).await;
+        assert_eq!(mutations.len(), 3, "{mutations:?}");
+        assert!(mutations[0].1.ends_with("select?initiatedBy=agent"), "{:?}", mutations[0]);
+        assert!(mutations[1].1.ends_with("tab-1?initiatedBy=agent"), "{:?}", mutations[1]);
+        assert_eq!(mutations[2].2["initiatedBy"], "agent", "{:?}", mutations[2]);
+    }
+
+    #[test]
+    fn reload_is_refused_for_agent_actor_only() {
+        let reload = json!({ "type": "reload", "ignore_cache": true });
+        assert!(reload_refused_for_actor(&reload, BrowserActionActor::Agent));
+        assert!(!reload_refused_for_actor(&reload, BrowserActionActor::Human));
+        let back = json!({ "type": "back" });
+        assert!(!reload_refused_for_actor(&back, BrowserActionActor::Agent));
     }
 
     #[test]
@@ -5468,7 +8654,7 @@ mod tests {
 
         let request = build_ai_run_request(
             "check out the cart",
-            "session:sess_1",
+            "sess_1",
             None,
             &metadata,
             &body,
@@ -5478,7 +8664,7 @@ mod tests {
         assert_eq!(request["require_approval"], json!(false));
         // Sanity: everything else still forwards as expected.
         assert_eq!(request["goal"], json!("check out the cart"));
-        assert_eq!(request["grant_id"], json!("session:sess_1"));
+        assert_eq!(request["grant_id"], json!("sess_1"));
         assert_eq!(request["profile_id"], json!("prof_1"));
         assert_eq!(request["max_steps"], json!(5));
         assert_eq!(request["zdr"], json!(false));
@@ -5512,7 +8698,7 @@ mod tests {
 
         let request = build_ai_run_request(
             "find the price",
-            "session:sess_2",
+            "sess_2",
             None,
             &metadata,
             &body,
@@ -5559,7 +8745,7 @@ mod tests {
 
         let request = build_ai_run_request(
             "browse around",
-            "session:sess_3",
+            "sess_3",
             None,
             &metadata,
             &body,
@@ -5602,7 +8788,7 @@ mod tests {
 
             let request = build_ai_run_request(
                 "resume shopping",
-                "session:sess_4",
+                "sess_4",
                 None,
                 &metadata,
                 &body,
@@ -5879,18 +9065,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_zero_retention_session_never_mints_a_browser_bearer_or_asks_for_a_grant() {
-        use wiremock::{
-            matchers::{method as wm_method, path as wm_path},
-            Mock, ResponseTemplate,
-        };
+        use axum::body::to_bytes;
 
+        // The session has no grant of its own; with the switch on, a
+        // zero-retention session still gets no issued grant and no bearer.
         let (_quarry, auth_core, model_gateway, state) =
             ai_run_upstreams("sess_zdr", "https://shop.example.test/cart", true).await;
-        Mock::given(wm_method("POST"))
-            .and(wm_path("/v1/browser/runs"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "run_id": "run-zdr" })))
-            .mount(&model_gateway)
-            .await;
 
         let response = start_ai_run_with_switch(
             state,
@@ -5902,34 +9082,26 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let received = model_gateway
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("response body");
+        let body: Value = serde_json::from_slice(&bytes).expect("JSON response");
+        assert_eq!(body["error"]["code"], json!("browser_session_grant_missing"));
+        assert!(model_gateway
             .received_requests()
             .await
-            .expect("recorded model-gateway requests");
-        let [run] = received.as_slice() else {
-            panic!("expected only the run request, got {}", received.len());
-        };
-        assert_eq!(run.url.path(), "/v1/browser/runs");
-        assert_eq!(request_header(run, "x-browser-authorization"), None);
-        assert_eq!(request_json(run)["grant_id"], json!("session:sess_zdr"));
+            .unwrap_or_default()
+            .is_empty());
         assert!(!browser_bearer_minted(&auth_core).await);
     }
 
     #[tokio::test]
-    async fn a_run_with_the_switch_off_keeps_the_session_string_and_no_browser_bearer() {
-        use wiremock::{
-            matchers::{method as wm_method, path as wm_path},
-            Mock, ResponseTemplate,
-        };
+    async fn a_grantless_session_with_the_switch_off_is_refused_and_sends_no_session_string() {
+        use axum::body::to_bytes;
 
         let (_quarry, auth_core, model_gateway, state) =
             ai_run_upstreams("sess_off", "https://shop.example.test/cart", false).await;
-        Mock::given(wm_method("POST"))
-            .and(wm_path("/v1/browser/runs"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "run_id": "run-off" })))
-            .mount(&model_gateway)
-            .await;
 
         let response = start_ai_run_with_switch(
             state,
@@ -5941,18 +9113,17 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let received = model_gateway
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("response body");
+        let body: Value = serde_json::from_slice(&bytes).expect("JSON response");
+        assert_eq!(body["error"]["code"], json!("browser_session_grant_missing"));
+        assert!(model_gateway
             .received_requests()
             .await
-            .expect("recorded model-gateway requests");
-        let [run] = received.as_slice() else {
-            panic!("expected only the run request, got {}", received.len());
-        };
-        assert_eq!(request_header(run, "x-browser-authorization"), None);
-        let run_body = request_json(run);
-        assert_eq!(run_body["grant_id"], json!("session:sess_off"));
-        assert_eq!(run_body["allowed_domains"], json!(["shop.example.test"]));
+            .unwrap_or_default()
+            .is_empty());
         assert!(!browser_bearer_minted(&auth_core).await);
     }
 
@@ -6995,5 +10166,106 @@ mod tests {
             })),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod human_browse_session_tests {
+    use super::*;
+
+    // The HTTP path (create_session, keepalive_session) needs a live broker, model gateway
+    // and Quarry; these tests pin the pure decisions those handlers make. The wire-level
+    // legs are the Playwright and stack evidence of WS8.D, not run in the build.
+
+    #[test]
+    fn create_session_requests_human_browse_grant_and_omits_budget_literals() {
+        let grant = session_grant_request_body(SessionGrantScope::HumanBrowse, false)
+            .expect("a human_browse grant has a body");
+        assert_eq!(grant, json!({ "kind": "human_browse", "zdr": false }));
+        assert!(grant.get("allowed_domains").is_none(), "{grant}");
+        // With a human grant the start body carries no constraints at all: no max_steps,
+        // no max_runtime_s and no allowed_domains.
+        assert_eq!(session_start_constraints(true, Some("example.com")), None);
+    }
+
+    #[test]
+    fn create_session_off_keeps_legacy_first_host_policy() {
+        assert_eq!(
+            session_grant_request_body(SessionGrantScope::StartHost(Some("example.com")), true),
+            Some(json!({ "allowed_domains": ["example.com"], "zdr": true }))
+        );
+        assert_eq!(
+            session_grant_request_body(SessionGrantScope::StartHost(None), false),
+            None
+        );
+        assert_eq!(
+            session_start_constraints(false, Some("example.com")),
+            Some(json!({
+                "max_steps": 12,
+                "allowed_domains": ["example.com"],
+                "max_runtime_s": 120
+            }))
+        );
+    }
+
+    #[test]
+    fn keepalive_requires_owner_and_returns_expiry_only() {
+        let renewed = json!({
+            "expires_at": "2030-01-01T00:00:00Z",
+            "absolute_expires_at": "2030-01-01T04:00:00Z",
+            "grant_id": "g_secret"
+        });
+        let payload = keepalive_outcome(StatusCode::OK, &renewed).expect("a renewed grant");
+        assert_eq!(payload, json!({ "expiresAt": "2030-01-01T00:00:00Z" }));
+        assert!(!payload.to_string().contains("g_secret"), "{payload}");
+    }
+
+    #[test]
+    fn keepalive_maps_not_renewable_to_409() {
+        for status in [
+            StatusCode::CONFLICT,
+            StatusCode::NOT_FOUND,
+            StatusCode::FORBIDDEN,
+        ] {
+            assert_eq!(
+                keepalive_outcome(status, &json!({ "error": "browser_grant_not_renewable" })),
+                Err((StatusCode::CONFLICT, "browser_session_expired")),
+                "{status}"
+            );
+        }
+        assert_eq!(
+            keepalive_outcome(StatusCode::BAD_GATEWAY, &json!({})),
+            Err((StatusCode::SERVICE_UNAVAILABLE, "browser_grant_unavailable"))
+        );
+    }
+
+    #[test]
+    fn projection_never_exposes_grant_id() {
+        let projection = json!({
+            "runId": "run-1",
+            "grantId": "g_secret",
+            "grantKind": "human_browse",
+            "tabControl": true,
+            "attachAvailable": false,
+            "status": "live",
+            "live": true
+        });
+        let response = browser_response_from_owner_projection(&projection, None);
+        assert!(!response.to_string().contains("g_secret"), "{response}");
+        assert!(response.pointer("/session/grantId").is_none());
+        let capabilities = response["session"]["capabilities"]
+            .as_array()
+            .expect("capabilities array");
+        assert!(capabilities.iter().any(|c| c == "human_browsing"));
+        assert!(capabilities.iter().any(|c| c == "tab_control"));
+        assert!(!capabilities.iter().any(|c| c == "attach"));
+    }
+
+    #[test]
+    fn human_capabilities_are_not_advertised_without_quarry_saying_so() {
+        let caps = browser_session_capabilities(&json!({ "runId": "run-1" }));
+        assert!(!caps.contains(&"human_browsing"));
+        assert!(!caps.contains(&"tab_control"));
+        assert!(!caps.contains(&"attach"));
     }
 }

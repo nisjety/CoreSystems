@@ -108,6 +108,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "browser.blocked.try_other_source",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:0ec9c11adc7fb2db30403d2027176231bebbcf8e9b90fc7f5461311db37e3ca3",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "browser_action.run",
       "registry": true,
       "access": "none",
@@ -130,7 +143,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:aa453c340c4769794968499008ec1abe802bea7c1f544303475305c8867d3e88",
+      "schemaHash": "sha256:602275812baccffefaf43a2d4422aba857b45ad57e41779170ac91566a4c3f11",
       "zdr_allowed": false
     },
     {
@@ -144,6 +157,45 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:c61ee6845a476122d74dfd5ec9d4ceb82f4a8b9afe891cd582cd87cd45563e43",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "browser_evidence.compile_procedure",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:5a3c7acbb53c150a80610f0378eb826723055833e0e00cef8447d7a8c61f0cb5",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "browser_omnibox.search",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:ad3e5928c07b8f578bf761fe58f015dd60d26bdc0194973be33b8f6c53dd4ab8",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "browser_omnibox.suggest",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:fe6acc014806564372048b01da619783ed707af68825f2beb2c26dbac35edba5",
       "zdr_allowed": false
     },
     {
@@ -251,6 +303,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "browser_session.keepalive",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:4dfa993ac1730e1d991f52d49fbad26b15d48f1b2441863a6c18f4c8f67229da",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "browser_tab.close",
       "registry": true,
       "access": "none",
@@ -260,7 +325,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:879391195e06efc29a08018a3a651e2257a656d68b9aaf453bd5868b2dae761b",
+      "schemaHash": "sha256:8086fb088b153aa81a0e66274fcb634c24a3e53792c2989f4bd3818fac28352f",
       "zdr_allowed": false
     },
     {
@@ -273,7 +338,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:943bb0445e2ce147ff044581aeed9b1e9dfcd6cbbec6ac6b8f2c2c1098976297",
+      "schemaHash": "sha256:dd27317231bb0c152b0cf2b48717874f587a6ac2f55a915f87d33d2099955c9d",
       "zdr_allowed": false
     },
     {
@@ -286,7 +351,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:0ae35acc06e743c7df27059233b5d6e7491f54a19a8f3235cb04c2b56adaae51",
+      "schemaHash": "sha256:37e6ff3ba761b93692883197d83564275540b6c8debff5ed82dd2293c88731d3",
       "zdr_allowed": false
     },
     {
@@ -1038,7 +1103,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:db5ba709a98091c30d261c643080c0e45c89b00a7db2af728a9634d52931cf46",
+      "schemaHash": "sha256:640bbf1de515d59e8ccd9f4e8f2328293348c9a298731d3b0059492cccd99847",
       "zdr_allowed": false
     },
     {
@@ -1147,7 +1212,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:265b76aba5f802f0ccb37c6c3f3cdd03fac14f6c2f83ccb386b8e6a4d22c37da",
+      "schemaHash": "sha256:1020b35cbc6ed66f20ce7df0acfa0410843e53bf7e9d7114c923a07b82fa68ce",
       "zdr_allowed": false
     },
     {
@@ -1591,7 +1656,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:8c64480d4238ab72e677c63d54ba66acfa4f4c2da409885f40ff1c450bf5ba4f",
+      "schemaHash": "sha256:cf43226ed06d77aa16934b19d2686531bdf503d7c44181b6143239a53d4cc508",
       "zdr_allowed": false
     },
     {

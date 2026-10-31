@@ -17,6 +17,10 @@ var ErrDomainNotGrantable = errors.New("browser host is not grantable")
 // without touching issuance.
 type PolicyResolver interface {
 	CheckSession(ctx context.Context, orgID string, domains []string) error
+	// ResolveHumanBrowse says whether human_browse (open-web) grants are issued
+	// to this user and which deny-list they carry (WS8.C). The org override is
+	// the ADR-1 hook and is not implemented: StaticPolicy ignores both ids.
+	ResolveHumanBrowse(ctx context.Context, orgID, ownerID string) (HumanBrowsePolicy, error)
 }
 
 // DefaultMaxSessionDomains bounds one session grant.
@@ -43,6 +47,13 @@ type StaticPolicy struct {
 	// MaxDomains caps hosts per grant. Zero or negative uses
 	// DefaultMaxSessionDomains.
 	MaxDomains int
+	// HumanBrowseEnabled turns human_browse issuance on
+	// (BROWSER_BROKER_HUMAN_BROWSE_ENABLED). The zero value is off.
+	HumanBrowseEnabled bool
+	// DeniedSuffixes is the deny-list of an issued human_browse grant. Nil or
+	// empty uses DefaultDeniedSuffixes, so enabling the kind can never issue an
+	// open-web grant with no deny-list.
+	DeniedSuffixes []string
 }
 
 // CheckSession implements PolicyResolver.
@@ -68,4 +79,16 @@ func (p StaticPolicy) CheckSession(_ context.Context, _ string, domains []string
 		}
 	}
 	return nil
+}
+
+// ResolveHumanBrowse implements PolicyResolver.
+func (p StaticPolicy) ResolveHumanBrowse(_ context.Context, _, _ string) (HumanBrowsePolicy, error) {
+	if !p.HumanBrowseEnabled {
+		return HumanBrowsePolicy{}, nil
+	}
+	denied := p.DeniedSuffixes
+	if len(denied) == 0 {
+		denied = DefaultDeniedSuffixes
+	}
+	return HumanBrowsePolicy{Allowed: true, DeniedSuffixes: append([]string(nil), denied...)}, nil
 }

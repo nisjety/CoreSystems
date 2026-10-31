@@ -216,6 +216,13 @@ pub struct PageMetadata {
     /// Robots directive. `meta[name=robots]`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub robots: Option<String>,
+    /// What the body was detected to be (`html`, `pdf`, `docx`, ...), from the
+    /// Content-Type and the first bytes. Absent when content routing is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_kind: Option<String>,
+    /// Where `content_kind` came from: `header`, `magic` or `default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_kind_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

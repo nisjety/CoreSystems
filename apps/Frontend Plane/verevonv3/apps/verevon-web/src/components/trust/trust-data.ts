@@ -16,6 +16,62 @@ export type TrustControl = {
 };
 
 /**
+ * The short procurement view of the detailed controls below. This is not a
+ * document pack: it tells a buyer exactly which evidence is available today
+ * and which evidence is still missing, so the detailed sections can be read
+ * in the right light.
+ */
+export type TrustEvidenceItem = {
+	title: string;
+	level: StatusLevel;
+	available: string;
+	pending: string;
+};
+
+export const procurementEvidence: TrustEvidenceItem[] = [
+	{
+		title: "Sporing av AI-handlinger",
+		level: "progress",
+		available:
+			"Modell-planet skriver tool_action-hendelser til en utboks, og Trust Center kan vise hendelser per tilkoblet app.",
+		pending:
+			"Leveringen til revisjonstjenesten er ikke verifisert ende til ende. Vi publiserer ikke et kontrollspor som bevis før det faktisk er levert og vist.",
+	},
+	{
+		title: "Uavhengig sikkerhetstesting",
+		level: "planned",
+		available:
+			"Rate-limiting, sikkerhetsheadere og påloggingskontroller er beskrevet som håndhevet i gateway og webserver.",
+		pending:
+			"En uavhengig pentest og et publiserbart sammendrag er planlagt. Vi har ingen rapport å dele ennå.",
+	},
+	{
+		title: "DPA, overføringsvurdering og dataflyt",
+		level: "progress",
+		available:
+			"Underleverandører, formål og oppgitt region er publisert nedenfor, med begrensningene for hver rute.",
+		pending:
+			"DPA, Schrems II-vurdering og dataflyt-diagram er under utarbeidelse og ikke gjennomgått av norsk personvernjurist.",
+	},
+	{
+		title: "Datalagring og residens",
+		level: "progress",
+		available:
+			"Modellruter og deres konfigurerte regioner er oppgitt per leverandør, inkludert ruter uten EU- eller ZDR-garanti.",
+		pending:
+			"Konfigurerte regioner er ikke uavhengig verifiserte behandlingssteder, og Verevons egne lagre publiseres ikke før de kan dokumenteres.",
+	},
+	{
+		title: "Sletting og oppbevaring",
+		level: "progress",
+		available:
+			"Sletting av brukerdata i Control Plane er bygget og testet mot en ekte database. Omfanget og unntakene er beskrevet nedenfor.",
+		pending:
+			"Sletting av hele brukeren og organisasjonen er ikke verifisert ende til ende. Samtaler og kjørehistorikk slettes ikke automatisk etter alder.",
+	},
+];
+
+/**
  * The controls the page can stand behind, each worded no wider than the evidence in
  * docs/compliance/evidence/claims-vs-code.md and carrying its real level. The drift
  * test (trust-data.test.ts) pins the statements to trust-claims.ts.

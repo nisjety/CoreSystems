@@ -4,16 +4,25 @@ import type { JSX } from '@solidjs/web'
 import { AppShell } from '@/app/shell/AppShell'
 import { hasWorkspaceAdminAccess } from '@/shared/session/access'
 import { getSession } from '@/shared/session/session-store'
+import { shouldEnableSceneMode } from '@/demo/scene-mode'
 
 const DashboardPage = lazy(() => import('@/features/dashboard/components/DashboardPage'))
 const ChatPage = lazy(() => import('@/features/chat/components/ChatPage'))
+const ChatUtilityPage = lazy(() => import('@/features/chat/components/ChatUtilityPage'))
 const StudioPage = lazy(() => import('@/features/studio/components/StudioPage'))
+const EngagementPage = lazy(() => import('@/features/visibility/components/EngagementPage'))
+const VisibilityPage = lazy(() => import('@/features/visibility/components/VisibilityPage'))
 const InboxPage = lazy(() => import('@/features/inbox/components/InboxPage'))
 const TicketingPage = lazy(() => import('@/features/tickets/components/TicketingPage'))
 const SupportPage = lazy(() => import('@/features/support/components/SupportPage'))
 const AgentsPage = lazy(() => import('@/features/agents/components/AgentsPage'))
 const AgentRunConsole = lazy(() => import('@/features/agents/components/AgentRunConsole'))
-const FleetRunConsole = lazy(() => import('@/features/agents/components/FleetRunConsole'))
+// The fleet console has no producer yet (nothing starts a fleet), so its route is off unless
+// VITE_FLEET_CONSOLE=1. With the flag unset the build folds this to false and emits no chunk.
+const FLEET_CONSOLE_ENABLED = import.meta.env.VITE_FLEET_CONSOLE === '1'
+const FleetRunConsole = FLEET_CONSOLE_ENABLED
+  ? lazy(() => import('@/features/agents/components/FleetRunConsole'))
+  : undefined
 const AgentInstallationsPage = lazy(() => import('@/features/agents/components/AgentInstallationsPage'))
 const ChiefCoreRoutingPage = lazy(() => import('@/features/agents/components/ChiefCoreRoutingPage'))
 const CostDashboardPage = lazy(() => import('@/features/cost/components/CostDashboardPage'))
@@ -27,6 +36,7 @@ const SharedWithMePage = lazy(() => import('@/features/knowledge/components/Shar
 const SpacePage = lazy(() => import('@/features/spaces/components/SpacePage'))
 const SpacesIndexPage = lazy(() => import('@/features/spaces/components/SpacesIndexPage'))
 const LeadsPage = lazy(() => import('@/features/leads/components/LeadsPage'))
+const AnbudPage = lazy(() => import('@/features/anbud/components/AnbudPage'))
 const VerevonIngestionsPage = lazy(() => import('@/features/ingestions/components/VerevonIngestionsPage'))
 const AuthPage = lazy(() => import('@/features/auth/components/AuthPage'))
 const AcceptInvitationPage = lazy(() => import('@/features/auth/components/AcceptInvitationPage'))
@@ -34,6 +44,11 @@ const OnboardingPage = lazy(() => import('@/features/onboarding/components/Onboa
 const AccountSettingsPage = lazy(() => import('@/features/settings/components/AccountSettingsPage'))
 const SettingsPage = lazy(() => import('@/features/settings/components/SettingsPage'))
 const NotFoundPage = lazy(() => import('@/app/routes/NotFoundPage'))
+// Product-scene route (plans/product-scenes/CONTRACT.md): available only in the explicitly enabled
+// development build (VITE_SCENE_MODE=1 on a /scene/<id> path); a normal build has no src/demo chunk.
+const ScenePage = import.meta.env.DEV && shouldEnableSceneMode(import.meta.env.VITE_SCENE_MODE, true, window.location.pathname)
+  ? lazy(() => import('@/demo/ScenePage'))
+  : undefined
 
 function SessionLoading() {
   return (
@@ -138,6 +153,13 @@ function RequireWorkspaceAdmin(props: { children: JSX.Element }) {
   )
 }
 
+/// Legacy URL that now lives elsewhere: replace it in history so Back does not bounce.
+function RedirectTo(props: { href: string }) {
+  const navigate = useNavigate()
+  createEffectRedirect(() => props.href, (href) => navigate(href, { replace: true }))
+  return null
+}
+
 /// Solid 2's createEffect requires two separate functions: `compute` (tracked
 /// reads only) and `effect` (untracked imperative work, e.g. navigate()).
 /// Mixing a tracked read with an imperative write in one callback — the
@@ -149,6 +171,7 @@ function createEffectRedirect<T>(compute: () => T, effect: (value: T) => void): 
 
 export const Router = createRouter({
   routes: [
+    ...(ScenePage ? [{ path: '/scene/:id', component: ScenePage }] : []),
     { path: '/auth', component: AuthPage },
     { path: '/login', component: AuthPage },
     { path: '/reset-password', component: AuthPage },
@@ -168,12 +191,24 @@ export const Router = createRouter({
         { path: '/', component: DashboardPage },
         { path: '/dashboard', component: DashboardPage },
         { path: '/chat', component: ChatPage },
+        { path: '/chat/findings', component: () => <ChatUtilityPage section="findings" /> },
+        { path: '/chat/reports', component: () => <ChatUtilityPage section="reports" /> },
+        { path: '/chat/routines', component: () => <ChatUtilityPage section="routines" /> },
         { path: '/spaces', component: SpacesIndexPage },
         { path: '/spaces/:spaceId', component: SpacePage },
         { path: '/studio', component: () => <StudioPage section="canvas" /> },
         { path: '/studio/canvas', component: () => <StudioPage section="canvas" /> },
         { path: '/studio/campaigns', component: () => <StudioPage section="campaigns" /> },
         { path: '/studio/templates', component: () => <StudioPage section="templates" /> },
+        { path: '/studio/pulse', component: () => <RedirectTo href="/engagement/visibility" /> },
+        { path: '/engagement', component: EngagementPage },
+        { path: '/engagement/visibility', component: VisibilityPage },
+        { path: '/engagement/visibility/pages', component: VisibilityPage },
+        { path: '/engagement/visibility/groups', component: VisibilityPage },
+        { path: '/engagement/visibility/links', component: VisibilityPage },
+        { path: '/engagement/visibility/competitors', component: VisibilityPage },
+        { path: '/anbud', component: () => <AnbudPage section="matches" /> },
+        { path: '/anbud/radar', component: () => <AnbudPage section="radar" /> },
         { path: '/inbox', component: InboxPage },
         { path: '/tickets', component: TicketingPage },
         { path: '/support', component: SupportPage },
@@ -203,7 +238,9 @@ export const Router = createRouter({
         { path: '/agents/installations', component: AgentInstallationsPage },
         { path: '/agents/chief-core', component: ChiefCoreRoutingPage },
         { path: '/agents/runs', component: AgentRunConsole },
-        { path: '/agents/fleets/:fleetId', component: () => <FleetRunConsole fleetId={window.location.pathname.split('/').pop()!} /> },
+        ...(FleetRunConsole
+          ? [{ path: '/agents/fleets/:fleetId', component: () => <FleetRunConsole fleetId={window.location.pathname.split('/').pop()!} /> }]
+          : []),
         { path: '/agents/cost', component: CostDashboardPage },
         { path: '/agents/quality', component: OpsQualityPage },
         { path: '/ingestions', component: VerevonIngestionsPage },

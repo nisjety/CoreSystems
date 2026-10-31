@@ -1,0 +1,37 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  name: "fact_batch_payment_line",
+  description: "Silver: current payment lines within Xero batches. Grain: one row per tenant, batch, and line position.",
+  tags: ["silver", "xero", "fact"]
+}
+
+WITH current_batches AS (
+  SELECT tenant_id, record_id, synced_at, batch_payment_id
+  FROM ${ref("dw_staging_xero", "batch_payments")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, record_id
+    ORDER BY synced_at DESC
+  ) = 1
+)
+
+SELECT
+  s.tenant_id,
+  s.synced_at,
+  COALESCE(s.batch_payment_id, h.batch_payment_id) AS batch_payment_id,
+  s.line_index,
+  s.payment_id,
+  s.invoice_id,
+  s.invoice_currency_code,
+  s.account_currency_code,
+  SAFE_CAST(s.amount AS FLOAT64) AS amount,
+  SAFE_CAST(s.bank_amount AS FLOAT64) AS bank_amount,
+  s.details,
+  s.invoice_has_errors,
+  s.invoice_is_discounted,
+  'xero' AS _source
+FROM ${ref("dw_staging_xero", "batch_payment_line_snapshots")} AS s
+JOIN current_batches AS h
+  ON s.tenant_id = h.tenant_id
+ AND s.record_id = h.record_id
+ AND s.synced_at = h.synced_at

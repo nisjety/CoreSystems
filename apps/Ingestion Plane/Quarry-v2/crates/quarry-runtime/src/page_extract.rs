@@ -456,14 +456,14 @@ impl PageTitleEnricher {
             }
         }
         if !self.within_budget() {
-            tracing::debug!(url = %url, "page-title enrichment skipped: hourly cap reached");
+            tracing::debug!("page-title enrichment skipped: hourly cap reached");
             return None;
         }
         let _permit = match tokio::time::timeout(self.timeout / 2, self.permits.acquire()).await
         {
             Ok(Ok(p)) => p,
             _ => {
-                tracing::debug!(url = %url, "page-title enrichment skipped: concurrency saturated");
+                tracing::debug!("page-title enrichment skipped: concurrency saturated");
                 return None;
             }
         };
@@ -488,12 +488,11 @@ impl PageTitleEnricher {
         let result = match tokio::time::timeout(self.timeout, call).await {
             Ok(Ok(resp)) => parse_model_title(&resp.content, url),
             Ok(Err(e)) => {
-                tracing::warn!(error = %e, url = %url, model = %self.model, "page-title enrichment failed");
+                tracing::warn!(error_class = e.code.wire_name(), model = %self.model, "page-title enrichment failed");
                 None
             }
             Err(_) => {
                 tracing::warn!(
-                    url = %url,
                     model = %self.model,
                     timeout_ms = self.timeout.as_millis() as u64,
                     "page-title enrichment timed out"
@@ -502,7 +501,6 @@ impl PageTitleEnricher {
             }
         };
         tracing::info!(
-            url = %url,
             model = %self.model,
             elapsed_ms = started.elapsed().as_millis() as u64,
             resolved = result.is_some(),

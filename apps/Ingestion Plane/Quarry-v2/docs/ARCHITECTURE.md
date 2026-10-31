@@ -80,7 +80,7 @@ DriverPlan
   ├─ index/cache hit            (fastest; no network when valid)
   ├─ static impersonated HTTP   (rquest upstream / wreq crate + BoringSSL TLS/H2 emulation)
   ├─ browser CDP                (chromiumoxide/local Chrome or Browserless CDP)
-  ├─ browser CDP + stealth      (sticky proxy + persisted profile + action support)
+  ├─ browser CDP + profile      (sticky proxy + persisted profile + action support)
   ├─ document/PDF parser        (PDF/DOCX/XLSX/RTF path, never HTML assumptions)
   └─ specialty handlers         (Wikipedia, YouTube/audio, future site adapters)
 ```
@@ -88,11 +88,11 @@ DriverPlan
 Selection inputs:
 
 - Requested formats and actions.
-- Policy preset (`fast`, `polite`, `stealth`, `deterministic`, future custom).
+- Policy preset (`fast`, `polite`, `careful`, `deterministic`, future custom; `stealth` is a deprecated alias of `careful` for one release).
 - URL hints: file extension, known JS-required hosts, known static/API hosts.
 - Cache policy and age.
 - Session/profile requirement.
-- Block signals from prior attempts.
+- Block signals from prior attempts (`prior_block_signals`, deprecated: honoured only under `QUARRY_BLOCK_ESCALATION=legacy`, ignored under `honest`; a block never selects another identity).
 - Budget: timeout, cost tier, max browser time.
 
 Selection outputs:
@@ -100,7 +100,7 @@ Selection outputs:
 - Chosen driver and ordered fallback list.
 - Unsupported feature set per fallback.
 - Driver reason codes for events and `meta.json`.
-- Retry/escalation plan: retry static, escalate to TLS, escalate to browser, or abort.
+- Retry/escalation plan: retry static, escalate to TLS, escalate to browser, or abort. Under `QUARRY_BLOCK_ESCALATION=honest` a block status or a block-class error is not a reason to escalate (the block is returned or refused); a transport failure, a JS shell and an unfollowed redirect still are (`docs/RUNBOOKS.md`, "Block escalation").
 
 The first implementation should keep this deterministic and inspectable: every fallback decision must be visible in events and artifact metadata.
 
@@ -170,9 +170,9 @@ V2 frontier components:
 
 - `RequestQueue`: per-run queue with priority, depth, source URL, canonical URL, retry count, and reason fields.
 - `SeenSet`: canonical URL dedupe with configurable query stripping and section-anchor policy.
-- `HostSlot`: per-host delay/concurrency state, robots crawl-delay floor, and adaptive backoff.
+- `HostSlot` (planned): per-host delay/concurrency state, robots crawl-delay floor, and adaptive backoff. No robots crawl-delay floor is applied today (WS14.S4).
 - `SessionPool`: session/proxy health scores (`good`, `bad`, `retired`) inspired by Crawlee.
-- `DenialReason`: structured reason for skipped links, using Firecrawl-style operator-readable explanations.
+- `DenialReason` (planned): structured reason for skipped links, using Firecrawl-style operator-readable explanations. The enum exists in `quarry-core/src/crawl_denial.rs` with no production producer (WS14.S2 and S3).
 - `Checkpoint`: serializable frontier + seen-set + host-slot state for Temporal replay.
 
 Temporal remains the durable outer workflow. Rust owns page execution, frontier mutation, link extraction, denial classification, and per-page events.

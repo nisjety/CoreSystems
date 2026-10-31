@@ -2,12 +2,17 @@ package pg
 
 import (
 	"context"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store/storetest"
 )
 
 // envDSN gates real-database tests. Set QUARRY_TEST_DSN to e.g.
@@ -17,12 +22,29 @@ import (
 // to exercise the migrator + Postgres CRUD path end-to-end.
 const envDSN = "QUARRY_TEST_DSN"
 
-func openOrSkip(t *testing.T) store.DB {
+// envRequireDB turns the "no database" skip into a failure. The CI job that
+// provides a Postgres service sets it to 1, so a lane that lost its database
+// (a renamed secret, a dropped service block) is red instead of green with
+// every persistence test silently skipped.
+const envRequireDB = "QUARRY_REQUIRE_DB"
+
+// testDSN returns the database the integration tests run against. Unset, it
+// skips the test, unless QUARRY_REQUIRE_DB=1, where it fails it.
+func testDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv(envDSN)
 	if dsn == "" {
+		if os.Getenv(envRequireDB) == "1" {
+			t.Fatalf("%s is unset but %s=1: the postgres integration tests must run here", envDSN, envRequireDB)
+		}
 		t.Skipf("%s unset — skipping postgres integration test", envDSN)
 	}
+	return dsn
+}
+
+func openOrSkip(t *testing.T) store.DB {
+	t.Helper()
+	dsn := testDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	db, err := New(ctx, dsn)
@@ -194,4 +216,119 @@ func TestPostgres_EventAppendDedupe(t *testing.T) {
 	if len(list) != 1 {
 		t.Fatalf("ForRun len=%d, want 1", len(list))
 	}
+}
+
+// Statistics are written once, by the terminal event, and read back by every
+// jobs query: Get, GetByOrg, GetByRunID, the three lists and the schedule list.
+// A later status-only update must not erase them.
+func TestPostgres_JobStatisticsRoundTrip(t *testing.T) {
+	db := openOrSkip(t)
+	org := "org_stats_" + string(quarrycontracts.NewID(quarrycontracts.KindJob))
+	runID := quarrycontracts.NewID(quarrycontracts.KindRun)
+	id := quarrycontracts.NewID(quarrycontracts.KindJob)
+	if err := db.Jobs().Create(store.Job{
+		ID: id, OrgID: org, Kind: "crawl", Status: "running", RunID: &runID,
+		CreatedAt: time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Jobs().Delete(id) })
+
+	if job, ok := db.Jobs().Get(id); !ok || job.Statistics != nil {
+		t.Fatalf("a new job has no statistics: %#v ok=%v", job, ok)
+	}
+
+	job, _ := db.Jobs().Get(id)
+	job.Status = "completed"
+	job.Statistics = map[string]any{
+		"pages_visited":  float64(5),
+		"status_classes": map[string]any{"2xx": float64(4), "4xx": float64(1)},
+	}
+	if err := db.Jobs().Update(job); err != nil {
+		t.Fatal(err)
+	}
+
+	check := func(where string, got store.Job, ok bool) {
+		t.Helper()
+		if !ok {
+			t.Fatalf("%s: job not found", where)
+		}
+		if got.Status != "completed" || got.Statistics["pages_visited"] != float64(5) {
+			t.Fatalf("%s: %#v", where, got)
+		}
+		classes, _ := got.Statistics["status_classes"].(map[string]any)
+		if classes["4xx"] != float64(1) {
+			t.Fatalf("%s: nested counts lost: %#v", where, got.Statistics)
+		}
+	}
+	got, ok := db.Jobs().Get(id)
+	check("Get", got, ok)
+	got, ok = db.Jobs().GetByOrg(org, id)
+	check("GetByOrg", got, ok)
+	got, ok = db.Jobs().GetByRunID(runID)
+	check("GetByRunID", got, ok)
+	for name, list := range map[string][]store.Job{
+		"ListByOrg":  first(db.Jobs().ListByOrg(org, 10, "")),
+		"ListByKind": first(db.Jobs().ListByKind(org, "crawl", 10, "")),
+	} {
+		if len(list) != 1 {
+			t.Fatalf("%s returned %d jobs", name, len(list))
+		}
+		check(name, list[0], true)
+	}
+
+	// A status-only update (the dispatcher's shape) keeps what the run reported.
+	again, _ := db.Jobs().Get(id)
+	again.Statistics = nil
+	again.Status = "cancelled"
+	if err := db.Jobs().Update(again); err != nil {
+		t.Fatal(err)
+	}
+	final, _ := db.Jobs().Get(id)
+	if final.Status != "cancelled" || final.Statistics["pages_visited"] != float64(5) {
+		t.Fatalf("a status-only update erased the statistics: %#v", final)
+	}
+}
+
+func first[T any](items []T, _ string) []T { return items }
+
+// openIsolatedOrSkip opens the database in a schema of its own, dropped when
+// the test ends. A claim is global across organizations, so a suite that claims
+// jobs must not see the rows other tests left behind in the shared schema.
+func openIsolatedOrSkip(t *testing.T) store.DB {
+	t.Helper()
+	dsn := testDSN(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("admin pool: %v", err)
+	}
+	schema := "adm_" + strings.ToLower(string(quarrycontracts.NewID(quarrycontracts.KindJob)))
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		admin.Close()
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE")
+		admin.Close()
+	})
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := u.Query()
+	query.Set("search_path", schema)
+	u.RawQuery = query.Encode()
+	db, err := New(ctx, u.String())
+	if err != nil {
+		t.Fatalf("pg.New: %v", err)
+	}
+	return db
+}
+
+// The claim statement must behave exactly like the in-memory one: the same
+// contract suite runs against both.
+func TestPostgres_JobAdmission(t *testing.T) {
+	storetest.AdmissionConformance(t, func(t *testing.T) store.DB { return openIsolatedOrSkip(t) })
 }

@@ -88,6 +88,12 @@ pub struct BrowserObservation {
     /// meter; absence is never a zero-cost or zero-resource claim.
     #[serde(default)]
     pub telemetry: BrowserTelemetry,
+    /// WS12.S2: what the secret-redaction pass did to this observation: the
+    /// rule version, the profile and mode, and counts per rule id. It carries
+    /// no content and no lengths. `None` on an observation that did not pass
+    /// through the runner (a fixture, an older peer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redaction: Option<crate::redaction::RedactionStamp>,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -121,6 +127,53 @@ pub struct BrowserTelemetry {
     /// means Quarry did not receive an authoritative cost figure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_action_cost_micro_usd: Option<u64>,
+    /// WS17.C2: what a persistent profile restored into this session's first tab. Counts
+    /// only. Absent for a session without a saved profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_restore: Option<ProfileRestoreSummary>,
+}
+
+/// WS17.C2: what restoring a saved profile did. Counts and flags only: never a cookie name,
+/// an origin, a URL or a value. It rides on [`BrowserTelemetry`] and on the browser-session
+/// projection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProfileRestoreSummary {
+    /// Cookies the snapshot held.
+    #[serde(default)]
+    pub cookies_total: u32,
+    /// Cookies Chromium accepted into the context.
+    #[serde(default)]
+    pub cookies_applied: u32,
+    /// Cookies whose expiry had passed.
+    #[serde(default)]
+    pub skipped_expired: u32,
+    /// Session cookies older than `QUARRY_BROWSER_PROFILE_SESSION_COOKIE_MAX_AGE_S`.
+    #[serde(default)]
+    pub skipped_session_stale: u32,
+    /// Cookies Chromium (or the mapping) refused.
+    #[serde(default)]
+    pub cookies_rejected: u32,
+    /// Origins whose web storage and IndexedDB the page seeds on first visit.
+    #[serde(default)]
+    pub origins_seeded: u32,
+    /// IndexedDB databases those origins carry.
+    #[serde(default)]
+    pub idb_databases: u32,
+    /// The browser's user agent differs from the one the profile was captured with. The
+    /// user agent is never overridden.
+    #[serde(default)]
+    pub ua_changed: bool,
+    /// Seconds between the snapshot's capture and this restore; absent for a legacy
+    /// snapshot that does not say when it was captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_age_s: Option<u64>,
+    /// The snapshot was cut by a cap or lost values at capture.
+    #[serde(default)]
+    pub truncated: bool,
+    /// The restore did not finish; the session runs with what was applied and its release
+    /// does not overwrite the stored profile.
+    #[serde(default)]
+    pub failed: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -232,6 +285,7 @@ impl Default for ActionOutcome {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ChallengeKind {
     Captcha,
@@ -240,18 +294,94 @@ pub enum ChallengeKind {
     Consent,
     RateLimit,
     AccessDenied,
+    /// A paywall or subscription gate. Informational: it is not a bot verdict.
+    Paywall,
+    /// A regional or legal restriction (HTTP 451, "not available in your
+    /// country"). Informational: it is not a bot verdict.
+    GeoBlocked,
     Unknown,
 }
 
+/// How much weight a challenge signal carries. Only `Strong` is a verdict
+/// that a bot wall stands in front of the page; `Weak` is a hint worth a look
+/// at the screenshot, and `NonSignal` names an ordinary access state (a login
+/// form, a cookie banner, a paywall, a rate limit, a bare status) so a planner
+/// does not mistake it for one.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ChallengeStrength {
+    /// A signal from before the taxonomy existed has no strength field, and it
+    /// asked for escalation, so it reads as strong.
+    #[default]
+    Strong,
+    Weak,
+    NonSignal,
+}
+
+/// Why a strong signal is strong. A closed set: a new marker family is a new
+/// variant, never a free-text reason.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum BlockReason {
+    /// A CAPTCHA or proof-of-humanity widget gates the page.
+    CaptchaWidget,
+    /// A WAF or CDN interstitial stands in place of the page.
+    WafInterstitial,
+    /// The same host showed a strong signal again after the one allowed
+    /// recovery (a wait or a reload) was spent.
+    ChallengeLoop,
+    /// Two independent markers say the host took the client for a bot.
+    UnexpectedBotError,
+}
+
+impl BlockReason {
+    /// The wire name, for log counters and error details.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CaptchaWidget => "captcha_widget",
+            Self::WafInterstitial => "waf_interstitial",
+            Self::ChallengeLoop => "challenge_loop",
+            Self::UnexpectedBotError => "unexpected_bot_error",
+        }
+    }
+}
+
+/// Whether the single recovery the planner gets is still there.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ChallengeRecovery {
+    /// One wait or one reload of the same URL is still allowed on this host.
+    Available,
+    /// The recovery was spent and the host still challenges. Quarry refuses
+    /// further navigation and interaction on it.
+    Exhausted,
+    /// Not a strong signal, so there is nothing to recover from.
+    #[default]
+    NotApplicable,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 pub struct ChallengeSignal {
     pub kind: ChallengeKind,
     pub confidence: f32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
-    /// Explicitly tells the planner that automatic bypass is forbidden.
+    /// Explicitly tells the planner that automatic bypass is forbidden. False
+    /// for `Weak` and `NonSignal`: a login page, a cookie banner or a rate
+    /// limit is not a reason to hand the run to a person.
     #[serde(default = "true_value")]
     pub requires_escalation: bool,
+    #[serde(default)]
+    pub strength: ChallengeStrength,
+    /// Set on a strong signal only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_reason: Option<BlockReason>,
+    #[serde(default)]
+    pub recovery: ChallengeRecovery,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -327,6 +457,10 @@ pub struct ProofBundle {
     pub target_resolution: Option<ResolvedTargetProof>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_delta_artifact_id: Option<kinds::ArtifactKind>,
+    /// WS12.S2: the rule version (`qr-redact/N`) the observation this proof
+    /// belongs to was masked under, so a stored proof says which rules ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redaction_rule_version: Option<String>,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -824,6 +958,14 @@ pub enum AgentAction {
     Back,
     Forward,
     GetContent,
+    /// Reload the current page (WS9.B). Human-only on the wire: the Model
+    /// Plane `browser.act` schema never exposes it, and the edge refuses it from the
+    /// derived agent (`agent_reload_denied`, D2-012). `ignore_cache` bypasses
+    /// the HTTP cache (CDP `Page.reload{ignoreCache}`).
+    Reload {
+        #[serde(default)]
+        ignore_cache: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -835,6 +977,43 @@ pub struct AgentConstraints {
     pub max_runtime_s: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_cost_usd: Option<f64>,
+}
+
+/// `meta.budget` on a browser step response (WS6.B): what an agent run has used
+/// and the bounds it runs under. Cost is estimated (the flat action table plus a
+/// browser-time term) unless the driver supplied a provider-billed figure.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BudgetMeta {
+    /// `interactive` (a person, never capped) or `agent`.
+    pub class: String,
+    /// Completed steps.
+    pub steps: u32,
+    /// Attempts, completed or failed.
+    pub attempts: u32,
+    /// The step bound. Absent for an interactive run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_steps: Option<u32>,
+    /// The attempt bound. Absent for an interactive run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+    /// Active time in seconds; a human takeover does not count.
+    pub elapsed_s: f64,
+    /// The runtime bound. Absent for an interactive run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_runtime_s: Option<u32>,
+    /// Spent so far, in USD (estimated).
+    pub spent_usd: f64,
+    /// The cost bound. Absent for an interactive run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_usd: Option<f64>,
+    /// Always true: cost is not billed usage.
+    pub estimated: bool,
+    /// `flat_table` or `provider_billed`: where the cost of the step this response
+    /// answers came from.
+    pub cost_source: String,
+    /// The dimension that was reached (`steps`, `attempts`, `runtime`, `cost`), once one was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exhausted: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -970,4 +1149,23 @@ pub struct ExtractionUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cost_usd: f64,
+}
+
+#[cfg(test)]
+mod reload_contract_tests {
+    use super::AgentAction;
+
+    #[test]
+    fn agent_action_reload_roundtrips() {
+        let soft: AgentAction = serde_json::from_str(r#"{"type":"reload"}"#).unwrap();
+        assert!(matches!(soft, AgentAction::Reload { ignore_cache: false }));
+        let hard: AgentAction =
+            serde_json::from_str(r#"{"type":"reload","ignore_cache":true}"#).unwrap();
+        assert!(matches!(hard, AgentAction::Reload { ignore_cache: true }));
+        let wire = serde_json::to_string(&hard).unwrap();
+        let back: AgentAction = serde_json::from_str(&wire).unwrap();
+        assert!(matches!(back, AgentAction::Reload { ignore_cache: true }));
+        // Unknown keys stay accepted by default; a URL field is not part of the variant.
+        assert!(serde_json::from_str::<AgentAction>(r#"{"type":"reload","url":"x"}"#).is_ok());
+    }
 }

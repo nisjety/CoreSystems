@@ -28,6 +28,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: bufbuild/buf-setup-action@v1
+      # `buf breaking` compares against a real image (baseline.binpb, built from
+      # main on 2026-10-16; before that the file was 0 bytes and the unquoted path
+      # made both steps fail on argument parsing). The module has ~1.5k
+      # pre-existing lint findings, so lint is ratcheted against a committed
+      # baseline instead of gating on zero.
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

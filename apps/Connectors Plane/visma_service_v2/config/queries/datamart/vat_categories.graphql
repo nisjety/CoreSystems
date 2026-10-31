@@ -1,0 +1,27 @@
+query VatCategories(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  vatCategories(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    vatCategoryId
+    description
+    excludeListedTaxes
+    active
+    standardTaxCode
+    lastModifiedDateTime
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+  }
+}

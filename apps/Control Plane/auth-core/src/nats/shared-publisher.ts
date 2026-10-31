@@ -5,10 +5,10 @@ import { SharedNatsService } from './shared-nats.service';
  * SharedPublisher is a typed facade on top of SharedNatsService
  * that provides strongly-typed publish methods for cross-plane domain events.
  *
- * Subject convention: aqencia.controlplane.<entity>.<verb>
- *   aqencia.controlplane.user.registered
- *   aqencia.controlplane.user.created
- *   aqencia.controlplane.user.oauth_callback
+ * Subject convention: controlplane.<entity>.<verb>
+ *   controlplane.user.registered
+ *   controlplane.user.created
+ *   controlplane.user.oauth_callback
  */
 @Injectable()
 export class SharedPublisher {
@@ -32,7 +32,7 @@ export class SharedPublisher {
   }
 
   /**
-   * PublishUserRegistered publishes aqencia.controlplane.user.registered.
+   * PublishUserRegistered publishes controlplane.user.registered.
    */
   async publishUserRegistered(
     userId: string,
@@ -40,7 +40,7 @@ export class SharedPublisher {
     name: string,
     provider: string,
   ): Promise<void> {
-    await this.sharedNats.publish('aqencia.controlplane.user.registered', {
+    await this.sharedNats.publish('controlplane.user.registered', {
       user_id: userId,
       email,
       name,
@@ -49,14 +49,14 @@ export class SharedPublisher {
   }
 
   /**
-   * PublishUserCreated publishes aqencia.controlplane.user.created.
+   * PublishUserCreated publishes controlplane.user.created.
    */
   async publishUserCreated(
     userId: string,
     email: string,
     name: string,
   ): Promise<void> {
-    await this.sharedNats.publish('aqencia.controlplane.user.created', {
+    await this.sharedNats.publish('controlplane.user.created', {
       user_id: userId,
       email,
       name,
@@ -64,7 +64,7 @@ export class SharedPublisher {
   }
 
   /**
-   * PublishOAuthCallback publishes aqencia.controlplane.user.oauth_callback.
+   * PublishOAuthCallback publishes controlplane.user.oauth_callback.
    * Critical event for Ingestion Plane to handle M365 connectors.
    */
   async publishOAuthCallback(
@@ -73,7 +73,7 @@ export class SharedPublisher {
     provider: string,
     metadata?: Record<string, unknown>,
   ): Promise<void> {
-    await this.sharedNats.publish('aqencia.controlplane.user.oauth_callback', {
+    await this.sharedNats.publish('controlplane.user.oauth_callback', {
       user_id: userId,
       email,
       provider,

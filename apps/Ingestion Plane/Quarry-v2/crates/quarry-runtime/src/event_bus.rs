@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use quarry_core::event::EventType;
+use quarry_core::event::{Event, EventType};
 use quarry_core::ids::kinds::RunKind;
 use quarry_core::QuarryResult;
 
@@ -25,6 +25,19 @@ pub trait EventBus: Send + Sync {
     async fn subscribe(&self, run_id: &RunKind) -> QuarryResult<Box<dyn EventReceiver>>;
 
     async fn unsubscribe(&self, run_id: &RunKind) -> QuarryResult<()>;
+
+    /// Publish an event that already carries its id and seq (WS10.S3). The transport
+    /// must not mint its own, so the bus delivers what the SSE path carried. The
+    /// default republishes the parts through `publish`.
+    async fn publish_event(&self, event: Event) -> QuarryResult<()> {
+        match event.run_id {
+            Some(run_id) => {
+                self.publish(run_id, event.event_type, event.payload, event.idempotency_key)
+                    .await
+            }
+            None => Ok(()),
+        }
+    }
 }
 
 #[async_trait]

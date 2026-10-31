@@ -88,7 +88,7 @@ describe('AppShell when a routed page fails', () => {
     'shows the generic error copy for any other failure under %s, and the notice still comes up',
     async (path) => {
       renderApp(path, () => {
-        throw new TypeError('Cannot read properties of undefined')
+        throw new Error('Cannot read properties of undefined')
       })
       expect((await screen.findByRole('alert')).textContent).toMatch(/Noe gikk galt|Something went wrong/)
       expect(console.error).toHaveBeenCalled()

@@ -27,28 +27,32 @@ use serde_json::{json, Value};
 
 use crate::{
     audience_tokens::get_audience_token,
-    cache,
+    cache_admission::CacheAdmission,
     config::AppState,
     envelope::{error, ok},
     middleware::{require_session, AuthenticatedUser},
+    rate_limit::{with_rate_class, RateClass},
     upstream::proxy_sse_stream,
 };
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
-    Router::new()
+    let routes = Router::new()
         .route("/api/v1/search/web", post(search_web))
         .route("/api/v1/search/similar", post(search_similar))
         .route("/api/v1/search/suggest", post(search_suggest))
         .route("/api/v1/search/images", post(search_images))
         .route("/api/v1/search/videos", post(search_videos))
         .route("/api/v1/search/suggestions", get(search_suggestions))
-        .route("/api/v1/search/answer/stream", post(search_answer_stream))
+        .route("/api/v1/search/answer/stream", post(search_answer_stream));
+    // Search and scrape share one per-organization bucket (see
+    // `rate_limit::RateClass`).
+    with_rate_class(routes, &state.rate_limiter, RateClass::SearchScrape)
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 
 /// `POST /api/v1/search/web` — keyword search, or a single-page fetch when the
 /// query is a URL / bare domain. Mirrors verevonv2's `search/web` route.
-async fn search_web(
+pub(crate) async fn search_web(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -109,13 +113,22 @@ async fn search_web(
 
     let token = quarry_token(&state, &user, &headers).await;
 
+    // Cache admission and the ZDR posture, resolved once and server-side: the
+    // request flag, the live org membership and org-core's standing posture.
+    // The cached search body is built by quarry-edge from the caller's
+    // ORG-SCOPED private corpus, so entries are keyed by org and a ZDR caller
+    // gets no cache in either direction. When ZDR is established it is also
+    // forwarded to quarry-edge, which can only raise it.
+    let admission = CacheAdmission::resolve(&state, &user, &headers, &body, false).await;
+    admission.record_bypass("search-web");
+    let zdr = admission.zdr_established();
+
     // URL / bare-domain path → scrape the page so the searchbar can "open" links.
     if is_url_input(&query) {
         let target = normalize_url(&query);
         let url = format!("{}/v1/scrape", state.quarry_edge_url);
-        let browser_payload = json!({
+        let mut browser_payload = json!({
             "url": target,
-            "maxPages": 1,
             "formats": ["markdown"],
             "signals": {
                 "actions": ["render_page"],
@@ -129,11 +142,14 @@ async fn search_web(
                 "waitForTimeoutMs": 1800,
             },
         });
-        let static_payload = json!({
+        let mut static_payload = json!({
             "url": target,
-            "maxPages": 1,
             "formats": ["markdown"],
         });
+        if zdr {
+            browser_payload["zdr"] = json!(true);
+            static_payload["zdr"] = json!(true);
+        }
         let data = match post_quarry(
             &state,
             &url,
@@ -152,7 +168,6 @@ async fn search_web(
                 if browser_driver_unavailable(&err_body) || status.is_server_error() =>
             {
                 tracing::warn!(
-                    target = %target,
                     %status,
                     "quarry browser render failed; retrying URL search fetch as a static fetch"
                 );
@@ -215,7 +230,7 @@ async fn search_web(
         include_domains.join(","),
         exclude_domains.join(","),
     );
-    let key = cache::cache_key(
+    let key = admission.key(
         "search-web",
         &[
             &query,
@@ -225,11 +240,16 @@ async fn search_web(
         ],
     );
     let mut stale: Option<Value> = None;
-    if let Some(hit) = state.cache.lookup(&key).await {
-        if hit.fresh {
-            return (StatusCode::OK, Json(ok(hit.data)));
+    if let (Some(key), Some(scope), true) = (key.as_deref(), admission.scope(), admission.may_read)
+    {
+        match state.cache.lookup_scoped(key, scope).await {
+            Some(hit) if hit.fresh => {
+                crate::observability::record_result_cache("search-web", "hit");
+                return (StatusCode::OK, Json(ok(hit.data)));
+            }
+            Some(hit) => stale = Some(hit.data),
+            None => crate::observability::record_result_cache("search-web", "miss"),
         }
-        stale = Some(hit.data);
     }
 
     let url = format!("{}/v1/search", state.quarry_edge_url);
@@ -257,6 +277,9 @@ async fn search_web(
     if !exclude_domains.is_empty() {
         payload["exclude_domains"] = json!(exclude_domains);
     }
+    if zdr {
+        payload["zdr"] = json!(true);
+    }
     match post_quarry(
         &state,
         &url,
@@ -282,11 +305,19 @@ async fn search_web(
                 "answer": answer,
                 "citations": citations,
             });
-            state.cache.store(&key, &cached_payload).await;
+            if let (Some(key), Some(scope), true) =
+                (key.as_deref(), admission.scope(), admission.may_write)
+            {
+                state.cache.store_scoped(key, scope, &cached_payload).await;
+                crate::observability::record_result_cache("search-web", "store");
+            }
             (StatusCode::OK, Json(ok(cached_payload)))
         }
         Err(envelope) => match stale {
-            Some(data) => (StatusCode::OK, Json(ok(data))),
+            Some(data) => {
+                crate::observability::record_result_cache("search-web", "stale_hit");
+                (StatusCode::OK, Json(ok(data)))
+            }
             None => envelope,
         },
     }
@@ -521,12 +552,19 @@ fn as_video_error(envelope: (StatusCode, Json<Value>)) -> (StatusCode, Json<Valu
 
 /// `GET /api/v1/search/suggestions` → autocomplete-core. Always degrades to an
 /// empty list (never an error) so the searchbar dropdown stays resilient.
-async fn search_suggestions(
+pub(crate) async fn search_suggestions(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> (StatusCode, Json<Value>) {
     let empty = || (StatusCode::OK, Json(ok(json!({ "suggestions": [] }))));
+    // Zero data retention: suggestions are built from what people have searched
+    // for, so a ZDR request (header, or an org whose posture is ZDR or unknown)
+    // gets none. Checked before anything else, including the autocomplete lookup.
+    if crate::zdr::request_zdr(&headers, None) || crate::zdr::org_zdr_enabled(&state, &user).await {
+        return empty();
+    }
 
     let query = params.get("q").map(|s| s.trim()).unwrap_or("");
     if query.len() < 2
@@ -607,7 +645,16 @@ async fn search_answer_stream(
         )
             .into_response();
     }
-    let payload = json!({ "query": query });
+    let mut payload = json!({ "query": query });
+    // Forward an established ZDR posture (request flag or the org's standing
+    // posture): quarry-edge can only raise it, and an answer stream is never
+    // cached here, so this is the whole of the gateway's part.
+    if CacheAdmission::resolve(&state, &user, &headers, &body, false)
+        .await
+        .zdr_established()
+    {
+        payload["zdr"] = json!(true);
+    }
     proxy_sse_stream(
         &state,
         Method::POST,
@@ -1074,5 +1121,390 @@ mod tests {
             first_error_message(&body),
             Some("no drivers succeeded in fallback chain: Browser=driver not registered"),
         );
+    }
+
+    // ── result-cache admission (F-t2-003 phase 1) ───────────────────────────
+
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn member_of(org: &str) -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: format!("user-{org}"),
+            user_email: format!("user@{org}.invalid"),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some(org.to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: org.to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    /// org-core answers `zdr` per org id; quarry-edge answers every search with
+    /// a body that names the org-scoped answer so a cross-org hit is visible.
+    struct World {
+        state: AppState,
+        quarry: MockServer,
+        _org_core: MockServer,
+    }
+
+    async fn world(zdr_orgs: &[&str], plain_orgs: &[&str]) -> World {
+        let org_core = MockServer::start().await;
+        for (org, zdr) in zdr_orgs
+            .iter()
+            .map(|o| (*o, true))
+            .chain(plain_orgs.iter().map(|o| (*o, false)))
+        {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/v1/organizations/{org}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "id": org,
+                    "metadata": { "interactiveRetention": { "zdr": zdr } }
+                })))
+                .mount(&org_core)
+                .await;
+        }
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{ "title": "r", "url": "https://example.invalid/r" }],
+                "answer": "answer built from the caller's private corpus",
+                "citations": []
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.org_core_url = org_core.uri();
+        state.quarry_edge_url = quarry.uri();
+        state.cache = crate::cache::ResultCache::in_memory();
+        World {
+            state,
+            quarry,
+            _org_core: org_core,
+        }
+    }
+
+    async fn search_as(
+        world: &World,
+        org: &str,
+        extra_headers: &[(&'static str, &'static str)],
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let mut headers = HeaderMap::new();
+        for (name, value) in extra_headers {
+            headers.insert(*name, axum::http::HeaderValue::from_static(value));
+        }
+        let (status, Json(value)) = search_web(
+            State(world.state.clone()),
+            Extension(member_of(org)),
+            headers,
+            Json(body),
+        )
+        .await;
+        (status, value)
+    }
+
+    async fn quarry_search_calls(world: &World) -> usize {
+        world
+            .quarry
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path() == "/v1/search")
+            .count()
+    }
+
+    fn content_keys(world: &World) -> Vec<String> {
+        world
+            .state
+            .cache
+            .mem_keys()
+            .into_iter()
+            .filter(|key| key.starts_with("verevon:gw:search-web:"))
+            .collect()
+    }
+
+    /// Zero data retention: suggestions are built from what people have searched
+    /// for, so a ZDR request gets none, and so does a ZDR org even without the
+    /// header. The autocomplete mock must never be called in those cases.
+    async fn suggestions_as(
+        world: &World,
+        org: &str,
+        extra_headers: &[(&'static str, &'static str)],
+    ) -> (StatusCode, Value) {
+        let mut headers = HeaderMap::new();
+        for (name, value) in extra_headers {
+            headers.insert(*name, axum::http::HeaderValue::from_static(value));
+        }
+        let params: HashMap<String, String> = HashMap::from([
+            ("q".to_owned(), "norwegian salmon".to_owned()),
+            ("scope".to_owned(), "queries".to_owned()),
+        ]);
+        let (status, Json(value)) = search_suggestions(
+            State(world.state.clone()),
+            Extension(member_of(org)),
+            headers,
+            Query(params),
+        )
+        .await;
+        (status, value)
+    }
+
+    async fn autocomplete_core() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/suggestions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "suggestions": [{ "text": "norwegian salmon exports" }]
+            })))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn autocomplete_calls(server: &MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path() == "/v1/suggestions")
+            .count()
+    }
+
+    fn with_autocomplete(world: &mut World, server: &MockServer) {
+        world.state.autocomplete_token = "test-token".to_owned();
+        world.state.autocomplete_core_url = server.uri();
+    }
+
+    #[tokio::test]
+    async fn search_suggestions_empty_under_zdr_header() {
+        let mut world = world(&[], &["org-plain"]).await;
+        let autocomplete = autocomplete_core().await;
+        with_autocomplete(&mut world, &autocomplete);
+
+        let (status, value) = suggestions_as(&world, "org-plain", &[("x-zdr", "1")]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["data"]["suggestions"], json!([]));
+        assert_eq!(autocomplete_calls(&autocomplete).await, 0);
+
+        // The control: the same request without the header is answered.
+        let (_, value) = suggestions_as(&world, "org-plain", &[]).await;
+        assert_eq!(value["data"]["suggestions"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn search_suggestions_empty_under_org_zdr() {
+        let mut world = world(&["org-zdr"], &["org-plain"]).await;
+        let autocomplete = autocomplete_core().await;
+        with_autocomplete(&mut world, &autocomplete);
+
+        let (_, value) = suggestions_as(&world, "org-zdr", &[]).await;
+        assert_eq!(value["data"]["suggestions"], json!([]));
+        assert_eq!(autocomplete_calls(&autocomplete).await, 0);
+
+        let (_, value) = suggestions_as(&world, "org-plain", &[]).await;
+        assert_eq!(value["data"]["suggestions"].as_array().map(Vec::len), Some(1));
+    }
+
+    /// The cross-tenant test. The cached search body carries an `answer` that
+    /// quarry-edge built from org A's private corpus; org B asking the same
+    /// question must reach quarry-edge (which scopes by org), not read A's entry.
+    #[tokio::test]
+    async fn search_web_isolates_cached_results_by_org() {
+        let w = world(&[], &["org-a", "org-b"]).await;
+        let body = json!({ "query": "private roadmap", "includeAnswer": true });
+
+        let (status, _) = search_as(&w, "org-a", &[], body.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(quarry_search_calls(&w).await, 1);
+
+        let (status, _) = search_as(&w, "org-b", &[], body.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            quarry_search_calls(&w).await,
+            2,
+            "org B must reach quarry-edge, not be served org A's cached entry"
+        );
+
+        let keys = content_keys(&w);
+        assert_eq!(keys.len(), 2, "{keys:?}");
+        assert!(keys.iter().any(|k| k.contains(":o:org-a:")));
+        assert!(keys.iter().any(|k| k.contains(":o:org-b:")));
+    }
+
+    #[tokio::test]
+    async fn search_web_same_org_second_request_is_a_cache_hit() {
+        let w = world(&[], &["org-a"]).await;
+        let body = json!({ "query": "public docs", "includeAnswer": true });
+
+        search_as(&w, "org-a", &[], body.clone()).await;
+        let (status, value) = search_as(&w, "org-a", &[], body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["data"]["mode"], json!("search"));
+        assert_eq!(
+            quarry_search_calls(&w).await,
+            1,
+            "second call is a cache hit"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zdr_org_search_leaves_no_cache_entry_and_tells_quarry() {
+        let w = world(&["org-z"], &[]).await;
+        let body = json!({ "query": "sensitive question", "includeAnswer": true });
+
+        search_as(&w, "org-z", &[], body.clone()).await;
+        search_as(&w, "org-z", &[], body).await;
+
+        assert_eq!(quarry_search_calls(&w).await, 2, "no cache for a ZDR org");
+        assert!(content_keys(&w).is_empty(), "{:?}", content_keys(&w));
+
+        // quarry-edge is told, so it applies the same posture to the search.
+        let forwarded = w.quarry.received_requests().await.unwrap_or_default();
+        let sent: Value = serde_json::from_slice(&forwarded[0].body).unwrap();
+        assert_eq!(sent["zdr"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn explicit_zdr_header_or_body_skips_cache_for_a_non_zdr_org() {
+        let w = world(&[], &["org-a"]).await;
+        let body = json!({ "query": "temporary chat question" });
+
+        search_as(&w, "org-a", &[("x-zdr", "true")], body.clone()).await;
+        let mut with_body = body.clone();
+        with_body["zdr"] = json!(true);
+        search_as(&w, "org-a", &[], with_body).await;
+
+        assert_eq!(quarry_search_calls(&w).await, 2);
+        assert!(content_keys(&w).is_empty());
+
+        // A plain request for the same query still caches (the posture is per request).
+        search_as(&w, "org-a", &[], body.clone()).await;
+        search_as(&w, "org-a", &[], body).await;
+        assert_eq!(quarry_search_calls(&w).await, 3);
+        assert_eq!(content_keys(&w).len(), 1);
+    }
+
+    /// An org-core outage must skip the cache in both directions but must not
+    /// fail the search, and must not be reported to quarry-edge as ZDR.
+    #[tokio::test]
+    async fn org_core_outage_skips_the_cache_but_not_the_search() {
+        let w = world(&[], &[]).await; // org-core has no org record: 404
+        let body = json!({ "query": "outage question" });
+
+        let (status, value) = search_as(&w, "org-a", &[], body.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["data"]["mode"], json!("search"));
+        search_as(&w, "org-a", &[], body).await;
+
+        assert_eq!(quarry_search_calls(&w).await, 2);
+        assert!(content_keys(&w).is_empty());
+        let forwarded = w.quarry.received_requests().await.unwrap_or_default();
+        let sent: Value = serde_json::from_slice(&forwarded[0].body).unwrap();
+        assert!(sent.get("zdr").is_none(), "an outage is not a ZDR posture");
+    }
+
+    /// When quarry-edge fails, a stale entry is a fallback only for the org that
+    /// wrote it. Plant an old entry under org A's key and fail the upstream.
+    #[tokio::test]
+    async fn stale_entry_is_not_served_across_orgs_when_quarry_fails() {
+        let w = world(&[], &["org-a", "org-b"]).await;
+        // Quarry now fails every search.
+        w.quarry.reset().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/search"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&w.quarry)
+            .await;
+
+        let body = json!({ "query": "stale probe", "includeAnswer": false });
+        // Org A has a cached entry, regardless of age.
+        let key = {
+            let admission = CacheAdmission::resolve(
+                &w.state,
+                &member_of("org-a"),
+                &HeaderMap::new(),
+                &body,
+                false,
+            )
+            .await;
+            admission
+                .key(
+                    "search-web",
+                    &[
+                        "stale probe",
+                        &8.to_string(),
+                        &false.to_string(),
+                        "|||false||",
+                    ],
+                )
+                .expect("org a key")
+        };
+        w.state
+            .cache
+            .store_scoped(
+                &key,
+                "org-a",
+                &json!({ "mode": "search", "answer": "A-ONLY" }),
+            )
+            .await;
+
+        let (status_b, value_b) = search_as(&w, "org-b", &[], body.clone()).await;
+        assert!(
+            !status_b.is_success(),
+            "org B must see the upstream failure, got {value_b}"
+        );
+        assert!(!value_b.to_string().contains("A-ONLY"));
+    }
+
+    /// The search bar reads `data.markdown`, which quarry-edge only inlines
+    /// when asked for the `markdown` format. A `maxPages` key is not a scrape
+    /// option (the edge warns on it), so it must not be sent.
+    #[tokio::test]
+    async fn fetch_mode_excerpt_is_populated_from_inline_markdown() {
+        let w = world(&[], &["org-a"]).await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "status": 200,
+                    "markdown": "# Example\n\nInline page text.",
+                    "metadata": { "title": "Example", "content_kind": "html" }
+                }
+            })))
+            .mount(&w.quarry)
+            .await;
+
+        let (status, value) = search_as(
+            &w,
+            "org-a",
+            &[],
+            json!({ "query": "https://example.invalid/a" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["data"]["mode"], json!("fetch"));
+        assert_eq!(value["data"]["title"], json!("Example"));
+        assert_eq!(
+            value["data"]["excerpt"],
+            json!("# Example\n\nInline page text.")
+        );
+
+        let sent = w.quarry.received_requests().await.unwrap_or_default();
+        let scrapes: Vec<Value> = sent
+            .iter()
+            .filter(|request| request.url.path() == "/v1/scrape")
+            .map(|request| serde_json::from_slice(&request.body).unwrap())
+            .collect();
+        assert_eq!(scrapes.len(), 1, "one scrape serves the fetch");
+        assert_eq!(scrapes[0]["formats"], json!(["markdown"]));
+        assert!(scrapes[0].get("maxPages").is_none(), "{}", scrapes[0]);
     }
 }

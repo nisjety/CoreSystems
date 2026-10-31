@@ -163,7 +163,7 @@ impl SidecarVisualProcessor {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("vision client: {e}")))?;
+            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("vision client: {}", e.without_url())))?;
         Ok(Self {
             client,
             endpoint: format!("{}/v1/visual/observe", base_url.trim_end_matches('/')),
@@ -208,7 +208,7 @@ impl VisualObservationProcessor for SidecarVisualProcessor {
             .send()
             .await
             .map_err(|e| {
-                QuarryError::new(ErrorCode::DriverFailed, format!("vision sidecar: {e}"))
+                QuarryError::new(ErrorCode::DriverFailed, format!("vision sidecar: {}", e.without_url()))
             })?;
 
         let status = response.status();
@@ -223,7 +223,7 @@ impl VisualObservationProcessor for SidecarVisualProcessor {
         let response: SidecarVisualResponse = response.json().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("vision sidecar decode: {e}"),
+                format!("vision sidecar decode: {}", e.without_url()),
             )
         })?;
         let annotated_png = match response.annotated_png_b64 {
@@ -285,7 +285,7 @@ impl VisualObservationProcessor for SidecarVisualProcessor {
             .send()
             .await
             .map_err(|e| {
-                QuarryError::new(ErrorCode::DriverFailed, format!("vision sidecar: {e}"))
+                QuarryError::new(ErrorCode::DriverFailed, format!("vision sidecar: {}", e.without_url()))
             })?;
 
         let status = response.status();
@@ -300,7 +300,7 @@ impl VisualObservationProcessor for SidecarVisualProcessor {
         let response: SidecarPreprocessResponse = response.json().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("vision sidecar decode: {e}"),
+                format!("vision sidecar decode: {}", e.without_url()),
             )
         })?;
 

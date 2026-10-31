@@ -143,3 +143,31 @@ CREATE DATABASE finspo
 
 SELECT 'CREATE DATABASE shipping_core OWNER ingestion_user'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'shipping_core')\gexec
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 8. browser_broker database + role  (used by the Model Plane browser-broker)
+--    NOT created here: the role needs a password this script cannot read, and
+--    this file only runs on a fresh data volume. Run
+--    scripts/bootstrap_broker_db.sh (idempotent) after the stack is up; it
+--    creates role browser_broker and database browser_broker (owned by it, with
+--    CONNECT revoked from PUBLIC) and revokes PUBLIC CONNECT on the databases
+--    above, as they exist when it runs, so the broker role cannot open them
+--    (a database created later keeps the default PUBLIC CONNECT until the
+--    script is run again). The broker applies its own
+--    migrations. This is separation by database and role only: ingestion_user
+--    is a superuser, ignores those revokes, and so can still read and write
+--    browser_broker.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 9. anbud_core database  (used by anbud-core / Doffin + TED tender ingestion)
+--    anbud-core owns its schema through embedded migrations applied at startup
+--    (internal/db.ApplyMigrations), so keep the database empty here. Idempotent
+--    create so re-running this script is safe. NOTE: Postgres only runs this
+--    file on a FRESH data volume — on an existing volume create the database by
+--    hand (see anbud-core/docs/REQUIREMENTS.md).
+-- ─────────────────────────────────────────────────────────────────────────────
+\connect ingestion_plane_db
+
+SELECT 'CREATE DATABASE anbud_core OWNER ingestion_user'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'anbud_core')\gexec

@@ -112,6 +112,8 @@ fn test_state(quarry_edge_url: String) -> AppState {
         streaming_client: reqwest::Client::new(),
         internal_api_key: "test-key".into(),
         enforcement_mode: "off".into(),
+        browser_grant_mode: crate::config::BrowserGrantMode::Permissive,
+        browser_human_browse: false,
         // Unroutable: the onboarding preview-token mint fails, so the
         // upstream calls go out unauthenticated — which is exactly the
         // degraded path we want covered here, and the stub does not check.
@@ -128,6 +130,12 @@ fn test_state(quarry_edge_url: String) -> AppState {
         audit_core_url: "http://127.0.0.1:1".into(),
         audit_core_service_token: "stream-e2e-not-a-real-audit-core-service-token".into(),
         insight_core_url: "http://127.0.0.1:1".into(),
+        anbud_core_url: "http://127.0.0.1:1".into(),
+        anbud_api_key: String::new(),
+        anbud_api_key_header: "X-API-Key".into(),
+        marketing_core_url: "http://127.0.0.1:1".into(),
+        marketing_core_service_key: String::new(),
+        marketing_core_organization_id: String::new(),
         leads_core_url: "http://127.0.0.1:1".into(),
         shipping_core_url: "http://127.0.0.1:1".into(),
         user_core_url: "http://127.0.0.1:1".into(),
@@ -168,6 +176,7 @@ fn test_state(quarry_edge_url: String) -> AppState {
         rate_limiter: crate::rate_limit::RateLimiter::from_cache(&ResultCache::disabled()),
         cache: ResultCache::disabled(),
         studio_store: crate::domains::studio::StudioStore::new(),
+        schedule_capabilities: crate::config::ScheduleCapabilities::default(),
         allow_dev_actor_headers: false,
         allow_dev_auth_bypass: false,
         mail_task_ingest_service_token: "mail-task-test-secret-at-least-32-bytes".into(),

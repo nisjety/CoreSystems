@@ -156,9 +156,13 @@ a one-sentence summary from a ≤ 1 200-char slice of the excerpt.
   `RoutingPolicy.table.budget` ladder / `cheap_fallback`), i.e. the cheapest
   capable model the Model Plane currently routes. Never set a vendor model
   id here; use `verevon-budget`, `verevon-balance` or `verevon-genius`.
-* **Enable/disable** — `QUARRY_EDGE__PAGE_TITLE_ENRICH` (default `true`
-  whenever `QUARRY_EDGE__MODEL_PLANE_URL` is set). Without a Model Plane URL
-  the hop is simply absent and `title_source` stays `html`/`host`.
+* **Enable/disable** — `QUARRY_EDGE__PAGE_TITLE_ENRICH` (default `false`: the
+  hop needs a Model Plane path that the registry grants, and none exists yet;
+  see `SELF_HOST.md`). With the switch off, or without a Model Plane URL, the
+  hop is absent and `title_source` stays `html`/`host`. The Ingestion
+  compose also sets `QUARRY_EDGE__PAGE_TITLE_ENRICH` to `0` (decision 3.12):
+  the hop stays off until an operator sets `QUARRY_EDGE_PAGE_TITLE_ENRICH=1`,
+  a Model Plane URL and a granted model path.
 * **Guards** — time-boxed at 2 s, at most 3 concurrent calls, a rolling cap
   of 600 calls/hour per edge process, results cached by content
   fingerprint (re-crawls of an unchanged page never pay twice), reply must

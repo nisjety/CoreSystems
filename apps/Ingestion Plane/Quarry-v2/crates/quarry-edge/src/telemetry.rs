@@ -3,15 +3,17 @@
 //! When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, exports spans via gRPC.
 //! Otherwise falls back to tracing-subscriber's JSON fmt layer only.
 //!
-//! Before adding counters anywhere in this crate: the `metrics` and
-//! `metrics-exporter-prometheus` dependencies in `Cargo.toml` are inert. No
-//! recorder is ever installed and no `/metrics` endpoint is served, so
-//! `metrics::counter!` compiles fine, records nothing, and leaves the call
-//! site reading as instrumented — which is how the search path shipped with
-//! no per-provider observability at all. Until a recorder is installed here,
-//! per-request observability goes out as `tracing` events with explicit
-//! low-cardinality fields (see the `search.upstream` / `search.result_shape`
-//! events in `search_routes`), which the layers below already export.
+//! Before adding counters anywhere in this crate: the `metrics` facade only
+//! records when a recorder is installed, and `crate::metrics` installs one only
+//! when `QUARRY_EDGE__METRICS_ENABLED=1` (and serves it on a separate internal
+//! listener, never the public port). With it off, `metrics::counter!` compiles
+//! fine, records nothing, and leaves the call site reading as instrumented —
+//! which is how the search path shipped with no per-provider observability at
+//! all. The series that exist are the ones described in `crate::metrics`;
+//! anything else (the `search.upstream` / `search.result_shape` events in
+//! `search_routes`, for one) still goes out as `tracing` events with explicit
+//! low-cardinality fields, which the layers below already export. Label values
+//! must come from a closed set: never a URL, host, org, user or run id.
 //!
 //! This module is declared in `main.rs` only, not in `lib.rs`, so the source
 //! files shared by both targets cannot reference it — hence those helpers
@@ -20,26 +22,54 @@
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::SpanExporter;
 use opentelemetry_sdk::trace::SdkTracerProvider;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{util::SubscriberInitExt, EnvFilter};
+
+/// `RUST_LOG` (default `info`), with the dependencies that print page content or
+/// URLs at debug capped regardless (see `crate::zdr_log::harden`).
+///
+/// This is handed to each OUTPUT layer as its own filter and never added to the
+/// registry. A level filter on the registry decides which spans exist: at
+/// `RUST_LOG=error` the info-level request span was never created, the ZDR mark
+/// had nowhere to live, and every sensitive-named error event was written for a
+/// ZDR caller. (The gateway had the same wiring; commit d8a9708d fixed it there.)
+fn env_filter() -> EnvFilter {
+    crate::zdr_log::harden(
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+    )
+}
 
 pub fn init_telemetry() {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let fmt_layer = tracing_subscriber::fmt::layer().json();
-
     if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .ok()
         .filter(|endpoint| !endpoint.trim().is_empty())
         .is_some()
     {
+        if !quarry_edge::otel_zdr::export_enabled() {
+            // `QUARRY_TELEMETRY_EXPORT=off`: no exporter, no provider, no sampler.
+            crate::zdr_log::production_subscriber(std::io::stdout, env_filter()).init();
+            tracing::info!("telemetry export disabled by flag");
+            return;
+        }
         match try_init_otel() {
             Ok(provider) => {
                 let tracer = provider.tracer("quarry-edge");
-                let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-                tracing_subscriber::registry()
-                    .with(env_filter)
-                    .with(fmt_layer)
-                    .with(otel_layer)
-                    .init();
+                // `otel_subscriber` is the whole stack: the sticky ZDR mark, the
+                // JSON log and the exporter, the last two each behind their own
+                // filter (level filter, caps, ZDR rule) and nothing level-filtered
+                // on the registry. It lives in `crate::zdr_log` so a test builds
+                // the same stack with a recording layer in place of the exporter.
+                crate::zdr_log::otel_subscriber(
+                    std::io::stdout,
+                    env_filter(),
+                    env_filter(),
+                    // The OTel layer is wrapped so a span that records `zdr = true`
+                    // (late, after creation) flags its trace for the exporter.
+                    quarry_edge::otel_zdr::ZdrFlagLayer::new(
+                        tracing_opentelemetry::layer().with_tracer(tracer),
+                        quarry_edge::otel_zdr::shared_registry(),
+                    ),
+                )
+                .init();
                 tracing::info!("OTEL tracing enabled");
                 return;
             }
@@ -49,16 +79,20 @@ pub fn init_telemetry() {
         }
     }
 
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(fmt_layer)
-        .init();
+    crate::zdr_log::production_subscriber(std::io::stdout, env_filter()).init();
 }
 
 fn try_init_otel() -> Result<SdkTracerProvider, Box<dyn std::error::Error>> {
     let exporter = SpanExporter::builder().with_tonic().build()?;
+    // WS10.S8: the sampler decides at span creation, the processor at span end.
+    // Both judge against the same process-wide registry, so a trace flagged ZDR
+    // by any span is dropped from then on. The batch processor is built explicitly
+    // (not via `with_batch_exporter`) so the ZDR processor can wrap it.
+    let registry = quarry_edge::otel_zdr::shared_registry();
+    let batch = opentelemetry_sdk::trace::BatchSpanProcessor::builder(exporter).build();
     let provider = SdkTracerProvider::builder()
-        .with_batch_exporter(exporter)
+        .with_sampler(quarry_edge::otel_zdr::ZdrSampler::new(registry.clone(), true))
+        .with_span_processor(quarry_edge::otel_zdr::ZdrSpanProcessor::new(batch, registry))
         .build();
     Ok(provider)
 }

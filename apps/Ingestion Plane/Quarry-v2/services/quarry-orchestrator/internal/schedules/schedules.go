@@ -17,6 +17,7 @@ import (
 	"go.temporal.io/sdk/converter"
 
 	"github.com/triodelab/quarry-v2/services/quarry-orchestrator/internal/controlauth"
+	"github.com/triodelab/quarry-v2/services/quarry-orchestrator/internal/jobs"
 )
 
 // memoOrgKey is the Temporal schedule Memo field that carries the owning org.
@@ -33,6 +34,10 @@ type Config struct {
 	TaskQueue         string
 	HTTPClient        *http.Client
 	Interval          time.Duration
+	// CrawlLimits are the bounds a crawl schedule's fire runs with (WS15.S2).
+	// The reconciler resolves them into the schedule args, so a fire uses the
+	// same bounds the dispatcher would apply. Zero means the built-in defaults.
+	CrawlLimits jobs.CrawlLimits
 }
 
 // Manager reconciles schedules from Control Plane into Temporal.
@@ -54,6 +59,14 @@ type ScheduleSpec struct {
 	Workflow string        `json:"workflow"`
 	Args     []interface{} `json:"args"`
 	Paused   bool          `json:"paused"`
+	// Executable-schedule fields (WS15.S2). A zero value is the default.
+	Overlap        string `json:"overlap,omitempty"`
+	TimeZone       string `json:"timezone,omitempty"`
+	JitterS        int64  `json:"jitter_s,omitempty"`
+	CatchupWindowS int64  `json:"catchup_window_s,omitempty"`
+	PauseOnFailure bool   `json:"pause_on_failure,omitempty"`
+	// ExecutionTimeoutS is derived by prepareSpec; control never sends it.
+	ExecutionTimeoutS int64 `json:"-"`
 }
 
 // existingSchedule is one Temporal schedule the reconciler discovered, paired
@@ -66,6 +79,9 @@ type existingSchedule struct {
 
 // New builds a Manager.
 func New(tc client.Client, cfg Config) *Manager {
+	if cfg.CrawlLimits == (jobs.CrawlLimits{}) {
+		cfg.CrawlLimits = jobs.DefaultCrawlLimits()
+	}
 	if cfg.Interval <= 0 {
 		cfg.Interval = 30 * time.Second
 	}
@@ -158,9 +174,13 @@ func (m *Manager) reconcileWith(ctx context.Context, sc client.ScheduleClient, d
 		// an empty Workflow. Skip them — but they STAY in desiredSet so the
 		// orphan-reap loop below doesn't delete anything on their behalf.
 		if spec.Workflow == "" {
+			if _, ok := existing[id]; ok {
+				m.pauseIfRunning(ctx, sc, id)
+			}
 			m.log.Debug().Str("id", id).Msg("skipping schedule with no mapped workflow")
 			continue
 		}
+		spec = m.prepareSpec(spec)
 		if _, ok := existing[id]; !ok {
 			if err := m.create(ctx, sc, spec); err != nil {
 				m.log.Error().Err(err).Str("id", id).Msg("create schedule failed")
@@ -204,7 +224,7 @@ func (m *Manager) reconcileWith(ctx context.Context, sc client.ScheduleClient, d
 }
 
 func (m *Manager) fetchDesired(ctx context.Context) ([]ScheduleSpec, error) {
-	url := m.cfg.ControlBaseURL + "/v1/schedules"
+	url := m.cfg.ControlBaseURL + "/v1/internal/schedules/desired"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -307,47 +327,62 @@ func (m *Manager) create(ctx context.Context, sc client.ScheduleClient, spec Sch
 	if spec.OrgID != "" {
 		memo = map[string]interface{}{memoOrgKey: spec.OrgID}
 	}
-	_, err := sc.Create(ctx, client.ScheduleOptions{
-		ID: spec.ID,
-		Spec: client.ScheduleSpec{
-			CronExpressions: []string{spec.Cron},
-		},
-		Action: &client.ScheduleWorkflowAction{
-			ID:        spec.ID + "-wf",
-			Workflow:  spec.Workflow,
-			Args:      spec.Args,
-			TaskQueue: m.cfg.TaskQueue,
-		},
-		Paused: spec.Paused,
-		Note:   spec.Name,
-		Memo:   memo,
-	})
+	opts := client.ScheduleOptions{
+		ID:             spec.ID,
+		Spec:           m.scheduleSpecFor(spec),
+		Action:         m.scheduleActionFor(spec),
+		Overlap:        overlapPolicy(spec.Overlap),
+		PauseOnFailure: spec.PauseOnFailure,
+		Paused:         spec.Paused,
+		Note:           spec.Name,
+		Memo:           memo,
+	}
+	// A zero catch-up window keeps the server default, so it is set only when asked for.
+	if spec.CatchupWindowS > 0 {
+		opts.CatchupWindow = time.Duration(spec.CatchupWindowS) * time.Second
+	}
+	_, err := sc.Create(ctx, opts)
 	return err
 }
 
 func (m *Manager) update(ctx context.Context, sc client.ScheduleClient, spec ScheduleSpec) error {
 	h := sc.GetHandle(ctx, spec.ID)
 
-	err := h.Update(ctx, client.ScheduleUpdateOptions{
-		DoUpdate: func(in client.ScheduleUpdateInput) (*client.ScheduleUpdate, error) {
-			sched := in.Description.Schedule
-			sched.Spec = &client.ScheduleSpec{
-				CronExpressions: []string{spec.Cron},
-			}
-			sched.Action = &client.ScheduleWorkflowAction{
-				ID:        spec.ID + "-wf",
-				Workflow:  spec.Workflow,
-				Args:      spec.Args,
-				TaskQueue: m.cfg.TaskQueue,
-			}
-			return &client.ScheduleUpdate{Schedule: &sched}, nil
-		},
-	})
+	// Compare what Temporal holds with the desired spec. Update is called only
+	// when they differ, so an unchanged schedule costs one Describe per pass.
+	desc, err := h.Describe(ctx)
 	if err != nil {
-		return fmt.Errorf("update: %w", err)
+		return fmt.Errorf("describe: %w", err)
+	}
+	want, err := m.canonicalFromSpec(spec)
+	if err != nil {
+		return fmt.Errorf("canonical spec: %w", err)
+	}
+	have, err := m.canonicalFromDescription(desc, spec)
+	if err != nil {
+		return fmt.Errorf("canonical description: %w", err)
+	}
+	if want != have {
+		err := h.Update(ctx, client.ScheduleUpdateOptions{
+			DoUpdate: func(in client.ScheduleUpdateInput) (*client.ScheduleUpdate, error) {
+				sched := in.Description.Schedule
+				spc := m.scheduleSpecFor(spec)
+				sched.Spec = &spc
+				sched.Action = m.scheduleActionFor(spec)
+				sched.Policy = m.policyFor(spec, sched.Policy)
+				return &client.ScheduleUpdate{Schedule: &sched}, nil
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("update: %w", err)
+		}
 	}
 
-	// Reconcile pause state explicitly (Update does not alter State by default).
+	// Pause state is reconciled only when it differs. A description without a
+	// state (an unknown state) is acted on, as before.
+	if desc.Schedule.State != nil && desc.Schedule.State.Paused == spec.Paused {
+		return nil
+	}
 	if spec.Paused {
 		if err := h.Pause(ctx, client.SchedulePauseOptions{Note: "reconciled: paused"}); err != nil {
 			return fmt.Errorf("pause: %w", err)

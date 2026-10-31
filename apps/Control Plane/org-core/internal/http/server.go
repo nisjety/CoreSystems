@@ -149,6 +149,8 @@ func (s *Server) setupRoutes() {
 	v1.POST("/organizations/:id/plan", guard, s.updatePlan)
 	v1.PATCH("/organizations/:id/settings", guard, s.updateOrgSettings)
 	v1.PATCH("/organizations/:id/brreg", guard, s.verifyOrgBrreg)
+	v1.PATCH("/organizations/:id/website", guard, s.updateOrgWebsite)
+	v1.GET("/organizations/:id/website", s.getOrgWebsite)
 	v1.GET("/brreg/search", s.searchBrreg)
 	v1.GET("/brreg/:orgnr", s.lookupBrreg)
 

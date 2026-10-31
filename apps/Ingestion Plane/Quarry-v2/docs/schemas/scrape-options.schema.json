@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ScrapeOptions",
+  "description": "The options a caller may put at the root of a `/v1/scrape` body, as sent.\nEvery field is optional; `resolve` turns this into what the run uses.",
+  "type": "object",
+  "properties": {
+    "actions": {
+      "description": "Actions to run on the page, in order. Checked by WS13.2, run by WS13.5.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": true
+    },
+    "actions_on_error": {
+      "description": "`abort` (the default) or `continue`. There is no retry: a replayed click\nor type can submit twice.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ActionOnError"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "exclude_tags": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "extractor": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Extractor"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "formats": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/ScrapeFormat"
+      }
+    },
+    "include_tags": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "max_inline_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "only_main_content": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "remove_base64_images": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "timeout_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "$defs": {
+    "ActionOnError": {
+      "description": "What to do when an action fails: stop and report, or go on to the next one.\nThere is no retry: a replayed click or type can submit twice.",
+      "type": "string",
+      "enum": [
+        "abort",
+        "continue"
+      ]
+    },
+    "Extractor": {
+      "description": "Which content extractor shapes the markdown. `Readability` is the\nmain-content heuristic (`only_main_content`, the default); `CleanFull` keeps\nthe whole body minus scripts and chrome; `Raw` converts the document as it is.",
+      "type": "string",
+      "enum": [
+        "readability",
+        "clean_full",
+        "raw"
+      ]
+    },
+    "ScrapeFormat": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "markdown",
+            "html",
+            "rawHtml",
+            "links",
+            "metadata",
+            "screenshot",
+            "pdf"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "enum": [
+                "screenshot",
+                "pdf"
+              ]
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    }
+  }
+}

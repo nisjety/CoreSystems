@@ -94,12 +94,18 @@ export interface CrawlJob {
 export interface ScrapeRequest {
   url: string
   render?: Record<string, unknown>
-  renderHints?: Record<string, unknown>
   signals?: Record<string, unknown>
-  cachePolicy?: string
+  /** Output formats quarry-edge should return. The gateway adds `['markdown']` when absent so the
+   * text comes back inline in `data.markdown` instead of as an artifact reference. */
+  formats?: string[]
+  only_main_content?: boolean
+  include_tags?: string[]
+  exclude_tags?: string[]
   /** When true, quarry-edge persists the fetched page into the knowledge base
    * (not just returns it). Omit/false for preview-only scrapes. */
   ingest?: boolean
+  /** WS13.7: screenshot and PDF captures. Sent as `formats` entries on `/scrape` only; the cached preview never sends them. */
+  capture?: ScrapeCaptureRequest
 }
 
 export interface CrawlRequest {
@@ -107,6 +113,27 @@ export interface CrawlRequest {
   maxPages?: number
   /** Phase 6 selective ingest: true = persist+embed; omitted = working-set only (default never). */
   ingest?: boolean
+  /** WS14.S6: link depth from the seed (the gateway caps it at 10). */
+  maxDepth?: number
+  /** WS14.S6: patterns a link must match (glob, or `re:` regular expression). */
+  includePaths?: string[]
+  /** WS14.S6: patterns that deny a link; they beat `includePaths`. */
+  excludePaths?: string[]
+  /** WS14.S3: follow links to subdomains of the seed host. Omitted = false. */
+  allowSubdomains?: boolean
+  /** WS14.S3: follow links to unrelated hosts. UI only; the gateway drops it for a Model proposal. */
+  allowExternalLinks?: boolean
+}
+
+/** WS14.S6: the scope a crawl runs with, echoed by the handoff (`effective`). */
+export interface CrawlEffectiveScope {
+  scopeMode: string
+  robots: string
+  maxPages: number
+  maxDepth: number
+  legacy: boolean
+  warnings: string[]
+  requestWarnings: { code: string; field: string }[]
 }
 
 /** A single page surfaced by `/crawl/discover` (quarry `/v1/map`). */
@@ -145,16 +172,22 @@ export interface ScrapeResult {
   html?: string
   markdown?: string
   metadata?: ScrapeMetadata
-  rawHtml?: string
+  raw_html?: string
   text?: string
   url?: string | { final?: string; final_url?: string; requested?: string }
+  /** WS13.7: inline screenshot (ZDR only), or absent. */
+  screenshot?: unknown
+  /** WS13.7: inline PDF (ZDR only), or absent. */
+  pdf?: unknown
+  /** WS13.7: what the captures measured, counts only. */
+  captures?: unknown
   data?: {
     content?: string
     formats?: Record<string, unknown>
     html?: string
     markdown?: string
     metadata?: ScrapeMetadata
-    rawHtml?: string
+    raw_html?: string
     text?: string
     url?: string | { final?: string; final_url?: string; requested?: string }
   }
@@ -363,6 +396,84 @@ export async function importUpload(
 
 // ── Quarry ────────────────────────────────────────────────────────────────────
 
+/** WS13.7: a screenshot request. `true` asks for the defaults. */
+export interface ScreenshotOptions {
+  fullPage?: boolean
+  quality?: number
+}
+
+/** WS13.7: captures to take with a scrape. */
+export interface ScrapeCaptureRequest {
+  screenshot?: boolean | ScreenshotOptions
+  pdf?: boolean
+}
+
+/** WS13.7: a scrape's captures as the SPA reads them. `screenshotUrl` and `pdfUrl` are
+ * gateway artifact routes; `screenshotInline` is ZDR only (the bytes come back in the
+ * response and nothing is stored). */
+export interface ScrapeCaptureView {
+  pdfUrl?: string
+  screenshotInline?: { contentType: string; dataBase64: string }
+  screenshotUrl?: string
+}
+
+/** WS13.7: the gateway route that serves one scrape artifact (screenshot or PDF). */
+export function scrapeArtifactUrl(artifactId: string): string {
+  return `/api/v1/knowledge/scrape-artifacts/${encodeURIComponent(artifactId)}`
+}
+
+/** The `formats` entries for a capture request; empty when nothing is asked. */
+export function captureFormats(
+  capture: ScrapeCaptureRequest | undefined,
+): Array<string | Record<string, unknown>> {
+  const formats: Array<string | Record<string, unknown>> = []
+  if (capture?.screenshot) {
+    formats.push(
+      typeof capture.screenshot === 'object' ? { type: 'screenshot', ...capture.screenshot } : 'screenshot',
+    )
+  }
+  if (capture?.pdf) formats.push('pdf')
+  return formats
+}
+
+/** The wire body for `/v1/knowledge/scrape`: `capture` becomes `formats` entries. A
+ * capture request keeps `markdown` so the text still comes back inline. */
+export function scrapeRequestBody(body: ScrapeRequest): Record<string, unknown> {
+  const { capture, ...rest } = body
+  const extra = captureFormats(capture)
+  if (extra.length === 0) return rest as Record<string, unknown>
+  return { ...rest, formats: [...(rest.formats ?? ['markdown']), ...extra] }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Read the captures of a scrape result. The fields may sit at the top level or under
+ * `data`, so both are read; a value that is not the expected shape is ignored.
+ * `undefined` when the response carries no capture. */
+export function readScrapeCaptures(result: unknown): ScrapeCaptureView | undefined {
+  if (!isRecord(result)) return undefined
+  const data = isRecord(result.data) ? result.data : {}
+  const pick = (key: string): unknown => result[key] ?? data[key]
+  const view: ScrapeCaptureView = {}
+  const inline = pick('screenshot')
+  if (isRecord(inline) && typeof inline.data_base64 === 'string' && typeof inline.content_type === 'string') {
+    view.screenshotInline = { contentType: inline.content_type, dataBase64: inline.data_base64 }
+  }
+  const formatsValue = pick('formats')
+  const formats = isRecord(formatsValue) ? formatsValue : {}
+  const artifactRef = (key: string): string | undefined => {
+    const value = formats[key]
+    return typeof value === 'string' && /^art_[A-Za-z0-9_-]+$/.test(value) ? value : undefined
+  }
+  const screenshotRef = artifactRef('screenshot')
+  if (screenshotRef) view.screenshotUrl = scrapeArtifactUrl(screenshotRef)
+  const pdfRef = artifactRef('pdf')
+  if (pdfRef) view.pdfUrl = scrapeArtifactUrl(pdfRef)
+  return view.screenshotInline || view.screenshotUrl || view.pdfUrl ? view : undefined
+}
+
 export async function scrapeUrl(
   orgId: string,
   body: ScrapeRequest,
@@ -370,12 +481,19 @@ export async function scrapeUrl(
 ): Promise<ScrapeResult> {
   return requestJson<ScrapeResult>('/api/v1/knowledge/scrape', {
     method: 'POST',
-    body: JSON.stringify(body),
+    body: JSON.stringify(scrapeRequestBody(body)),
     headers: orgHeaders(orgId),
     signal,
   })
 }
 
+/**
+ * A failed preview carries a typed `error.code` (`invalid_url`, `site_blocked` with a
+ * `blockReason`, `scrape_refused`, `scrape_rate_limited` with `retryAfterSeconds`,
+ * `scrape_timeout`, `scrape_failed`). The caller shows it through `browserErrorMessage`,
+ * which looks the code up in `shared/i18n/errors.ts`; a test reads the gateway to pin
+ * the set, so there is no list of the codes here to keep in step.
+ */
 export async function scrapePreview(
   orgId: string,
   body: ScrapeRequest,
@@ -445,6 +563,12 @@ export async function startCrawl(
       // Phase 6 selective ingest: forward the resolved decision so the gateway
       // gates persistence (omitted → quarry default NEVER = working-set only).
       ...(body.ingest === undefined ? {} : { ingest: body.ingest }),
+      // WS14.S6: the scope options, sent only when the caller set them.
+      ...(body.maxDepth ? { maxDepth: body.maxDepth } : {}),
+      ...(body.includePaths?.length ? { includePaths: body.includePaths } : {}),
+      ...(body.excludePaths?.length ? { excludePaths: body.excludePaths } : {}),
+      ...(body.allowSubdomains === undefined ? {} : { allowSubdomains: body.allowSubdomains }),
+      ...(body.allowExternalLinks === undefined ? {} : { allowExternalLinks: body.allowExternalLinks }),
     }),
     headers: orgHeaders(orgId),
     signal,
@@ -605,6 +729,14 @@ export type CrawlWorkflowEvent = {
   pagesFailed?: number
   /** Best-estimate total work, when the producer can compute it. */
   total?: number
+  /** WS14.S3: pages the edge refused (robots or scope), from `run_*` payloads. */
+  pagesBlocked?: number
+  /** WS14.S4: the part of `pagesBlocked` the edge refused under robots.txt (`pages_blocked_robots`). */
+  pagesBlockedByRobots?: number
+  /** WS14.S3: links the crawl scope refused, from `run_*` payloads. */
+  linksDenied?: number
+  /** WS14.S3: denial counts by code (`denials.counts`), from `run_*` payloads. */
+  denialCounts?: Record<string, number>
 }
 
 export type CrawlWorkflowHandlers = {
@@ -710,6 +842,18 @@ function normalizeDiscoveredPage(raw: unknown): DiscoveredPage | null {
   }
 }
 
+/** WS14.S3: `payload.denials.counts` as code → count; undefined when absent or malformed. */
+function denialCountsField(payload: Record<string, unknown>): Record<string, number> | undefined {
+  const denials = asRecord(payload.denials)
+  const counts = denials ? asRecord(denials.counts) : undefined
+  if (!counts) return undefined
+  const out: Record<string, number> = {}
+  for (const [code, value] of Object.entries(counts)) {
+    if (typeof value === 'number' && Number.isFinite(value)) out[code] = value
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
 function normalizeCrawlEvent(event: string | undefined, data: string): CrawlWorkflowEvent {
   if (!data) return { detail: event ?? 'Crawl updated.', event }
   try {
@@ -741,6 +885,11 @@ function normalizeCrawlEvent(event: string | undefined, data: string): CrawlWork
       ?? numberField(record, 'pages_failed')
     const total = numberField(payload, 'total')
       ?? numberField(record, 'total')
+    // WS14.S3: the scope summary of a terminal event. Absent for a legacy crawl.
+    const pagesBlocked = numberField(payload, 'pages_blocked')
+    const pagesBlockedByRobots = numberField(payload, 'pages_blocked_robots')
+    const linksDenied = numberField(payload, 'links_denied')
+    const denialCounts = denialCountsField(payload)
 
     const detail = stringField(payload, 'url')
       ?? stringField(record, 'message')
@@ -763,6 +912,10 @@ function normalizeCrawlEvent(event: string | undefined, data: string): CrawlWork
       ...(pagesVisited !== undefined ? { pagesVisited } : {}),
       ...(pagesFailed !== undefined ? { pagesFailed } : {}),
       ...(total !== undefined ? { total } : {}),
+      ...(pagesBlocked !== undefined ? { pagesBlocked } : {}),
+      ...(pagesBlockedByRobots !== undefined ? { pagesBlockedByRobots } : {}),
+      ...(linksDenied !== undefined ? { linksDenied } : {}),
+      ...(denialCounts ? { denialCounts } : {}),
     }
   } catch {
     return { detail: data, event }

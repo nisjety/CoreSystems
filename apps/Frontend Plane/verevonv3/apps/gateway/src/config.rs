@@ -25,6 +25,13 @@ pub(crate) struct AppState {
     /// privacy affordances (badges/ShareDialog) render ONLY when this is
     /// "strict" AND viewer identity is live — surfaced via GET /api/v1/ownership/status.
     pub(crate) enforcement_mode: String,
+    /// `BROWSER_GRANT_ENFORCEMENT` (off|permissive|strict): whether the
+    /// in-app browser obtains a BrowserBroker session grant, and whether a
+    /// failure to obtain one stops the session (WS1.B).
+    pub(crate) browser_grant_mode: BrowserGrantMode,
+    /// `BROWSER_HUMAN_BROWSE` (WS8.D): whether a session asks for a person's open-web
+    /// `human_browse` grant. Off unless set to a truthy value, in every environment.
+    pub(crate) browser_human_browse: bool,
     pub(crate) auth_core_url: String,
     pub(crate) verevon_public_origin: String,
     pub(crate) session_core_url: String,
@@ -39,6 +46,16 @@ pub(crate) struct AppState {
     pub(crate) audit_core_service_token: String,
     pub(crate) insight_core_url: String,
     pub(crate) leads_core_url: String,
+    /// The anbud core (tender matching). Its key is the gateway's own credential for that core: the browser
+    /// never sees it, and an empty key answers the anbud routes with `not_configured`.
+    pub(crate) anbud_core_url: String,
+    pub(crate) anbud_api_key: String,
+    pub(crate) anbud_api_key_header: String,
+    pub(crate) marketing_core_url: String,
+    pub(crate) marketing_core_service_key: String,
+    /// Temporary single-org Marketing Core deployment binding, never a fallback
+    /// tenant. Sensitive routes compare it to live session membership.
+    pub(crate) marketing_core_organization_id: String,
     pub(crate) shipping_core_url: String,
     pub(crate) user_core_url: String,
     /// Application Plane's Convex deployment. Read from the environment once,
@@ -77,7 +94,10 @@ pub(crate) struct AppState {
     /// at a mock that mounts nothing and asserting the mock received no
     /// request at all. The tripwire only works while the field still exists,
     /// so it is deliberately retained rather than deleted with its warning.
-    #[allow(dead_code, reason = "tripwire for the closed direct-to-SearXNG bypass; see doc comment")]
+    #[allow(
+        dead_code,
+        reason = "tripwire for the closed direct-to-SearXNG bypass; see doc comment"
+    )]
     pub(crate) searxng_url: String,
     pub(crate) autocomplete_core_url: String,
     pub(crate) autocomplete_token: String,
@@ -91,6 +111,9 @@ pub(crate) struct AppState {
     pub(crate) remote_support_server_public_key: String,
     pub(crate) zammad_api_token: String,
     pub(crate) audience_token_cache: AudienceTokenCache,
+    /// WS15.S0: what the Ingestions schedules surface may offer. Read once at
+    /// startup from `QUARRY_SCHEDULE_CAPABILITIES`, never per request.
+    pub(crate) schedule_capabilities: ScheduleCapabilities,
     /// Retained only for legacy browser-domain unit fixtures. Runtime browser
     /// authority and presentation state live in Quarry-v2.
     #[cfg(test)]
@@ -136,7 +159,41 @@ pub(crate) struct AppState {
     /// execution-core" step. Deliberately `None` in every production build
     /// today -- see `domains/mail_task.rs`'s module doc for why this is a real
     /// gap, not an oversight, and what unblocks it.
-    pub(crate) mail_task_pipeline: Option<std::sync::Arc<dyn crate::domains::mail_task::MailTaskPipeline>>,
+    pub(crate) mail_task_pipeline:
+        Option<std::sync::Arc<dyn crate::domains::mail_task::MailTaskPipeline>>,
+}
+
+/// Which optional parts of the Ingestions schedules surface this installation
+/// can honour (WS15.S0). Every flag is off by default, and a flag is turned on
+/// by configuration only once the backend behind it exists: `kinds` when a
+/// schedule kind has a workflow (S1), `overlap` when overlap policy is enforced
+/// (S2), `trigger` and `backfill` when the control verbs are implemented (S3).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct ScheduleCapabilities {
+    pub(crate) trigger: bool,
+    pub(crate) backfill: bool,
+    pub(crate) overlap: bool,
+    pub(crate) kinds: Vec<String>,
+    pub(crate) needs_activation: bool,
+}
+
+/// Parse `QUARRY_SCHEDULE_CAPABILITIES` (a JSON object). Unset, blank or
+/// malformed input yields the all-off default, so a broken value can never
+/// switch a capability on. The raw value is not logged, only the failure.
+pub(crate) fn schedule_capabilities_from_env(raw: Option<&str>) -> ScheduleCapabilities {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return ScheduleCapabilities::default();
+    };
+    match serde_json::from_str::<ScheduleCapabilities>(raw) {
+        Ok(capabilities) => capabilities,
+        Err(_) => {
+            tracing::warn!(
+                "QUARRY_SCHEDULE_CAPABILITIES is not valid JSON; all schedule capabilities stay off"
+            );
+            ScheduleCapabilities::default()
+        }
+    }
 }
 
 pub(crate) async fn build_state() -> Result<AppState> {
@@ -177,6 +234,11 @@ pub(crate) async fn build_state() -> Result<AppState> {
             .map(|v| v.trim().to_lowercase())
             .filter(|v| matches!(v.as_str(), "off" | "permissive" | "strict"))
             .unwrap_or_else(|| "off".to_string()),
+        browser_grant_mode: browser_grant_mode(
+            env::var("BROWSER_GRANT_ENFORCEMENT").ok().as_deref(),
+            &env::var("APP_ENV").unwrap_or_default(),
+        ),
+        browser_human_browse: human_browse_enabled(env::var("BROWSER_HUMAN_BROWSE").ok().as_deref()),
         auth_core_url: env_url("AUTH_CORE_URL", "http://auth-core:3011"),
         verevon_public_origin: canonical_public_origin(
             &env::var("VEREVON_PUBLIC_ORIGIN")
@@ -200,6 +262,16 @@ pub(crate) async fn build_state() -> Result<AppState> {
         // registry. Internal-key auth + x-org-id header, like the other cores.
         insight_core_url: env_url("INSIGHT_CORE_URL", "http://insight-core:3163"),
         leads_core_url: env_url("LEADS_CORE_URL", "http://leads-core:3164"),
+        anbud_core_url: env_url("ANBUD_CORE_URL", "http://anbud-core:3138"),
+        anbud_api_key: env::var("ANBUD_API_KEY").unwrap_or_default().trim().to_owned(),
+        anbud_api_key_header: env::var("ANBUD_API_KEY_HEADER")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "X-API-Key".to_owned()),
+        marketing_core_url: env_url("MARKETING_CORE_URL", "http://marketing-core:3165"),
+        marketing_core_service_key: env::var("MARKETING_CORE_SERVICE_KEY").unwrap_or_default().trim().to_owned(),
+        marketing_core_organization_id: env::var("MARKETING_CORE_ORGANIZATION_ID").unwrap_or_default().trim().to_owned(),
         // shipping-core (Ingestion Plane) — freight aggregator; on the
         // inter-plane bus, so the in-network name resolves from the gateway.
         shipping_core_url: env_url("SHIPPING_CORE_URL", "http://shipping-core:8080"),
@@ -274,6 +346,9 @@ pub(crate) async fn build_state() -> Result<AppState> {
         ),
         cache,
         studio_store: crate::domains::studio::StudioStore::new(),
+        schedule_capabilities: schedule_capabilities_from_env(
+            env::var("QUARRY_SCHEDULE_CAPABILITIES").ok().as_deref(),
+        ),
         allow_dev_actor_headers: dev_only_flag("ALLOW_DEV_ACTOR_HEADERS"),
         allow_dev_auth_bypass: dev_only_flag("ALLOW_DEV_AUTH_BYPASS"),
         continue_park_form: continue_park_form_enabled(),
@@ -350,6 +425,8 @@ pub(crate) fn build_cors_layer() -> CorsLayer {
             CONTENT_TYPE,
             HeaderName::from_static("x-verevon-org-id"),
         ])
+        // WS10.S1: browsers may read the id from a response (support reports).
+        .expose_headers([HeaderName::from_static("x-request-id")])
         .allow_credentials(true)
 }
 
@@ -470,6 +547,65 @@ fn model_entitlement_admin_from(value: Option<&str>) -> bool {
 
 fn dev_flags_allowed(app_env: &str) -> bool {
     !matches!(app_env.to_ascii_lowercase().as_str(), "production" | "prod")
+}
+
+/// How the BFF treats BrowserBroker grants for the in-app browser
+/// (`BROWSER_GRANT_ENFORCEMENT`, WS1.B).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BrowserGrantMode {
+    /// No grant is issued; Quarry runs on its own client-supplied constraints.
+    Off,
+    /// A session grant is requested; if it cannot be issued the session still
+    /// opens without one (logged by outcome class, never by host).
+    Permissive,
+    /// No grant, no browser session.
+    Strict,
+}
+
+impl BrowserGrantMode {
+    pub(crate) const fn issues_grants(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
+
+/// Resolves `BROWSER_GRANT_ENFORCEMENT` against `APP_ENV`. Outside production
+/// the default is `permissive`; in production it is `strict`, and an explicit
+/// `off` is refused there (the `dev_only_flag` pattern: report and fall back
+/// to the safe value rather than silently run without grants). An unknown
+/// value is the environment's default, never a looser mode.
+pub(crate) fn browser_grant_mode(raw: Option<&str>, app_env: &str) -> BrowserGrantMode {
+    let production = !dev_flags_allowed(app_env);
+    let default = if production {
+        BrowserGrantMode::Strict
+    } else {
+        BrowserGrantMode::Permissive
+    };
+    let Some(value) = raw.map(|value| value.trim().to_ascii_lowercase()) else {
+        return default;
+    };
+    match value.as_str() {
+        "" => default,
+        "strict" => BrowserGrantMode::Strict,
+        "permissive" => BrowserGrantMode::Permissive,
+        "off" if production => {
+            eprintln!(
+                "refusing BROWSER_GRANT_ENFORCEMENT=off because APP_ENV={app_env}; using strict"
+            );
+            BrowserGrantMode::Strict
+        }
+        "off" => BrowserGrantMode::Off,
+        _ => {
+            eprintln!("unknown BROWSER_GRANT_ENFORCEMENT value; using the {default:?} default");
+            default
+        }
+    }
+}
+
+/// Parses `BROWSER_HUMAN_BROWSE` (WS8.D). Unset, blank or anything but a truthy word is off;
+/// the flag is never read against `APP_ENV`, so every environment defaults to off.
+pub(crate) fn human_browse_enabled(raw: Option<&str>) -> bool {
+    raw.map(|value| value.trim().to_ascii_lowercase())
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
 }
 
 fn env_bool(key: &str, fallback: bool) -> bool {
@@ -634,6 +770,32 @@ mod tests {
         assert!(dev_flags_allowed("staging"));
     }
 
+    #[test]
+    fn browser_grant_mode_defaults_permissive_outside_production_and_strict_in_it() {
+        use super::{browser_grant_mode, BrowserGrantMode::*};
+        assert_eq!(browser_grant_mode(None, ""), Permissive);
+        assert_eq!(browser_grant_mode(None, "development"), Permissive);
+        assert_eq!(browser_grant_mode(None, "production"), Strict);
+        assert_eq!(browser_grant_mode(Some("  "), "prod"), Strict);
+        assert_eq!(browser_grant_mode(Some("STRICT"), ""), Strict);
+        assert_eq!(
+            browser_grant_mode(Some("permissive"), "production"),
+            Permissive
+        );
+        assert_eq!(browser_grant_mode(Some("off"), "development"), Off);
+    }
+
+    #[test]
+    fn browser_grant_mode_refuses_off_in_production_and_never_loosens_on_a_typo() {
+        use super::{browser_grant_mode, BrowserGrantMode::*};
+        assert_eq!(browser_grant_mode(Some("off"), "production"), Strict);
+        assert_eq!(browser_grant_mode(Some("Off"), "Prod"), Strict);
+        assert_eq!(browser_grant_mode(Some("of"), "production"), Strict);
+        assert_eq!(browser_grant_mode(Some("disabled"), ""), Permissive);
+        assert!(!Off.issues_grants());
+        assert!(Permissive.issues_grants() && Strict.issues_grants());
+    }
+
     /// WS03 S8-A: the park form of `/continue` is off unless the variable is exactly `true`.
     /// Nothing is trimmed or case-folded, and the other truthy spellings `env_bool` accepts
     /// (`1`, `yes`, `on`) do not turn it on.
@@ -721,5 +883,24 @@ mod tests {
             1,
             "declared exactly once"
         );
+    }
+}
+
+#[cfg(test)]
+mod human_browse_flag_tests {
+    use super::human_browse_enabled;
+
+    #[test]
+    fn human_browse_flag_defaults_off_in_every_environment() {
+        // The flag is read without APP_ENV: unset is off everywhere, production included.
+        assert!(!human_browse_enabled(None));
+        assert!(!human_browse_enabled(Some("")));
+        assert!(!human_browse_enabled(Some("   ")));
+        assert!(!human_browse_enabled(Some("0")));
+        assert!(!human_browse_enabled(Some("off")));
+        assert!(!human_browse_enabled(Some("garbage")));
+        assert!(human_browse_enabled(Some("1")));
+        assert!(human_browse_enabled(Some(" TRUE ")));
+        assert!(human_browse_enabled(Some("yes")));
     }
 }

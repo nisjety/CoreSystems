@@ -1,0 +1,3 @@
+# W2-U54 hand-over (WS6.J usage segment)
+
+See `W2-U54-progress.md` for what is committed and what to run. In one paragraph: the SIGTERM drain now ends each live run through `finish_run(Drain)` (last usage segment, `agent.expired` reason `shutdown`, one release, non-ZDR checkpoint stays active, ZDR writes nothing), then closes the open agent streams so graceful shutdown completes, then flushes the usage meter. Traps found: tests that flip the process-global drain flags must be `#[serial]` and reset them (`drain::reset_for_tests`); `main.rs` and `RUNBOOKS.md` carry other units' uncommitted hunks, so commit them from the HEAD blob (`qcommit-blobs.sh`); `async_stream::stream!` cannot `yield` inside a `tokio::select!` arm, so the stream code selects first and yields after.

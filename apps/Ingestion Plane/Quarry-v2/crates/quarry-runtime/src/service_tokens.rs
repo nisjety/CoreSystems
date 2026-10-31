@@ -40,6 +40,9 @@ impl fmt::Debug for ServiceBearer {
 pub enum ServiceTokenAudience {
     DataPlane,
     ModelPlane,
+    /// The Model Plane BrowserBroker (`ValidateGrant`), an audience of its
+    /// own: its tokens carry `aud=browser-broker` and scope `browser:read`.
+    BrowserBroker,
 }
 
 impl ServiceTokenAudience {
@@ -47,6 +50,7 @@ impl ServiceTokenAudience {
         match self {
             Self::DataPlane => "/api/data-plane/internal-token",
             Self::ModelPlane => "/api/model-plane/internal-token",
+            Self::BrowserBroker => "/api/browser-broker/internal-token",
         }
     }
 
@@ -57,11 +61,12 @@ impl ServiceTokenAudience {
         match self {
             Self::DataPlane => "data-plane",
             Self::ModelPlane => "model-gateway",
+            Self::BrowserBroker => "browser-broker",
         }
     }
 
     fn from_registry_audience(audience: &str) -> Option<Self> {
-        [Self::DataPlane, Self::ModelPlane]
+        [Self::DataPlane, Self::ModelPlane, Self::BrowserBroker]
             .into_iter()
             .find(|candidate| candidate.registry_audience() == audience)
     }
@@ -179,7 +184,7 @@ const MANIFEST_SCHEMA_VERSION: u32 = 1;
 #[serde(deny_unknown_fields)]
 pub struct TokenRequestRow {
     pub name: String,
-    /// The registry audience: `data-plane` or `model-gateway`.
+    /// The registry audience: `data-plane`, `model-gateway` or `browser-broker`.
     pub audience: String,
     /// The Auth Core path that mints for that audience.
     pub mint_path: String,
@@ -401,7 +406,7 @@ impl AuthCoreServiceTokenProvider {
             .map_err(|error| {
                 QuarryError::new(
                     ErrorCode::Internal,
-                    format!("Auth Core token client initialization failed: {error}"),
+                    format!("Auth Core token client initialization failed: {}", error.without_url()),
                 )
             })?;
         Ok(Self {
@@ -621,6 +626,78 @@ mod tests {
         assert_eq!(format!("{first:?}"), "ServiceBearer(<redacted>)");
     }
 
+    /// The broker credential: its own audience path, the three-field body
+    /// (no retention posture), one mint per organization, and a token for one
+    /// organization is never handed to another.
+    #[tokio::test]
+    async fn mints_an_org_scoped_browser_broker_token_on_its_own_path() {
+        let server = MockServer::start().await;
+        for (org, token) in [("org_a", "aaa.bbb.ccc"), ("org_b", "ddd.eee.fff")] {
+            Mock::given(method("POST"))
+                .and(path("/api/browser-broker/internal-token"))
+                .and(header("x-service-id", "quarry-edge"))
+                .and(header("x-service-api-key", "credential-long-enough"))
+                .and(body_json(json!({
+                    "orgId": org,
+                    "scopes": ["browser:read"],
+                    "reason": "validate verified browser grant"
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "token": token,
+                    "expiresInSeconds": 300,
+                    "audience": "browser-broker"
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let provider =
+            AuthCoreServiceTokenProvider::new(server.uri(), "credential-long-enough").unwrap();
+        let request = ServiceTokenRequest::from_manifest("browser-grant-validate").unwrap();
+        assert_eq!(request.audience(), ServiceTokenAudience::BrowserBroker);
+
+        let a1 = provider.token_for_org("org_a", &request, false).await.unwrap();
+        let b1 = provider.token_for_org("org_b", &request, false).await.unwrap();
+        let a2 = provider.token_for_org("org_a", &request, false).await.unwrap();
+        assert_eq!(a1.expose(), "aaa.bbb.ccc");
+        assert_eq!(a2.expose(), a1.expose(), "the second call is the cached token");
+        assert_eq!(b1.expose(), "ddd.eee.fff", "another org gets its own token");
+        // The mock's `expect(1)` per org proves one mint each (checked on drop).
+    }
+
+    /// A refusal from Auth Core (the principal is not entitled to the lane, or
+    /// org-core does not hold the organization) is an error to the caller, never
+    /// an empty or reused token, and nothing is cached for it.
+    #[tokio::test]
+    async fn a_refused_browser_broker_mint_fails_closed_and_caches_nothing() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/browser-broker/internal-token"))
+            .respond_with(ResponseTemplate::new(403))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let provider =
+            AuthCoreServiceTokenProvider::new(server.uri(), "credential-long-enough").unwrap();
+        let request = ServiceTokenRequest::from_manifest("browser-grant-validate").unwrap();
+        for _ in 0..2 {
+            let error = provider
+                .token_for_org("org_a", &request, false)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, quarry_core::error::ErrorCode::Forbidden);
+        }
+        // Org-core down is a 503 from Auth Core: also an error, not a token.
+        let down = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&down)
+            .await;
+        let provider =
+            AuthCoreServiceTokenProvider::new(down.uri(), "credential-long-enough").unwrap();
+        assert!(provider.token_for_org("org_a", &request, false).await.is_err());
+    }
+
     #[tokio::test]
     async fn forced_refresh_mints_a_replacement_model_token() {
         let server = MockServer::start().await;
@@ -715,7 +792,7 @@ mod manifest_tests {
     /// manifest: the first five are exactly what the call sites wrote inline
     /// before the manifest existed, so the refactor cannot change a request
     /// unnoticed, and editing a row means editing this table too.
-    const EXPECTED_REQUESTS: [(&str, ServiceTokenAudience, &[&str], &str); 6] = [
+    const EXPECTED_REQUESTS: [(&str, ServiceTokenAudience, &[&str], &str); 7] = [
         (
             "vector-retrieve",
             ServiceTokenAudience::DataPlane,
@@ -751,6 +828,12 @@ mod manifest_tests {
             ServiceTokenAudience::ModelPlane,
             &["models:invoke"],
             "invoke bounded audio primitive",
+        ),
+        (
+            "browser-grant-validate",
+            ServiceTokenAudience::BrowserBroker,
+            &["browser:read"],
+            "validate verified browser grant",
         ),
     ];
 
@@ -804,6 +887,7 @@ mod manifest_tests {
             let audience = match row["audience"].as_str().expect("an audience") {
                 "data-plane" => ServiceTokenAudience::DataPlane,
                 "model-gateway" => ServiceTokenAudience::ModelPlane,
+                "browser-broker" => ServiceTokenAudience::BrowserBroker,
                 other => panic!("row {name}: unexpected audience {other}"),
             };
             assert_eq!(request.audience(), audience, "{name}");

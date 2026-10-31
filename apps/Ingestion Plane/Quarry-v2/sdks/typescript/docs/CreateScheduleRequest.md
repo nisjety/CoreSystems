@@ -7,12 +7,14 @@
 Name | Type
 ------------ | -------------
 `name` | string
+`activate` | boolean
+`timezone` | string
+`catchupWindowS` | number
+`pauseOnFailure` | boolean
 `kind` | string
 `cron` | string
 `scheduleAt` | Date
 `overlapPolicy` | [OverlapPolicy](OverlapPolicy.md)
-`catchupWindowS` | number
-`pauseOnFailure` | boolean
 `preset` | string
 `targetRef` | string
 `config` | { [key: string]: any; }
@@ -25,12 +27,14 @@ import type { CreateScheduleRequest } from '@quarry/client'
 // TODO: Update the object below with actual values
 const example = {
   "name": null,
+  "activate": null,
+  "timezone": null,
+  "catchupWindowS": null,
+  "pauseOnFailure": null,
   "kind": null,
   "cron": null,
   "scheduleAt": null,
   "overlapPolicy": null,
-  "catchupWindowS": null,
-  "pauseOnFailure": null,
   "preset": null,
   "targetRef": null,
   "config": null,

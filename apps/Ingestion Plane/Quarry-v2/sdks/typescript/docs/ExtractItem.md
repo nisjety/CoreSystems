@@ -10,6 +10,7 @@ Name | Type
 `status` | string
 `data` | object
 `markdown` | string
+`structured` | [StructuredData](StructuredData.md)
 `error` | string
 
 ## Example
@@ -23,6 +24,7 @@ const example = {
   "status": null,
   "data": null,
   "markdown": null,
+  "structured": null,
   "error": null,
 } satisfies ExtractItem
 

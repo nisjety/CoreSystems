@@ -1,0 +1,211 @@
+# W2 build wave: closeout
+
+Written 2026-10-24 by the W2-closeout-writer unit. Branch `quarryv2-next`, HEAD at writing `226a7f2ff`. Inputs: `W2-queue.md` (15 batches: 12 plain and 3 gated), the `W2-U*-progress.md` and `W3-B*-progress.md` notes, `W3-estimate.md`, the W2 sweep note, the wave test phase results (run once on HEAD), the decisions of `DECISIONS-2026-10-23.md`, and `git log`. Consolidated depth register: `DEPTH-FINDINGS-W2.md` (344 rows: 147 high, 187 medium, 10 low themes). Commit ranges: `2ac764f1f..HEAD` is 362 commits (the code and notes of the whole W2 and W3-B1-B3 build; 76 of them are notes commits, 143 feat, 26 test, 16 fix, 166 docs, 848 files changed, 97,843 insertions, 2,701 deletions); `3ee1bc9f4..HEAD` is 341 commits. Batch 1 (U01 to U06) landed just before the W1 ledger commit `3ee1bc9f4`, so the range the brief names omits it; the per-unit commit lists below were found with `git log 2ac764f1f..HEAD` and the slice ids in the subjects.
+
+## (a) The plain statement
+
+**W2 is built to the queue's scope where the table says so, and it is NOT proven.** All 15 batches of the W2 queue were built in wave mode: 68 of the 69 units, with the one optional unit (U57, WS17.S7) deliberately not built. 59 of the 112 scheduled slices are built to scope (62 with the three that W1 already had), 9 are built in part, 41 are not built because they wait on another plane, a decision or a counsel step (section c). Every one of those is built and committed locally; nothing is pushed, no image of the final tree was built, and no stack was run. Under the user's build strategy of 2026-10-23 (build the wave first, depth later; one light test pass at the end) the tests of W2 were written and compile-checked while building and were run once, in part, at the end.
+
+What the light pass actually covered (section d): Go, node, the frontend gateway, the SPA and auth-core ran once on HEAD `226a7f2ff`, and they found 33 failing tests (5 orchestrator, 8 control, 4 node, 16 SPA), 5 new TypeScript errors and a build break in the lab benchmark. The Quarry Rust lane (quarry-core, -transform, -security, -runtime, -edge) was NOT run on the W2 tree: the only recorded run (2323 passed, 0 failed) was taken before 130 later commits to those crates, so it proves W1 and nothing of W2 or W3. Several hundred Rust tests written in W2 and W3 have never run. The Chromium lane, the Postgres lane, the Redis lane and the broker end-to-end harness were not run either, on purpose.
+
+"Built to scope" means every code, test and doc deliverable the queue row names for the unit is committed and compiles (Rust: `cargo check --tests` through the container; Go: `go vet`; SPA: `tsc` and single-file vitest). It does not mean correct, deployed or integrated. Most W2 behaviour ships dark: a flag that defaults off, a route nobody calls, or a capability the gateway does not advertise. The units that change live behaviour on deploy are marked "WIRED" in the table. 147 high depth rows are open: defects, security and ZDR hazards, and unmet definition-of-done items (stack evidence is owed for almost every unit).
+
+## (b) One row per W2 unit
+
+Columns. Built: yes = the unit's queue scope is committed; partly = a stated part is not. Wired or dark: WIRED = on by default or on a live path; DARK = behind a default-off flag, a route no caller uses, or a capability not advertised; the default flag state is named. Left kinds: DEPTH (in the depth register, not built), OUTSIDE (sibling plane, Control or Application Plane, credential, owner decision, counsel, GitHub CI), BUILD-LEFT (code of the unit's own scope that is still missing). Light pass: what the end-of-wave run said about this unit where it said anything. Commits are short hashes; "notes" commits (progress, depth and hand-over files) are not listed.
+
+| Unit | Slices | Built (commits) | Wired or dark; default flag | Left, with kind |
+|---|---|---|---|---|
+| U01 | WS10.S1 x-request-id | yes: `d762e8fcb` `e18328f50` `1833ce445` `f27bfab21` `42a9a9e53` | WIRED: id layer on edge, control and gateway; `QUARRY_EDGE__REQUEST_ID_ADOPT=1` (0 always mints) | DEPTH: Rust tests unrun (the gateway suite ran green; no httpx test is among the quarry-control failures). OUTSIDE: none. |
+| U02 | WS7.B web_policy library | yes: `e36237d8c` `4541fb6c2` | library only (used by U13, U29, U33, U35); no flag | DEPTH: lattice and catalogue tests unrun. OUTSIDE: catalogue key review with Control (soft). |
+| U03 | WS8.A spikes and ledger | partly: spike tests built in a scratch worktree, never merged, never run; notes `2a35f8b57` | no product code | DEPTH: F3 and latency measurements. OUTSIDE: the ledger row in a sibling docs file needs Model Plane's OK. |
+| U04 | WS15.S0 hide unsupported schedule options | yes: `3446196a0` `42744158f` | WIRED (capability flags all false, UI hides kinds and triggers) | DEPTH: tests unrun. |
+| U05 | WS17.S0 CDP capability spike | yes (test-only): `5a990a667` `0720bb562` | no product code; the live probe is `#[ignore]` | DEPTH: probe never run, the spike table feeds U55. |
+| U06 | WS12.S6 log hygiene lint | yes: `157da7789` `829fe7ce1` `75626eec3` `b0c029f0a` `f27bfab21` | WIRED as a ratchet test (`tests/log_hygiene.rs`, empty allow-list) | DEPTH: lint unrun at HEAD. |
+| U07 | WS8.E background tabs, tab pin, per-tab egress | yes: `6ec6a34bb` `61c4e8d6e` | DARK (capability bits and trait defaults; WS8.F U67 is the caller) | DEPTH: tab egress is tab-first not a meet (high), live tests unrun. |
+| U08 | WS6.K remainder (run-duration histogram) | yes: `d15ba874c` `4df36420d` (the statistics part is W1's `369caa89`) | WIRED (statistics on non-ZDR crawl jobs; histogram per run class) | DEPTH: `run_duration_tests` unrun. |
+| U09 | WS13.2 scrape capture and action types | yes: `a6c7c42a5` `242c58cc5` `0a5707ac2` `130950cb3` | DARK (screenshot, pdf and actions parse and validate, off by default) | DEPTH: tests unrun. |
+| U10 | WS14.S1 fixture site and harness | yes: `ba965aa9b` `b247455d5` `922747679` | test-only harness plus compose overlay | DEPTH: stack run not done; U20's counts not checked against it. |
+| U11 | WS15.L1 job record v2, reads, errors | yes: `7c1be7597` `735d23d33` `2c3cdd6b0` `2680d8ea5` | WIRED additive (read surface, origin-carrying handoff; migration 016); no flag; deploy control before edge | DEPTH: ZDR-floor 403 on errors has no test; deployment evidence; Go and Rust tests (control Go package ran; Rust unrun). |
+| U12 | WS14.S0, S0b crawl truth docs, characterization tests, go-test job | yes: `ac0627b8e` `2489e2b63` `73604c4d8` `9ecd83519` | docs, tests and a CI job | OUTSIDE: the CI job runs on GitHub (unpushed). DEPTH: runPage classification claim unverified. |
+| U13 | WS7.C web policy on the scrape family | yes: `1f4f95373` `3fff5e8b6` `b33379cb6` | WIRED, `QUARRY_EDGE__WEB_POLICY_ENFORCEMENT` off, observe or enforce (plan default enforce, the baseline reproduces today's behaviour) | DEPTH: tests unrun, evidence. |
+| U14 | WS7.F JobPolicy, preset requires, /v1/blocklists 410 | yes: `861f7d595` `007d45c24` `a20b81757` `9a0f11ffb` (the Rust half was uncommitted until the sweep) | WIRED: `/v1/blocklists` answers 410 on control; `requires` declared not enforced | DEPTH: Rust golden unrun; Go presets and blocklists tests are in a control package whose 8 failures are other tests. |
+| U15 | WS17.P1 monotonic saves, tombstones, exists (migration 0015) | yes: `27d0657f4` `fc44dfa55` `a4531c99b` `28e2a8d3d` `ae70857ca` `de1be35b6` | WIRED strict tightening; migration 0015 applies at the next edge boot; CI job advisory | DEPTH: no owner stamp on create and capture paths (high), tests unrun. |
+| U16 | WS15.S1 tenant-safe schedules (migration 017) | yes: `d1c861872` `369f55674` `81854809c` `1ed8d3ff2` `99c61dfd9` | WIRED (scoping not flagged); migration 017 disables existing rows | DEPTH: legacy unscoped GET still leaks across orgs (high). Light pass: 8 control failures sit in schedule files (possible link). |
+| U17 | WS12.S1 field probe, AX and target masking | yes: `1f829687c` `ea229444a` | WIRED, `QUARRY_BROWSER_FIELD_PROBE=on` (off masks every editable value) | DEPTH: Q10 probe run owed (gate before merge), probe_ms unmeasured, tests unrun. |
+| U18 | WS9.A omnibox search | yes: `a3c2b6f3c` | DARK, `VITE_BROWSER_OMNIBOX_SEARCH` 1 in dev and staging, 0 in production builds (X-18) | Light pass: 3 SPA tests fail. DEPTH: refusal copy. OUTSIDE: X-18 product flip. |
+| U19 | WS9.C devtools filters, gateway evidence proxies | yes: `35688ef98` `95a2d00b2` `8db594349` | WIRED, panels gated by capability evidence | DEPTH: tests unrun at build; gateway ran green. |
+| U20 | WS14.S2 crawl filter and run_page crawl context | yes: `9bee0f4d5` `1b4ff9384` `af75d8b2a` `5f5622d7f` `fd2060174` `d0d575755` (RUNBOOKS repairs `32d954c74` `ae4c9aa61`) | DARK (inert without a crawl field; no-crawl responses byte-identical) | DEPTH: fixture counts unchecked, proptest compares host_matches to itself, tests unrun, stale openapi schema. |
+| U21 | WS6.B remainder (receipts, meta.budget, budget_exhausted) | yes: `e2a4c0c03` `f3b6515ed` `a4d7a608c` `199961724` `2eae5f6be` | WIRED in shadow, `QUARRY_EDGE__BUDGET_ENFORCEMENT` off, shadow (default) or on | OUTSIDE: X-12 ratification and a shadow review before on; Model Plane 402 mapping. DEPTH: note conflict on shadow behaviour (high). |
+| U22 | WS6.J orchestrator stop bound | yes: `841075065` `3ea5e7c39` | WIRED, no flag | DEPTH: the second compose file lacks `stop_grace_period` (bound inert there). Light pass: cmd/orchestrator package green. |
+| U23 | WS13.1 isolated scrape sessions, heavy lane | yes: `752a0e7ff` `5e91d10f5` `4e5527cda` `a07c96b67` | WIRED default on: `QUARRY_SCRAPE_SESSION_ISOLATION=on`, `QUARRY_SCRAPE_HEAVY_PERMITS=1` | DEPTH: kill-switch proof and concurrency DoD owed. |
+| U24 | WS17.P2 owner and ACL on /v1/profiles | yes: `2130d341a` `a1142d57c` | WIRED in observe; enforce off | OUTSIDE: D16 Q2 legacy-owner policy. DEPTH: ownerless capture profiles, tests unrun. |
+| U25 | WS10.S3 resumable agent event stream | yes: `f9f8ee3ab` `16d27999c` `0d05adc6c` `958fd00ca` `4addc8747` (RUNBOOKS repairs `33344282a` `9340a5eca` `0c5423b6e` `1935c2c8f`) | WIRED, ring 512 events (0 disables), 1 MiB byte bound | DEPTH: stream-vs-close hang (high), seq restarts at 1 after edge restart, NATS raw events, tests unrun. |
+| U26 | WS13.4a FetchResponse carries captures | yes: `3b80faa60` `b015d2206` | WIRED mechanical (30 literal sites) | DEPTH: identical-body DoD not run. |
+| U27 | WS9.B reload, hard reload, navigation error card | yes: `54dae42bc` `fff5b7c79` `b57e3edb6` `f8979d0da` `ce573805c` `f330a5f18` `e8103cef8` | WIRED; `hard_reload` capability is server-driven | Light pass: all 7 reload tests fail (createEffect) and 4 new tsc errors. DEPTH: actor taken from the request body (high). |
+| U28 | WS15.L2 cancel, pause, resume, typed timeouts | yes: `d65c897be` `f0e995d1a` `2503209d6` `31a2f7928` `12aae7ed0` `63b185124` | DARK, `QUARRY_EDGE__JOB_CONTROL` (off answers 501), `QUARRY_JOB_CONTROL_LOOP` on the orchestrator | Light pass: 1 control test and 2 orchestrator tests (Pause-twice, timeouts env) fail. DEPTH: internal routes share the HMAC group. |
+| U29 | WS7.D agent-path policy gates | yes: `98faa937c` `7a58c6e95` `1eb88a6ff` `8eabdd77b` | WIRED under the WS7.C flag | DEPTH: resume drops the ask, deny list not on subresources, 5 plan tests unwritten. |
+| U30 | WS17.P0 profile route guard, redacted reads, ZDR observe, import scope | yes (committed by the sweep): `911d69b95` `88941d04e` `b068c33bc` `e71fc4ca5` | WIRED: ZDR refusal behind `QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES` (observe first); service-principal refusal and redaction on; import needs a scope | DEPTH: dev-bypass stub scope, import scope may break a live importer, tests unrun. |
+| U31 | WS15.L3 live job-event tail | yes: `d96dcdcd6` `ab7bd6ff7` `568379c31` `629c1dd90` | DARK (only with `follow=true`; legacy drain pages up to 200 pages) | DEPTH: no ZDR floor on the tail, seq race in control (high). |
+| U32 | WS6.H claim lock, admission, backlog (unit scope) | yes to unit scope, slice partly: `cc75bdf33` `0018ac497` `3b8e841f2` `054d4b8c7` | DARK, `QUARRY_JOB_ADMISSION` off (cap 3, backlog 200 defaults) | BUILD-LEFT: the plan-dependent cap stamp (waits no longer; U43 exists). DEPTH: pg tests skipped (no DSN). |
+| U33 | WS7.E policy on search, extract, map, crawl, batch, profile create | yes: `77ad12125` `ebed40304` `dd6d29f52` (repairs `0f3dde7f4` `629c1dd90`) | WIRED under the WS7.C flag | DEPTH: other URL-fetching routes not swept, route tests unwritten. The optional ZDR consolidation PR is not built. |
+| U34 | WS7.G 6a backstops (policy engine, final-URL recheck, deny list) | partly: 6a only: `fb64c4f0d` `832ed171d` `7333d17d5` `958fdad17` `e1a87b4de` `4b05fd570` `53df13da1` `f8a24e56e` | `QUARRY_EDGE__WEB_POLICY_FINAL_URL_CHECK` default derived from ENVIRONMENT (on in dev and test) | BUILD-LEFT: 6b snapshot (waits on WS14 and WS15 being deployed). DEPTH: egress reinstall bug (high), tests unrun. |
+| U35 | WS7.J claim intake, observe part | partly: `c5cb15995` `b97c3e240` | WIRED, observe then enforce (default enforce applies a minted claim at once) | OUTSIDE: issuer side WS7.I (Control Plane). DEPTH: empty `domains.allow` semantics. |
+| U36 | WS17.E1 profile envelope encryption | yes: `f43b72dc2` `ad21ef5c9` `3565f6bfa` `a71bb8ebf` | DARK, `QUARRY_EDGE__PROFILE_ENCRYPTION=off` (compat later; REQUIRED=1 after review) | OUTSIDE: external crypto review; Control key service (E2). DEPTH: no known-answer vector. |
+| U37 | WS6.C-e usage emission (Quarry half) | partly: `034f9f124` `76803d35f` | DARK, `QUARRY_EDGE__USAGE_BROWSER_METRICS` off | OUTSIDE: Lago codes and billing-core `usage_test.go` (billing owner). DEPTH: legacy extract double-bill. |
+| U38 | WS15.S2 executable schedules | yes: `4419d5f22` `1aa3d0a7f` `beb4ab33e` `efbe8cd46` `233b61994` `a699ae2af` | DARK, `QUARRY_SCHEDULED_JOBS_ENABLED=0` | Light pass: `TestScheduledJobWF_HappyPathCrawl` fails; 2 schedules spec tests fail. DEPTH: 5 plan tests unwritten. |
+| U39 | WS8.B open-web navigation, human steps, retention (dark) | yes (human branch): `8603f03c3` `2e3566f54` `d09936203` `04f5f63e1` `2ee29f147` `62f928a86` `51101f4a6` `600671bbf` `2f6b026f7` | DARK, `QUARRY_EDGE__HUMAN_BROWSE` (1 in dev compose, 0 in the production overlay), `HUMAN_RECEIPT_MODE` | DEPTH: TTL not plan values, DNS rebinding, Narrowed(empty) fail-open check, DoD run. |
+| U40 | WS13.3 capture API on the driver | yes: `607443838` `40cab60eb` `d4ae7ed4e` | DARK (no caller) | DEPTH: provisional 16000 px cap, tile spike never ran. |
+| U41 | WS17.E3 backfill, erasure hop, purge (0017) | yes: `54958bf96` `afe212786` `d1eb42d22` `c7d537912` | WIRED when control has `QUARRY_EDGE_URL`; migration 0017 applies at boot; backfill operator-run | DEPTH: tombstone race, other tables not erased, not cryptographic (E2). |
+| U42 | WS10.S8 telemetry contract, ZDR sampler, span processor | yes: `265813f34` `76f1d3196` `9347a80b2` `f8326009f` | DARK, export switch off builds no exporter | DEPTH: control has no span middleware (flag is a no-op), events keep fields. OUTSIDE: Model Plane telemetry adoption; GitHub CI job. |
+| U43 | WS6.D-s static LimitsResolver | partly (static half): `cfdc8a07a` `b867a9fed` (+ restore `52cd874c8`) | WIRED, `LIMITS_SOURCE=static`, `LIMITS_FAIL_MODE=floor` | OUTSIDE: billing_core source and the Control half (credential). |
+| U44 | WS12.S2 observation-level masking, redaction stamp | yes: `b2873b3df` `d707acf60` | WIRED, `QUARRY_EDGE__REDACTION_MODE=enforce` (shadow and off refuse boot in production) | DEPTH: shadow soak and flows A to C not run; raw type selector hole. |
+| U45 | WS13.4b screenshot and pdf on /v1/scrape (first shippable half) | yes: `01c65bebf` `e8781375f` `11c22dae2` `52cd874c8` `f3592a47a` `26a212c0f` | DARK, `QUARRY_EDGE__SCRAPE_CAPTURE=off` committed; 501 when no browser is wired | DEPTH: ZDR-floor and org-stamp tests unwritten; no Chromium run. |
+| U46 | WS9.D evidence panels | yes: `c36a6c071` `7bfbc92f0` `74149951e` `2cb78a671` | WIRED once the gateway advertises `evidence` (it does on deploy) | Light pass: ConsoleFilterBar test fails. DEPTH: deploy order, 80-of-512 filter. |
+| U47 | WS9.F browser session controller | yes: `380360b38` | new SPA module | DEPTH: Solid 2 flush hazard, controller tests thin. |
+| U48 | WS6.I metrics series (second half) | yes: `f57d3d81f` (first half is W1's) | DARK, `QUARRY_EDGE__METRICS_ENABLED` off (no listener) | OUTSIDE: Control Prometheus job and token. DEPTH: tests unrun. |
+| U49 | WS12.S3 receipt masking | yes: `323f69753` `308ae766d` `3cbf91b93` `5202d1f5f` | WIRED, `QUARRY_EDGE__RECEIPT_TEXT_MODE=sensitive` | OUTSIDE: X-19 owner confirmation. DEPTH: per-keypress password, tests unrun. |
+| U50 | WS13.6 tile-and-stitch | yes: `faf207415` `d72c9b1b8` `8e6ed3432` `a9f692812` (+ `5ad959edc`) | DARK, `QUARRY_EDGE__SCRAPE_STITCH` off | DEPTH: never run (30,000 px, memory). |
+| U51 | WS13.7 gateway artifact route, SPA capture section | yes: `70e41deb0` `1b4d83606` | DARK (no caller asks for captures; composer never requests them) | DEPTH: gateway tests ran inside a green gateway suite. |
+| U52 | WS12.S5 screenshot masking | yes: `36d2f5709` `8c4035e3f` `d311efb65` `44d45d8b4` | WIRED, `QUARRY_BROWSER_SCREENSHOT_MASK=on`, `..._OOPIF=allow` | DEPTH: main-world scan, cross-origin iframes visible, never run. |
+| U53 | WS13.5 scrape-time actions | partly (PARTIAL): `ab49f5ae3` `82144afb4` `2e541cdfd` | DARK, `QUARRY_EDGE__SCRAPE_ACTIONS=off` | BUILD-LEFT: wire response `data.actions[]`, action capture bytes, gateway slice, security tests, live test. OUTSIDE: ADR-6 and X-20. |
+| U54 | WS6.J drain usage segment | yes: `f84baf097` `cb7bb5cad` | WIRED, `QUARRY_EDGE__DRAIN_DEADLINE_S` 30 | DEPTH: drain tests unrun. |
+| U55 | WS17.C1 complete profile capture | yes: `45d817ab4` `8ecaf112b` `aa09d2d7b` | DARK, `QUARRY_BROWSER_PROFILE_CAPTURE_V2=0` | DEPTH: closed-tab IndexedDB lost, S0 spike table missing, 24 tests unrun. |
+| U56 | WS13.8 contract docs, OpenAPI, parity docs, e2e script | partly: `16fdb679e` `4d501698e` `cb7329886` `74dc1e6f7` (+ `e30c7119b`) | docs, script and a make target | BUILD-LEFT: SDK regeneration (the spec does not parse). Light pass: openapi parity test fails. |
+| U57 | WS17.S7 single-writer profile lease (optional) | no, on purpose: optional, "on usage evidence" | - | BUILD-LEFT if usage evidence appears. |
+| U58 | WS17.C2 restore | yes: `8f47e6f2d` `9706d03ec` | DARK (shares the CAPTURE_V2 flag, default 0) | DEPTH: a load error starts a session that never saves (high), `setCookies` unverified, 16 tests unrun. |
+| U59 | WS6.G plan-aware run caps | yes: `254737fa7` `707c6837c` (+ repair `f5a692976`) | DARK, `QUARRY_EDGE__POOL_ORG_MAX_PERMITS=0` | OUTSIDE: billing source for plan values and render permits. |
+| U60 | WS14.S3 crawl scope in Go, enqueue_batch, replay safety | yes: `ace74d619` `e7118fcb2` `15b67d748` `c43fa4fa2` `ca6a4f386` `ca8569508` | WIRED in observe behind GetVersion `crawl-scope-v1` | DEPTH: replay test unwritten (must pass before deploy), enforce evidence unrun. |
+| U61 | WS8.C broker side: human_browse, RenewGrant, attach derive | yes: `30bd92a7d` `e03e05045` `31d880a83` `eef3df1e4` | DARK switches; migration 0004 never executed | OUTSIDE: Model Plane planner and execution-core fail closed on human grants (sibling). Light pass: broker suite green (115). |
+| U62 | WS9.I control strip, epoch CAS, tab provenance | yes: `927956683` `d15c9cd80` `073e7a100` | WIRED (compare-and-set epoch on the gateway) | DEPTH: chip sends no expectedEpoch; marker inert until openedBy. |
+| U63 | WS14.S4 robots gate (observe build) | yes: `114ae9e50` `081c442a8` `c4b08e4b7` | WIRED in observe; enforce not flipped | OUTSIDE: X-10 decision. DEPTH: crawl-delay holds a global permit. |
+| U64 | WS14.S5 static batch check at handoff | yes: `7edf11250` `55f614bc5` `aed6360dd` `832feaf08` | WIRED at handoff | DEPTH: Pause-twice test failing in the orchestrator; default observe ends crawls after one page (high). |
+| U65 | WS14.S6 CrawlRequest v2 and scoping vocabulary | yes: `6dd1456ce` `614df6ad7` `a30a01d3a` | WIRED, `QUARRY_EDGE__CRAWL_REQUEST_VALIDATION=lenient`; include and exclude paths reported not applied in observe | BUILD-LEFT: SPA options UI in the composer. Light pass: one new tsc error in `crawl-site-scope.test.ts`. |
+| U66 | WS8.D human sessions, keep-alive | yes: `cebeb55c5` `04b000648` `3eb2cb70c` `b5553efe9` | DARK (keep-alive timer dormant: parent passes no handler, projection omits grantKind) | BUILD-LEFT: two one-line wirings (depth, high). |
+| U67 | WS8.F attach core, tab ledger, delegate steps | yes: `3b1861652` `80a346116` `10ddd22c6` `4c76cb5ef` `492b87295` | DARK, `QUARRY_EDGE__ATTACH` off everywhere | OUTSIDE: WS8.G (Model Plane drives the lane). DEPTH: GET tabs not filtered for a delegate; per-tab egress unproven; tests missing. |
+| U68 | WS8.H execution lanes | yes: `16fa15f39` `f7b7fbe78` | DARK (one lane without an attach) | DEPTH: admitted delegate step writes a receipt after release; browser DoD unrun. |
+| U69 | WS14.S8 rollout closeout | partly (PARTIAL): `51c0b43b7` | docs only; enforce defaults not flipped | OUTSIDE: X-10, soak. BUILD-LEFT: flip, legacy removal, test removal. DEPTH: wrong env-var name in the doc (high). |
+
+U03, U53, U56 and U69 are the four partial units; U32, U34, U35, U37 and U43 are built to their unit scope while the slice they belong to stays partly built by the queue's own design.
+
+## (c) The numbers
+
+Counting rules. The queue counts 122 rows in its slice table: 112 scheduled (counted in the totals), 6 optional, 1 conditional, 3 unscheduled. "Built to scope" for a slice means every unit that the queue assigned to it is built to its unit scope and the slice has no remaining part that the queue schedules in W2. A slice whose queue row is explicitly a half (WS6.C emission only, WS6.D static only, WS7.G 6a only, WS7.J observe only, WS6.H without plan caps) is "partly", even though its unit is built to its unit scope. Days are the queue's census days per slice, partly built slices counted in full as the queue does; they are planning estimates, not measured effort: no hours were tracked.
+
+| Measure | Number |
+|---|---|
+| Rows in the queue's slice table | 122 (112 scheduled, 6 optional, 1 conditional, 3 unscheduled) |
+| Units in the queue | 69 (U01 to U69); 68 built or partly built, U57 (optional) not built |
+| W2 slices built to scope (scheduled rows) | **59 of 112** (59 of 122 rows); 62 of 112 (55.4 percent) if the 3 that W1 already had are counted: WS6.E, WS6.F, WS12.S0 |
+| Slices built in part | 9 |
+| Slices not built | 41 scheduled, plus the 10 optional, conditional and unscheduled rows (none built) |
+| Engineer-days built of the queue's 493.5 scheduled days | **268.5 (54.4 percent)**: 258.5 built in W2 plus 10.0 built in W1 |
+| Engineer-days of partly built slices | 35.0 census days (the unit estimates of the parts that were built add up to 24.5: U37 4.0, U43 2.5, U32 2.0, U34 3.0, U35 1.5, U03 1.5, U53 7.0, U56 2.0, U69 1.0) |
+| Engineer-days not built | 190.0 |
+| Unit-days, for comparison | 68 units, 274.5 unit-days by the queue's planner estimates: 263.0 for units built to scope, 11.5 for the four partial units (U03, U53, U56, U69); U57 (3.0, optional) not built |
+| Days verified above compile level | 0.0 at integration, rebuilt-image or L2; unit level (the light pass) for Go, node, gateway and SPA code only |
+
+The 59 built slices: WS6.B, G, I, J, K; WS7.B, C, D, E, F; WS8.B, C, D, E, F, H; WS9.A, B, C, D, F, I; WS10.S1, S3, S8; WS12.S1, S2, S3, S5, S6; WS13.1, 2, 3, 4a, 4b, 6, 7; WS14.S0, S0b, S1, S2, S3, S4 (observe build), S5, S6; WS15.S0, L1, L2, S1, S2, L3; WS17.S0, P0, P1, E1, C1, P2, C2, E3.
+
+Two judgement calls in that list: WS13.4b is counted built because its unit note calls the delivered first shippable half the slice (two plan tests, the ZDR-floor inline capture and the org-stamp test, are unwritten); WS14.S4 is counted built because its queue scope is the observe build (enforce needs X-10).
+
+The 9 partly built, and what is missing: WS6.C (only the Quarry emission half, U37; Lago codes and billing-core tests wait on billing); WS6.D (only the static resolver, U43; the billing_core source and the Control half); WS6.H (claim lock and admission, U32; the plan-dependent cap stamp); WS7.G (6a backstops only, U34; 6b snapshot waits for WS14 and WS15 to be deployed); WS7.J (observe part, U35; issuer enforcement waits on WS7.I); WS8.A (spike tests built in scratch and never run, ledger entry not merged); WS13.5 (U53: wire response, capture bytes, gateway slice, security tests and the live test are not built); WS13.8 (U56: SDK regeneration blocked by an unparseable spec); WS14.S8 (U69: docs only, the flip and the removals are gated).
+
+The 41 not built, and why (all are outside this branch's authority or waiting on a decision):
+
+| Reason | Slices | Days |
+|---|---|---|
+| Sibling Model Plane (b), execution-core, model-gateway, session-core, Convex-adjacent files (22) | WS7.L; WS8.G, I, J; WS9.E, G, H; WS10.S2, S4, S5, S6, S9; WS11.S0 to S7 (8); WS12.S4; WS15.L5 | 99.0 |
+| Control Plane (6): org-core, auth-core, the registry, entitlement, docs files | WS7.A, H, I, K; WS14.S7; WS17.E2 | 35.0 |
+| Application Plane (1) | WS10.S7 | 4.5 |
+| An owner decision, X-9 (3) | WS15.S3, S4, S5 | 10.5 |
+| The WS16 AI-format chain (9): Model Plane service lane, Control registry, then Quarry's client; WS16.S0 is a small Ingestion doc correction that could be done alone and is BUILD-LEFT | WS16.S0 to S8 | 41.0 |
+
+## (d) Wave test phase
+
+The wave test phase ran once, on HEAD `226a7f2ff` unless stated, with the big suites skipped on purpose: the live Chromium lane, the Postgres, Redis and integration suites (QUARRY_TEST_DSN and REDIS_URL unset), the broker end-to-end harness, the full vitest suite, model-gateway, the Model Plane Rust crates, and anything that needs a rebuilt image. No retry, no fix, no code edit. The causes of the failures were not investigated.
+
+**Result in one line: green for browser-broker, the node root suite, ZDR contract sync, the frontend gateway (838) and auth-core registry specs (101); red for quarry-orchestrator (5), quarry-control (8), the Quarry node suite (4), the SPA (16 tests, 5 new type errors); timeout for principal-registry-parity; the Quarry Rust lane has no run on this tree.**
+
+| Command (cwd) | Result | Counts | Failing or notable | Skipped on purpose / not run |
+|---|---|---|---|---|
+| Quarry Rust: `cargo check --workspace --all-targets` then `cargo test --no-fail-fast -p quarry-core -p quarry-transform -p quarry-security -p quarry-runtime -p quarry-edge` (qtest.sh, quarry-rust-env, 2 jobs). **Taken 2026-10-23 17:26, STALE: not the W2 tree.** | pass at that time | 2323 passed, 0 failed, 3 ignored in 56 groups (core 229, edge 1060, runtime 794, security 31, transform 209); check 0 errors, 38 warnings | Ignored: redaction_perf_budget (release-only), cleaning_a_five_megabyte_page (measurement), one doc-test. Zero-test binaries: quarry_doc_parse, browser_egress_boundary. Taken before 130 later commits (and before WS8.E at 18:23), so it describes W1, not W2 or W3. The sweep's later `cargo check --workspace --all-targets` found one error: `lab/evals/src/browser_benchmark.rs:221` misses `tab_pin` (WS8.E), so the workspace check is red at HEAD | Every Rust test written in W2 and W3 is compile-checked only |
+| browser-broker: `go vet ./... && go test -count=1 -v ./...` (apps/Model Plane/go/services/browser-broker) | pass | 115 top-level tests, 4 packages ok | none | internal/telemetry has no tests |
+| quarry-orchestrator: `GOWORK=off go test -count=1 -v ./...` | **fail** | 126 pass, 5 FAIL | schedules: TestCreate_AppliesOverlapTimezoneJitterCatchup, TestPrepareSpec_ResolvesCrawlBoundsAndTimeout; workflows: TestBatchJobWF_PauseTwiceEmitsTwoDistinctEvents, TestScheduledJobWF_HappyPathCrawl; timeouts: TestExecutionTimeoutEnvOverridesDefault. Last touched by WS15.S2 and WS15.L2. schedules and workflows passed in the W1-end run | internal/controlauth has no tests |
+| quarry-control: `GOWORK=off go test -count=1 -v ./...` | **fail** | 289 pass, 8 FAIL (+2 failing subtests), 28 SKIP | internal/resources: TestPendingControl_ReturnsOnlyUnapplied; TestRegisterRun_IdempotentByRunKey; TestRegisterRun_DerivesOrgAndParamsFromScheduleNotBody; TestRegisterRun_SkippedRowIsTerminalWithEvent; TestCreateScheduleStampsZdr (zdr_org, standard_org); TestUnstampedScheduleArgsAreUnchanged; TestCreateSchedule_ChangeMonitor_EmitsWorkflowArgs; TestCreateSchedule_Scrape_EmptyWorkflow. The package passed in the W1-end run; egress package is new and green | 28 Postgres tests skipped (QUARRY_TEST_DSN unset) |
+| repo root: `node --test scripts/tests/*.test.mjs` (5 files) | pass | 143 pass | none (138 at the W1-end run) | docker compose render only, no containers |
+| Quarry-v2: `node --test scripts/tests/*.test.mjs` (3 files) | **fail** | 19 pass, 4 fail of 23 | openapi-route-coverage (3 tests: documented or allow-listed, no stale entries, route count pinned) and openapi-scrape-parity (formatsDefs is not iterable). 23 of 23 at the W1-end run | none |
+| repo root: `bash scripts/tests/zdr-contract-sync.test.sh` | pass | 71 passed (65 at W1-end) | none (pending lines are informational) | none |
+| repo root: `bash scripts/tests/principal-registry-parity.test.sh` (1000 s wrapper) | **timeout** | 21 ok, 0 not ok before the kill | killed at 1000 s, rc 124, as in the W1-end run; the shadowing-launcher check and the bootstrap runs never appeared | none |
+| frontend gateway: `cargo test --no-fail-fast` (apps/Frontend Plane/verevonv3/apps/gateway, native) | pass | 838 tests in 5 binaries (820 unit, 1, 13, 3, 1) | one unused-import warning; 1 ignored diagnostic | none |
+| SPA: `pnpm exec vitest run` on the 32 test files changed since the wave start, plus src/shared/i18n and src/shared/actions (40 files) | **fail** | 423 pass, 16 FAIL in 8 of 40 files; no worker timeouts this run | BrowserChrome.reload (7), OmniboxField (2), omnibox-history (1), BrowserApprovalDecisionCard (2), ConsoleFilterBar (1), browser-errors (1), gateway-error-codes (1), error-catch-sites (1). BrowserChrome.tsx:534 reports MISSING_EFFECT_FN | The full vitest suite |
+| SPA: `pnpm exec tsc -b` | **fail** | 38 errors vs a baseline of 33 | 5 new: BrowserChrome.tsx 661, 662, 663, 669; crawl-site-scope.test.ts:33. Baseline 33 (RemoteSupportPage.tsx 12, quarry-client.ts 21) pre-existing | none |
+| SPA: `pnpm lint` | pass | 0 errors, 201 warnings (baseline 191) | +10 warnings, 4 in use-browser-session-controller.ts | none |
+| auth-core: `npx jest` on plane-service-principals-policy, plane-principal-registry-assembly, plane-token-scopes | pass | 101 tests, 3 suites | none | the full auth-core jest suite |
+
+Single-file runs recorded by units while building (not part of the light pass): use-browser-evidence.test.ts 4 of 4 (U46); two SPA test files for U51; crawl-site-scope.test.ts 3 of 3 (U65; it now fails `tsc`); tab-mention.test.ts 24 of 24 (W3-B2-02).
+
+What this means. 33 tests fail across 4 suites, and three of the red suites were green in the W1-end run, so they are regressions from W2 commits (WS15.L2, S1, S2, WS6.H, WS14.S2 docs and routes, WS9 SPA work). The two ZDR stamping tests among the control failures need reading first. The SPA failures have a likely shared cause (a Solid 2 createEffect signature at BrowserChrome.tsx:534, and a signal-flush hazard). Nothing was run for Rust at HEAD, so the largest block of W2 code is unproven.
+
+## (e) What is GATED, and on exactly what
+
+"Gated" here means built dark or not built because something outside this branch's authority has to happen first. Who can unblock each is named.
+
+| Gate | What it blocks | Kind | Who can unblock |
+|---|---|---|---|
+| X-10 (robots enforce) | Flipping robots and crawl-scope defaults to enforce (U63, U69, U60, U65 include/exclude paths); WS14.S8 removal of the legacy branch | Decision | The owner, after a soak in observe on a stack |
+| X-12 (budget enforce) and a 24 h shadow review | `QUARRY_EDGE__BUDGET_ENFORCEMENT=on` (U21) | Decision plus live stack | The owner and a stack session |
+| D16 Q2 (legacy-owner policy) | WS17.P2 enforce (U24) | Decision | The owner |
+| X-19 (receipt text mode default) | Merging WS12.S3 as the default (U49) | Decision | The owner |
+| X-9 (fire-time posture read) | WS15.S3, S4, S5 (10.5 d); the later-ZDR-org monitor and schedule gap; E3.5-8 flip | Decision plus Control Plane read | The owner; Control Plane |
+| ADR-6 and X-20 | `QUARRY_EDGE__SCRAPE_ACTIONS=on` and user-token actions (U53) | Decision | The owner |
+| ADR-4 amendment, customer notice | AI formats under ZDR (WS16.S6); monitor enforcement under ZDR | Decision, counsel | The owner, counsel |
+| X-8 and external crypto review | `PROFILE_ENCRYPTION_REQUIRED=1` in production (U36) | Counsel and review outside the branch | Security reviewer |
+| X-18 product flip | Omnibox search in production builds (U18) | Decision | Product |
+| D11 score ratification | Eval gates becoming blocking (W3-B1-01, B2-05) | Decision | The owner |
+| OD13 wording | E3.2-e1 consent language ships flag-off until reviewed | Counsel | Counsel |
+| Control Plane: R-13 registry row (audience ingestion), WS7.H and I, org-core key API (WS17.E2, migration 024), billing-core quota keys and Lago codes, Prometheus job | E3.1-g and the OTP path; issuer-side web policy (U35, WS7.K); cryptographic erasure (U41); WS6.C and WS6.D billing halves (U37, U43, U59); WS6.I scrape job; the X-1 sign-off for WS1.A2 in production | Sibling plane | Control Plane owner |
+| Model Plane (b): execution-core, model-gateway, session-core | 402 mapping (U21), redaction stamp use (U44), attach mode WS8.G and the UI WS8.I, J (U67 is dark until then), WS9.E, G, H, WS10.S2 to S6 and S9, WS11 (8 slices), WS12.S4, WS16 chain, WS15.L5, `allowRedirect` (W3-B1-06), the Tier B loop (W3-B2-05), the @tab render and gateway re-resolution (W3-B2-02) | Sibling plane | Model Plane session |
+| Application Plane | WS10.S7 browser activity projection | Sibling plane | Application Plane owner |
+| Data Plane | E3.8.8 artifacts contract (W3), E3.4-8 hand-off | Sibling plane | Data Plane owner |
+| Credentials | Billing-core credential (WS6.D billing source), WS1.A2 broker credential (X-1), the capped Tier C credential (W3), the profile master key ceremony and ledger entry | Credential | The owner and the plane owners |
+| W2 units that are dark by design | The U66 keep-alive and U62 markers need a one-line wiring and the edge's openedBy; U28 job control needs the orchestrator loop and a gateway proxy (WS15.L5); U38 schedules need `QUARRY_SCHEDULED_JOBS_ENABLED=1` after U28 and an orchestrator rebuild; U60 needs the replay test before deploy | W2 unit or build-left | This branch (small) |
+| CI (GitHub, outside the branch) | The go-test job (U12), the eval workflow (W3-B1-01), the quarryotel job (U42), the Postgres job (U15, advisory), the Chromium live job and required checks, actionlint on every changed workflow, first push | CI | Whoever pushes; the owner must authorise the push |
+| Live stack and deployment | Every deployment-evidence row; deploy order control, edge, orchestrator, gateway; the migrations that apply at boot (0015, 0017, control 016 and 017 which disables old schedule rows); Q10, spikes and the L2 legs inherited from W1; the compose merge from the main checkout (broker db network) | Stack | A stack session (one agent, rebuilt images) |
+| History is not rewritten | Commits with wrong messages (32d954c74, ae4c9aa61, 7c250ea01 and others, listed in the depth register) stay as they are | Process | The owner notes it in the PR text |
+
+## (f) W3 batches 1 to 3, and what W3 waits for
+
+W3 was estimated at 278 expected days (low 202, high 372) over E3.1 to E3.9. Batches B1 to B3 are the part that was buildable then: 44.5 estimated days in 15 units. Built to scope: 38.5 of them. All 15 units are committed locally; none was run beyond compile checks (the SPA ones ran in the light pass).
+
+| Unit | Slice | Est. days | Built | Commits | State | Left |
+|---|---|---|---|---|---|---|
+| W3-B1-01 | E3.9.1 and E3.9.5 eval CI job and score file | 3.0 | yes | `185a3f802` `c98d262d6` `14e4babff` `cc05191fd` | CI workflow never run; SCOREBOARD rows pending | OUTSIDE: first push; D11 thresholds |
+| W3-B1-02 | E3.6-1 PII validators and golden corpus | 4.0 | yes | `cb2511b95` `8b873e592` | DARK (nothing wired) | BUILD-LEFT: E3.6-4 fail-closed wiring (now approved); DEPTH: precision and recall unmeasured |
+| W3-B1-03 | E3.6-2 and E3.6-3 parser bombs, PDF page classifier | 4.0 | yes | `ebe43222f` `ff58b0bdb` | DARK (classifier unrouted) | DEPTH: lopdf recursion risk; BUILD-LEFT: routing |
+| W3-B1-04 | E3.7.6 canonical URL helper | 2.5 | yes | `aa41358ed` `aa23352a3` `1e0070413` | DARK (pure) | BUILD-LEFT: enqueue wiring (U60 is built, so it is unblocked) |
+| W3-B1-05 | E3.5-2 webhook and catalog egress guard | 3.0 | yes | `9af43e7cf` `578c327bf` `7c250ea01` | **WIRED**: webhook delivery refuses private and metadata targets for every org | DEPTH: audit existing registrations before deploy; proxy transport |
+| W3-B1-06 | E3.2-b keyboard-first approval card | 5.0 | yes | `e94ae3737` `cfdc60c1d` (+ content in `61c4e8d6e`) | DARK (card not mounted) | Light pass: 2 card tests fail; BUILD-LEFT: the swap (U62 built, D9 decided inline) |
+| W3-B2-01 | E3.7.8 job price estimate | 2.0 | yes | `5135b1a37` `1bad0529a` | DARK (no caller); placeholder rates | BUILD-LEFT: E3.7.9 approval above 50 pages (decided); X-12 |
+| W3-B2-02 | E3.3-c @tab mention parser and resolver | 3.0 | partly (parser and resolver only) | `5e92816de` `8626cb6b9` | DARK; 24 tests passed at build | BUILD-LEFT: inline chip render (D9 decided), gateway re-resolution |
+| W3-B2-03 | E3.5-8 ZDR gate on monitors | 1.0 | no code: already on the branch (WS4.H stage A) | none | closed with a note | DEPTH: later-ZDR-org gap (X-9) |
+| W3-B2-04 | E3.1-f ADR-2 credential-handoff decision memo | 2.0 | memo only (no code, no Control edit) | notes only | the split is now ratified (decision 1) | OUTSIDE: Control PR R-13 PR 1; then E3.1-g |
+| W3-B2-05 | E3.9.2 Tier B eval corpus and scorer | 3.0 | yes (corpus, loader, scoring hooks) | `59ea6025b` `dd4eb3dbd` | DARK (no producer of observations) | OUTSIDE: Model Plane loop; BUILD-LEFT: CI wiring |
+| W3-B2-06 | E3.6-9 per-tenant parse cache | 3.0 | yes | `9a5ba1886` `f995f9a56` | DARK (not wired) | DEPTH: key lacks parser identity |
+| W3-B3-01 | E3.8.6 reputation snapshot hot reload | 3.5 | yes | `949b40e79` `c8f610f94` `4273ad148` `cfaeb12b9` | DARK, watch flags off | BUILD-LEFT: browser hook and per-org modes (W3 Chromium lane C3) |
+| W3-B3-02 | E3.7.4 gzip sitemap and robots Sitemap lines | 2.5 | yes (library) | `2aa157c17` `ce444bc5c` | DARK (not wired into map_routes) | BUILD-LEFT: the map_routes hunk (U33 and U63 are built); DEPTH: GAP.md false claim |
+| W3-B3-03 | E3.6-10 synthetic Norwegian document corpus | 3.0 | yes | `d1ab270b9` `d1fdd8ca3` `52a107006` | DARK (fixtures and loader) | OUTSIDE: real samples approved by the owner |
+
+Not built in W3: B4 (E3.5-4, E3.2-g, E3.4-8; 12.5 d), B5 (E3.5-1 with E3.5-7, E3.7.7, E3.5-5; 14.0 d), B6 (E3.1-a, E3.3-e1, E3.6-5, E3.9.6, E3.1-d; 11.5 d), B7 (E3.6-4, E3.3-j, E3.4-1, E3.8.1 to 3; 18.0 d), B8 (E3.1-b, E3.8.4; 8.0 d), the Chromium lane C1 to C4 (20.5 d serial), and the gated list of 149 days.
+
+**What W3 waits for.** The W2 batches the later W3 batches depend on are now built: B4 needed W2 batches 4 and 5, B5 batch 6, B6 batch 8, B7 and B8 batch 10, the Chromium lane batch 12, and the gated list the units U60 to U67. They are built but unproven, and the Rust lane has not run on them. So W3 now waits for these things:
+
+1. The owner's start of the next wave. Under the build strategy the owner prioritises at the end of each wave; this register and this closeout are that handover. The recommendation of the depth register is to run the Rust lane and fix the light-pass failures first (about 4 to 5 days), because B4 to B8 build on W2 code (change_routes.rs, workflows.go, store.go and the migrations, pipeline.rs, grant.go) that has never run.
+2. The decisions of 2026-10-23 already answer the estimate's open questions (ADR-2 split ratified, crawl approval above 50 pages, Office hybrid and fail-closed PII approved, D9 inline card and chip, OD13 consent language flag-off, migration 021 shared with the E3.5-6 tag column, the WS1.A2 gate lifted for code). They do not cover: X-9, ADR-1, ADR-3 detail and X-1 (gate E3.2, E3.3, E3.4 and parts of E3.7), D11 thresholds, the retention of the parse cache, or crawl-approval UI wording.
+3. Control Plane (the R-13 registry row for audience ingestion; migration slots for E3.5-1 and E3.5-6), the Model Plane session (WS11.S0 and the provenance seam for E3.3 and E3.9.3, E3.9.4, the 402 mapping, execution-core reading the reject reason) and the Data Plane contract (E3.8.8).
+4. For anything that goes beyond code: a live stack, the Chromium lane in a pinned image and the first push, so the CI rows can turn into evidence.
+
+
+## Addendum 2026-10-24: the Quarry Rust lane was run (the close workflow had not run it)
+
+See `W2-rust-lane-failures.md`: **3560 passed, 64 failed, 23 targets failed** at HEAD a6a9b44c7. This replaces the statement that the Rust lane was not run. The Go and Node failures reported by the light pass (5 orchestrator, 8 quarry-control, 4 openapi node tests, 16 SPA tests, 5 new tsc errors) are separate depth items. All are depth, none reopens the build.

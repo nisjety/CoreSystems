@@ -13,6 +13,7 @@ use quarry_core::QuarryResult;
 use url::Url;
 
 use crate::driver::FetchHints;
+use crate::escalation::EscalationMode;
 use crate::proxy_pool::ProxyPool;
 
 const DEFAULT_BLOCK_COOLDOWN: Duration = Duration::from_secs(60);
@@ -70,6 +71,10 @@ pub struct EgressBroker {
     health: Arc<Mutex<HashMap<HealthKey, EgressHealth>>>,
     block_cooldown: Duration,
     max_proxy_attempts: usize,
+    /// Whether an origin status may count against a proxy's health. Under
+    /// `Honest` it may not: health is transport-only, so a 403 never moves the
+    /// next request to another identity (WS3.I).
+    mode: EscalationMode,
 }
 
 impl EgressBroker {
@@ -80,7 +85,14 @@ impl EgressBroker {
             health: Arc::new(Mutex::new(HashMap::new())),
             block_cooldown: DEFAULT_BLOCK_COOLDOWN,
             max_proxy_attempts: DEFAULT_MAX_PROXY_ATTEMPTS,
+            mode: EscalationMode::current(),
         }
+    }
+
+    /// Pins the escalation mode instead of reading the process default.
+    pub fn with_escalation_mode(mut self, mode: EscalationMode) -> Self {
+        self.mode = mode;
+        self
     }
 
     #[cfg(test)]
@@ -96,6 +108,7 @@ impl EgressBroker {
             health: Arc::new(Mutex::new(HashMap::new())),
             block_cooldown,
             max_proxy_attempts: max_proxy_attempts.max(1),
+            mode: EscalationMode::current(),
         }
     }
 
@@ -146,7 +159,7 @@ impl EgressBroker {
                 reason: if attempt == 0 {
                     "sticky_primary".into()
                 } else {
-                    "block_rotation".into()
+                    "health_rotation".into()
                 },
             })
             .collect())
@@ -156,7 +169,11 @@ impl EgressBroker {
         let Some(uri) = identity.proxy_uri() else {
             return;
         };
-        if crate::fingerprint_rotation::is_block_status(status) {
+        // Honest: the proxy carried the request and the origin answered, so a
+        // block status says nothing about the proxy. Without this the next
+        // request to the host would start on another proxy, a status-driven
+        // identity change across requests.
+        if !self.mode.is_honest() && crate::fingerprint_rotation::is_block_status(status) {
             self.mark_block(host, uri, Some(status));
             return;
         }
@@ -270,7 +287,8 @@ mod tests {
             Some("quarry_proxy_pool".into()),
             Duration::from_secs(60),
             2,
-        );
+        )
+        .with_escalation_mode(EscalationMode::Legacy);
         let hints = approved_hints();
         let url = Url::parse("https://example.com/").unwrap();
         let first = broker.plan(&hints, &url).unwrap();
@@ -280,5 +298,67 @@ mod tests {
         let second = broker.plan(&hints, &url).unwrap();
 
         assert_ne!(second[0].identity, first_identity);
+    }
+
+    #[test]
+    fn honest_status_does_not_cool_down_the_proxy() {
+        let pool = ProxyPool::from_env_string("http://proxy-a:8080;http://proxy-b:8080");
+        let broker = EgressBroker::with_limits(
+            pool,
+            Some("quarry_proxy_pool".into()),
+            Duration::from_secs(60),
+            2,
+        )
+        .with_escalation_mode(EscalationMode::Honest);
+        let hints = approved_hints();
+        let url = Url::parse("https://example.com/").unwrap();
+        let first = broker.plan(&hints, &url).unwrap();
+        let first_identity = first[0].identity.clone();
+
+        for status in [401u16, 403, 407, 429, 503] {
+            broker.mark_http_status("example.com", &first_identity, status);
+            let next = broker.plan(&hints, &url).unwrap();
+            assert_eq!(
+                next[0].identity, first_identity,
+                "status {status} must not move the next request to another proxy"
+            );
+        }
+    }
+
+    #[test]
+    fn honest_transport_error_still_cools_the_proxy_down() {
+        let pool = ProxyPool::from_env_string("http://proxy-a:8080;http://proxy-b:8080");
+        let broker = EgressBroker::with_limits(
+            pool,
+            Some("quarry_proxy_pool".into()),
+            Duration::from_secs(60),
+            2,
+        )
+        .with_escalation_mode(EscalationMode::Honest);
+        let hints = approved_hints();
+        let url = Url::parse("https://example.com/").unwrap();
+        let first = broker.plan(&hints, &url).unwrap();
+        let first_identity = first[0].identity.clone();
+
+        broker.mark_transport_error("example.com", &first_identity);
+        let second = broker.plan(&hints, &url).unwrap();
+
+        assert_ne!(second[0].identity, first_identity);
+    }
+
+    #[test]
+    fn rotation_label_is_health_rotation() {
+        let pool = ProxyPool::from_env_string("http://proxy-a:8080;http://proxy-b:8080");
+        for mode in [EscalationMode::Legacy, EscalationMode::Honest] {
+            let broker = EgressBroker::new(pool.clone(), Some("quarry_proxy_pool".into()))
+                .with_escalation_mode(mode);
+            let url = Url::parse("https://example.com/").unwrap();
+
+            let plan = broker.plan(&approved_hints(), &url).unwrap();
+
+            assert_eq!(plan.len(), 2);
+            assert_eq!(plan[0].reason, "sticky_primary");
+            assert_eq!(plan[1].reason, "health_rotation");
+        }
     }
 }

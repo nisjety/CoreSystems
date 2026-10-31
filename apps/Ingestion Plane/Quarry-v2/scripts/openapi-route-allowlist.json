@@ -1,0 +1,95 @@
+{
+  "_comment": "Routes the edge registers that neither docs/openapi.yaml nor docs/openapi-internal.yaml describes, each with the reason. A new route must be documented in one of those files or added here with a reason; an entry that becomes documented or stops existing must be removed (scripts/tests/openapi-route-coverage.test.mjs).",
+  "route_registrations": 108,
+  "route_registrations_note": "Re-pinned by D-B3-openapi-sdk (D2-003) from 86 to 108: the W2 .route(...) registrations are documented or allowlisted; three internal routes were added and six documented routes removed from the allowlist. OPENAPI-INTERNAL (decision 3.13): the eight /v1/internal/* routes are documented in docs/openapi-internal.yaml and left this list; the count is unchanged.",
+  "routes": [
+    {
+      "path": "/graphql",
+      "reason": "GraphQL surface; its schema is served at /graphql/schema and is not described in this OpenAPI file."
+    },
+    {
+      "path": "/graphql/playground",
+      "reason": "GraphQL surface; its schema is served at /graphql/schema and is not described in this OpenAPI file."
+    },
+    {
+      "path": "/graphql/schema",
+      "reason": "GraphQL surface; its schema is served at /graphql/schema and is not described in this OpenAPI file."
+    },
+    {
+      "path": "/v1/agent/runs/{}/browser-session",
+      "reason": "Browser session surface used by the Verevon browser and the Model Plane; its contract lives in docs/CONTRACTS.md and is documented with the browser slices (WS8, WS9)."
+    },
+    {
+      "path": "/v1/agent/runs/{}/browser-session/control",
+      "reason": "Browser session surface used by the Verevon browser and the Model Plane; its contract lives in docs/CONTRACTS.md and is documented with the browser slices (WS8, WS9)."
+    },
+    {
+      "path": "/v1/agent/runs/{}/browser-session/timeline",
+      "reason": "Browser session surface used by the Verevon browser and the Model Plane; its contract lives in docs/CONTRACTS.md and is documented with the browser slices (WS8, WS9)."
+    },
+    {
+      "path": "/v1/agent/runs/{}/frame",
+      "reason": "Browser session surface used by the Verevon browser and the Model Plane; its contract lives in docs/CONTRACTS.md and is documented with the browser slices (WS8, WS9)."
+    },
+    {
+      "path": "/v1/agent/runs/{}/frames/stream",
+      "reason": "Browser session surface used by the Verevon browser and the Model Plane; its contract lives in docs/CONTRACTS.md and is documented with the browser slices (WS8, WS9)."
+    },
+    {
+      "path": "/v1/agent/runs/{}/frames/ws",
+      "reason": "Browser session surface used by the Verevon browser and the Model Plane; its contract lives in docs/CONTRACTS.md and is documented with the browser slices (WS8, WS9)."
+    },
+    {
+      "path": "/v1/agent/runs/{}/live-view",
+      "reason": "Browser session surface used by the Verevon browser and the Model Plane; its contract lives in docs/CONTRACTS.md and is documented with the browser slices (WS8, WS9)."
+    },
+    {
+      "path": "/v1/answer",
+      "reason": "Public route not yet described in openapi.yaml; allowlisted so a new undocumented route cannot slip in unnoticed, to be documented in a follow-up."
+    },
+    {
+      "path": "/v1/answer/stream",
+      "reason": "Public route not yet described in openapi.yaml; allowlisted so a new undocumented route cannot slip in unnoticed, to be documented in a follow-up."
+    },
+    {
+      "path": "/v1/audio",
+      "reason": "Public route not yet described in openapi.yaml; allowlisted so a new undocumented route cannot slip in unnoticed, to be documented in a follow-up."
+    },
+    {
+      "path": "/v1/fleets",
+      "reason": "Fleet orchestration, hidden in the UI (WS2.E) and not yet a public contract."
+    },
+    {
+      "path": "/v1/fleets/{}",
+      "reason": "Fleet orchestration, hidden in the UI (WS2.E) and not yet a public contract."
+    },
+    {
+      "path": "/v1/fleets/{}/budget",
+      "reason": "Fleet orchestration, hidden in the UI (WS2.E) and not yet a public contract."
+    },
+    {
+      "path": "/v1/fleets/{}/members",
+      "reason": "Fleet orchestration, hidden in the UI (WS2.E) and not yet a public contract."
+    },
+    {
+      "path": "/v1/search/images",
+      "reason": "Public route not yet described in openapi.yaml; allowlisted so a new undocumented route cannot slip in unnoticed, to be documented in a follow-up."
+    },
+    {
+      "path": "/v1/search/similar",
+      "reason": "Public route not yet described in openapi.yaml; allowlisted so a new undocumented route cannot slip in unnoticed, to be documented in a follow-up."
+    },
+    {
+      "path": "/v1/search/suggest",
+      "reason": "Public route not yet described in openapi.yaml; allowlisted so a new undocumented route cannot slip in unnoticed, to be documented in a follow-up."
+    },
+    {
+      "path": "/v1/search/videos",
+      "reason": "Public route not yet described in openapi.yaml; allowlisted so a new undocumented route cannot slip in unnoticed, to be documented in a follow-up."
+    },
+    {
+      "path": "/version",
+      "reason": "Public route not yet described in openapi.yaml; allowlisted so a new undocumented route cannot slip in unnoticed, to be documented in a follow-up."
+    }
+  ]
+}

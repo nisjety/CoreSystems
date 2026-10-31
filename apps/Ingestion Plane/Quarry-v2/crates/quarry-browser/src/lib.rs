@@ -36,6 +36,83 @@ pub struct BrowserEgressPolicy {
     /// non-empty grant list. Normalizing `[" "]` to `[]` must never turn a
     /// deny-all grant into allow-all authority.
     restricted: bool,
+    /// `Allowlist` (the established grant-scoped mode) or `OpenWeb` (a
+    /// human-browse grant: any public http(s) host not on `denied_domains`).
+    mode: EgressMode,
+    /// Only consulted in `OpenWeb` mode. Canonical, lower-case, dot-suffix
+    /// matched; a host equal to or under an entry is refused.
+    denied_domains: Vec<String>,
+}
+
+/// How a browser egress policy admits hosts. Default is `Allowlist`, so every
+/// existing constructor keeps its meaning.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EgressMode {
+    #[default]
+    Allowlist,
+    /// Any public http(s) host that is not denied. Private, loopback, link-local,
+    /// single-label and cloud-metadata hosts are refused regardless of the
+    /// denied list; see `open_web_host_is_local`.
+    OpenWeb,
+}
+
+/// Upper bound on a broker grant's denied list (plan WS8.B, R-16 family).
+pub const MAX_DENIED_DOMAINS: usize = 64;
+
+/// The navigation authority a broker validation grants a run. Built only from
+/// the broker's own answer, never from the caller's requested domains.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrokerNavPolicy {
+    /// Exact canonical host list (`policy_mode` empty or `allowlist`).
+    Allowlist { domains: Vec<String> },
+    /// Open web minus `denied` (`policy_mode` `open_web`).
+    OpenWeb { denied: Vec<String> },
+}
+
+impl BrokerNavPolicy {
+    /// Fail closed: an unknown mode, an allow-list carrying a deny list, or an
+    /// open-web grant naming allowed hosts is an error, never a fallback.
+    pub fn from_validation(
+        policy_mode: &str,
+        allowed_domains: &[String],
+        denied_domains: &[String],
+    ) -> Result<Self, String> {
+        match policy_mode {
+            "" | "allowlist" => {
+                if !denied_domains.is_empty() {
+                    return Err("allow-list browser grant carries a denied list".to_owned());
+                }
+                Ok(Self::Allowlist {
+                    domains: BrowserEgressPolicy::canonical_broker_domains(allowed_domains)?,
+                })
+            }
+            "open_web" => {
+                if !allowed_domains.is_empty() {
+                    return Err("open-web browser grant must not name allowed domains".to_owned());
+                }
+                Ok(Self::OpenWeb {
+                    denied: BrowserEgressPolicy::canonical_denied_domains(denied_domains)?,
+                })
+            }
+            _ => Err("unknown browser grant policy mode".to_owned()),
+        }
+    }
+
+    /// The egress policy the browser boundary enforces for this grant.
+    pub fn egress_policy(&self) -> BrowserEgressPolicy {
+        match self {
+            Self::Allowlist { domains } => BrowserEgressPolicy::from_allowed_domains(domains),
+            Self::OpenWeb { denied } => BrowserEgressPolicy::open_web(denied),
+        }
+    }
+
+    /// The wire name of the mode, as stored in a run checkpoint.
+    pub fn mode_name(&self) -> &'static str {
+        match self {
+            Self::Allowlist { .. } => "allowlist",
+            Self::OpenWeb { .. } => "open_web",
+        }
+    }
 }
 
 impl BrowserEgressPolicy {
@@ -49,6 +126,8 @@ impl BrowserEgressPolicy {
         Self {
             allowed_domains: Vec::new(),
             restricted: true,
+            mode: EgressMode::Allowlist,
+            denied_domains: Vec::new(),
         }
     }
 
@@ -93,7 +172,108 @@ impl BrowserEgressPolicy {
         Self {
             allowed_domains,
             restricted,
+            mode: EgressMode::Allowlist,
+            denied_domains: Vec::new(),
         }
+    }
+
+    /// An open-web egress policy: any public http(s) host except `denied`
+    /// (and except private or metadata hosts, which are always refused). The
+    /// caller validates `denied` with `canonical_denied_domains` first; this
+    /// constructor only normalises case and trims.
+    pub fn open_web(denied: &[String]) -> Self {
+        let denied_domains = denied
+            .iter()
+            .map(|domain| domain.trim().to_ascii_lowercase())
+            .filter(|domain| !domain.is_empty())
+            .collect();
+        Self {
+            allowed_domains: Vec::new(),
+            restricted: true,
+            mode: EgressMode::OpenWeb,
+            denied_domains,
+        }
+    }
+
+    /// Add hosts the run may never reach, in any mode (WS7.G). A host equal to or under an
+    /// entry is refused for every http(s) request: navigation, redirect, frame and
+    /// sub-resource. Entries are trimmed and lower-cased; an empty list changes nothing, so
+    /// a policy built without this call is byte-identical to one built before it existed.
+    pub fn with_denied_domains(mut self, denied: &[String]) -> Self {
+        let mut added = false;
+        for domain in denied {
+            let domain = domain
+                .trim()
+                .trim_end_matches('.')
+                .to_ascii_lowercase();
+            if !domain.is_empty() && !self.denied_domains.contains(&domain) {
+                self.denied_domains.push(domain);
+                added = true;
+            }
+        }
+        if added {
+            self.denied_domains.sort();
+        }
+        self
+    }
+
+    /// The hosts this policy refuses whatever else it allows.
+    pub fn denied_domains(&self) -> &[String] {
+        &self.denied_domains
+    }
+
+    /// True for an allow-list policy that names no host: the "unchanged" resolution of an
+    /// unrestricted run. A deny list, if any, does not make it restricted to a host set.
+    pub fn is_unconstrained(&self) -> bool {
+        self.mode == EgressMode::Allowlist && !self.restricted && self.allowed_domains.is_empty()
+    }
+
+    /// Whether `raw` is an http(s) URL whose host is equal to or under a denied entry.
+    pub fn denies_url(&self, raw: &str) -> bool {
+        if self.denied_domains.is_empty() {
+            return false;
+        }
+        let Ok(url) = url::Url::parse(raw) else {
+            return false;
+        };
+        if !matches!(url.scheme(), "http" | "https") {
+            return false;
+        }
+        let Some(host) = url
+            .host_str()
+            .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
+        else {
+            return false;
+        };
+        self.denied_domains.iter().any(|domain| {
+            host == *domain
+                || host
+                    .strip_suffix(domain.as_str())
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+        })
+    }
+
+    /// Validate a broker's denied list for an open-web grant: empty is allowed,
+    /// at most `MAX_DENIED_DOMAINS` entries, each canonical (no wildcard, no IP
+    /// literal, at least one dot), sorted and unique. A non-canonical list is an
+    /// error, never repaired, the same rule as `canonical_broker_domains`.
+    pub fn canonical_denied_domains(domains: &[String]) -> Result<Vec<String>, String> {
+        if domains.len() > MAX_DENIED_DOMAINS {
+            return Err("browser grant denied list exceeds its bound".to_owned());
+        }
+        let mut canonical = BTreeSet::new();
+        for raw in domains {
+            let domain = raw.trim().to_ascii_lowercase();
+            if !is_canonical_broker_domain(&domain) {
+                return Err("browser grant denied list contains an invalid canonical domain".to_owned());
+            }
+            canonical.insert(domain);
+        }
+        let canonical: Vec<_> = canonical.into_iter().collect();
+        if canonical.as_slice() != domains {
+            return Err("browser grant denied list is not canonical".to_owned());
+        }
+        Ok(canonical)
     }
 
     pub fn allows_url(&self, raw: &str) -> bool {
@@ -102,6 +282,14 @@ impl BrowserEgressPolicy {
         // an inline image or use an object URL it created itself.
         if raw.starts_with("data:") || raw.starts_with("blob:") {
             return true;
+        }
+        if self.mode == EgressMode::OpenWeb {
+            return open_web_url_allowed(raw, &self.denied_domains);
+        }
+        // WS7.G: the policy's deny list wins over an allow-list entry and over an
+        // unrestricted run. Empty by default, so this line costs nothing for a run without one.
+        if self.denies_url(raw) {
+            return false;
         }
         if !self.restricted {
             return true;
@@ -129,6 +317,80 @@ impl BrowserEgressPolicy {
     }
 }
 
+/// Whether an open-web policy may reach `raw`: http(s) only, a host that is
+/// not local (see `open_web_host_is_local`) and not equal to or under a denied
+/// entry.
+fn open_web_url_allowed(raw: &str, denied: &[String]) -> bool {
+    let Ok(url) = url::Url::parse(raw) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = url.host_str().map(|host| host.trim_end_matches('.').to_ascii_lowercase()) else {
+        return false;
+    };
+    if open_web_host_is_local(&host) {
+        return false;
+    }
+    !denied.iter().any(|domain| {
+        host == *domain
+            || host
+                .strip_suffix(domain.as_str())
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    })
+}
+
+/// Hosts an open-web policy never reaches, whatever the broker's deny list says:
+/// loopback, private, link-local, unique-local, CGNAT, unspecified, multicast
+/// addresses; single-label names; local-only suffixes; and the cloud metadata
+/// names. A check on the name only: the DNS guard still resolves and checks.
+fn open_web_host_is_local(host: &str) -> bool {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare.parse::<IpAddr>() {
+        return ip_is_local(ip);
+    }
+    if !bare.contains('.') {
+        return true;
+    }
+    const LOCAL_SUFFIXES: [&str; 6] = [
+        ".internal",
+        ".local",
+        ".localhost",
+        ".localdomain",
+        ".lan",
+        ".home.arpa",
+    ];
+    bare == "metadata.goog" || LOCAL_SUFFIXES.iter().any(|suffix| bare.ends_with(suffix))
+}
+
+fn ip_is_local(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, _, _] = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || a == 0
+                || (a == 100 && (64..=127).contains(&b))
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return ip_is_local(IpAddr::V4(v4));
+            }
+            let first = v6.segments()[0];
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80
+        }
+    }
+}
+
 fn is_canonical_broker_domain(domain: &str) -> bool {
     if domain.is_empty()
         || domain.len() > 253
@@ -150,22 +412,110 @@ fn is_canonical_broker_domain(domain: &str) -> bool {
     })
 }
 
+#[cfg(feature = "chromiumoxide")]
+mod actionability;
 pub mod actions;
 pub mod browserbase;
 pub mod browserless;
 #[cfg(feature = "chromiumoxide")]
 pub mod chromiumoxide;
+pub mod capture_plan;
+/// WS13.6: tile-and-stitch planning and encoders (pure; no CDP call).
+pub mod stitch;
+/// WS12.S5: where the sensitive fields are on screen (the read-only scan).
+pub mod sensitive_rects;
+/// WS12.S5: painting those rectangles over a screenshot, or withholding it.
+pub mod screenshot_mask;
+
+/// WS12.S5: a screenshot after the sensitive fields were painted over.
+///
+/// `bytes` is `None` when the image was withheld: nothing may be stored or sent,
+/// and `note` says why in the closed `screenshot_withheld:<cause>` vocabulary.
+/// `rects` are the painted rectangles in image pixels; they stay in process (the
+/// stamp carries only their count).
+#[derive(Debug, Clone)]
+pub struct MaskedScreenshot {
+    pub bytes: Option<bytes::Bytes>,
+    pub state: quarry_core::redaction::ScreenshotState,
+    pub rects: Vec<screenshot_mask::PixelRect>,
+    pub oopif_frames: u32,
+    pub mask_ms: u32,
+    pub note: Option<&'static str>,
+}
+
+impl MaskedScreenshot {
+    /// An image that was not scanned: a driver with no masking reports `none`.
+    pub fn unmasked(bytes: bytes::Bytes) -> Self {
+        Self {
+            bytes: Some(bytes),
+            state: quarry_core::redaction::ScreenshotState::NotApplicable,
+            rects: Vec::new(),
+            oopif_frames: 0,
+            mask_ms: 0,
+            note: None,
+        }
+    }
+
+    /// An image that was withheld.
+    pub fn withheld(withheld: screenshot_mask::Withheld, oopif_frames: u32, mask_ms: u32) -> Self {
+        Self {
+            bytes: None,
+            state: quarry_core::redaction::ScreenshotState::Withheld,
+            rects: Vec::new(),
+            oopif_frames,
+            mask_ms,
+            note: Some(withheld.note()),
+        }
+    }
+
+    /// The error a caller that needs the image (an explicit `screenshot` action, a
+    /// scrape capture) gets when it was withheld: `SecurityBlocked`, 403.
+    pub fn withheld_error(note: &'static str) -> QuarryError {
+        QuarryError::new(
+            ErrorCode::SecurityBlocked,
+            "the screenshot was withheld because a sensitive field could not be masked",
+        )
+        .with_details(serde_json::json!({ "reason": note }))
+    }
+}
+
+/// WS13.6: a heavy-lane permit that lets one screenshot stitch tiles. The
+/// runtime takes it from the heavy semaphore only when the page needs stitching,
+/// and holds it for the one capture.
+pub struct StitchPermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl StitchPermit {
+    pub fn new(permit: tokio::sync::OwnedSemaphorePermit) -> Self {
+        Self { _permit: permit }
+    }
+}
+mod deadlines;
+#[cfg(feature = "chromiumoxide")]
+pub mod live_gate;
 #[cfg(feature = "kernel")]
 pub mod kernel;
 pub mod navigation;
 pub mod persistent_session;
 pub mod pool;
 pub mod session;
-pub mod stealth;
+/// WS17.C1: snapshot schema v2 types, caps, the origin journal and the capture flags (pure).
+pub mod profile_snapshot;
+/// WS17.C1: capture v2 (cookies of the whole context, web storage, IndexedDB) over CDP.
+#[cfg(feature = "chromiumoxide")]
+mod profile_capture;
+/// WS17.C2: restore of a saved profile into a fresh context (cookie plan, seeding script,
+/// emulation; pure) and its CDP half (feature `chromiumoxide`).
+pub mod profile_restore;
+pub mod slots;
+pub mod tab_control;
+mod field_probe;
 
 #[cfg(feature = "kernel")]
 pub use kernel::{KernelConfig, KernelDriver};
 pub use persistent_session::{PersistentSession, PersistentSessionRegistry};
+pub use tab_control::OpenTabOptions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveFrameFormat {
@@ -283,6 +633,34 @@ pub struct BrowserDriverCapabilities {
     /// must not infer this merely from a top-level URL guard.
     pub security_evidence: bool,
     pub atomic_target_actions: bool,
+    /// Ref-targeted click, type and select run the actionability pipeline
+    /// (visible, enabled, stable, not covered) and send trusted input
+    /// (`event.isTrusted` is true) instead of in-page script events. True only
+    /// when the driver was started with `QUARRY_BROWSER_TRUSTED_INPUT=on`.
+    /// Additive on the wire: an older peer omits it and reads as `false`.
+    #[serde(default)]
+    pub trusted_input: bool,
+    /// WS8.E: the driver can open a tab without making it the active tab
+    /// (`OpenTabOptions::activate == false`). Additive on the wire.
+    #[serde(default)]
+    pub background_tabs: bool,
+    /// WS8.E: a handle pinned to one tab (`BrowserSession::pinned_to`) addresses
+    /// that tab and never the active tab. Additive on the wire.
+    #[serde(default)]
+    pub tab_pinning: bool,
+    /// WS8.E: an egress policy can be installed for one tab, not only for the
+    /// session. Additive on the wire.
+    #[serde(default)]
+    pub per_tab_egress: bool,
+    /// WS13.3: the driver can run scrape-time `actions[]` on one page. Additive
+    /// on the wire: an older peer omits it and reads as `false`.
+    #[serde(default)]
+    pub scrape_actions: bool,
+    /// WS13.3: the driver takes screenshots and PDFs with options (clip, JPEG,
+    /// viewport, paper size), not only the legacy viewport PNG and default PDF.
+    /// Additive on the wire.
+    #[serde(default)]
+    pub capture_options: bool,
 }
 
 /// Browser-authored page state for an agent observation. Drivers return only
@@ -295,6 +673,19 @@ pub struct BrowserNativeProjection {
     /// projection. This is deliberately not serialized into an observation:
     /// Model Plane receives only `@e…` refs, never CDP node handles.
     pub targets: Vec<BrowserNativeTarget>,
+    /// WS12.S1: what the field-facts probe and the masking did to this projection.
+    /// `None` only for a projection that was not produced by the masking pass.
+    pub redaction: Option<ProjectionRedaction>,
+}
+
+/// WS12.S1 stamp for one native projection: counts and rule ids only, never
+/// content. The observation-level stamp (WS12.S2) is built from it.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectionRedaction {
+    pub probe: quarry_core::redaction::ProbeState,
+    pub probe_ms: u32,
+    pub values_masked: u32,
+    pub by_rule: std::collections::BTreeMap<String, u32>,
 }
 
 /// A short-lived renderer binding for one accessible DOM node. The binding is
@@ -312,6 +703,10 @@ pub struct BrowserNativeTarget {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// WS12.S1: the field kind the probe decided for an editable control; `None`
+    /// for every other role. Crate-internal: never serialised into an observation.
+    #[serde(skip)]
+    pub field_kind: Option<quarry_core::redaction::FieldKind>,
 }
 
 /// A browser download that has completed inside Quarry's private per-session
@@ -395,6 +790,79 @@ pub trait BrowserEgressProxyProvider: Send + Sync {
     async fn release_session(&self, session_key: &str);
 }
 
+/// How a browser driver's own processes are doing, for `/ready`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserHealthState {
+    /// The driver runs no local browser (a remote provider, a test double).
+    NotApplicable,
+    /// No browser has been launched yet. Ready: the first run launches one.
+    Idle,
+    Healthy,
+    /// Some launched browsers are unhealthy or dead, not all.
+    Degraded,
+    /// Every launched browser is unhealthy or dead.
+    Unhealthy,
+}
+
+/// One browser process of a local driver. Content-free: counts and states only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotHealth {
+    pub slot: usize,
+    pub status: String,
+    pub generation: u64,
+    pub sessions: usize,
+    pub pages: usize,
+    /// `None` until the first probe answered.
+    pub healthy: Option<bool>,
+    pub probe_failures: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserHealth {
+    pub state: BrowserHealthState,
+    /// 0 = no cap.
+    pub max_sessions: usize,
+    pub sessions_open: usize,
+    pub slots: Vec<SlotHealth>,
+}
+
+impl BrowserHealth {
+    pub fn not_applicable() -> Self {
+        Self {
+            state: BrowserHealthState::NotApplicable,
+            max_sessions: 0,
+            sessions_open: 0,
+            slots: Vec::new(),
+        }
+    }
+
+    /// The overall state from the slots: never launched is `Idle`, every
+    /// launched slot dead or unhealthy is `Unhealthy`, some is `Degraded`.
+    pub fn from_slots(max_sessions: usize, sessions_open: usize, slots: Vec<SlotHealth>) -> Self {
+        let launched: Vec<&SlotHealth> = slots.iter().filter(|slot| slot.generation > 0).collect();
+        let bad = launched
+            .iter()
+            .filter(|slot| slot.status == "dead" || slot.healthy == Some(false))
+            .count();
+        let state = if launched.is_empty() {
+            BrowserHealthState::Idle
+        } else if bad == launched.len() {
+            BrowserHealthState::Unhealthy
+        } else if bad > 0 {
+            BrowserHealthState::Degraded
+        } else {
+            BrowserHealthState::Healthy
+        };
+        Self {
+            state,
+            max_sessions,
+            sessions_open,
+            slots,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VerifiedTargetOperation {
@@ -411,7 +879,20 @@ pub trait BrowserDriver: Send + Sync {
     }
 
     async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession>;
+    /// Must be idempotent: releasing a session twice (or a clone of a released
+    /// one) is not an error and changes nothing the second time.
     async fn release(&self, session: BrowserSession) -> QuarryResult<()>;
+
+    /// Stop whatever browser process this driver owns and wait for it, for the process's
+    /// graceful exit (after the sessions have been released). Idempotent. Default: nothing to
+    /// stop (remote providers, test doubles).
+    async fn shutdown(&self) {}
+
+    /// How this driver's own browser processes are doing, for `/ready`.
+    /// Default: not applicable (remote providers, test doubles).
+    async fn health(&self) -> BrowserHealth {
+        BrowserHealth::not_applicable()
+    }
 
     /// W2 — return the live-view reference for the given session, if
     /// the driver has one. Cloud providers (Browserbase, Browserless,
@@ -450,6 +931,15 @@ pub trait BrowserDriver: Send + Sync {
         Err(QuarryError::unsupported_action("configure_egress_policy"))
     }
     async fn goto(&self, session: &BrowserSession, url: &str) -> QuarryResult<()>;
+
+    /// Give a session that has no page yet one to observe (SC4 D1): a tab on
+    /// `about:blank`, navigated nowhere, which the session's next `goto` uses. A session
+    /// that has a page keeps it; a lost session and a pinned handle whose tab is gone keep
+    /// their errors. Observation paths call it before reading a page they did not
+    /// navigate to. Default: nothing (a driver whose session always has a page).
+    async fn ensure_page(&self, _session: &BrowserSession) -> QuarryResult<()> {
+        Ok(())
+    }
     async fn content(&self, session: &BrowserSession) -> QuarryResult<bytes::Bytes>;
 
     /// Verify a uniquely-selected target and perform the operation as one
@@ -491,6 +981,18 @@ pub trait BrowserDriver: Send + Sync {
         session: &BrowserSession,
         full_page: bool,
     ) -> QuarryResult<bytes::Bytes>;
+    /// WS12.S5: a screenshot with the sensitive fields painted over. A driver that
+    /// cannot scan (the default) reports `none`: the image is as `screenshot` made it.
+    /// A driver that can scan overrides this and makes `screenshot` return the
+    /// masked bytes, so no caller can reach the raw image.
+    async fn screenshot_masked(
+        &self,
+        session: &BrowserSession,
+        full_page: bool,
+    ) -> QuarryResult<MaskedScreenshot> {
+        let bytes = self.screenshot(session, full_page).await?;
+        Ok(MaskedScreenshot::unmasked(bytes))
+    }
     async fn live_frame(
         &self,
         _session: &BrowserSession,
@@ -499,6 +1001,86 @@ pub trait BrowserDriver: Send + Sync {
         Err(QuarryError::unsupported_action("live_frame"))
     }
     async fn pdf(&self, session: &BrowserSession) -> QuarryResult<bytes::Bytes>;
+
+    /// WS13.3: a screenshot with options. Legacy options (every option at its
+    /// default: the viewport, PNG) delegate to `screenshot`; any other option
+    /// needs a driver that overrides this method, and is refused here rather than
+    /// silently dropped.
+    async fn capture_screenshot(
+        &self,
+        session: &BrowserSession,
+        options: &quarry_core::capture::ScreenshotOptions,
+        limits: &quarry_core::capture::CaptureLimits,
+    ) -> QuarryResult<quarry_core::capture::CapturedImage> {
+        if !options.is_legacy() {
+            return Err(QuarryError::unsupported_action("capture_screenshot_options"));
+        }
+        let bytes = self.screenshot(session, false).await?;
+        crate::capture_plan::check_capture_size(bytes.len(), limits)?;
+        let Some((width_px, height_px)) = crate::capture_plan::image_dimensions(&bytes) else {
+            return Err(
+                QuarryError::new(ErrorCode::DriverFailed, "screenshot is not a PNG or JPEG")
+                    .with_details(serde_json::json!({ "reason": "screenshot_unreadable" })),
+            );
+        };
+        Ok(quarry_core::capture::CapturedImage {
+            bytes: bytes.to_vec(),
+            format: quarry_core::capture::ImageFormat::Png,
+            width_px,
+            height_px,
+            tiles: 1,
+            stitched: false,
+            truncated: false,
+        })
+    }
+
+    /// WS13.3: a PDF with options. The default options delegate to `pdf`; any
+    /// other option needs a driver that overrides this method.
+    async fn capture_pdf(
+        &self,
+        session: &BrowserSession,
+        options: &quarry_core::capture::PdfOptions,
+        limits: &quarry_core::capture::CaptureLimits,
+    ) -> QuarryResult<quarry_core::capture::CapturedPdf> {
+        if !options.is_default() {
+            return Err(QuarryError::unsupported_action("capture_pdf_options"));
+        }
+        let bytes = self.pdf(session).await?;
+        crate::capture_plan::check_capture_size(bytes.len(), limits)?;
+        Ok(quarry_core::capture::CapturedPdf {
+            bytes: bytes.to_vec(),
+        })
+    }
+
+    /// WS13.3: the URL the page is on now, or `None` when the driver cannot say.
+    async fn current_url(&self, _session: &BrowserSession) -> QuarryResult<Option<String>> {
+        Ok(None)
+    }
+
+    /// WS13.6: whether a full-page screenshot of this page is taller than one
+    /// capture holds at its device scale, so it would need tile-and-stitch. Default:
+    /// no. The runtime asks this before it takes a heavy-lane permit.
+    async fn screenshot_needs_stitch(
+        &self,
+        _session: &BrowserSession,
+        _options: &quarry_core::capture::ScreenshotOptions,
+    ) -> QuarryResult<bool> {
+        Ok(false)
+    }
+
+    /// WS13.6: a screenshot that may stitch tiles when `stitch` holds a heavy-lane
+    /// permit. Without a permit, and on a driver that does not stitch, this is
+    /// `capture_screenshot`: the image stops at the single-capture limit.
+    async fn capture_screenshot_stitched(
+        &self,
+        session: &BrowserSession,
+        options: &quarry_core::capture::ScreenshotOptions,
+        limits: &quarry_core::capture::CaptureLimits,
+        stitch: Option<&StitchPermit>,
+    ) -> QuarryResult<quarry_core::capture::CapturedImage> {
+        let _ = stitch;
+        self.capture_screenshot(session, options, limits).await
+    }
 
     /// List live tabs bound to this browser session. Default: Unsupported.
     async fn list_tabs(&self, _session: &BrowserSession) -> QuarryResult<Vec<BrowserTab>> {
@@ -512,6 +1094,35 @@ pub trait BrowserDriver: Send + Sync {
         _url: Option<&str>,
     ) -> QuarryResult<BrowserTab> {
         Err(QuarryError::unsupported_action("new_tab"))
+    }
+
+    /// Open a tab with its own options (WS8.E). `activate: false` leaves the
+    /// session's active tab where it is; `egress_policy` governs this tab only.
+    /// Default: Unsupported.
+    async fn open_tab(
+        &self,
+        _session: &BrowserSession,
+        _options: OpenTabOptions,
+    ) -> QuarryResult<BrowserTab> {
+        Err(QuarryError::unsupported_action("open_tab"))
+    }
+
+    /// Install the egress policy of one tab (WS8.E). A tab's policy takes
+    /// precedence over the session policy for requests made from that tab.
+    /// Default: Unsupported.
+    async fn configure_tab_egress_policy(
+        &self,
+        _session: &BrowserSession,
+        _tab_id: &str,
+        _policy: BrowserEgressPolicy,
+    ) -> QuarryResult<()> {
+        Err(QuarryError::unsupported_action("configure_tab_egress_policy"))
+    }
+
+    /// The session's active tab id, the tab an unpinned handle acts on
+    /// (WS8.E). A pinned handle may name a different tab. Default: Unsupported.
+    async fn active_tab_id(&self, _session: &BrowserSession) -> QuarryResult<Option<String>> {
+        Err(QuarryError::unsupported_action("active_tab_id"))
     }
 
     /// Select an existing tab as the active page for actions/frames. Default: Unsupported.
@@ -661,16 +1272,230 @@ pub trait BrowserDriver: Send + Sync {
     async fn forward(&self, _session: &BrowserSession) -> QuarryResult<()> {
         Err(QuarryError::unsupported_action("forward"))
     }
+
+    /// Reload the current page (WS9.B). `ignore_cache` bypasses the HTTP cache.
+    /// Default: Unsupported.
+    async fn reload(&self, _session: &BrowserSession, _ignore_cache: bool) -> QuarryResult<()> {
+        Err(QuarryError::unsupported_action("reload"))
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct BrowserSession {
     pub lease: BrowserLease,
     pub inner: Arc<Mutex<SessionInner>>,
+    /// The tab this handle addresses when it is pinned (WS8.E). `None` means
+    /// the session's active tab.
+    pub tab_pin: Option<Arc<str>>,
+}
+
+impl BrowserSession {
+    /// A handle on the same session whose actions address `tab_id` and never
+    /// another tab, even when `tab_id` is closed (no fallback to the active tab).
+    pub fn pinned_to(&self, tab_id: &str) -> Self {
+        Self {
+            lease: self.lease.clone(),
+            inner: self.inner.clone(),
+            tab_pin: Some(Arc::from(tab_id)),
+        }
+    }
+
+    /// The pinned tab id, if this handle is pinned.
+    pub fn tab_pin(&self) -> Option<&str> {
+        self.tab_pin.as_deref()
+    }
 }
 
 #[derive(Debug, Default)]
 pub struct SessionInner {
     pub connected: bool,
     pub pages_served: u64,
+}
+
+#[cfg(test)]
+mod capture_default_tests {
+    use crate::{BrowserDriver, BrowserSession, SessionInner};
+    use async_trait::async_trait;
+    use quarry_core::capture::{CaptureLimits, ImageFormat, PdfOptions, ScreenshotOptions};
+    use quarry_core::error::{ErrorCode, QuarryResult};
+    use quarry_core::ids::kinds;
+    use quarry_core::lease::{BrowserLease, ProxyAffinity};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    /// A PNG header for a 3 by 2 picture. The planning code reads only the header.
+    fn png_3x2() -> Vec<u8> {
+        let mut bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&3u32.to_be_bytes());
+        bytes.extend_from_slice(&2u32.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes
+    }
+
+    /// Implements only the methods a driver must have. The capture methods are
+    /// the trait defaults under test.
+    struct DefaultsOnly;
+
+    #[async_trait]
+    impl BrowserDriver for DefaultsOnly {
+        async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
+            Ok(BrowserSession {
+                lease: lease.clone(),
+                tab_pin: None,
+                inner: Arc::new(Mutex::new(SessionInner::default())),
+            })
+        }
+        async fn release(&self, _session: BrowserSession) -> QuarryResult<()> {
+            Ok(())
+        }
+        async fn goto(&self, _session: &BrowserSession, _url: &str) -> QuarryResult<()> {
+            Ok(())
+        }
+        async fn content(&self, _session: &BrowserSession) -> QuarryResult<bytes::Bytes> {
+            Ok(bytes::Bytes::new())
+        }
+        async fn screenshot(
+            &self,
+            _session: &BrowserSession,
+            _full_page: bool,
+        ) -> QuarryResult<bytes::Bytes> {
+            Ok(bytes::Bytes::from(png_3x2()))
+        }
+        async fn pdf(&self, _session: &BrowserSession) -> QuarryResult<bytes::Bytes> {
+            Ok(bytes::Bytes::from_static(b"%PDF-1.7"))
+        }
+    }
+
+    fn lease() -> BrowserLease {
+        BrowserLease {
+            lease_id: kinds::LeaseKind::new(),
+            profile_id: kinds::ProfileKind::new(),
+            session_affinity_key: "capture-defaults".to_owned(),
+            proxy_affinity: ProxyAffinity {
+                pool: "default".into(),
+                sticky_key: None,
+            },
+            ttl_s: 60,
+            capabilities: vec![],
+            artifact_bucket: "test".into(),
+            persist_profile: false,
+            viewport: None,
+            org_id: "test_org".into(),
+        }
+    }
+
+    /// WS13.3: a driver that does not override the capture methods serves the
+    /// legacy options through `screenshot` and `pdf`, and refuses every other
+    /// option with `unsupported`. Nothing is dropped silently.
+    #[tokio::test]
+    async fn default_capture_methods_delegate_for_legacy_options_and_refuse_others() {
+        let driver = DefaultsOnly;
+        let session = driver.acquire(&lease()).await.expect("acquire");
+        let limits = CaptureLimits::default();
+
+        let image = driver
+            .capture_screenshot(&session, &ScreenshotOptions::default(), &limits)
+            .await
+            .expect("legacy screenshot");
+        assert_eq!((image.width_px, image.height_px), (3, 2));
+        assert_eq!(image.format, ImageFormat::Png);
+        assert_eq!((image.tiles, image.stitched, image.truncated), (1, false, false));
+
+        let jpeg = ScreenshotOptions {
+            quality: Some(80),
+            ..ScreenshotOptions::default()
+        };
+        let refused = driver
+            .capture_screenshot(&session, &jpeg, &limits)
+            .await
+            .expect_err("jpeg is refused by the default method");
+        assert!(matches!(refused.code, ErrorCode::Unsupported));
+
+        let pdf = driver
+            .capture_pdf(&session, &PdfOptions::default(), &limits)
+            .await
+            .expect("default pdf");
+        assert!(pdf.bytes.starts_with(b"%PDF-"));
+        let landscape = PdfOptions {
+            landscape: true,
+            ..PdfOptions::default()
+        };
+        let refused = driver
+            .capture_pdf(&session, &landscape, &limits)
+            .await
+            .expect_err("landscape is refused by the default method");
+        assert!(matches!(refused.code, ErrorCode::Unsupported));
+
+        assert_eq!(driver.current_url(&session).await.expect("url"), None);
+        driver.release(session).await.expect("release");
+    }
+}
+
+#[cfg(test)]
+mod capability_wire_tests {
+    use super::*;
+
+    #[test]
+    fn capabilities_flag_defaults_false_and_is_additive_on_the_wire() {
+        // Deny by default: a driver that does not say so has no trusted input.
+        assert!(!BrowserDriverCapabilities::default().trusted_input);
+        // A peer that predates every additive key sends none of them and still parses: each
+        // additive key reads as false.
+        let oldest = serde_json::json!({
+            "persistent_profile": true,
+            "devtools_trace": false,
+            "downloads_to_artifacts": false,
+            "uploads_from_artifacts": false,
+            "full_visual_fidelity": true,
+            "isolated_egress": true,
+            "security_evidence": true,
+            "atomic_target_actions": true
+        });
+        let parsed_oldest: BrowserDriverCapabilities =
+            serde_json::from_value(oldest).expect("oldest shape parses");
+        assert!(parsed_oldest.atomic_target_actions);
+        for additive in [
+            parsed_oldest.trusted_input,
+            parsed_oldest.background_tabs,
+            parsed_oldest.tab_pinning,
+            parsed_oldest.per_tab_egress,
+            parsed_oldest.scrape_actions,
+            parsed_oldest.capture_options,
+        ] {
+            assert!(!additive);
+        }
+        // A peer that predates trusted_input but has the later additive keys (WS8.E tab keys,
+        // WS13.3 capture keys) sends them as false, and the new key is the only difference.
+        let older = serde_json::json!({
+            "persistent_profile": true,
+            "devtools_trace": false,
+            "downloads_to_artifacts": false,
+            "uploads_from_artifacts": false,
+            "full_visual_fidelity": true,
+            "isolated_egress": true,
+            "security_evidence": true,
+            "atomic_target_actions": true,
+            "background_tabs": false,
+            "tab_pinning": false,
+            "per_tab_egress": false,
+            "scrape_actions": false,
+            "capture_options": false
+        });
+        let parsed: BrowserDriverCapabilities =
+            serde_json::from_value(older.clone()).expect("older shape parses");
+        assert!(!parsed.trusted_input);
+        assert!(parsed.atomic_target_actions);
+        // The new key is the only difference on the way out, and it round-trips.
+        let mut on = parsed;
+        on.trusted_input = true;
+        let wire = serde_json::to_value(on).expect("serializes");
+        assert_eq!(wire["trusted_input"], true);
+        let mut without = wire.clone();
+        without.as_object_mut().unwrap().remove("trusted_input");
+        assert_eq!(without, older);
+        let back: BrowserDriverCapabilities = serde_json::from_value(wire).expect("round-trips");
+        assert!(back.trusted_input);
+    }
 }

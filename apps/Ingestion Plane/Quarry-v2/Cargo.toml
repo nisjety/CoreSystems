@@ -128,3 +128,13 @@ tonic = { version = "0.12", default-features = false, features = ["transport", "
 prost = "0.13"
 prost-types = "0.13"
 tonic-build = "0.12"
+
+# Inflate is the hot loop of the document parser, and unoptimized it is slow
+# enough that a decompression bomb meets the parser's wall-clock deadline before
+# its memory limit in a debug build (doc_parse_sandbox). Optimize just the
+# deflate implementation in dev and test builds; release builds are unaffected.
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+
+[profile.dev.package.flate2]
+opt-level = 3

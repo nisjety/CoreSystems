@@ -67,7 +67,7 @@ Quarry-v2 already has most of the building blocks:
 | Area | Existing primitive |
 |---|---|
 | Policy gate | `PrivacyPolicy`, ZDR, processor approval, Data Plane privacy metadata |
-| Proxy routing | `EgressBroker`, `ProxyPool`, sticky `(org, host)` ordering, 429 rotation |
+| Proxy routing | `EgressBroker`, `ProxyPool`, sticky `(org, host)` ordering, rotation on transport failure (and on block statuses only under `QUARRY_BLOCK_ESCALATION=legacy`) |
 | Driver fallback | `DriverPlan`, `FallbackDriver`, block-status classification |
 | TLS impersonation | `quarry-tls`, `tls_driver`, browser-like TLS/H2 path |
 | Browser execution | `quarry-browser`, `chromiumoxide`, Browserless, Browserbase scaffolding |
@@ -141,21 +141,92 @@ state.
 
 ### 4. Challenge Classifier and Policy Gate
 
-Add a classifier that detects challenge pages and returns structured reasons:
+Implemented for the browser observation path (WS3.H):
+`crates/quarry-runtime/src/challenge.rs`. It classifies what an observed page
+says about access and refuses to repeat a failed recovery. It evades nothing.
 
-- `rate_limited`
-- `bot_wall`
-- `captcha`
-- `auth_required`
-- `paywall`
-- `geo_blocked`
-- `robots_disallowed`
-- `policy_denied`
-- `processor_not_approved`
+A page is one of three strengths. **Strong** means a bot wall stands in front of
+it, with a closed reason: `captcha_widget`, `waf_interstitial`,
+`unexpected_bot_error` (two independent markers) or `challenge_loop` (below).
+**Weak** is a hint worth a look at the screenshot. **Non-signal** names an
+ordinary access state a planner must not take for a bot wall: `bare_status`,
+`rate_limited`, `auth_required`, `consent_required`, `paywall`,
+`geo_blocked`, `server_error` (a `timeout` is a driver error, never a page).
+A status alone is never a strong signal.
 
-The classifier should not silently bypass high-risk pages. It should either
-escalate within the approved Quarry driver chain or fail with a reason and an
-audit receipt.
+Markers come in three classes. Class A is an infrastructure identifier in the
+HTML (a CAPTCHA widget script, a WAF interstitial's own variables); an
+interstitial marker decides alone, a widget also needs the page to be the
+challenge itself (an error status, a title cue, a phrase group, or a short page
+with no other form field to fill in). On a page that also has a form field to
+fill in, a 2xx page needs a title cue or an interstitial phrase group; the
+widget's own label ("please verify you are human") does not count. So a CAPTCHA
+on a login form, a contact or newsletter form or a comment box is a hint at
+most. An invisible
+reCAPTCHA v3 anchor is ignored, and does not hide a visible v2 widget on the
+same page. Class B is a phrase group in
+the title or in the visible text of a short page ("unusual traffic", "checking
+your browser"); two independent groups are strong, one is weak, a title hit
+counts twice and an error status counts once. Class C is a single word
+("captcha", "forbidden") and never decides anything: an article titled "How
+CAPTCHAs work" or prose containing "forbidden" produces no signal. Evidence in a
+signal is marker ids and the status, never page text.
+
+**One recovery.** The first strong signal on a host gives the planner one
+recovery: a wait, or a reload of the same URL. Quarry never reloads on its own
+(a reload is an action nobody asked for and can re-submit a POST). If the host
+still challenges afterwards, or shows a third strong signal in the run, the
+signal becomes `challenge_loop` with `recovery: exhausted`, and Quarry
+answers navigation to that host and click, type, press and select on its page
+(and upload or download of one of its nodes, `evaluate`, and the snapshot-ref
+and semantic forms of each) with `403 CHALLENGE_DETECTED` (`details`: `reason`, `host`,
+`recovery: "exhausted"`, `next: "user_takeover_or_other_source"`). Screenshots,
+reads, waits, scrolling (the mouse wheel too), answering a dialog the page has
+already opened, back and forward, and navigation to another host stay allowed.
+The rule stops further attempts at the wall; it does not stop a person taking
+over or a planner reporting the block. `evaluate` is refused because a script
+can do everything the refused actions do (it is also denied outright before the
+driver, so this is a second lock). A dialog is answered so the page is not
+wedged behind it. Back and forward stay open because Quarry does not know where
+the history step lands; what it lands on is judged by its own host, so a step
+back onto the exhausted host leaves every interaction refused. A later
+observation that is not strong clears the episode. The state is per run and in
+memory only; under Zero Data Retention the host is held as a hash, only reason
+counts are kept and the error leaves the host out. The host is never logged.
+
+`QUARRY_CHALLENGE_CLASSIFIER=v2|legacy` (default `v2`; `legacy` is the old
+substring classifier for one release and is not subject to the rule) and
+`QUARRY_CHALLENGE_ENFORCE=log|enforce` (default `log`, the plan's setting while
+the corpus validates: classification and the signals stay, `quarry.challenge.would_reject`
+is logged and the action goes through; `enforce` turns the refusals above on
+and is set per environment once a captured corpus has passed).
+
+**The scrape path (WS3.J).** `/v1/scrape` is one shot: no wait, no reload, no
+person to hand over to. `PageRunner` classifies the fetched page with the same
+`classify` (markup bodies only, the first 512 KiB, with the response status),
+and only a strong signal counts. A page that is a bot wall is not extracted,
+stored, indexed or ingested; the scrape fails with `403 CHALLENGE_DETECTED` and
+`details.block_reason` (`captcha_widget`, `waf_interstitial` or
+`unexpected_bot_error`, never `challenge_loop`), `recovery: "not_applicable"`,
+`next: "other_source"`. No host, URL or page text is in the error. A status alone
+(a bare 403, a 429, a 5xx), a login page, a paywall and a CAPTCHA on an ordinary
+form are not walls and scrape as before. `QUARRY_CHALLENGE_CLASSIFIER=legacy`
+turns the scrape-path classification off. Under the default
+`QUARRY_CHALLENGE_ENFORCE=log` the wall is returned as before and
+`quarry.challenge.would_refuse_scrape` logs the reason and the status; under
+`enforce` it is refused as described. ZDR runs are classified the same way and
+log only the reason.
+
+**Evidence.** The classification table (about 60 rows) and the runner tests use
+hand-written HTML, modelled on the shape of each vendor's page. None of it is a
+captured page: there are no recorded pages with provenance under the test
+fixtures yet, and no live Turnstile, hCaptcha or login page has been run
+through the classifier. Treat the confidence values as unvalidated until such a
+corpus exists.
+
+Still to do from the original list: `robots_disallowed`, `policy_denied` and
+`processor_not_approved` belong to the fetch path and the policy gate, not to
+page classification.
 
 ### 5. Owned Browser Fleet
 

@@ -1,0 +1,1284 @@
+openapi: 3.1.0
+info:
+  title: Quarry v2 internal API
+  version: 0.1.0
+  description: >-
+    Plane-to-plane routes on the trusted inter-plane bus. The orchestrator, the Control Plane
+    GDPR consumer and the embedding consumer call these; a browser or a tenant never does.
+    This file is repository documentation only: it is never served, and no SDK is generated
+    from it. Internal routes never appear in docs/openapi.yaml or in the generated SDKs
+    (decision 3.13, OPENAPI-INTERNAL, 2026-10-28). Who can reach these routes is decided by
+    gateway routing, not by this file (D2-312). The eight internal routes of the Go control
+    service are not described here yet; they follow the D2-050 internal secret split.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+paths:
+  /v1/internal/run_page:
+    post:
+      operationId: internalRunPage
+      summary: Internal page execution (orchestrator → edge)
+      description: >-
+        Called by orchestrator activities to execute a single page. The runtime token names the
+        caller and the X-Quarry-Run-Sig binding ties the org to the url. The edge refuses every
+        call with UNSUPPORTED when QUARRY_EDGE__INTERNAL_SECRET is not set, because the org binding
+        cannot be checked. A request whose crawl object is set gets its links checked against the
+        scope, and the response then carries a crawl report.
+      tags:
+      - internal
+      security:
+      - runtimeToken: []
+      parameters:
+      - name: X-Quarry-Run-Sig
+        in: header
+        required: true
+        description: >-
+          HMAC over the body's raw org_id, a newline, and the raw url (before URL parsing), keyed
+          by the edge's internal secret.
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalRunPage'
+      responses:
+        '200':
+          description: Page execution result. A plain object, not an envelope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalRunPageResult'
+        '400':
+          description: >-
+            BAD_REQUEST when org_id is empty, or when crawl is malformed (details.fields names each
+            rejected path). Other errors use InternalErrorEnvelope too.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: UNAUTHORIZED when the runtime token or the run binding is wrong.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '403':
+          description: >-
+            The page was refused before it was fetched (WS14.S4). error.code is SECURITY_BLOCKED,
+            error.retryable is false and error.details.denial says why (see RobotsFetchDenial).
+            Only a request whose crawl.robots is respect is checked, and only when
+            QUARRY_EDGE__CRAWL_ROBOTS is enforce; in observe the page is fetched and the would-be
+            refusal is counted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '501':
+          description: >-
+            UNSUPPORTED when QUARRY_EDGE__INTERNAL_SECRET or QUARRY_EDGE__RUNTIME_AUTH_TOKEN is not
+            set on the edge.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+  /v1/internal/change/record:
+    post:
+      operationId: internalChangeRecord
+      summary: Record a fingerprint for change tracking (orchestrator → edge)
+      description: >-
+        Compares a fresh fingerprint with the latest baseline of the url, saves a baseline for a
+        new or changed page and, on a change, a diff record. Unchanged and unreachable results
+        persist nothing. The org travels in the body, because the orchestrator calls for many
+        tenants with one service identity. The route needs the postgres-queue build and
+        DATABASE_URL on the edge.
+      tags:
+      - internal
+      security:
+      - internalToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalChangeRecordRequest'
+      responses:
+        '200':
+          description: The change result. A plain object, not an envelope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalChangeRecordResponse'
+        '400':
+          description: BAD_REQUEST when org_id or fresh_fingerprint is empty, or url is not a URL.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: UNAUTHORIZED when the bearer token is not QUARRY_EDGE_INTERNAL_TOKEN.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '403':
+          description: >-
+            FORBIDDEN with details.zdr_refusal (code zdr_durable_mutation_forbidden, action record)
+            when the schedule is ZDR and QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES is on. In observe
+            the edge logs the would-be refusal and answers 200.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '501':
+          description: >-
+            UNSUPPORTED when QUARRY_EDGE_INTERNAL_TOKEN is not set, or the build or DATABASE_URL
+            does not provide the change store.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+  /v1/internal/page-images/{org}/{doc}/{page}/{hash}:
+    get:
+      operationId: internalPageImage
+      summary: Serve a page-image PNG from the content-addressed store (embedding consumer)
+      description: >-
+        No token. The content hash in the path is the capability on the trusted bus, so this route
+        must not be reachable from the public gateway (D2-312). The response is image/png with
+        nosniff and a 300 second private cache. A missing object is answered as INTERNAL, not 404:
+        the store error is not mapped.
+      tags:
+      - internal
+      security: []
+      parameters:
+      - name: org
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: doc
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: page
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: hash
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: The page image, raw bytes.
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '500':
+          description: >-
+            INTERNAL when the page-image producer is not configured, or the store fails (including
+            an object that is not there).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+  /v1/internal/schedules/preflight:
+    post:
+      operationId: internalSchedulePreflight
+      summary: Fire-time preflight of an executable scheduled job (orchestrator → edge)
+      description: >-
+        The orchestrator asks before every fire of an executable schedule. In S2 the answer is
+        always allow, with posture unchecked and entitlement floor; S4 changes the answer to the
+        checked values, not the shape. The optional X-Quarry-Run-Sig binding is signed over the
+        org, a newline and schedule:<schedule_id>, and it is enforced when the edge has its
+        internal secret.
+      tags:
+      - internal
+      security:
+      - runtimeToken: []
+      parameters:
+      - name: X-Quarry-Run-Sig
+        in: header
+        required: false
+        description: The run binding over org_id, a newline and schedule:<schedule_id>. Checked when the edge has its internal secret.
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalSchedulePreflightRequest'
+      responses:
+        '200':
+          description: The fire-time answer. A plain object, not an envelope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalSchedulePreflightResponse'
+        '400':
+          description: BAD_REQUEST when org_id is empty, schedule_id is empty or over 128 characters, or either contains a newline.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: UNAUTHORIZED when the runtime token or the run binding is wrong.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '501':
+          description: UNSUPPORTED when QUARRY_EDGE__RUNTIME_AUTH_TOKEN is not set on the edge.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+  /v1/internal/orgs/{org}/profiles:
+    delete:
+      operationId: internalPurgeOrgProfiles
+      summary: Erase an organization's profile families (Control Plane GDPR consumer → edge)
+      description: >-
+        Called by quarry-control's GDPR consumer when an organization erasure is published. Each
+        erasure family in the edge state runs in order, profiles first. The answer carries counts
+        only. The route is idempotent: a second call for the same org reports zeros.
+      tags:
+      - internal
+      security:
+      - internalToken: []
+      parameters:
+      - name: org
+        in: path
+        required: true
+        description: The organization id. 1 to 256 characters, with no surrounding whitespace.
+        schema:
+          type: string
+          maxLength: 256
+      responses:
+        '200':
+          description: The purge report, in an envelope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalPurgeOrgEnvelope'
+        '400':
+          description: BAD_REQUEST when the org id is empty, too long or has surrounding whitespace.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: UNAUTHORIZED when the bearer token is not QUARRY_EDGE_INTERNAL_TOKEN.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '501':
+          description: UNSUPPORTED when QUARRY_EDGE_INTERNAL_TOKEN is not set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+  /v1/internal/queues/{queue_name}/enqueue:
+    post:
+      operationId: internalQueueEnqueue
+      summary: Enqueue one request in a durable queue (orchestrator → edge)
+      description: >-
+        Only a build with the postgres-queue feature registers this route; other builds answer 404.
+        A durable frontier (DATABASE_URL) is needed. Authenticated by the
+        runtime token and by X-Quarry-Queue-Sig, the binding over org_id and the queue name. The
+        binding cannot be skipped: without the internal secret the route answers RUNTIME_NOT_READY.
+        A request_id already in the queue is refused, not queued twice (accepted is false).
+      tags:
+      - internal
+      security:
+      - runtimeToken: []
+      parameters:
+      - $ref: '#/components/parameters/QueueName'
+      - $ref: '#/components/parameters/QueueSignature'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalQueueEnqueueRequest'
+      responses:
+        '200':
+          description: Whether the queue took the request, in an envelope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalQueueMutationEnvelope'
+        '400':
+          description: BAD_REQUEST when org_id is empty or the queue name is not 1 to 128 letters, digits, hyphens or underscores.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: UNAUTHORIZED when the runtime token or the queue binding is wrong.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '501':
+          description: UNSUPPORTED when QUARRY_EDGE__RUNTIME_AUTH_TOKEN is not set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '503':
+          description: RUNTIME_NOT_READY when the queue binding (internal secret) or the durable frontier is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+  /v1/internal/queues/{queue_name}/enqueue_batch:
+    post:
+      operationId: internalQueueEnqueueBatch
+      summary: Enqueue one page's children in one call (orchestrator → edge)
+      description: >-
+        Only a build with the postgres-queue feature registers this route; other builds answer 404.
+        The orchestrator sends one call per page. Items are enqueued one by one; a failure part way
+        leaves the earlier items queued, and the retry re-sends them with the same request ids, which
+        the queue refuses as duplicates. At most 500 items. Authentication as for enqueue.
+      tags:
+      - internal
+      security:
+      - runtimeToken: []
+      parameters:
+      - $ref: '#/components/parameters/QueueName'
+      - $ref: '#/components/parameters/QueueSignature'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalQueueEnqueueBatchRequest'
+      responses:
+        '200':
+          description: How many items the queue took, in an envelope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalQueueBatchAckEnvelope'
+        '400':
+          description: BAD_REQUEST when org_id or the queue name is invalid, there are more than 500 items, or an item has no request_id or no url.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: UNAUTHORIZED when the runtime token or the queue binding is wrong.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '501':
+          description: UNSUPPORTED when QUARRY_EDGE__RUNTIME_AUTH_TOKEN is not set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '503':
+          description: RUNTIME_NOT_READY when the queue binding (internal secret) or the durable frontier is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+  /v1/internal/queues/{queue_name}/pop:
+    post:
+      operationId: internalQueuePop
+      summary: Take the next request from a durable queue (orchestrator → edge)
+      description: >-
+        Only a build with the postgres-queue feature registers this route; other builds answer 404.
+        Takes the next request of the org's queue and counts one more delivery in attempt. Workers
+        that see attempt above 1 should assume a retry is in flight. Authentication as for enqueue.
+      tags:
+      - internal
+      security:
+      - runtimeToken: []
+      parameters:
+      - $ref: '#/components/parameters/QueueName'
+      - $ref: '#/components/parameters/QueueSignature'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalQueueOrgRequest'
+      responses:
+        '200':
+          description: The next request in an envelope, or data null when the queue is empty.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalQueuedRequestEnvelope'
+        '400':
+          description: BAD_REQUEST when org_id is empty or the queue name is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: UNAUTHORIZED when the runtime token or the queue binding is wrong.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '501':
+          description: UNSUPPORTED when QUARRY_EDGE__RUNTIME_AUTH_TOKEN is not set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '503':
+          description: RUNTIME_NOT_READY when the queue binding (internal secret) or the durable frontier is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+  /v1/internal/queues/{queue_name}/ack:
+    put:
+      operationId: internalQueueAck
+      summary: Acknowledge a popped request (orchestrator → edge)
+      description: >-
+        Only a build with the postgres-queue feature registers this route; other builds answer 404.
+        The same handler answers PUT and POST. Acknowledging a request removes it from the queue.
+        Authentication as for enqueue.
+      tags:
+      - internal
+      security:
+      - runtimeToken: []
+      parameters:
+      - $ref: '#/components/parameters/QueueName'
+      - $ref: '#/components/parameters/QueueSignature'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalQueueAckRequest'
+      responses:
+        '200':
+          description: accepted is true, in an envelope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalQueueMutationEnvelope'
+        '400':
+          description: BAD_REQUEST when org_id is empty or the queue name is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: UNAUTHORIZED when the runtime token or the queue binding is wrong.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '501':
+          description: UNSUPPORTED when QUARRY_EDGE__RUNTIME_AUTH_TOKEN is not set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '503':
+          description: RUNTIME_NOT_READY when the queue binding (internal secret) or the durable frontier is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+    post:
+      operationId: internalQueueAckPost
+      summary: Acknowledge a popped request (POST, the same handler as PUT)
+      description: The same handler as the PUT above. Authentication as for enqueue.
+      tags:
+      - internal
+      security:
+      - runtimeToken: []
+      parameters:
+      - $ref: '#/components/parameters/QueueName'
+      - $ref: '#/components/parameters/QueueSignature'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalQueueAckRequest'
+      responses:
+        '200':
+          description: accepted is true, in an envelope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalQueueMutationEnvelope'
+        '400':
+          description: BAD_REQUEST when org_id is empty or the queue name is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: UNAUTHORIZED when the runtime token or the queue binding is wrong.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '501':
+          description: UNSUPPORTED when QUARRY_EDGE__RUNTIME_AUTH_TOKEN is not set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '503':
+          description: RUNTIME_NOT_READY when the queue binding (internal secret) or the durable frontier is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+components:
+  securitySchemes:
+    runtimeToken:
+      type: http
+      scheme: bearer
+      description: >-
+        The shared runtime service token, QUARRY_EDGE__RUNTIME_AUTH_TOKEN, sent as
+        Authorization: Bearer. It names the caller only; the org travels in the body and is bound
+        by a signature header.
+    internalToken:
+      type: http
+      scheme: bearer
+      description: >-
+        The shared internal service token, QUARRY_EDGE_INTERNAL_TOKEN, sent as Authorization:
+        Bearer. The edge's dev bypass (QUARRY_EDGE_AUTH_DEV_BYPASS) skips this check; it is for
+        local runs only.
+  parameters:
+    QueueName:
+      name: queue_name
+      in: path
+      required: true
+      description: 1 to 128 characters, letters, digits, hyphens and underscores.
+      schema:
+        type: string
+        maxLength: 128
+    QueueSignature:
+      name: X-Quarry-Queue-Sig
+      in: header
+      required: true
+      description: The queue binding over org_id and the queue name, keyed by the edge's internal secret.
+      schema:
+        type: string
+  schemas:
+    InternalMeta:
+      type: object
+      required:
+      - request_id
+      properties:
+        request_id:
+          type: string
+    InternalError:
+      type: object
+      required:
+      - code
+      - message
+      - retryable
+      properties:
+        code:
+          type: string
+          description: The wire code, SCREAMING_SNAKE_CASE. The routes here answer BAD_REQUEST, UNAUTHORIZED, FORBIDDEN, UNSUPPORTED, RUNTIME_NOT_READY, SECURITY_BLOCKED or INTERNAL.
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+          description: Present only when the route adds detail, such as details.zdr_refusal, details.fields or details.denial.
+        retryable:
+          type: boolean
+    InternalErrorEnvelope:
+      description: The error envelope every internal route uses. data is null and error is set.
+      type: object
+      required:
+      - meta
+      - error
+      properties:
+        data:
+          description: Always null on an error.
+        meta:
+          $ref: '#/components/schemas/InternalMeta'
+        error:
+          $ref: '#/components/schemas/InternalError'
+    InternalRunPage:
+      description: >-
+        The orchestrator's page request. The fields user_id, privacy, render, prefer_http3 and kind
+        follow the edge's request type; the public copy this file replaces did not describe them.
+      type: object
+      required:
+      - url
+      properties:
+        url:
+          type: string
+          format: uri
+        run_id:
+          type: string
+          nullable: true
+        prev_fingerprint:
+          type: string
+          nullable: true
+        cache:
+          $ref: '#/components/schemas/CachePolicy'
+        zdr:
+          type: boolean
+          default: false
+        privacy:
+          $ref: '#/components/schemas/InternalPrivacyPolicy'
+        signals:
+          $ref: '#/components/schemas/DriverSignals'
+        ingest:
+          type: boolean
+          default: false
+        org_id:
+          type: string
+          nullable: true
+          description: Required. The edge answers BAD_REQUEST when it is empty.
+        user_id:
+          type: string
+          nullable: true
+          description: The initiating user, set by the orchestrator from the verified Edge JWT. A durable ingest is stamped private to this user.
+        render:
+          $ref: '#/components/schemas/InternalRenderHints'
+        prefer_http3:
+          type: boolean
+          default: false
+        crawl:
+          $ref: '#/components/schemas/CrawlContext'
+        kind:
+          type: string
+          nullable: true
+          description: The job kind the page was fetched for, crawl or batch, or absent. Only a crawl page is metered (quarry.crawl.page).
+    InternalPrivacyPolicy:
+      description: The privacy posture of the page. Absent means the defaults (customer_private, zdr off).
+      type: object
+      properties:
+        purpose_id:
+          type: string
+          nullable: true
+        lawful_basis:
+          type: string
+          nullable: true
+        privacy_classification:
+          type: string
+          enum: [public_non_personal, customer_private, personal, sensitive_personal, credential_or_secret, zdr_ephemeral]
+          default: customer_private
+        zdr:
+          type: string
+          enum: [off, on]
+          default: off
+        retention_policy:
+          type: string
+          nullable: true
+        residency:
+          type: string
+          nullable: true
+        allow_third_party_processing:
+          type: boolean
+          default: false
+        processor_id:
+          type: string
+          nullable: true
+    InternalRenderHints:
+      description: Render hints for the browser driver.
+      type: object
+      properties:
+        wait_for_selector:
+          type: string
+          nullable: true
+        wait_for_timeout_ms:
+          type: integer
+          minimum: 0
+          nullable: true
+    CachePolicy:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum:
+          - read_write
+          - read_only
+          - write_only
+          - bypass
+          default: read_write
+        max_age_s:
+          type: integer
+          default: 0
+          description: Custom TTL in seconds (0 = use default 3600s)
+    DriverSignals:
+      type: object
+      properties:
+        actions:
+          type: array
+          items:
+            type: string
+          default: []
+          description: Actions that require a browser driver
+        screenshot:
+          type: boolean
+          default: false
+        pdf:
+          type: boolean
+          default: false
+        prior_block_signals:
+          type: integer
+          default: 0
+          deprecated: true
+          description: >-
+            Deprecated. Number of prior blocks. Under QUARRY_BLOCK_ESCALATION=legacy
+            a value of 1 selects the TLS driver and 2 or more the browser; under
+            honest (WS3.I) the field is accepted and ignored, because a block never
+            changes the identity Quarry presents.
+        profile_required:
+          type: boolean
+          default: false
+        url_type:
+          type: string
+          enum:
+          - json
+          - plain_text
+          - default
+          default: default
+    InternalRunPageResult:
+      description: >-
+        The page result the orchestrator reads (activities.RunPageResult). A plain object, not an
+        envelope. An optional field is absent when it has no value; it is never null.
+      type: object
+      required:
+      - run_id
+      - status
+      - fingerprint
+      - links
+      properties:
+        run_id:
+          type: string
+        status:
+          type: integer
+          minimum: 0
+          description: The HTTP status of the upstream fetch.
+        fingerprint:
+          type: string
+        links:
+          type: array
+          items:
+            type: string
+        content_type:
+          type: string
+          description: MIME from the upstream Content-Type header, best effort.
+        title:
+          type: string
+          description: The raw HTML title when parseable.
+        branding:
+          type: object
+          additionalProperties: true
+          description: The brand signals extracted from the page. The orchestrator forwards them as branding_extracted.
+        display_title:
+          type: string
+          description: The display title after provenance resolution.
+        title_source:
+          type: string
+          enum: [html, model, host]
+        excerpt:
+          type: string
+          description: About 300 characters of the readable text.
+        summary:
+          type: string
+          description: One sentence from the model, only when title_source is model.
+        word_count:
+          type: integer
+          minimum: 0
+        lang:
+          type: string
+        driver:
+          type: string
+          enum: [static, tls, browser]
+          description: The driver that served the fetch.
+        crawl:
+          $ref: '#/components/schemas/CrawlReport'
+    CrawlContext:
+      description: >-
+        WS14.S2. The crawl scope for one run_page call. Absent or null leaves the
+        response unchanged. An unknown key, a bad value or an over-cap list is a 400
+        whose details.fields names each path. Hosts are bare names. The seed URL is
+        used only when crawl_entire_domain is false.
+      type: object
+      properties:
+        v:
+          type: integer
+          enum:
+          - 1
+          default: 1
+        kind:
+          type: string
+          enum:
+          - crawl
+          - batch
+          default: crawl
+          description: A batch page returns no links.
+        depth:
+          type: integer
+          minimum: 0
+          default: 0
+          description: Depth of the page being run (0 for the seed).
+        max_depth:
+          type: integer
+          minimum: 0
+          default: 0
+          description: Deepest link depth to follow. 0 means unlimited.
+        seed_hosts:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            maxLength: 253
+        seed_url:
+          type: string
+          nullable: true
+          description: Absolute http or https URL. Used only when crawl_entire_domain is false.
+        scope:
+          $ref: '#/components/schemas/CrawlScope'
+        scope_mode:
+          type: string
+          enum:
+          - enforce
+          - observe
+          default: enforce
+          description: observe returns every href as sent and reports what enforce would drop.
+        robots:
+          type: string
+          enum:
+          - respect
+          - ignore
+          default: respect
+    CrawlScope:
+      type: object
+      additionalProperties: false
+      properties:
+        allow_subdomains:
+          type: boolean
+          default: false
+        allow_external_links:
+          type: boolean
+          default: false
+        crawl_entire_domain:
+          type: boolean
+          default: true
+          description: When false, only links under the seed URL's directory are followed.
+        include_paths:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            maxLength: 512
+          description: "Include and exclude lists together hold at most 100 patterns. re: matches the URL path with a regex, re_url: the full URL with a regex, url: the full URL, and a plain pattern with * or ? is an anchored glob. Other plain patterns are prefixes."
+        exclude_paths:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            maxLength: 512
+          description: A matching exclude beats any include.
+        deny_extensions:
+          type: array
+          nullable: true
+          maxItems: 100
+          items:
+            type: string
+            maxLength: 16
+          description: Extensions without the dot. null takes the built-in list of static assets and media.
+        legacy:
+          type: boolean
+          default: false
+          description: Set by the orchestrator for jobs accepted before scope existed.
+    CrawlReport:
+      description: WS14.S2. Present on a run_page response only when the request carried crawl.
+      type: object
+      required:
+      - v
+      - scope_applied
+      - mode
+      - links_seen
+      - links_allowed
+      - links_denied
+      - links_unevaluated
+      - denials
+      - hosts_added
+      properties:
+        v:
+          type: integer
+          enum:
+          - 1
+        scope_applied:
+          type: boolean
+          description: True when the edge evaluated the scope in both modes. The orchestrator ends a crawl whose report lacks it (D2-029). Only enforce changes links.
+        mode:
+          type: string
+          enum:
+          - enforce
+          - observe
+        links_seen:
+          type: integer
+          minimum: 0
+        links_allowed:
+          type: integer
+          minimum: 0
+        links_denied:
+          type: integer
+          minimum: 0
+        links_unevaluated:
+          type: integer
+          minimum: 0
+          description: Hrefs past the 5000-link evaluation cap, or every href of a batch page.
+        denials:
+          $ref: '#/components/schemas/CrawlDenials'
+        hosts_added:
+          type: array
+          items:
+            type: string
+          description: Hosts this page added to scope. Only set at depth 0.
+        crawl_delay_ms:
+          type: integer
+          nullable: true
+          minimum: 0
+          description: Reserved. Set once robots peeks supply a crawl delay.
+    CrawlDenials:
+      type: object
+      required:
+      - counts
+      - samples
+      - robots
+      properties:
+        counts:
+          type: object
+          description: Denial count by code. Codes include out_of_scope, external_host_disabled, depth_exceeded, include_pattern_miss, exclude_pattern_hit, content_type_rejected, not_crawlable, duplicate, robots_disallowed and robots_unreachable.
+          additionalProperties:
+            type: integer
+            minimum: 0
+        samples:
+          type: array
+          maxItems: 20
+          description: At most 3 per code and 20 per page.
+          items:
+            $ref: '#/components/schemas/CrawlDenialSample'
+        robots:
+          type: array
+          maxItems: 50
+          description: Robots denials, at most 50 per page. The counts keep going past that.
+          items:
+            $ref: '#/components/schemas/CrawlRobotsDenial'
+    CrawlDenialSample:
+      type: object
+      required:
+      - url
+      - code
+      - message
+      - depth
+      properties:
+        url:
+          type: string
+        code:
+          type: string
+        message:
+          type: string
+        remedy:
+          type: string
+          nullable: true
+        depth:
+          type: integer
+          minimum: 0
+    CrawlRobotsDenial:
+      type: object
+      required:
+      - url
+      - code
+      - user_agent
+      - path
+      properties:
+        url:
+          type: string
+        code:
+          type: string
+        user_agent:
+          type: string
+        path:
+          type: string
+    InternalChangeRecordRequest:
+      type: object
+      required:
+      - org_id
+      - url
+      - fresh_fingerprint
+      properties:
+        org_id:
+          type: string
+          description: The org the orchestrator verified when the schedule was created. Must not be empty.
+        url:
+          type: string
+          format: uri
+        fresh_fingerprint:
+          type: string
+          description: The fingerprint of the page as just fetched. Must not be empty.
+        run_id:
+          type: string
+          default: ''
+          description: The orchestrator's run id. It is not a ULID, so it is not linked as a typed run; the link lives in the event log.
+        zdr:
+          type: boolean
+          nullable: true
+          description: The posture of the schedule. When it is true the durable ChangeDetected event and the control webhook are suppressed.
+    InternalChangeRecordResponse:
+      type: object
+      required:
+      - status
+      - changed
+      - fingerprint
+      properties:
+        status:
+          type: string
+          enum: [new, unchanged, changed, unreachable]
+        changed:
+          type: boolean
+        fingerprint:
+          type: string
+        prev_fingerprint:
+          type: string
+          description: Absent when there was no earlier baseline.
+        baseline_id:
+          type: string
+          description: Absent unless a baseline was saved (new or changed).
+        diff_id:
+          type: string
+          description: Present only when the page changed.
+    InternalSchedulePreflightRequest:
+      type: object
+      required:
+      - org_id
+      - schedule_id
+      properties:
+        org_id:
+          type: string
+          description: Must not be empty or contain a newline.
+        schedule_id:
+          type: string
+          maxLength: 128
+          description: Must not be empty or contain a newline.
+    InternalSchedulePreflightResponse:
+      type: object
+      required:
+      - allow
+      - posture
+      - entitlement
+      properties:
+        allow:
+          type: boolean
+        posture:
+          type: string
+          description: Closed vocabulary. S2 always writes unchecked; S4 writes the checked values.
+        entitlement:
+          type: string
+          description: Closed vocabulary. S2 always writes floor; S4 writes the checked values.
+    InternalPurgeFamilyReport:
+      type: object
+      required:
+      - family
+      - rows_deleted
+      - tombstones_deleted
+      - cache_keys_deleted
+      - keys_evicted
+      properties:
+        family:
+          type: string
+        rows_deleted:
+          type: integer
+          minimum: 0
+        tombstones_deleted:
+          type: integer
+          minimum: 0
+        cache_keys_deleted:
+          type: integer
+          minimum: 0
+        keys_evicted:
+          type: boolean
+    InternalPurgeOrgReport:
+      type: object
+      required:
+      - families
+      properties:
+        families:
+          type: array
+          description: One entry per erasure family, in the order the purge ran.
+          items:
+            $ref: '#/components/schemas/InternalPurgeFamilyReport'
+    InternalPurgeOrgEnvelope:
+      type: object
+      required:
+      - data
+      - meta
+      properties:
+        data:
+          $ref: '#/components/schemas/InternalPurgeOrgReport'
+        meta:
+          $ref: '#/components/schemas/InternalMeta'
+        error:
+          description: Always null on success.
+    InternalQueuePriority:
+      type: string
+      enum: [low, default, high]
+    InternalQueueEnqueueRequest:
+      type: object
+      required:
+      - org_id
+      - request_id
+      - url
+      properties:
+        org_id:
+          type: string
+        request_id:
+          type: string
+          description: The idempotency key within the queue. A request_id already queued is refused (accepted is false).
+        url:
+          type: string
+        priority:
+          $ref: '#/components/schemas/InternalQueuePriority'
+        payload:
+          description: Any JSON value, kept with the request. Null when omitted.
+    InternalQueueBatchItem:
+      type: object
+      required:
+      - request_id
+      - url
+      properties:
+        request_id:
+          type: string
+        url:
+          type: string
+        depth:
+          type: integer
+          minimum: 0
+          default: 0
+    InternalQueueEnqueueBatchRequest:
+      type: object
+      required:
+      - org_id
+      - items
+      properties:
+        org_id:
+          type: string
+        items:
+          type: array
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/InternalQueueBatchItem'
+    InternalQueueBatchAck:
+      type: object
+      required:
+      - accepted
+      properties:
+        accepted:
+          type: integer
+          minimum: 0
+          description: How many items the queue took. An item whose request_id is already queued is not counted.
+    InternalQueueBatchAckEnvelope:
+      type: object
+      required:
+      - data
+      - meta
+      properties:
+        data:
+          $ref: '#/components/schemas/InternalQueueBatchAck'
+        meta:
+          $ref: '#/components/schemas/InternalMeta'
+        error:
+          description: Always null on success.
+    InternalQueueOrgRequest:
+      type: object
+      required:
+      - org_id
+      properties:
+        org_id:
+          type: string
+    InternalQueueAckRequest:
+      type: object
+      required:
+      - org_id
+      - request_id
+      properties:
+        org_id:
+          type: string
+        request_id:
+          type: string
+    InternalQueueMutation:
+      type: object
+      required:
+      - accepted
+      properties:
+        accepted:
+          type: boolean
+    InternalQueueMutationEnvelope:
+      type: object
+      required:
+      - data
+      - meta
+      properties:
+        data:
+          $ref: '#/components/schemas/InternalQueueMutation'
+        meta:
+          $ref: '#/components/schemas/InternalMeta'
+        error:
+          description: Always null on success.
+    InternalQueuedRequest:
+      type: object
+      required:
+      - request_id
+      - url
+      - priority
+      - payload
+      - enqueued_at
+      - attempt
+      properties:
+        request_id:
+          type: string
+        url:
+          type: string
+        priority:
+          $ref: '#/components/schemas/InternalQueuePriority'
+        payload:
+          description: The JSON value the request was enqueued with.
+        enqueued_at:
+          type: string
+          format: date-time
+        attempt:
+          type: integer
+          minimum: 0
+          description: How many times the request has been delivered, this delivery included.
+    InternalQueuedRequestEnvelope:
+      type: object
+      required:
+      - data
+      - meta
+      properties:
+        data:
+          type: [object, 'null']
+          description: The next request (InternalQueuedRequest), or null when the queue is empty.
+        meta:
+          $ref: '#/components/schemas/InternalMeta'
+        error:
+          description: Always null on success.
+tags:
+- name: internal
+  description: Plane-to-plane endpoints on the trusted bus. Never public, never in the SDKs.

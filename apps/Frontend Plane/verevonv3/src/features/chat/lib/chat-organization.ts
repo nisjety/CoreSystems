@@ -1,4 +1,5 @@
 import { chatOrganizationActionSchema, chatOrganizationSchema, type ChatOrganization, type ChatOrganizationAction } from '@/shared/actions/chat-organization'
+import { LocalizedError } from '@/shared/i18n/errors'
 import { readClientValue, writeClientJson } from '@/shared/session/client-storage'
 import type { ChatThreadHistoryItem } from './chat-thread-history'
 
@@ -17,25 +18,27 @@ export function readChatOrganization(key: string | null): ChatOrganization {
 }
 export function saveChatOrganization(key: string, state: ChatOrganization) { writeClientJson(key, state) }
 
+const projectNotFound = () => new LocalizedError({ no: 'Fant ikke prosjektet. Det kan ha blitt fjernet. Last siden på nytt.', en: 'Project not found.' })
+
 export function applyChatOrganizationAction(state: ChatOrganization, input: ChatOrganizationAction): ChatOrganization {
   const action = chatOrganizationActionSchema.parse(input)
   if (action.type === 'view.update') return { ...state, view: action.view }
   if (action.type === 'thread.move') {
-    if (action.projectId && !state.projects.some((project) => project.id === action.projectId)) throw new Error('Project not found.')
+    if (action.projectId && !state.projects.some((project) => project.id === action.projectId)) throw projectNotFound()
     const assignments = { ...state.assignments }
     if (action.projectId) assignments[action.threadId] = action.projectId
     else delete assignments[action.threadId]
     return { ...state, assignments }
   }
   if (action.type === 'project.create' || action.type === 'project.rename') {
-    if (state.projects.some((project) => project.id !== (action.type === 'project.rename' ? action.id : null) && project.name.toLocaleLowerCase() === action.name.toLocaleLowerCase())) throw new Error('A project with this name already exists.')
+    if (state.projects.some((project) => project.id !== (action.type === 'project.rename' ? action.id : null) && project.name.toLocaleLowerCase() === action.name.toLocaleLowerCase())) throw new LocalizedError({ no: 'Du har allerede et prosjekt med dette navnet. Velg et annet navn.', en: 'A project with this name already exists.' })
   }
   if (action.type === 'project.create') {
-    if (state.projects.length >= 100) throw new Error('The preview supports up to 100 projects.')
-    if (state.projects.some((project) => project.id === action.id)) throw new Error('Project already exists.')
+    if (state.projects.length >= 100) throw new LocalizedError({ no: 'Du kan ha opptil 100 prosjekter. Fjern et prosjekt før du oppretter et nytt.', en: 'The preview supports up to 100 projects.' })
+    if (state.projects.some((project) => project.id === action.id)) throw new LocalizedError({ no: 'Prosjektet finnes allerede.', en: 'Project already exists.' })
     return { ...state, projects: [...state.projects, { id: action.id, name: action.name, pinned: false }] }
   }
-  if (!state.projects.some((project) => project.id === action.id)) throw new Error('Project not found.')
+  if (!state.projects.some((project) => project.id === action.id)) throw projectNotFound()
   if (action.type === 'project.remove') return {
     ...state,
     projects: state.projects.filter((project) => project.id !== action.id),

@@ -259,7 +259,7 @@ impl KernelDriver {
                         path: opt_string(&c.path),
                         secure: c.secure,
                         http_only: c.http_only,
-                        same_site: None, // Cookie struct in session.rs predates same_site
+                        same_site: c.same_site.map(|same_site| same_site.as_cdp().to_owned()),
                     })
                     .collect()
             })
@@ -315,7 +315,7 @@ impl KernelDriver {
             .map_err(|e| {
                 QuarryError::new(
                     ErrorCode::DriverFailed,
-                    format!("kernel create failed: {e}"),
+                    format!("kernel create failed: {}", e.without_url()),
                 )
             })?;
 
@@ -337,7 +337,7 @@ impl KernelDriver {
         let parsed: CreateBrowserResponse = resp.json().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("kernel decode failed: {e}"),
+                format!("kernel decode failed: {}", e.without_url()),
             )
         })?;
 
@@ -369,7 +369,7 @@ impl KernelDriver {
             .map_err(|e| {
                 QuarryError::new(
                     ErrorCode::DriverFailed,
-                    format!("kernel state fetch failed: {e}"),
+                    format!("kernel state fetch failed: {}", e.without_url()),
                 )
             })?;
 
@@ -399,7 +399,7 @@ impl KernelDriver {
         let parsed: StateResponse = resp.json().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("kernel state decode failed: {e}"),
+                format!("kernel state decode failed: {}", e.without_url()),
             )
         })?;
 
@@ -415,6 +415,7 @@ impl KernelDriver {
                     secure: c.secure,
                     http_only: c.http_only,
                     expires: None,
+                    ..Default::default()
                 })
                 .collect(),
             local_storage: parsed
@@ -437,6 +438,7 @@ impl KernelDriver {
             }),
             locale: parsed.locale,
             timezone: parsed.timezone,
+            ..Default::default()
         };
         Ok(Some(snapshot))
     }
@@ -467,7 +469,7 @@ impl KernelDriver {
             .map_err(|e| {
                 QuarryError::new(
                     ErrorCode::DriverFailed,
-                    format!("kernel {action} failed: {e}"),
+                    format!("kernel {action} failed: {}", e.without_url()),
                 )
             })?;
 
@@ -475,7 +477,7 @@ impl KernelDriver {
         let bytes = resp.bytes().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("kernel {action} body read failed: {e}"),
+                format!("kernel {action} body read failed: {}", e.without_url()),
             )
         })?;
 
@@ -499,6 +501,7 @@ impl BrowserDriver for KernelDriver {
         self.ensure_browser(lease).await?;
         Ok(BrowserSession {
             lease: lease.clone(),
+            tab_pin: None,
             inner: Arc::new(Mutex::new(SessionInner {
                 connected: true,
                 pages_served: 0,
@@ -542,6 +545,9 @@ impl BrowserDriver for KernelDriver {
         // lose the capture than block release for the default 60s when
         // Kernel hangs. Release MUST be fast because callers hold the
         // lease until it returns.
+        // Ordering stamp = capture START (WS17.P1): a capture that began before a
+        // delete or a newer capture must not overwrite either.
+        let captured_at = chrono::Utc::now();
         let captured = if self.profiles.is_some() {
             let id_opt = self.state.lock().await.browser_id.clone();
             if let Some(id) = id_opt {
@@ -549,7 +555,7 @@ impl BrowserDriver for KernelDriver {
                 match tokio::time::timeout(Duration::from_secs(5), fetch_fut).await {
                     Ok(Ok(snap)) => snap,
                     Ok(Err(e)) => {
-                        tracing::warn!(error = %e, "kernel state fetch failed; skipping capture");
+                        tracing::warn!(error_class = e.code.wire_name(), "kernel state fetch failed; skipping capture");
                         None
                     }
                     Err(_) => {
@@ -582,11 +588,32 @@ impl BrowserDriver for KernelDriver {
         drop(state);
 
         if let (Some(store), Some(snapshot)) = (&self.profiles, captured) {
-            if let Err(e) = store
-                .save(&session.lease.org_id, &session.lease.profile_id, &snapshot)
+            let meta = crate::session::SaveMeta {
+                saved_at: captured_at,
+                owner: None,
+            };
+            match store
+                .save(
+                    &session.lease.org_id,
+                    &session.lease.profile_id,
+                    &snapshot,
+                    &meta,
+                )
                 .await
             {
-                tracing::warn!(error = %e, "kernel session capture save failed");
+                Ok(outcome) if !outcome.is_stored() => {
+                    tracing::info!(
+                        reason = outcome.reason_class(),
+                        "kernel session capture ignored"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        error_class = e.code.wire_name(),
+                        "kernel session capture save failed"
+                    );
+                }
             }
         }
         Ok(())
@@ -1106,11 +1133,13 @@ mod tests {
                         secure: true,
                         http_only: true,
                         expires: None,
+                        ..Default::default()
                     }],
                     local_storage: vec![("ui.theme".into(), "dark".into())],
                     user_agent: Some("CustomUA/1.0".into()),
                     ..Default::default()
                 },
+                &crate::session::SaveMeta::now(None),
             )
             .await
             .unwrap();

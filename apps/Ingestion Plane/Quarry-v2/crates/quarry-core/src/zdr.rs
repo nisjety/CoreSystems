@@ -16,9 +16,26 @@ pub enum ZdrMode {
     On,
 }
 
+/// The span field the process log reads to know a request runs under ZDR.
+/// A span that wants to carry it declares `zdr = tracing::field::Empty`.
+pub const ZDR_SPAN_FIELD: &str = "zdr";
+
 impl ZdrMode {
     pub fn is_active(self) -> bool {
         self == ZdrMode::On
+    }
+
+    /// Record `zdr = true` on the current span when this mode is active, so the
+    /// log filter can drop events that carry a URL, query or error text from
+    /// here on (and from every child span). A no-op when ZDR is off, when there
+    /// is no current span, or when the span did not declare the field.
+    ///
+    /// The mark is set by the earliest code that learns the posture and is
+    /// never lowered: a later `record(zdr, false)` does not clear it.
+    pub fn mark_current_span(self) {
+        if self.is_active() {
+            tracing::Span::current().record(ZDR_SPAN_FIELD, true);
+        }
     }
 }
 

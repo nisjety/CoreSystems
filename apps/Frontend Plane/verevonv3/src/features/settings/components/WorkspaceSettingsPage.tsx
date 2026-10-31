@@ -59,7 +59,7 @@ import {
   type SupportAIMode,
 } from '@/shared/api/organization-client'
 import { hasZeroRetentionModel, listModels } from '@/shared/api/chat-client'
-import { translateApiError } from '@/shared/i18n/errors'
+import { LocalizedError, translateApiError } from '@/shared/i18n/errors'
 import { triggerSync } from '@/shared/api/integrations-client'
 import { ApiError } from '@/shared/api/http'
 import {
@@ -321,7 +321,7 @@ export function VerevonWorkspaceSettingsPage(props: {
       setBillingAccount(await loadBillingAccount(signal))
     } catch (reason) {
       if (reason instanceof Error && reason.name === 'AbortError') return
-      setBillingError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke laste faktureringskonto.', 'Could not load billing account.'))
+      setBillingError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke laste faktureringskonto.', en: 'Could not load billing account.' }))
     } finally {
       if (!signal?.aborted) setBillingLoading(false)
     }
@@ -1053,10 +1053,10 @@ function BillingSection(props: {
           window.location.assign(session.url!)
           return
         default:
-          throw new Error(i18n.tr('Kasseøkten inneholdt ikke en gyldig betalingsflate.', 'Checkout session did not include a valid payment surface.'))
+          throw new LocalizedError({ no: 'Kasseøkten inneholdt ikke en gyldig betalingsflate. Prøv igjen, eller kontakt support.', en: 'Checkout session did not include a valid payment surface. Try again, or contact support.' })
       }
     } catch (reason) {
-      setCheckoutError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke starte kassen.', 'Could not start checkout.'))
+      setCheckoutError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke starte kassen.', en: 'Could not start checkout.' }))
     } finally {
       setStartingCheckout(false)
     }
@@ -1081,7 +1081,7 @@ function BillingSection(props: {
       })
 
       if (!isCheckoutActivatingStatus(result.status)) {
-        throw new Error(`${i18n.tr('Betalingsstatus er', 'Payment status is')} ${result.status}.`)
+        throw new LocalizedError({ no: `Betalingen er ikke fullført (status: ${result.status}). Prøv igjen, eller kontakt support.`, en: `The payment is not complete (status: ${result.status}). Try again, or contact support.` })
       }
 
       setCheckoutSession(undefined)
@@ -1091,7 +1091,7 @@ function BillingSection(props: {
       await props.onRefresh()
       clearCheckoutParams()
     } catch (reason) {
-      setCheckoutError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke bekrefte kassen.', 'Could not confirm checkout.'))
+      setCheckoutError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke bekrefte kassen.', en: 'Could not confirm checkout.' }))
     } finally {
       setConfirmingCheckout(false)
     }
@@ -1435,7 +1435,7 @@ function OrgSecuritySection() {
         setZdrError(translateApiError(reason, i18n.tr))
       } else {
         setZdrError(
-          reason instanceof Error ? reason.message : i18n.tr('Kunne ikke oppdatere Zero Data Retention.', 'Could not update Zero Data Retention.'),
+          translateApiError(reason, i18n.tr, { no: 'Kunne ikke oppdatere Zero Data Retention.', en: 'Could not update Zero Data Retention.' }),
         )
       }
     } finally {
@@ -1455,7 +1455,7 @@ function OrgSecuritySection() {
     } catch (reason) {
       setSupportAiMode(previous)
       setSupportAiError(
-        reason instanceof Error ? reason.message : i18n.tr('Kunne ikke oppdatere Support AI-modus.', 'Could not update the Support AI mode.'),
+        translateApiError(reason, i18n.tr, { no: 'Kunne ikke oppdatere Support AI-modus.', en: 'Could not update the Support AI mode.' }),
       )
     } finally {
       setSupportAiBusy(false)
@@ -1474,7 +1474,7 @@ function OrgSecuritySection() {
     } catch (reason) {
       setAgentPolicy(previous)
       setAgentPolicyError(
-        reason instanceof Error ? reason.message : i18n.tr('Kunne ikke oppdatere minnepolicyen.', 'Could not update the memory policy.'),
+        translateApiError(reason, i18n.tr, { no: 'Kunne ikke oppdatere minnepolicyen.', en: 'Could not update the memory policy.' }),
       )
     } finally {
       setAgentPolicyBusy(false)
@@ -1967,7 +1967,16 @@ function IntegrationsSection() {
                     </Show>
                   </div>
                   <span>{rowSyncProgress() ? `${integration.detail} · ${rowSyncProgress()}` : integration.detail}</span>
+                  <Show when={integration.provider.key === 'google'}>
+                    <span>{i18n.tr('Tilkobling ber om lesetilgang til Workspace, Search Console og Analytics. Ingen sending eller annonseendringer.', 'Connecting requests read access to Workspace, Search Console and Analytics. No sending or ad changes.')}</span>
+                  </Show>
+                  <Show when={integration.provider.key === 'microsoft'}>
+                    <span>{i18n.tr('Tilkobling ber om lesetilgang til Microsoft 365. Clarity kobles til separat.', 'Connecting requests read access to Microsoft 365. Clarity connects separately.')}</span>
+                  </Show>
                   <div class="verevon-settings-integration-caps">
+                    <Show when={!integration.connection}>
+                      <span>{i18n.tr('Mulige funksjoner etter separat godkjenning:', 'Available capabilities subject to separate approval:')}</span>
+                    </Show>
                     <Show when={groups().reads.length}>
                       <span class="verevon-settings-integration-caps__group">
                         <em>{i18n.tr('Leser', 'Reads')}</em> {groups().reads.join(' · ')}

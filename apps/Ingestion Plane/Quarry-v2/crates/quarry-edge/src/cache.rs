@@ -1,10 +1,17 @@
-//! Page-level Redis cache keyed by fingerprint.
+//! Page-level Redis cache keyed by org and fingerprint.
 //!
-//! Stores `NormalizedOutput` JSON at `quarry:page:{fingerprint}` with a TTL.
-//! Lookups are tried on the scrape path when the client supplies
+//! Stores `NormalizedOutput` JSON at `quarry:page:{org_id}:{fingerprint}` with a
+//! TTL. Lookups are tried on the scrape path when the client supplies
 //! `prev_fingerprint`; on success the cached value is returned and the fetch
 //! is skipped entirely. On miss the fresh result is written back keyed by the
 //! newly computed fingerprint.
+//!
+//! The org segment is a hard tenant boundary. A fingerprint is a hash of the
+//! raw page body, so anyone can compute it for a public page; without the org
+//! in the key, a caller could send another org's fingerprint as
+//! `prev_fingerprint` and read that org's cached output (final URL, title,
+//! artifact refs). An empty org id is never a key: reads miss and writes are
+//! dropped.
 
 use std::time::Duration;
 
@@ -28,20 +35,41 @@ impl PageCache {
         }
     }
 
-    fn key(fingerprint: &str) -> String {
-        format!("quarry:page:{fingerprint}")
+    /// `quarry:page:{org_id}:{fingerprint}`. `None` for an empty org id, which
+    /// must never address the cache.
+    fn key(org_id: &str, fingerprint: &str) -> Option<String> {
+        let org_id = org_id.trim();
+        if org_id.is_empty() {
+            return None;
+        }
+        Some(format!("quarry:page:{org_id}:{fingerprint}"))
     }
 
     /// Returns `Some(out)` on cache hit, `None` on miss or any recoverable
     /// backend/deserialization error. Cache failures must never fail the
     /// request path.
-    pub async fn get(&self, fingerprint: &str) -> Option<NormalizedOutput> {
+    pub async fn get(&self, org_id: &str, fingerprint: &str) -> Option<NormalizedOutput> {
+        let key = Self::key(org_id, fingerprint)?;
         let mut conn = self.conn.clone();
-        let raw: Option<String> = conn.get(Self::key(fingerprint)).await.ok()?;
-        let raw = raw?;
+        let raw: Option<String> = match conn.get(key).await {
+            Ok(raw) => raw,
+            Err(_) => {
+                crate::metrics::record_cache("page", "error");
+                return None;
+            }
+        };
+        let Some(raw) = raw else {
+            crate::metrics::record_cache("page", "miss");
+            return None;
+        };
         match serde_json::from_str::<NormalizedOutput>(&raw) {
-            Ok(out) => Some(out),
+            Ok(out) => {
+                crate::metrics::record_cache("page", "hit");
+                Some(out)
+            }
             Err(err) => {
+                crate::metrics::record_cache("page", "error");
+                // zdr-log-ok: the page cache is never read for a ZDR request (every caller gates on the ZDR guard), so only non-ZDR work reaches this line
                 tracing::warn!(error = %err, fingerprint, "page cache: deserialize failed");
                 None
             }
@@ -50,18 +78,29 @@ impl PageCache {
 
     /// Writes JSON-encoded `NormalizedOutput` under the computed fingerprint
     /// with the configured default TTL.
-    pub async fn put(&self, fingerprint: &str, out: &NormalizedOutput) -> redis::RedisResult<()> {
-        self.put_with_ttl(fingerprint, out, self.ttl_secs).await
+    pub async fn put(
+        &self,
+        org_id: &str,
+        fingerprint: &str,
+        out: &NormalizedOutput,
+    ) -> redis::RedisResult<()> {
+        self.put_with_ttl(org_id, fingerprint, out, self.ttl_secs)
+            .await
     }
 
     /// Like [`put`] but with a per-call TTL override (in seconds). A `ttl_secs`
     /// of zero is clamped to 1 to satisfy Redis `SETEX` semantics.
     pub async fn put_with_ttl(
         &self,
+        org_id: &str,
         fingerprint: &str,
         out: &NormalizedOutput,
         ttl_secs: u64,
     ) -> redis::RedisResult<()> {
+        let Some(key) = Self::key(org_id, fingerprint) else {
+            // No org, no cache entry: dropping the write is the safe outcome.
+            return Ok(());
+        };
         let mut conn = self.conn.clone();
         let encoded = serde_json::to_string(out).map_err(|e| {
             redis::RedisError::from((
@@ -70,8 +109,7 @@ impl PageCache {
                 e.to_string(),
             ))
         })?;
-        conn.set_ex::<_, _, ()>(Self::key(fingerprint), encoded, ttl_secs.max(1))
-            .await
+        conn.set_ex::<_, _, ()>(key, encoded, ttl_secs.max(1)).await
     }
 }
 
@@ -129,10 +167,25 @@ impl SearchCache {
     /// `Some(value)` on hit; `None` on miss or any recoverable error.
     pub async fn get<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
         let mut conn = self.conn.clone();
-        let raw: Option<String> = conn.get(key).await.ok()?;
-        match serde_json::from_str::<T>(&raw?) {
-            Ok(v) => Some(v),
+        let raw: Option<String> = match conn.get(key).await {
+            Ok(raw) => raw,
+            Err(_) => {
+                crate::metrics::record_cache("search", "error");
+                return None;
+            }
+        };
+        let Some(raw) = raw else {
+            crate::metrics::record_cache("search", "miss");
+            return None;
+        };
+        match serde_json::from_str::<T>(&raw) {
+            Ok(v) => {
+                crate::metrics::record_cache("search", "hit");
+                Some(v)
+            }
             Err(err) => {
+                crate::metrics::record_cache("search", "error");
+                // zdr-log-ok: the search cache is never read for a ZDR request (the caller skips the lookup when zdr is set), so only non-ZDR work reaches this line
                 tracing::warn!(error = %err, key, "search cache: deserialize failed");
                 None
             }
@@ -200,6 +253,28 @@ mod fingerprint_tests {
         let a = fingerprint("https://a.com", &[], false);
         let b = fingerprint("https://b.com", &[], false);
         assert_ne!(a, b);
+    }
+}
+
+#[cfg(test)]
+mod page_cache_tests {
+    use super::PageCache;
+
+    #[test]
+    fn page_cache_key_includes_the_org() {
+        // One fingerprint, two orgs: two keys. A fingerprint alone must never
+        // address another org's entry.
+        let a = PageCache::key("org_a", "fp1").expect("org a key");
+        let b = PageCache::key("org_b", "fp1").expect("org b key");
+        assert_ne!(a, b);
+        assert_eq!(a, "quarry:page:org_a:fp1");
+        assert_eq!(b, "quarry:page:org_b:fp1");
+    }
+
+    #[test]
+    fn page_cache_key_refuses_an_empty_org() {
+        assert!(PageCache::key("", "fp1").is_none());
+        assert!(PageCache::key("   ", "fp1").is_none());
     }
 }
 

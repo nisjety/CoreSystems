@@ -64,7 +64,9 @@ import { nodeKey } from '@/shared/chat-nodes/derive'
 import type { AutonomyRung, ChatPlanStep, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
 import { isSafeLinkHref } from '../lib/safe-href'
 import { readChatThreadHistory } from '../lib/chat-thread-history'
-import { chatAppearanceActive } from '../lib/chat-appearance-preview'
+import { buildPromptSuggestions, type PromptSuggestion } from '../lib/prompt-suggestions'
+import { listConversations, type LiveTicket } from '@/shared/api/inbox-client'
+import { listNotifications, type Notification } from '@/shared/api/notifications-client'
 import { MIN_PLAN_JUSTIFICATION_CHARS } from '@/shared/api/chat-client'
 import { answerProcessingNote } from '@/shared/api/privacy-tier'
 import { correctMemory, deleteMemory, listMemories, rememberMemory } from '@/shared/api/memory-client'
@@ -4218,28 +4220,116 @@ export function EmptyChatState(props: {
    */
   onResumeThread: (threadId: string) => void
   /** Names the actual grounding scope when the session knows it. */
+  orgId?: string
   orgName?: string
   /** Greets the person by name when the session knows it. First name only. */
+  userId?: string
   userName?: string
 }) {
   const i18n = useI18n()
   const [ideasOpen, setIdeasOpen] = createSignal(false)
+  const [inboxOpen, setInboxOpen] = createSignal(true)
+  const [otherOpen, setOtherOpen] = createSignal(false)
+  const [suggestions, setSuggestions] = createSignal<PromptSuggestion[]>([])
+  const [suggestionStatus, setSuggestionStatus] = createSignal<'loading' | 'ready' | 'unavailable'>('loading')
+  const inboxSuggestions = createMemo(() => suggestions().filter((item) => item.source === 'inbox'))
+  const otherSuggestions = createMemo(() => suggestions().filter((item) => item.source !== 'inbox'))
+  const inboxPanelId = createUniqueId()
+  const otherPanelId = createUniqueId()
+  createEffect(
+    () => ({ status: suggestionStatus(), inboxCount: inboxSuggestions().length, otherCount: otherSuggestions().length }),
+    ({ status, inboxCount, otherCount }) => {
+      if (status === 'ready' && inboxCount === 0 && otherCount > 0) setOtherOpen(true)
+    },
+  )
+  createEffect(() => ({ orgId: props.orgId, userId: props.userId }), ({ orgId, userId }) => {
+    setSuggestions([])
+    if (!orgId || !userId) {
+      setSuggestionStatus('ready')
+      return
+    }
+
+    setSuggestionStatus('loading')
+    let controller: AbortController | null = null
+    const refresh = () => {
+      controller?.abort()
+      controller = new AbortController()
+      const { signal } = controller
+      let notifications: Notification[] = []
+      let conversations: LiveTicket[] = []
+      let finished = 0
+      let failed = 0
+      const publish = () => {
+        if (signal.aborted) return
+        const next = buildPromptSuggestions({ notifications, conversations, orgId, userId })
+        // Keep the previous suggestions until both feeds confirm they are gone.
+        if (next.length || finished === 2) {
+          setSuggestions(next)
+          setSuggestionStatus(next.length || !failed ? 'ready' : 'unavailable')
+        }
+      }
+      void listNotifications(signal)
+        .then((items) => { notifications = Array.isArray(items) ? items : [] }, () => { failed += 1 })
+        .finally(() => { finished += 1; publish() })
+      void listConversations(orgId, { limit: 30, state: 'open' }, signal)
+        .then((result) => { conversations = result.tickets }, () => { failed += 1 })
+        .finally(() => { finished += 1; publish() })
+    }
+    refresh()
+    const timer = window.setInterval(() => { if (!document.hidden) refresh() }, 60_000)
+    const onVisible = () => { if (!document.hidden) refresh() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      controller?.abort()
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  })
   // Solid 2 evaluates component bodies untracked. Capture the prop through a
   // memo before handing it to <Show>, instead of reading the reactive prop
   // directly in the component body (STRICT_READ_UNTRACKED).
   const orgName = createMemo(() => props.orgName?.trim() || null)
   const scopeDescription = createMemo(() => {
     const name = orgName()
+    const shortName = name?.replace(/\s+(AS|ASA)$/i, '') ?? null
+    const possessiveName = shortName ? `${shortName}${/s$/i.test(shortName) ? '' : 's'}` : null
     return name
       ? i18n.tr(
-          `Verevon søker i kunnskapsbasen og systemene til ${name}, viser hvor svaret kommer fra, og lar deg godkjenne før noe sendes. Prøv et eksempel under, eller still et konkret spørsmål.`,
-          `Verevon searches ${name}'s knowledge base and systems, shows where the answer comes from, and lets you approve before anything is sent. Try an example below, or ask something specific.`,
+          `Spør om noe dere jobber med. Verevon finner svar i ${possessiveName} kunnskap og systemer, viser kildene og foreslår neste steg. Du godkjenner før noe sendes videre. Prøv et eksempel, eller skriv ditt eget spørsmål.`,
+          `Ask about something you're working on. Verevon finds answers in ${name}'s knowledge and systems, shows its sources, and suggests next steps. You approve before anything is sent. Try an example, or write your own question.`,
         )
       : i18n.tr(
-          'Verevon søker i kildene og systemene dere allerede bruker, viser hvor svaret kommer fra, og lar deg godkjenne før noe sendes. Prøv et eksempel under, eller still et konkret spørsmål.',
-          'Verevon searches the sources and systems you already use, shows where the answer comes from, and lets you approve before anything is sent. Try an example below, or ask something specific.',
+          'Spør om noe dere jobber med. Verevon finner svar i organisasjonens kunnskap og systemer, viser kildene og foreslår neste steg. Du godkjenner før noe sendes videre. Prøv et eksempel, eller skriv ditt eget spørsmål.',
+          "Ask about something you're working on. Verevon finds answers in your organization's knowledge and systems, shows its sources, and suggests next steps. You approve before anything is sent. Try an example, or write your own question.",
         )
   })
+
+  const promptForSuggestion = (suggestion: PromptSuggestion) => suggestion.source === 'alert'
+    ? i18n.tr(
+        `Gå gjennom varselet «${suggestion.title}». Finn hva som har skjedd i tilgjengelige kilder, forklar hva det betyr, og foreslå neste steg. Ikke utfør eller send noe før jeg godkjenner.`,
+        `Review the alert “${suggestion.title}”. Find what happened in available sources, explain what it means, and suggest next steps. Do not act or send anything before I approve.`,
+      )
+    : i18n.tr(
+        `Gå gjennom innbokssamtalen «${suggestion.title}» (ID: ${suggestion.id.slice(6)}). Oppsummer hva som trenger oppfølging, finn relevant kunnskap og foreslå et svar jeg kan godkjenne.`,
+        `Review inbox conversation “${suggestion.title}” (ID: ${suggestion.id.slice(6)}). Summarize what needs follow-up, find relevant knowledge, and suggest a reply I can approve.`,
+      )
+
+  const displayTitleForSuggestion = (suggestion: PromptSuggestion) => suggestion.source === 'inbox'
+    ? suggestion.title.split(/\s+\|\s+/)[0]
+    : suggestion.title
+
+  const suggestionRow = (suggestion: PromptSuggestion) => (
+    <button
+      type="button"
+      class="verevon-chat-empty__activity-item"
+      onClick={() => props.onSelectPrompt(promptForSuggestion(suggestion))}
+    >
+      <strong>{suggestion.source === 'alert'
+        ? i18n.tr(`Undersøk ${displayTitleForSuggestion(suggestion)}`, `Investigate ${displayTitleForSuggestion(suggestion)}`)
+        : i18n.tr(`Følg opp ${displayTitleForSuggestion(suggestion)}`, `Follow up ${displayTitleForSuggestion(suggestion)}`)}</strong>
+      <small>{suggestion.detail}</small>
+    </button>
+  )
 
   /**
    * A greeting instead of a question. "Hva vil du få gjort?" asked the user to
@@ -4280,34 +4370,82 @@ export function EmptyChatState(props: {
   const starterPrompts = () => [
     {
       description: i18n.tr('Trekk ut beslutninger, risiko og neste steg.', 'Extract decisions, risks, and next steps.'),
-      icon: FileText,
       label: i18n.tr('Oppsummer et dokument', 'Summarize a document'),
       prompt: i18n.tr('Oppsummer dokumentet jeg legger ved. Fremhev beslutninger, risiko og neste steg.', 'Summarize the document I attach. Highlight decisions, risks, and next steps.'),
     },
     {
       description: i18n.tr('Finn et pålitelig svar med sporbare kilder.', 'Find a reliable answer with traceable sources.'),
-      icon: Search,
       label: i18n.tr('Undersøk med kilder', 'Research with sources'),
       prompt: i18n.tr('Undersøk dette spørsmålet grundig og vis hvilke kilder som støtter konklusjonen.', 'Research this question thoroughly and show which sources support the conclusion.'),
     },
     {
       description: i18n.tr('Gå fra idé til et nyttig førsteutkast.', 'Turn an idea into a useful first draft.'),
-      icon: Pencil,
       label: i18n.tr('Lag et førsteutkast', 'Create a first draft'),
       prompt: i18n.tr('Lag et tydelig førsteutkast som jeg kan gjennomgå og forbedre.', 'Create a clear first draft that I can review and improve.'),
+    },
+    {
+      description: i18n.tr('Prioriter nye hendelser og åpne saker.', 'Prioritize recent events and open cases.'),
+      label: i18n.tr('Lag en dagsbrief', 'Prepare a daily brief'),
+      prompt: i18n.tr('Lag en kort dagsbrief fra tilgjengelige varsler og åpne saker. Skill mellom bekreftede fakta, mulige risikoer og anbefalte neste steg. Si tydelig fra hvis en kilde ikke er tilgjengelig.', 'Prepare a short daily brief from available alerts and open cases. Separate confirmed facts, possible risks, and recommended next steps. Say clearly if a source is unavailable.'),
+    },
+    {
+      description: i18n.tr('Samle fremdrift, avvik og beslutninger.', 'Bring progress, exceptions, and decisions together.'),
+      label: i18n.tr('Lag en statusrapport', 'Create a status report'),
+      prompt: i18n.tr('Lag en statusrapport for arbeidet jeg beskriver. Bruk bare tilgjengelige kilder, vis hvor opplysningene kommer fra, og marker det som må avklares før rapporten kan deles.', 'Create a status report for the work I describe. Use only available sources, show where the information comes from, and mark what needs clarification before the report can be shared.'),
+    },
+    {
+      description: i18n.tr('Finn avvik før de blir liggende.', 'Find exceptions before they linger.'),
+      label: i18n.tr('Se etter avvik', 'Review exceptions'),
+      prompt: i18n.tr('Gå gjennom dokumentene og tallene jeg legger ved for avvik, manglende informasjon og mulige feil. Ranger funnene etter konsekvens, vis kilder og foreslå hva som bør kontrolleres videre. Ikke endre noe uten godkjenning.', 'Review the documents and figures I attach for exceptions, missing information, and possible errors. Rank findings by impact, show sources, and suggest what to check next. Do not change anything without approval.'),
     },
   ]
 
   return (
     <div class="verevon-chat-empty">
-      <div class="verevon-chat-empty__inner" data-ideas-open={ideasOpen() ? 'true' : 'false'}>
+      <div class="verevon-chat-empty__inner">
         <div class="verevon-chat-empty__heading">
           <div class="verevon-chat-empty__brand" aria-hidden="true">
             <span class="verevon-chat-empty__mark"><span /></span>
             <span>Verevon</span>
           </div>
           <h1>{greeting()}</h1>
-          <p>{scopeDescription()}</p>
+          <Show when={suggestionStatus() === 'ready' && suggestions().length === 0}>
+            <p>{scopeDescription()}</p>
+          </Show>
+          <Show when={suggestionStatus() === 'ready' && suggestions().length > 0}>
+            <p>{i18n.tr('Dette kan trenge oppfølging', 'This may need follow-up')}</p>
+          </Show>
+          <Show when={suggestionStatus() === 'unavailable'}>
+            <p>{i18n.tr('Jeg får ikke hentet hendelser akkurat nå. Du kan fortsatt stille et spørsmål.', "I can't load recent activity right now. You can still ask a question.")}</p>
+          </Show>
+          <Show when={suggestions().length > 0}>
+            <div class="verevon-chat-empty__activity" role="group" aria-label={i18n.tr('Forslag basert på ny aktivitet', 'Suggestions from recent activity')}>
+              <section class="verevon-chat-empty__activity-source">
+                <button type="button" class="verevon-chat-empty__source-toggle verevon-chat-empty__source-toggle--inbox" aria-expanded={inboxOpen() ? 'true' : 'false'} aria-controls={inboxPanelId} onClick={() => setInboxOpen((open) => !open)}>
+                  <span>{i18n.tr('Innboks', 'Inbox')}</span><ChevronDown size={14} aria-hidden="true" />
+                </button>
+                <Show when={inboxOpen()}>
+                  <div class="verevon-chat-empty__source-items" id={inboxPanelId}>
+                    <Show when={inboxSuggestions().length} fallback={<p class="verevon-chat-empty__source-empty">{i18n.tr('Ingen innbokssaker akkurat nå.', 'No inbox cases right now.')}</p>}>
+                      <For each={inboxSuggestions()}>{suggestionRow}</For>
+                    </Show>
+                  </div>
+                </Show>
+              </section>
+              <section class="verevon-chat-empty__activity-source">
+                <button type="button" class="verevon-chat-empty__source-toggle" aria-expanded={otherOpen() ? 'true' : 'false'} aria-controls={otherPanelId} onClick={() => setOtherOpen((open) => !open)}>
+                  <span>{i18n.tr('Annet', 'Other')}</span><ChevronDown size={14} aria-hidden="true" />
+                </button>
+                <Show when={otherOpen()}>
+                  <div class="verevon-chat-empty__source-items" id={otherPanelId}>
+                    <Show when={otherSuggestions().length} fallback={<p class="verevon-chat-empty__source-empty">{i18n.tr('Ingen andre forslag akkurat nå.', 'No other suggestions right now.')}</p>}>
+                      <For each={otherSuggestions()}>{suggestionRow}</For>
+                    </Show>
+                  </div>
+                </Show>
+              </section>
+            </div>
+          </Show>
           {/* The suggested first move. Plan item 17 / designpixil's "two
               sentences and a suggestion": the scope line above says what
               Verevon can reach, this says what to do with it right now.
@@ -4323,7 +4461,7 @@ export function EmptyChatState(props: {
               `selectChatThread` fires the same event the sidebar's thread
               rows do, so this reuses the one working resume path rather than
               adding a second. */}
-          <Show when={resumeTarget()}>
+          <Show when={suggestionStatus() === 'ready' && suggestions().length === 0 ? resumeTarget() : null}>
             {(target) => (
               <button
                 type="button"
@@ -4340,35 +4478,30 @@ export function EmptyChatState(props: {
           </Show>
         </div>
         <div class="verevon-chat-empty__composer">{props.children}</div>
-        <Show when={chatAppearanceActive('welcome')}>
-          <button
-            type="button"
-            class="chat-appearance-ideas-toggle"
-            aria-expanded={ideasOpen() ? 'true' : 'false'}
-            aria-controls="chat-appearance-prompt-ideas"
-            onClick={() => setIdeasOpen((open) => !open)}
-          >
-            {ideasOpen() ? i18n.tr('Skjul eksempler', 'Hide prompt ideas') : i18n.tr('Vis eksempler', 'Show prompt ideas')}
-            <ChevronRight size={14} aria-hidden="true" />
-          </button>
+        <Show when={suggestionStatus() === 'ready'}>
+          <div class="verevon-chat-empty__prompts" id="chat-appearance-prompt-ideas">
+            <button type="button" class="verevon-chat-empty__examples-toggle" aria-expanded={ideasOpen() ? 'true' : 'false'} aria-controls="chat-appearance-prompt-list" onClick={() => setIdeasOpen((open) => !open)}>
+              {ideasOpen() ? i18n.tr('Skjul eksempler', 'Hide examples') : i18n.tr('Vis eksempler', 'Show examples')}
+              <ChevronRight size={14} aria-hidden="true" />
+            </button>
+            <Show when={ideasOpen()}>
+              <div class="verevon-chat-empty__prompt-list" id="chat-appearance-prompt-list">
+                <For each={starterPrompts()}>
+                  {({ label, description, prompt }) => (
+                    <button
+                      type="button"
+                      class="verevon-chat-starter"
+                      aria-label={label}
+                      onClick={() => props.onSelectPrompt(prompt)}
+                    >
+                      <span class="verevon-chat-starter__copy"><strong>{label}</strong><small>{description}</small></span>
+                    </button>
+                  )}
+                </For>
+              </div>
+            </Show>
+          </div>
         </Show>
-        <div class="verevon-chat-empty__prompts" id="chat-appearance-prompt-ideas">
-          <span class="verevon-chat-empty__prompt-label">{i18n.tr('Prøv for eksempel', 'Try one of these')}</span>
-          <For each={starterPrompts()}>
-            {({ label, description, prompt, icon: Icon }) => (
-              <button
-                type="button"
-                class="verevon-chat-starter"
-                aria-label={label}
-                onClick={() => props.onSelectPrompt(prompt)}
-              >
-                <span class="verevon-chat-starter__icon"><Icon size={15} strokeWidth={1.9} /></span>
-                <span class="verevon-chat-starter__copy"><strong>{label}</strong><small>{description}</small></span>
-                <ChevronRight size={15} aria-hidden="true" />
-              </button>
-            )}
-          </For>
-        </div>
         <p class="verevon-chat-empty__trust">{i18n.tr('Organisasjonens kunnskap er standard. Nettbruk er alltid synlig og valgfri.', 'Organisation knowledge is the default. Web access is always visible and optional.')}</p>
       </div>
     </div>

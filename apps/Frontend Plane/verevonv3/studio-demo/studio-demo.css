@@ -1,0 +1,35 @@
+html,
+body,
+#root {
+  height: 100%;
+  min-height: 100%;
+}
+
+html {
+  min-height: 100vh;
+}
+
+.studio-demo-shell .core-navbar__offline-badge {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--panel);
+  padding: 0 10px;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.studio-demo-shell .verevon-navbar-search-trigger:disabled,
+.studio-demo-shell .core-breadcrumb__workspace:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.studio-demo-shell .core-breadcrumb__workspace:disabled:hover {
+  background: transparent;
+  color: var(--verevon-text-soft);
+}

@@ -1,0 +1,187 @@
+config {
+  type: "table",
+  schema: "xero_gold_common",
+  description: "Daily external market FX bridge from an observed currency to NOK. It preserves source rate date and fill-forward state; it does not populate any Xero financial amount by itself.",
+  assertions: {
+    nonNull: ["currency_market_rate_daily_key", "from_currency_code", "to_currency_code", "calendar_date", "has_market_rate"],
+    uniqueKey: ["currency_market_rate_daily_key"]
+  }
+}
+
+WITH valid_nok_rates AS (
+  SELECT *
+  FROM ${ref("dw_1_silver_xero", "dim_currency_market_rate")}
+  WHERE to_currency_code = 'NOK'
+    AND market_exchange_rate_to_currency IS NOT NULL
+    AND market_exchange_rate_to_currency > 0
+), canonical_nok_rates AS (
+  SELECT * EXCEPT(rate_rank)
+  FROM (
+    SELECT
+      rate.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY from_currency_code, to_currency_code, rate_date
+        ORDER BY is_inverse_rate ASC, source_timestamp DESC, currency_market_rate_key DESC
+      ) AS rate_rank
+    FROM valid_nok_rates AS rate
+  )
+  WHERE rate_rank = 1
+), reference_dates AS (
+  SELECT MAX(invoice_date_local) AS max_reference_date
+  FROM ${ref("dw_1_silver_xero", "fact_invoice")}
+
+  UNION ALL
+
+  SELECT MAX(DATE(payment_date))
+  FROM ${ref("dw_1_silver_xero", "fact_payment")}
+
+  UNION ALL
+
+  SELECT MAX(transaction_date)
+  FROM ${ref("dw_1_silver_xero", "fact_general_ledger")}
+
+  UNION ALL
+
+  SELECT MAX(transaction_date_local)
+  FROM ${ref("dw_1_silver_xero", "fact_bank_transaction")}
+
+  UNION ALL
+
+  SELECT MAX(order_date_local)
+  FROM ${ref("dw_1_silver_xero", "fact_purchase_order")}
+
+  UNION ALL
+
+  SELECT MAX(quote_date_local)
+  FROM ${ref("dw_1_silver_xero", "fact_quote")}
+), rate_bounds AS (
+  SELECT
+    MIN(rate_date) AS min_rate_date,
+    GREATEST(
+      MAX(rate_date),
+      COALESCE((SELECT MAX(max_reference_date) FROM reference_dates), MAX(rate_date))
+    ) AS max_rate_date
+  FROM canonical_nok_rates
+), date_spine AS (
+  SELECT
+    date_key,
+    date_day AS calendar_date
+  FROM ${ref("xero_gold_common", "dim_date")}
+  CROSS JOIN rate_bounds
+  WHERE date_day >= min_rate_date
+    AND date_day <= max_rate_date
+), currency_spine AS (
+  SELECT from_currency_code
+  FROM canonical_nok_rates
+
+  UNION DISTINCT
+
+  SELECT base_currency
+  FROM ${ref("xero_gold_common", "dim_company")}
+  WHERE base_currency IS NOT NULL
+
+  UNION DISTINCT
+
+  SELECT 'NOK'
+), market_rate_candidates AS (
+  SELECT
+    date_spine.date_key,
+    date_spine.calendar_date,
+    currency_spine.from_currency_code,
+    'NOK' AS to_currency_code,
+    rate.currency_market_rate_key,
+    rate.rate_date AS market_rate_date,
+    rate.market_exchange_rate_to_currency AS market_exchange_rate_to_nok,
+    rate.rate_source AS market_rate_source,
+    rate.source_timestamp,
+    ROW_NUMBER() OVER (
+      PARTITION BY currency_spine.from_currency_code, date_spine.calendar_date
+      ORDER BY
+        CASE WHEN rate.rate_date IS NULL THEN 1 ELSE 0 END,
+        rate.rate_date DESC,
+        rate.source_timestamp DESC
+    ) AS rate_rank
+  FROM date_spine
+  CROSS JOIN currency_spine
+  LEFT JOIN canonical_nok_rates AS rate
+    ON rate.from_currency_code = currency_spine.from_currency_code
+   AND rate.to_currency_code = 'NOK'
+   AND rate.rate_date <= date_spine.calendar_date
+  WHERE currency_spine.from_currency_code != 'NOK'
+), non_nok_daily_rates AS (
+  SELECT
+    FARM_FINGERPRINT(CONCAT(
+      from_currency_code, '|', to_currency_code, '|', CAST(calendar_date AS STRING)
+    )) AS currency_market_rate_daily_key,
+    date_key,
+    from_currency_code,
+    to_currency_code,
+    calendar_date,
+    currency_market_rate_key,
+    market_rate_date,
+    market_exchange_rate_to_nok,
+    SAFE_DIVIDE(1, market_exchange_rate_to_nok) AS market_inverse_exchange_rate_from_nok,
+    market_rate_source,
+    FALSE AS is_same_currency,
+    market_rate_date IS NOT NULL AS has_market_rate,
+    market_rate_date IS NOT NULL AND market_rate_date < calendar_date AS is_rate_filled_forward,
+    source_timestamp
+  FROM market_rate_candidates
+  WHERE rate_rank = 1
+), nok_self_rates AS (
+  SELECT
+    FARM_FINGERPRINT(CONCAT('NOK|NOK|', CAST(calendar_date AS STRING)))
+      AS currency_market_rate_daily_key,
+    date_key,
+    'NOK' AS from_currency_code,
+    'NOK' AS to_currency_code,
+    calendar_date,
+    CAST(NULL AS INT64) AS currency_market_rate_key,
+    calendar_date AS market_rate_date,
+    CAST(1 AS NUMERIC) AS market_exchange_rate_to_nok,
+    CAST(1 AS NUMERIC) AS market_inverse_exchange_rate_from_nok,
+    'self' AS market_rate_source,
+    TRUE AS is_same_currency,
+    TRUE AS has_market_rate,
+    FALSE AS is_rate_filled_forward,
+    CAST(NULL AS TIMESTAMP) AS source_timestamp
+  FROM date_spine
+)
+
+SELECT
+  currency_market_rate_daily_key,
+  date_key,
+  from_currency_code,
+  to_currency_code,
+  calendar_date,
+  currency_market_rate_key,
+  market_rate_date,
+  market_exchange_rate_to_nok,
+  market_inverse_exchange_rate_from_nok,
+  market_rate_source,
+  is_same_currency,
+  has_market_rate,
+  is_rate_filled_forward,
+  source_timestamp,
+  'staging_currency_feed' AS source_system
+FROM non_nok_daily_rates
+
+UNION ALL
+
+SELECT
+  currency_market_rate_daily_key,
+  date_key,
+  from_currency_code,
+  to_currency_code,
+  calendar_date,
+  currency_market_rate_key,
+  market_rate_date,
+  market_exchange_rate_to_nok,
+  market_inverse_exchange_rate_from_nok,
+  market_rate_source,
+  is_same_currency,
+  has_market_rate,
+  is_rate_filled_forward,
+  source_timestamp,
+  'staging_currency_feed' AS source_system
+FROM nok_self_rates

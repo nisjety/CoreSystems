@@ -24,6 +24,7 @@ use tracing::info;
 mod audience_tokens;
 mod auth;
 mod cache;
+mod cache_admission;
 mod config;
 mod contracts;
 mod domains;
@@ -34,9 +35,11 @@ mod observability;
 mod onboarding;
 mod public_url;
 mod rate_limit;
+mod request_id;
 mod upstream;
 mod utils;
 mod zdr;
+mod zdr_log;
 
 use config::{build_cors_layer, build_state};
 use middleware::strip_inbound_identity_headers;
@@ -44,10 +47,9 @@ use rate_limit::rate_limit_middleware;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .json()
-        .init();
+    // RUST_LOG (capped for the dependencies that print URLs), the sticky ZDR
+    // mark and the JSON log with the ZDR event filter. See `zdr_log`.
+    zdr_log::init();
 
     // Prometheus recorder for the /metrics endpoint (Phase 6 B13). Installed
     // once, globally, before the router so the request-tracking middleware and
@@ -100,6 +102,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::audit_compliance::router(state.clone()))
         .merge(domains::auth::router(state.clone()))
         .merge(domains::browser::router(state.clone()))
+        .merge(domains::browser_evidence::router(state.clone()))
         .merge(domains::billing::router(state.clone()))
         .merge(domains::briefs::router(state.clone()))
         .merge(domains::chat::router(state.clone()))
@@ -115,6 +118,8 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::leads::router(state.clone()))
         .merge(domains::learning::router(state.clone()))
         .merge(domains::mail_task::router(state.clone()))
+        .merge(domains::anbud::router(state.clone()))
+        .merge(domains::marketing::router(state.clone()))
         .merge(domains::mcp::router(state.clone()))
         .merge(domains::memory::router(state.clone()))
         .merge(domains::monitoring::router(state.clone()))
@@ -164,6 +169,9 @@ fn build_router(state: config::AppState) -> Router {
         ))
         .layer(build_cors_layer())
         .layer(TraceLayer::new_for_http().make_span_with(make_http_trace_span))
+        // WS10.S1: outside the trace layer, so the span sees the id and every
+        // response (including the CORS and rate-limit answers) echoes it.
+        .layer(axum::middleware::from_fn(request_id::layer))
         .with_state(state)
 }
 
@@ -193,14 +201,35 @@ fn request_target_for_log(uri: &axum::http::Uri) -> String {
     uri.path().to_owned()
 }
 
+/// The span for one HTTP request: method and path (never the query string, and
+/// with single-use secrets in the path templated out, see
+/// `request_target_for_log`). `zdr` starts empty and is recorded
+/// by whichever code first learns the request is ZDR
+/// (`zdr_log::mark_current_span`); from then on the log drops events under this
+/// span that carry a sensitive field name.
 fn make_http_trace_span(request: &axum::http::Request<Body>) -> tracing::Span {
     let request_target = request_target_for_log(request.uri());
-    tracing::info_span!(
+    let request_id_value = request
+        .extensions()
+        .get::<request_id::RequestId>()
+        .map(|id| id.0.clone())
+        .unwrap_or_default();
+    // zdr-log-ok: `uri` is the path only, query stripped and single-use secrets templated out
+    let span = tracing::info_span!(
         "http_request",
         method = %request.method(),
         uri = %request_target,
         version = ?request.version(),
-    )
+        request_id = %request_id_value,
+        zdr = tracing::field::Empty,
+    );
+    // The header is the earliest posture signal there is: mark the span before
+    // the first event (`gateway authenticated request`) rather than when a
+    // handler first reads the header.
+    if domains::chat::shared::zdr_header(request.headers()) {
+        span.record("zdr", true);
+    }
+    span
 }
 
 async fn health() -> Json<Value> {
@@ -317,6 +346,8 @@ mod tests {
             streaming_client: reqwest::Client::new(),
             internal_api_key: "test-key".into(),
             enforcement_mode: "off".to_string(),
+            browser_grant_mode: crate::config::BrowserGrantMode::Permissive,
+            browser_human_browse: false,
             auth_core_url: "http://127.0.0.1:1".into(),
             verevon_public_origin: "http://localhost:5173".into(),
             session_core_url: "http://127.0.0.1:1".into(),
@@ -332,6 +363,12 @@ mod tests {
             audit_core_service_token: "audit-test-secret-at-least-32-bytes".into(),
             insight_core_url: "http://127.0.0.1:1".into(),
             leads_core_url: "http://127.0.0.1:1".into(),
+            anbud_core_url: "http://127.0.0.1:1".into(),
+            anbud_api_key: String::new(),
+            anbud_api_key_header: "X-API-Key".into(),
+            marketing_core_url: "http://127.0.0.1:1".into(),
+            marketing_core_service_key: String::new(),
+            marketing_core_organization_id: String::new(),
             shipping_core_url: "http://127.0.0.1:1".into(),
             user_core_url: "http://127.0.0.1:1".into(),
             application_convex_url: String::new(),
@@ -370,6 +407,7 @@ mod tests {
                 &crate::cache::ResultCache::disabled(),
             ),
             studio_store: crate::domains::studio::StudioStore::new(),
+            schedule_capabilities: crate::config::ScheduleCapabilities::default(),
             allow_dev_actor_headers,
             allow_dev_auth_bypass: allow_dev_actor_headers,
             mail_task_ingest_service_token: "mail-task-test-secret-at-least-32-bytes".into(),
@@ -766,6 +804,18 @@ mod tests {
             .mount(&user_core)
             .await;
 
+        let session_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/sessions/current"))
+            .and(wiremock::matchers::header("x-user-id", "removed-user"))
+            .and(wiremock::matchers::header("x-delegation-version", "v2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": { "id": "removed-user" }, "onboardingStatus": "COMPLETED"
+            })))
+            .expect(1)
+            .mount(&session_core)
+            .await;
+
         let sensitive_upstream = MockServer::start().await;
         Mock::given(wm_method("GET"))
             .and(wm_path("/internal/v1/router-policy"))
@@ -776,6 +826,7 @@ mod tests {
         let mut state = test_state(false);
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
+        state.session_core_url = session_core.uri();
         state.inference_core_url = sensitive_upstream.uri();
         let app = crate::build_router(state);
 

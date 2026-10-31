@@ -11,15 +11,16 @@ describe('the feature a zero-retention refusal names', () => {
   })
 
   it('is read from the error envelope', () => {
-    expect(extractError({ error: { code: 'zdr_feature_not_supported', message: 'x', feature: 'web_search' } }, 412)).toEqual({
+    expect(extractError({ error: { code: 'zdr_feature_not_supported', message: 'x', feature: 'web_search' } }, 412)).toMatchObject({
       code: 'zdr_feature_not_supported',
       message: 'x',
-      feature: 'web_search',
+      hints: { feature: 'web_search' },
     })
   })
 
   it('is absent when the body names none, so an ordinary error keeps its exact shape', () => {
-    expect(extractError({ error: { code: 'forbidden', message: 'no' } }, 403)).toEqual({ code: 'forbidden', message: 'no' })
+    expect(extractError({ error: { code: 'forbidden', message: 'no' } }, 403)).toMatchObject({ code: 'forbidden', message: 'no' })
+    expect(extractError({ error: { code: 'forbidden', message: 'no' } }, 403).hints.feature).toBeNull()
   })
 
   it('reaches the ApiError a JSON request throws', async () => {

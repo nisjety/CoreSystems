@@ -98,3 +98,25 @@ The presets module is shape-complete; cycle 27+ wires:
 - Edge handler reads `request.preset: Option<String>` and substitutes
   the resolved bundle into the scrape pipeline.
 - Postgres-backed registry for org-custom presets.
+
+## Job presets and `requires` (quarry-control, WS7.F)
+
+The job presets served by `GET /v1/presets` are `fast`, `polite` (the baseline,
+equal to `DefaultRunPolicy`), `careful` and `deterministic`. `stealth` is a
+deprecated alias of `careful` kept for one release; it carries the same
+policy, the same `requires`, and a `Deprecation` header on its single route.
+
+Each preset has `requires`: the web-policy capability keys (`key=value`, the
+names in `quarry_core::web_policy`) that its policy needs above the baseline.
+A preset whose policy exceeds the baseline must declare the excess, and the
+test `TestEveryPresetThatExceedsTheBaselineDeclaresRequires` enforces it.
+
+| Preset | requires |
+| --- | --- |
+| `fast` | `robots.max_mode=ignore` |
+| `polite` | (none, baseline) |
+| `careful` (and alias `stealth`) | `proxy.max_tier=pool` |
+| `deterministic` | (none, baseline) |
+
+`requires` is declared only. Job creation does not check it yet: WS7.C wires
+the edge and WS7.I mints the claim that unlocks each key.

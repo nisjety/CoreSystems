@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "staging_xero_sensitive",
+  name: "sync_run_entities",
+  description: "Restricted ordered outcomes for sensitive Xero API runs. Grain: run_id, outcome_index."
+}

@@ -1,0 +1,174 @@
+/* The keyboard-first approval card (BrowserApprovalDecisionCard). Uses the app's
+   existing approval tokens (--success, --danger) so it matches the deck it replaces. */
+.verevon-browser-approval {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid rgb(120 120 120 / 22%);
+  border-radius: 12px;
+  background: rgb(255 255 255 / 4%);
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.verevon-browser-approval:focus-visible {
+  outline: 2px solid var(--verevon-accent-ink, #b26340);
+  outline-offset: 2px;
+}
+
+.verevon-browser-approval__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+}
+
+.verevon-browser-approval__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  background: rgb(212 160 23 / 16%);
+  padding: 2px 8px;
+  font-weight: 700;
+}
+
+.verevon-browser-approval__source,
+.verevon-browser-approval__meta,
+.verevon-browser-approval__hint {
+  color: var(--text-muted, #6b6b6b);
+  font-size: 11.5px;
+}
+
+.verevon-browser-approval__reason {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.verevon-browser-approval__meta {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.verevon-browser-approval__risk {
+  font-weight: 600;
+}
+
+.verevon-browser-approval__redirect-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.verevon-browser-approval__redirect-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.verevon-browser-approval__redirect {
+  resize: vertical;
+  min-height: 40px;
+  border: 1px solid rgb(120 120 120 / 30%);
+  border-radius: 8px;
+  background: transparent;
+  padding: 6px 8px;
+  color: inherit;
+  font: inherit;
+}
+
+.verevon-browser-approval__redirect:focus-visible,
+.verevon-browser-approval button:focus-visible {
+  outline: 2px solid var(--verevon-accent-ink, #b26340);
+  outline-offset: 2px;
+}
+
+.verevon-browser-approval__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.verevon-browser-approval__actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.verevon-browser-approval__actions button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.verevon-browser-approval__approve {
+  background: var(--success, #2f7d4f);
+  color: #fff;
+}
+
+.verevon-browser-approval__reject {
+  background: transparent;
+  border-color: var(--danger, #b3261e) !important;
+  color: var(--danger, #b3261e);
+}
+
+.verevon-browser-approval__redirect-send {
+  background: transparent;
+  border-color: rgb(120 120 120 / 40%) !important;
+  color: inherit;
+}
+
+.verevon-browser-approval__kbd {
+  border-radius: 4px;
+  background: rgb(0 0 0 / 10%);
+  padding: 0 4px;
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 500;
+  opacity: 0.8;
+}
+
+.verevon-browser-approval__status {
+  margin: 0;
+  min-height: 0;
+  font-size: 11.5px;
+  color: var(--text-muted, #6b6b6b);
+}
+
+.verevon-browser-approval__status:empty {
+  display: none;
+}
+
+.verevon-browser-approval__error {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  color: var(--danger, #b3261e);
+  font-size: 12px;
+}
+
+.verevon-browser-approval__spin {
+  animation: verevon-browser-approval-spin 900ms linear infinite;
+}
+
+@keyframes verevon-browser-approval-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .verevon-browser-approval__spin {
+    animation: none;
+  }
+}

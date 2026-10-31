@@ -1,3 +1,4 @@
+import { changeBrowserControl, STALE_CONTROL_COPY } from '@/features/browser/dock/browser-control'
 import {
   AlertCircle,
   ArrowRight,
@@ -18,20 +19,22 @@ import {
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch, untrack } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { executeAction } from '@/shared/actions/action-client'
+import { leftWithRunControlsDisabled, runControlsDisabledNotice } from './browser-blocked'
 import { getAuthSession, getSessionContext } from '@/shared/api/auth-client'
 import {
   closeBrowserSession,
   createBrowserTab,
   createBrowserSession,
   createBrowserProfile,
+  browserErrorMessage,
   deleteBrowserProfile,
   getBrowserOwnerTimeline,
+  keepAliveBrowserSession,
   listBrowserProfiles,
   probeBrowserProfile,
   renameBrowserProfile,
   runBrowserAction,
   selectBrowserTab,
-  setBrowserControlMode,
   suggestBrowserAction,
   type BrowserAction,
   type BrowserActionSuggestionResponse,
@@ -43,7 +46,7 @@ import {
   type BrowserSessionResponse,
   type CreatableBrowserProfileScope,
 } from '@/shared/api/browser-client'
-import { startBrowserAiRun } from '@/shared/api/browser-run-client'
+import { createAiRunStartKeyring, startBrowserAiRun } from '@/shared/api/browser-run-client'
 import { streamRunEvents } from '@/shared/api/run-console-client'
 import { decideApproval, listApprovals, type ApprovalDecision } from '@/shared/api/orchestration-client'
 import {
@@ -65,12 +68,15 @@ import {
 } from '@/shared/api/knowledge-client'
 import { resolveCrawlIngest } from '@/shared/api/settings-client'
 import { cn } from '@/shared/lib/cn'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError, LocalizedError } from '@/shared/i18n'
 import { readClientJson, removeClientValue, writeClientJson } from '@/shared/session/client-storage'
 import { CrawlPagePicker } from './CrawlPagePicker'
 import { DashboardPlanBadge } from './DashboardPlanBadge'
 import { ProductPicker } from './ProductPicker'
 import { ScrapePreviewPanel } from './KnowledgeScrapePreview'
+import { navigationFailureFromError, type BrowserNavigationFailure } from '@/features/browser/session/browser-navigation-error'
+import type { KeepAliveOutcome } from '@/features/browser/session/session-keepalive'
+import { ApiError } from '@/shared/api/http'
 import { PROFILE_SCOPE_LABELS, type BrowserProfileManagerProps } from './BrowserChrome'
 import { createBrowserLoopController, type BrowserLoopState } from './browser-loop'
 import {
@@ -92,6 +98,7 @@ import {
   type ScrapeBlock,
   type ScrapePreview,
 } from './knowledge-preview'
+import { robotsBlockedText } from './knowledge-robots'
 
 type IngestMode = 'link' | 'crawl' | 'products'
 type IngestKind = 'link' | 'crawl' | 'upload'
@@ -121,6 +128,8 @@ type IngestJob = {
   label: string
   /** Pages fetched, surfaced from the crawl's run_completed event. */
   pages?: number
+  /** Pages the crawl's robots.txt gate refused (WS14.S4), from the run_completed event. */
+  pagesBlockedByRobots?: number
   progress?: number
   status: string
 }
@@ -191,6 +200,8 @@ export function KnowledgeComposer(props: {
   const [submitting, setSubmitting] = createSignal(false)
   const [adding, setAdding] = createSignal(false)
   const [browserBusy, setBrowserBusy] = createSignal(false)
+  // A navigation that did not load, kept for the error card and its Retry (WS9.B).
+  const [browserNavigationError, setBrowserNavigationError] = createSignal<BrowserNavigationFailure | null>(null)
   const [browserProfiles, setBrowserProfiles] = createSignal<BrowserProfileSummary[]>([])
   const [browserProfilesLoading, setBrowserProfilesLoading] = createSignal(false)
   const [browserProfileChoice, setBrowserProfileChoice] = createSignal(isolatedProfileChoice)
@@ -234,6 +245,14 @@ export function KnowledgeComposer(props: {
   const [decidingApprovalKeys, setDecidingApprovalKeys] = createSignal<string[]>([])
   let aiRunAbort: AbortController | null = null
   onCleanup(() => aiRunAbort?.abort())
+  // One `Idempotency-Key` per logical AI-run start: kept across a retry of the
+  // same start after an ambiguous failure, dropped on any definite answer.
+  const aiRunStartKeys = createAiRunStartKeyring()
+  // The run the last start created, with the session it was started on, so leaving a
+  // blocked site can stop it (the server treats a run that already ended as nothing
+  // left to stop). Only ever used for that same session, and dropped wherever the
+  // preview goes away (Discard, leaving a blocked site, adding to the knowledge base).
+  let lastAiRun: { sessionId: string; runId: string } | null = null
   const [preview, setPreview] = createSignal<ScrapePreview | null>(null)
   const [discovery, setDiscovery] = createSignal<CrawlDiscovery | null>(null)
   const [discovering, setDiscovering] = createSignal(false)
@@ -241,6 +260,9 @@ export function KnowledgeComposer(props: {
   const [productSummary, setProductSummary] = createSignal<string | null>(null)
   const [summarizing, setSummarizing] = createSignal(false)
   const [formError, setFormError] = createSignal<string | null>(null)
+  // A plain-language note that is not a failure: set when the site was left but the AI run
+  // could not be stopped (run controls off). Cleared by the next link submit.
+  const [leaveNotice, setLeaveNotice] = createSignal<string | null>(null)
   const [jobs, setJobs] = createSignal<IngestJob[]>([])
   let fileInputRef: HTMLInputElement | undefined
   let hydratedProfilesOrg: string | null = null
@@ -307,6 +329,7 @@ export function KnowledgeComposer(props: {
         ...(event.progress !== undefined ? { progress: event.progress } : {}),
         ...(event.status ? { status: event.status } : {}),
         ...(event.pagesVisited !== undefined ? { pages: event.pagesVisited } : {}),
+        ...(event.pagesBlockedByRobots !== undefined ? { pagesBlockedByRobots: event.pagesBlockedByRobots } : {}),
         // Real Data Plane ingest proof/failure — independent of quarry's own
         // run status, so a crawl can't read "Indexed" off scrape completion
         // alone. Latched (never cleared) so one written page still counts
@@ -527,7 +550,7 @@ export function KnowledgeComposer(props: {
       }
       setUrl('')
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : i18n.tr('Crawl kunne ikke startes.', 'Crawl could not be started.')
+      const message = translateApiError(reason, i18n.tr, { no: 'Crawl kunne ikke startes.', en: 'Crawl could not be started.' })
       updateJob(key, { status: 'failed', error: message })
       setFormError(message)
     }
@@ -539,7 +562,7 @@ export function KnowledgeComposer(props: {
     if (!canDiscover()) return
     const target = normalizeUrl(url())
     if (!target) {
-      setFormError(i18n.tr('Skriv inn en gyldig nettadresse, f.eks. vg.no eller https://coresystem.com.', 'Enter a valid web address, for example vg.no or https://coresystem.com.'))
+      setFormError(i18n.tr('Skriv inn en gyldig nettadresse, f.eks. nettsted.example eller https://nettsted.example.', 'Enter a valid web address, for example nettsted.example or https://nettsted.example.'))
       return
     }
     setFormError(null)
@@ -553,7 +576,7 @@ export function KnowledgeComposer(props: {
       }
       setDiscovery(result)
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke oppdage sider.', 'Could not discover pages.'))
+      setFormError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke oppdage sider.', en: 'Could not discover pages.' }))
     } finally {
       setDiscovering(false)
     }
@@ -593,7 +616,7 @@ export function KnowledgeComposer(props: {
       setDiscovery(null)
       setUrl('')
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : i18n.tr('Crawl kunne ikke startes.', 'Crawl could not be started.')
+      const message = translateApiError(reason, i18n.tr, { no: 'Crawl kunne ikke startes.', en: 'Crawl could not be started.' })
       updateJob(key, { status: 'failed', error: message })
       setFormError(message)
     } finally {
@@ -615,7 +638,7 @@ export function KnowledgeComposer(props: {
       }
       setProductExtraction(result)
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke hente produkter.', 'Could not fetch products.'))
+      setFormError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke hente produkter.', en: 'Could not fetch products.' }))
     }
   }
 
@@ -633,7 +656,7 @@ export function KnowledgeComposer(props: {
         setBrowserProfileProbe(null)
       }
     } catch (reason) {
-      setBrowserProfileError(reason instanceof Error ? reason.message : i18n.tr('Nettleserprofiler kunne ikke hentes.', 'Browser profiles could not be loaded.'))
+      setBrowserProfileError(browserErrorMessage(reason, i18n.tr, { no: 'Nettleserprofiler kunne ikke hentes.', en: 'Browser profiles could not be loaded.' }))
     } finally {
       setBrowserProfilesLoading(false)
     }
@@ -650,7 +673,7 @@ export function KnowledgeComposer(props: {
       setBrowserProfileProbe(await probeBrowserProfile(id, profileId, target))
     } catch (reason) {
       setBrowserProfileProbe(null)
-      setBrowserProfileError(reason instanceof Error ? reason.message : i18n.tr('Profilen kunne ikke sjekkes.', 'The profile could not be checked.'))
+      setBrowserProfileError(browserErrorMessage(reason, i18n.tr, { no: 'Profilen kunne ikke sjekkes.', en: 'The profile could not be checked.' }))
     } finally {
       setBrowserProfileProbing(false)
     }
@@ -679,7 +702,7 @@ export function KnowledgeComposer(props: {
       selectBrowserProfile(created.profile_id)
       setNewProfileName('')
     } catch (reason) {
-      setBrowserProfileError(reason instanceof Error ? reason.message : i18n.tr('Profilen kunne ikke opprettes.', 'The profile could not be created.'))
+      setBrowserProfileError(browserErrorMessage(reason, i18n.tr, { no: 'Profilen kunne ikke opprettes.', en: 'The profile could not be created.' }))
     } finally {
       setBrowserProfileCreating(false)
     }
@@ -710,7 +733,7 @@ export function KnowledgeComposer(props: {
       setBrowserProfiles((current) => current.map((profile) => (profile.profile_id === updated.profile_id ? updated : profile)))
       cancelRenamingBrowserProfile()
     } catch (reason) {
-      setBrowserProfileError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke gi profilen nytt navn.', 'Could not rename the profile.'))
+      setBrowserProfileError(browserErrorMessage(reason, i18n.tr, { no: 'Kunne ikke gi profilen nytt navn.', en: 'Could not rename the profile.' }))
     } finally {
       setBrowserProfileMutating(false)
     }
@@ -736,7 +759,7 @@ export function KnowledgeComposer(props: {
       setBrowserProfileProbe(null)
       cancelRenamingBrowserProfile()
     } catch (reason) {
-      setBrowserProfileError(reason instanceof Error ? reason.message : i18n.tr('Profilen kunne ikke slettes.', 'The profile could not be deleted.'))
+      setBrowserProfileError(browserErrorMessage(reason, i18n.tr, { no: 'Profilen kunne ikke slettes.', en: 'The profile could not be deleted.' }))
     } finally {
       setBrowserProfileDeleteArmed(false)
       setBrowserProfileMutating(false)
@@ -751,7 +774,7 @@ export function KnowledgeComposer(props: {
       const summary = await summarizeProducts(orgId(), selected, focus || undefined)
       setProductSummary(summary || i18n.tr('Ingen sammendrag ble generert.', 'No summary was generated.'))
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke lage AI-sammendrag.', 'Could not create an AI summary.'))
+      setFormError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke lage AI-sammendrag.', en: 'Could not create an AI summary.' }))
     } finally {
       setSummarizing(false)
     }
@@ -794,7 +817,7 @@ export function KnowledgeComposer(props: {
       void browserSessionPromise?.then((attempt) => {
         closeBrowserSessionById(attempt.session?.session.id)
       })
-      setFormError(reason instanceof Error ? reason.message : i18n.tr('Skraping kunne ikke fullføres.', 'Scraping could not be completed.'))
+      setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Skraping kunne ikke fullføres.', en: 'Scraping could not be completed.' }))
     }
   }
 
@@ -829,11 +852,28 @@ export function KnowledgeComposer(props: {
       return { error: null, session }
     } catch (reason) {
       return {
-        error: reason instanceof Error ? reason.message : i18n.tr('Nettleserøkt kunne ikke startes.', 'Browser session could not be started.'),
+        error: browserErrorMessage(reason, i18n.tr, { no: 'Nettleserøkt kunne ikke startes.', en: 'Browser session could not be started.' }),
         session: null,
       }
     } finally {
       window.clearTimeout(timeout)
+    }
+  }
+
+  /**
+   * WS8.D: one keep-alive call for the open browser session. The chrome runs its timer only for a
+   * session that advertises human_browsing, which Quarry does not project yet, so nothing calls this
+   * until it does. A session that can no longer be renewed is 'expired' (the timer stops once).
+   */
+  const keepAliveBrowser = async (): Promise<KeepAliveOutcome> => {
+    const id = orgId()
+    const sessionId = preview()?.browserSession?.session.id
+    if (!id || !sessionId) return 'failed'
+    try {
+      await keepAliveBrowserSession(id, sessionId)
+      return 'alive'
+    } catch (error) {
+      return error instanceof ApiError && error.code === 'browser_session_expired' ? 'expired' : 'failed'
     }
   }
 
@@ -860,9 +900,10 @@ export function KnowledgeComposer(props: {
         return attachBrowserOwnerTimeline(current, timeline)
       })
     } catch (reason) {
-      const message = reason instanceof Error
-        ? reason.message
-        : i18n.tr('Den varige nettleseraktiviteten kunne ikke lastes.', 'The durable browser activity could not be loaded.')
+      const message = browserErrorMessage(reason, i18n.tr, {
+        no: 'Den varige nettleseraktiviteten kunne ikke lastes.',
+        en: 'The durable browser activity could not be loaded.',
+      })
       setPreview((current) => {
         if (current?.browserSession?.session.id !== sessionId) return current
         return withBrowserOwnerTimelineError(current, message)
@@ -877,6 +918,7 @@ export function KnowledgeComposer(props: {
 
   const clearPreview = () => {
     const current = preview()
+    lastAiRun = null
     browserLoop.requestStop()
     aiRunAbort?.abort()
     setAiRunRationale(null)
@@ -896,15 +938,20 @@ export function KnowledgeComposer(props: {
     try {
       const nextSession = await runBrowserAction(id, sessionId, action, { actor: 'human' })
       setPreview(attachBrowserSession(current, nextSession))
+      setBrowserNavigationError(null)
       void refreshBrowserOwnerTimeline(sessionId)
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : i18n.tr('Nettleserhandlingen kunne ikke fullføres.', 'The browser action could not be completed.'))
+      const failure = navigationFailureFromError(action, reason, i18n.tr)
+      setBrowserNavigationError(failure)
+      if (!failure) {
+        setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Nettleserhandlingen kunne ikke fullføres.', en: 'The browser action could not be completed.' }))
+      }
     } finally {
       setBrowserBusy(false)
     }
   }
 
-  const updateBrowserControlMode = async (mode: BrowserControlMode) => {
+  const updateBrowserControlMode = async (mode: BrowserControlMode, expectedEpoch?: number | null) => {
     const current = preview()
     const sessionId = current?.browserSession?.session.id
     const id = orgId()
@@ -913,14 +960,50 @@ export function KnowledgeComposer(props: {
     setBrowserBusy(true)
     setFormError(null)
     try {
-      const nextSession = await setBrowserControlMode(id, sessionId, mode)
-      setPreview(attachBrowserSession(current, nextSession))
+      // Compare-and-set on the epoch the person saw (WS9.I); a stale epoch refetches once.
+      const outcome = await changeBrowserControl(
+        id,
+        sessionId,
+        mode,
+        expectedEpoch ?? current.browserSession?.session.control?.epoch ?? null,
+      )
+      setPreview(attachBrowserSession(current, outcome.response))
+      if (outcome.stale) setFormError(i18n.tr(STALE_CONTROL_COPY.no, STALE_CONTROL_COPY.en))
       void refreshBrowserOwnerTimeline(sessionId)
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke endre nettleserkontroll.', 'Could not change browser control.'))
+      setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Kunne ikke endre nettleserkontroll.', en: 'Could not change browser control.' }))
     } finally {
       setBrowserBusy(false)
     }
+  }
+
+  // "Try another source" in the blocked notice. The action stops the AI run (if
+  // there was one) and closes the session on the server; only when it succeeds does the
+  // preview go the way Discard sends it, back to the link field. A failure keeps the
+  // preview, so Discard still works, and says why.
+  const tryOtherSourceAfterBlock = async () => {
+    const current = preview()
+    const sessionId = current?.browserSession?.session.id
+    const id = orgId()
+    if (!current || !sessionId || !id || browserBusy()) return
+    setBrowserBusy(true)
+    setFormError(null)
+    setLeaveNotice(null)
+    let left: unknown
+    try {
+      left = await executeAction(
+        'browser.blocked.try_other_source',
+        { orgId: id, type: 'human', userId: ctx()?.userId ?? '' },
+        lastAiRun?.sessionId === sessionId ? { sessionId, runId: lastAiRun.runId } : { sessionId },
+      )
+    } catch (reason) {
+      setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Kunne ikke forlate nettstedet.', en: 'Could not leave the site.' }))
+      return
+    } finally {
+      setBrowserBusy(false)
+    }
+    clearPreview()
+    if (leftWithRunControlsDisabled(left)) setLeaveNotice(runControlsDisabledNotice(i18n.tr))
   }
 
   const createPreviewBrowserTab = async () => {
@@ -935,7 +1018,7 @@ export function KnowledgeComposer(props: {
       setPreview(attachBrowserTabs(current, nextTabs))
       void refreshBrowserOwnerTimeline(sessionId)
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke opprette ny nettleserfane.', 'Could not create a new browser tab.'))
+      setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Kunne ikke opprette ny nettleserfane.', en: 'Could not create a new browser tab.' }))
     } finally {
       setBrowserBusy(false)
     }
@@ -953,7 +1036,7 @@ export function KnowledgeComposer(props: {
       setPreview(attachBrowserTabs(current, nextTabs))
       void refreshBrowserOwnerTimeline(sessionId)
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke bytte nettleserfane.', 'Could not switch browser tab.'))
+      setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Kunne ikke bytte nettleserfane.', en: 'Could not switch browser tab.' }))
     } finally {
       setBrowserBusy(false)
     }
@@ -1010,7 +1093,7 @@ export function KnowledgeComposer(props: {
       }
       return suggestion
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : i18n.tr('AI-steget kunne ikke fullføres.', 'The AI browser step could not be completed.'))
+      setFormError(browserErrorMessage(reason, i18n.tr, { no: 'AI-steget kunne ikke fullføres.', en: 'The AI browser step could not be completed.' }))
       return null
     } finally {
       setBrowserBusy(false)
@@ -1041,13 +1124,19 @@ export function KnowledgeComposer(props: {
     aiRunAbort = controller
     let dispatchCount = 0
     try {
-      const run = await startBrowserAiRun(
-        id,
-        sessionId,
-        { goal, maxSteps: BROWSER_AI_LOOP_MAX_STEPS },
-        controller.signal,
-      )
+      const startParams = { goal, maxSteps: BROWSER_AI_LOOP_MAX_STEPS }
+      let run: Awaited<ReturnType<typeof startBrowserAiRun>>
+      try {
+        run = await startBrowserAiRun(id, sessionId, startParams, controller.signal, {
+          idempotencyKey: aiRunStartKeys.keyFor(sessionId, startParams),
+        })
+        aiRunStartKeys.succeeded()
+      } catch (startFailure) {
+        aiRunStartKeys.failed(startFailure)
+        throw startFailure
+      }
       browserLoop.attachRun({ orgId: id, runId: run.runId })
+      lastAiRun = { sessionId, runId: run.runId }
       await streamRunEvents(run.runId, {
         onBrowserAction: (event) => {
           dispatchCount += 1
@@ -1086,9 +1175,10 @@ export function KnowledgeComposer(props: {
             browserLoop.finish('stopped')
             return
           }
-          const message = streamError instanceof Error
-            ? streamError.message
-            : i18n.tr('AI-loopen mistet forbindelsen til kjøringen.', 'The AI browser loop lost its run connection.')
+          const message = browserErrorMessage(streamError, i18n.tr, {
+            no: 'AI-loopen mistet forbindelsen til kjøringen.',
+            en: 'The AI browser loop lost its run connection.',
+          })
           browserLoop.finish('stopped', message)
           setFormError(message)
         },
@@ -1102,7 +1192,7 @@ export function KnowledgeComposer(props: {
         browserLoop.finish('stopped')
         return null
       }
-      const message = reason instanceof Error ? reason.message : i18n.tr('AI-loopen kunne ikke startes.', 'The AI browser loop could not be started.')
+      const message = browserErrorMessage(reason, i18n.tr, { no: 'AI-loopen kunne ikke startes.', en: 'The AI browser loop could not be started.' })
       browserLoop.finish('stopped', message)
       setFormError(message)
       return null
@@ -1133,7 +1223,7 @@ export function KnowledgeComposer(props: {
     try {
       let approvalId = entry.approvalId
       if (!approvalId) {
-        if (!entry.runId) throw new Error(i18n.tr('Fant ikke kjøringen denne handlingen tilhører.', 'Could not find the run this action belongs to.'))
+        if (!entry.runId) throw new LocalizedError({ no: 'Fant ikke kjøringen denne handlingen tilhører.', en: 'Could not find the run this action belongs to.' })
         const pending = await listApprovals(entry.runId)
         const match = pending.find((candidate) => (candidate.status ?? '').toUpperCase() === 'PENDING')
         if (!match) {
@@ -1155,7 +1245,7 @@ export function KnowledgeComposer(props: {
       }))
       browserLoop.onApprovalDecided(resolved)
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : i18n.tr('Kunne ikke registrere beslutningen.', 'Could not record the decision.')
+      const message = browserErrorMessage(reason, i18n.tr, { no: 'Kunne ikke registrere beslutningen.', en: 'Could not record the decision.' })
       setFormError(message)
     } finally {
       setDecidingApprovalKeys((keys) => keys.filter((key) => key !== entryKey))
@@ -1169,10 +1259,11 @@ export function KnowledgeComposer(props: {
     if (!canSubmitUrl()) return
     const target = normalizeUrl(url())
     if (!target) {
-      setFormError(i18n.tr('Skriv inn en gyldig nettadresse, f.eks. vg.no eller https://coresystem.com.', 'Enter a valid web address, for example vg.no or https://coresystem.com.'))
+      setFormError(i18n.tr('Skriv inn en gyldig nettadresse, f.eks. nettsted.example eller https://nettsted.example.', 'Enter a valid web address, for example nettsted.example or https://nettsted.example.'))
       return
     }
     setFormError(null)
+    setLeaveNotice(null)
     setSubmitting(true)
 
     try {
@@ -1216,13 +1307,14 @@ export function KnowledgeComposer(props: {
       })
       updateJob(key, { status: 'completed' })
       browserLoop.requestStop()
+      lastAiRun = null
       closePreviewBrowserSession(current)
       clearStoredBrowserPreview()
       setBrowserRationales([])
       setPreview(null)
       setUrl('')
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : i18n.tr('Kunne ikke legge til i kunnskapsbasen.', 'Could not add to the knowledge base.')
+      const message = translateApiError(reason, i18n.tr, { no: 'Kunne ikke legge til i kunnskapsbasen.', en: 'Could not add to the knowledge base.' })
       updateJob(key, { status: 'failed', error: message })
       setFormError(message)
     } finally {
@@ -1248,7 +1340,7 @@ export function KnowledgeComposer(props: {
       const job = await importUpload(orgId(), list)
       updateJob(key, { id: job.id, status: job.status || 'pending' })
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : i18n.tr('Opplasting feilet.', 'Upload failed.')
+      const message = translateApiError(reason, i18n.tr, { no: 'Opplasting feilet.', en: 'Upload failed.' })
       updateJob(key, { status: 'failed', error: message })
       setFormError(message)
     } finally {
@@ -1580,16 +1672,21 @@ export function KnowledgeComposer(props: {
             browserRationales={browserRationales()}
             decidingBrowserApprovalKeys={decidingApprovalKeys()}
             onBrowserAction={(action) => void performBrowserAction(action)}
+            browserNavigationError={browserNavigationError()}
+            onBrowserNavigationDismiss={() => setBrowserNavigationError(null)}
+            onBrowserNavigationRetry={(url) => void performBrowserAction({ type: 'navigate', url })}
             onBrowserAutoRun={beginBrowserAiRun}
-            onBrowserControlMode={(mode) => void updateBrowserControlMode(mode)}
+            onBrowserControlMode={(mode, expectedEpoch) => void updateBrowserControlMode(mode, expectedEpoch)}
             onBrowserLoopPause={() => browserLoop.requestPause()}
             onBrowserLoopResume={() => browserLoop.requestResume()}
             onBrowserLoopStop={() => browserLoop.requestStop()}
             onDecideBrowserApproval={(key, decision) => void handleDecideBrowserApproval(key, decision)}
             onBrowserNewTab={createPreviewBrowserTab}
+            onKeepAlive={keepAliveBrowser}
             onBrowserSelectTab={selectPreviewBrowserTab}
             onBrowserSuggestAction={performBrowserSuggestedAction}
             onBrowserSocketObservation={handleBrowserSocketObservation}
+            onBrowserTryOtherSource={() => void tryOtherSourceAfterBlock()}
             onAdd={(markdown, allSelected) => void addToKnowledge(markdown, allSelected)}
             onDiscard={clearPreview}
             preview={current}
@@ -1655,6 +1752,9 @@ export function KnowledgeComposer(props: {
       <Show when={formError()}>
         {(message) => <p class="dashboard-knowledge-composer__error">{message()}</p>}
       </Show>
+      <Show when={leaveNotice()}>
+        {(message) => <p class="dashboard-knowledge-composer__status" role="status">{message()}</p>}
+      </Show>
 
       <Show when={jobs().length > 0}>
         <ul class="dashboard-knowledge-composer__jobs">
@@ -1694,6 +1794,11 @@ function IngestJobRow(props: { job: IngestJob }) {
         <span class="dashboard-knowledge-composer__job-detail">
           {kindLabel()} · {props.job.error ?? (running() ? props.job.detail : terminalDetail(props.job, i18n))}
         </span>
+        <Show when={(props.job.pagesBlockedByRobots ?? 0) > 0}>
+          <span class="dashboard-knowledge-composer__job-robots">
+            {robotsBlockedText(props.job.pagesBlockedByRobots, (no, en) => i18n.tr(no, en))}
+          </span>
+        </Show>
         <Show when={progress() !== null}>
           <span class="dashboard-knowledge-composer__job-progress">
             <span style={{ width: `${progress() ?? 0}%` }} />
@@ -1752,9 +1857,9 @@ function terminalDetail(job: IngestJob, i18n: ReturnType<typeof useI18n>): strin
 }
 
 function knowledgeUrlPlaceholder(mode: IngestMode, i18n: ReturnType<typeof useI18n>): string {
-  if (mode === 'crawl') return i18n.tr('vg.no - crawl hele nettstedet', 'vg.no - crawl the full site')
-  if (mode === 'products') return i18n.tr('elkjop.no/.../mac - hent produkter fra siden', 'elkjop.no/.../mac - extract products from the page')
-  return i18n.tr('vg.no eller coresystem.com - skrap og forhåndsvis', 'vg.no or coresystem.com - scrape and preview')
+  if (mode === 'crawl') return i18n.tr('nettsted.example - crawl hele nettstedet', 'nettsted.example - crawl the full site')
+  if (mode === 'products') return i18n.tr('nettsted.example/.../produkt - hent produkter fra siden', 'nettsted.example/.../product - extract products from the page')
+  return i18n.tr('nettsted.example - skrap og forhåndsvis', 'nettsted.example - scrape and preview')
 }
 
 function knowledgeSubmitLabel(mode: IngestMode, i18n: ReturnType<typeof useI18n>): string {

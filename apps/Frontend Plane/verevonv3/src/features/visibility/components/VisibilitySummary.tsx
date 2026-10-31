@@ -1,0 +1,10 @@
+import { createTrackedEffect } from 'solid-js'
+
+import { createSignal } from '@/shared/lib/create-immediate-signal'
+import { Show } from 'solid-js'
+import { useI18n } from '@/shared/i18n'
+import { loadAnalysis, type Analysis, type Context } from '@/shared/api/visibility/tools-client'
+export function VisibilitySummary(props:{context:Context;quarter:string}){
+ const {tr}=useI18n();const [data,setData]=createSignal<Analysis>();createTrackedEffect(() => { const cleanups: Array<() => void> = []; (() => {const context={...props.context};const q=props.quarter;const current=new AbortController();setData(undefined);void loadAnalysis(context,q,current.signal).then(v=>{if(!current.signal.aborted)setData(v)}).catch(()=>{/* Detailed views expose errors and retry. Never invent summary counts. */});cleanups.push(()=>current.abort())})(); return () => { for (const cleanup of cleanups.reverse()) cleanup() } })
+ return <nav class="visibility-overview-summary" aria-label={tr('Fordypning i Synlighet','Explore Visibility')}><a link href="/engagement/visibility/pages"><span>{tr('Sider i utvalget','Sampled pages')}</span><strong>{data()?.pages.length??'—'}</strong><small>{tr('Åpne sideoversikt','Open Page Explorer')} ↗</small></a><a link href="/engagement/visibility/groups"><span>{tr('SEO-grupper','SEO groups')}</span><strong>{data()?.groups.filter(g=>g.items.length>0).length??'—'}</strong><small>{tr('Grupper med treff','Groups with matches')} ↗</small></a><a link href="/engagement/visibility/links"><span>{tr('Observerte lenker','Observed links')}</span><strong>{data()?.edges.length??'—'}</strong><small>{tr('Se struktur og dekning','See structure and coverage')} ↗</small></a><a link href="/engagement/visibility/competitors"><span>{tr('Konkurrenter','Competitors')}</span><strong>↗</strong><small>{tr('Sammenlign offentlige sider','Compare public pages')}</small></a><Show when={data()}><p>{tr('Oppsummering av lagrede utvalg med delvis dekning.','Summary of saved samples with partial coverage.')}</p></Show></nav>
+}

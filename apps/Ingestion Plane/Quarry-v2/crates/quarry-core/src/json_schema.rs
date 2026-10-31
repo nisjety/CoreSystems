@@ -1,6 +1,5 @@
-//! Minimal JSON Schema (Draft 7-ish subset) validator used across Quarry +
-//! Model Plane to validate structured-extract responses without pulling in a
-//! full schema crate.
+//! Minimal JSON Schema (Draft 7-ish subset) validator that Quarry uses to
+//! check structured-extract responses without pulling in a full schema crate.
 //!
 //! Supports the subset Quarry actually uses:
 //!

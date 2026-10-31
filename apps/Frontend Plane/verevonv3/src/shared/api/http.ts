@@ -1,4 +1,7 @@
 import { gatewayBaseUrl } from './config'
+import { ApiError, type ApiErrorHints } from './api-error'
+
+export { ApiError, clientError, hasErrorCode, type ApiErrorHints } from './api-error'
 
 type Envelope<T> = { data: T } | T
 
@@ -10,28 +13,11 @@ type Envelope<T> = { data: T } | T
  */
 export const SESSION_EXPIRED_EVENT = 'verevon:session-expired'
 
-/**
- * Typed transport error. Carries the HTTP status and — when the backend
- * provides one — a machine-readable `code` (e.g. Better Auth's
- * `EMAIL_NOT_VERIFIED`, `INVALID_EMAIL_OR_PASSWORD`) so callers can branch on
- * intent instead of string-matching messages.
- */
-export class ApiError extends Error {
-  readonly status: number
-  readonly code: string | null
-  /**
-   * The feature a zero-retention refusal names (`zdr_feature_not_supported`),
-   * by its key, when the body carries one. Null otherwise.
-   */
-  readonly feature: string | null
-
-  constructor(message: string, status: number, code: string | null, feature: string | null = null) {
-    super(message)
-    this.name = 'ApiError'
-    this.status = status
-    this.code = code
-    this.feature = feature
-  }
+/** A retry hint in whole seconds, or null when it is missing or not sane (1..3600). */
+function boundedSeconds(value: unknown): number | null {
+  const parsed =
+    typeof value === 'number' ? value : typeof value === 'string' && /^\d{1,5}$/.test(value.trim()) ? Number(value) : Number.NaN
+  return Number.isFinite(parsed) && parsed >= 1 && parsed <= 3600 ? Math.ceil(parsed) : null
 }
 
 function unwrap<T>(payload: Envelope<T>): T {
@@ -61,31 +47,78 @@ function applyDevAuth(headers: Headers): void {
 export function extractError(
   body: unknown,
   status: number,
-): { code: string | null; message: string; feature?: string } {
+): { code: string | null; message: string; hints: ApiErrorHints } {
   if (body && typeof body === 'object') {
     const record = body as Record<string, unknown>
 
     const errorField = record.error
     if (typeof errorField === 'string' && errorField.trim()) {
-      return { code: typeof record.code === 'string' && record.code.trim() ? record.code : null, message: errorField }
+      return {
+        code: typeof record.code === 'string' && record.code.trim() ? record.code : null,
+        message: errorField,
+        hints: {},
+      }
     }
     if (errorField && typeof errorField === 'object') {
       const e = errorField as Record<string, unknown>
-      const feature = typeof e.feature === 'string' && e.feature.trim() ? e.feature : undefined
+      const details =
+        e.details && typeof e.details === 'object' && !Array.isArray(e.details) ? (e.details as Record<string, unknown>) : null
+      const blockReason = e.blockReason ?? details?.block_reason
       return {
         code: typeof e.code === 'string' ? e.code : null,
         message: typeof e.message === 'string' && e.message.trim() ? e.message : `Request failed (${status})`,
-        ...(feature ? { feature } : {}),
+        hints: {
+          details,
+          retryAfterSeconds: boundedSeconds(e.retryAfterSeconds) ?? boundedSeconds(details?.retry_after_seconds),
+          resumable: e.resumable === true || details?.resumable === true,
+          blockReason: typeof blockReason === 'string' ? blockReason : null,
+          feature: typeof e.feature === 'string' && e.feature.trim() ? e.feature : null,
+        },
       }
     }
 
     // Better Auth top-level { code, message }
     if (typeof record.message === 'string' && record.message.trim()) {
-      return { code: typeof record.code === 'string' ? record.code : null, message: record.message }
+      return { code: typeof record.code === 'string' ? record.code : null, message: record.message, hints: {} }
     }
   }
 
-  return { code: null, message: `Request failed (${status})` }
+  return { code: null, message: `Request failed (${status})`, hints: {} }
+}
+
+/**
+ * The {@link ApiError} for a non-2xx response: the envelope's code and typed
+ * hints, plus the `Retry-After` header (whole seconds) when the body carried no
+ * retry hint of its own. One place, so `requestJson`, `requestForm` and the SSE
+ * client cannot drift apart on which fields survive.
+ */
+export function apiErrorFromResponse(body: unknown, response: Pick<Response, 'status' | 'headers'>): ApiError {
+  const { code, message, hints } = extractError(body, response.status)
+  const retryAfterSeconds = hints.retryAfterSeconds ?? boundedSeconds(response.headers?.get('Retry-After'))
+  return new ApiError(message, response.status, code, { ...hints, retryAfterSeconds })
+}
+
+/**
+ * Tell the application shell that a protected request was refused because the
+ * server-side session is gone: one path back to sign-in for every transport.
+ *
+ * Only the gateway's own 401 `unauthorized` counts, and never on `/api/v1/auth/*`:
+ * a failed sign-in or two-factor challenge is an expected credential error that must
+ * stay on its form, and the session probe itself answering 401 must not re-trigger
+ * the probe (that would loop). A 503 `session_verification_unavailable`, a timeout or
+ * any 5xx says nothing about the session and never ends it. The streaming transports
+ * (`sse.ts`) do not call this: the agent stream maps the model gateway's own 401 to the
+ * same code, and a credential drift there is not a sign-out.
+ */
+export function signalSessionExpiry(failure: ApiError, path: string): void {
+  if (
+    failure.status === 401
+    && failure.code === 'unauthorized'
+    && !path.startsWith('/api/v1/auth/')
+    && typeof window !== 'undefined'
+  ) {
+    window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT))
+  }
 }
 
 export async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -105,20 +138,12 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
   const body = (await response.json().catch(() => null)) as Envelope<T> | Record<string, unknown> | null
 
   if (!response.ok) {
-    const { code, message, feature } = extractError(body, response.status)
-    // A failed sign-in or 2FA challenge is an expected credential error and
-    // must remain on its form. Other gateway `unauthorized` responses mean the
-    // existing browser session is no longer accepted, so leaving the user on a
-    // page with controls that will all fail is misleading.
-    if (
-      response.status === 401
-      && code === 'unauthorized'
-      && !path.startsWith('/api/v1/auth/')
-      && typeof window !== 'undefined'
-    ) {
-      window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT))
-    }
-    throw new ApiError(message, response.status, code, feature ?? null)
+    const failure = apiErrorFromResponse(body, response)
+    // Other gateway `unauthorized` responses mean the existing browser session is
+    // no longer accepted, so leaving the user on a page with controls that will
+    // all fail is misleading.
+    signalSessionExpiry(failure, path)
+    throw failure
   }
 
   return unwrap(body as Envelope<T>)
@@ -150,8 +175,9 @@ export async function requestForm<T>(
   const body = (await response.json().catch(() => null)) as Envelope<T> | Record<string, unknown> | null
 
   if (!response.ok) {
-    const { code, message, feature } = extractError(body, response.status)
-    throw new ApiError(message, response.status, code, feature ?? null)
+    const failure = apiErrorFromResponse(body, response)
+    signalSessionExpiry(failure, path)
+    throw failure
   }
 
   return unwrap(body as Envelope<T>)

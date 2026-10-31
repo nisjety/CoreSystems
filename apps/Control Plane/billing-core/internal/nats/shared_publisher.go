@@ -13,14 +13,14 @@ import (
 )
 
 // SharedPublisher publishes cross-plane domain events to the shared
-// verevon-nats broker on the aqencia.controlplane.* subject namespace.
+// verevon-nats broker on the controlplane.* subject namespace.
 //
-// Subject convention: aqencia.controlplane.<entity>.<verb>
+// Subject convention: controlplane.<entity>.<verb>
 //
-//	aqencia.controlplane.billing.account_updated
-//	aqencia.controlplane.billing.quota_exceeded
-//	aqencia.controlplane.billing.invoice_created
-//	aqencia.controlplane.billing.plan_changed
+//	controlplane.billing.account_updated
+//	controlplane.billing.quota_exceeded
+//	controlplane.billing.invoice_created
+//	controlplane.billing.plan_changed
 type SharedPublisher struct {
 	conn       *nats.Conn
 	js         jetstream.JetStream
@@ -131,7 +131,7 @@ func (sp *SharedPublisher) Close() {
 // PublishAccountUpdated fires when an org's billing account is created or updated.
 // Data Plane and Reasoning Plane subscribe to adjust feature quotas.
 func (sp *SharedPublisher) PublishAccountUpdated(ctx context.Context, orgID, plan string, seats int) {
-	_ = sp.Publish(ctx, "aqencia.controlplane.billing.account_updated", map[string]any{
+	_ = sp.Publish(ctx, "controlplane.billing.account_updated", map[string]any{
 		"org_id": orgID,
 		"plan":   plan,
 		"seats":  seats,
@@ -140,7 +140,7 @@ func (sp *SharedPublisher) PublishAccountUpdated(ctx context.Context, orgID, pla
 
 // PublishQuotaExceeded fires when an org exceeds a usage quota.
 func (sp *SharedPublisher) PublishQuotaExceeded(ctx context.Context, orgID, metric string, limit, current int64) {
-	_ = sp.Publish(ctx, "aqencia.controlplane.billing.quota_exceeded", map[string]any{
+	_ = sp.Publish(ctx, "controlplane.billing.quota_exceeded", map[string]any{
 		"org_id":  orgID,
 		"metric":  metric,
 		"limit":   limit,
@@ -150,7 +150,7 @@ func (sp *SharedPublisher) PublishQuotaExceeded(ctx context.Context, orgID, metr
 
 // PublishInvoiceCreated fires when a new invoice is generated.
 func (sp *SharedPublisher) PublishInvoiceCreated(ctx context.Context, orgID, invoiceID string, amountCents int64, currency string) {
-	_ = sp.Publish(ctx, "aqencia.controlplane.billing.invoice_created", map[string]any{
+	_ = sp.Publish(ctx, "controlplane.billing.invoice_created", map[string]any{
 		"org_id":       orgID,
 		"invoice_id":   invoiceID,
 		"amount_cents": amountCents,
@@ -166,13 +166,13 @@ func (sp *SharedPublisher) PublishPlanChanged(ctx context.Context, orgID, previo
 		"new_plan":      newPlan,
 	}
 	if len(revisions) == 0 || revisions[0] < 1 {
-		return sp.Publish(ctx, "aqencia.controlplane.billing.plan_changed", payload)
+		return sp.Publish(ctx, "controlplane.billing.plan_changed", payload)
 	}
 	revision := revisions[0]
 	payload["revision"] = revision
 	return sp.Publish(
 		ctx,
-		"aqencia.controlplane.billing.plan_changed",
+		"controlplane.billing.plan_changed",
 		payload,
 		jetstream.WithMsgID(billingPlanChangeMessageID(orgID, revision)),
 	)

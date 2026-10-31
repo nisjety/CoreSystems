@@ -119,6 +119,20 @@ func main() {
 		log.Warn().Msg("HMAC cross-plane auth: DISABLED (no secret) — control plane MUST be on private network")
 	}
 
+	// Job admission: per-organization caps, a bounded backlog and the claim
+	// endpoint. Off unless QUARRY_JOB_ADMISSION=on; a value that cannot be read
+	// stops control here rather than silently running without the bound.
+	admission, err := resources.AdmissionFromEnv(os.Getenv)
+	if err != nil {
+		log.Fatal().Err(err).Msg("job admission configuration is invalid")
+	}
+	log.Info().
+		Bool("enabled", admission.Enabled).
+		Int("cap_default", admission.CapDefault).
+		Int("backlog_default", admission.BacklogDefault).
+		Dur("backlog_ttl", admission.BacklogTTL).
+		Msg("job admission")
+
 	var db store.DB
 	var dbPinger httpx.Pinger
 	if dsn == "" {
@@ -153,7 +167,7 @@ func main() {
 	r.Group(func(r chi.Router) {
 		r.Use(hmacVerifier.Middleware)
 
-		resources.MountJobs(r, db)
+		resources.MountJobs(r, db, resources.WithAdmission(admission))
 		resources.MountStores(r, db)
 		// Legacy snapshot CRUD was folded into MountSnapshotsV2 below — the
 		// enriched list is the only /v1/snapshots surface; restore reads the
@@ -169,7 +183,23 @@ func main() {
 		// the hmacVerifier.Middleware above — mount here, not outside the
 		// group, so the handler inherits verification.
 		resources.MountChangeWebhook(r, db, notifySink)
-		resources.MountBlocklists(r, db)
+		// WS4.J: the ZDR run tombstone receiver. A new egress path under ZDR, so
+		// it is mounted only when this process has an HMAC secret (a trust-the-
+		// network control plane has no receiver at all) AND
+		// QUARRY_ZDR_TOMBSTONE_RECEIVER is on. OFF BY DEFAULT on both sides: the
+		// edge emits nothing unless QUARRY_EDGE__ZDR_TOMBSTONE is on, and this
+		// side neither receives nor writes an erasure marker (a retention of an
+		// erased org's id) until its own flag is on. Counsel review gates turning
+		// either on.
+		if zdrTombstoneReceiverPosture(os.Getenv, hmacVerifier.HasSecret(), db) {
+			resources.MountZdrTombstones(r, db)
+			log.Warn().Msg("ZDR tombstone receiver is ON (QUARRY_ZDR_TOMBSTONE_RECEIVER): erasures now leave a marker row")
+		} else {
+			log.Info().Msg("ZDR tombstone receiver is off (default): no route, no erasure marker")
+		}
+		// WS7.F: /v1/blocklists answers 410 Gone. The CRUD mount is
+		// resources.MountBlocklists(r, db); one-line rollback.
+		resources.MountBlocklistsGone(r)
 		resources.MountWebhookDeliveries(r, db)
 		resources.MountPresets(r)
 
@@ -194,10 +224,22 @@ func main() {
 	})
 
 	dCtx, dCancel := context.WithCancel(context.Background())
+	// Job admission (off unless QUARRY_JOB_ADMISSION=on): fail jobs that waited
+	// past the TTL so their streams close.
+	go resources.RunBacklogJanitor(dCtx, db, admission, time.Minute, log.Logger)
 	go dispatcher.Run(dCtx, db, nil, dispatcher.Options{Workers: 4}, log.Logger)
 	// Phase 7 retention sweep — INERT unless QUARRY_RETENTION_DAYS>0, and only
 	// deletes when QUARRY_RETENTION_DRY_RUN=false; otherwise a default-safe no-op.
 	go janitor.Run(dCtx, db, janitor.OptionsFromEnv(), log.Logger)
+	// WS4.J: the ZDR tombstone sweeper. Unlike the artifact janitor above it runs by
+	// default (30 days): it deletes metadata only, nothing references a tombstone,
+	// and with the edge flag off there are no rows. A bad retention value logs and
+	// falls back to 30; it never disables the sweep.
+	tombOpts, tombInvalid := janitor.TombstoneOptionsFromEnv(os.Getenv)
+	if tombInvalid {
+		log.Warn().Int("retention_days", tombOpts.RetentionDays).Msg("QUARRY_ZDR_TOMBSTONE_RETENTION_DAYS is not a non-negative integer — using the default")
+	}
+	go janitor.RunTombstones(dCtx, db, tombOpts, log.Logger)
 
 	// GDPR cross-plane org-erasure purge consumer — subscribes to
 	// verevon.gdpr.erasure.requested (org-core, fanned out over the
@@ -221,7 +263,7 @@ func main() {
 		)
 		if err != nil {
 			log.Warn().Err(err).Msg("control-shared NATS connect failed — GDPR org-erasure purge consumer disabled")
-		} else if _, err := gdpr.StartSubscriber(nc, db, log.Logger); err != nil {
+		} else if _, err := gdpr.StartSubscriber(nc, db, gdpr.EdgePurgerFromEnv(os.Getenv, log.Logger), log.Logger); err != nil {
 			log.Warn().Err(err).Msg("GDPR org-erasure subscriber failed to start")
 			nc.Close()
 		} else {
@@ -260,6 +302,19 @@ func main() {
 		gdprNC.Close()
 	}
 	log.Info().Msg("shutdown complete")
+}
+
+// zdrTombstoneReceiverPosture decides whether the tombstone receiver is mounted and,
+// when it is, switches on PurgeOrg's erasure marker. Both are OFF unless
+// QUARRY_ZDR_TOMBSTONE_RECEIVER is truthy AND the process has an HMAC secret; with
+// either missing no marker is ever written, so a fresh deploy retains nothing of an
+// erased org's id. Counsel review gates setting the flag.
+func zdrTombstoneReceiverPosture(getenv func(string) string, hasSecret bool, db store.DB) bool {
+	if !janitor.TombstoneReceiverEnabled(getenv) || !hasSecret {
+		return false
+	}
+	db.ZdrTombstones().SetErasureMarkers(true)
+	return true
 }
 
 func envOr(k, d string) string {

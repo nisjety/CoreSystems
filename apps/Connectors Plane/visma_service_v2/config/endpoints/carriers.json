@@ -1,0 +1,30 @@
+{
+  "endpoint_name": "carriers",
+  "bigquery_table": "visma_carriers",
+  "primary_key": "carrierId",
+  "source": "erp_rest",
+  "api_method": "get_carriers",
+  "api_endpoint": "/v1/carrier",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "carrierId",
+    "carrierDescription",
+    "lastModifiedDateTime"
+  ],
+  "datamart": {
+    "ready": false,
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    },
+    "query_file": "config/queries/carrier.graphql",
+    "type_name": "Carrier",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_carrier",
+    "fallback_source": "erp_rest"
+  }
+}

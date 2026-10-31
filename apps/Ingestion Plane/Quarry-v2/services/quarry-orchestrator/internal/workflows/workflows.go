@@ -3,6 +3,7 @@ package workflows
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,6 +57,12 @@ type ChangeMonitorInput struct {
 	// the change_detected event payload so quarry-control can deliver the
 	// one in-product notification to the right user. Empty = no notify.
 	CreatedBy string `json:"created_by,omitempty"`
+	// Zdr is the ZDR posture stamped on the schedule at create (WS4.H). The
+	// workflow only passes it to the CheckChange activity and branches on
+	// nothing else; nil for a schedule that predates the stamp. Known gaps are
+	// in RUNBOOKS: an org that turns ZDR on later keeps its stamp, and this
+	// workflow still emits run_started/change_detected events with the URL.
+	Zdr *bool `json:"zdr,omitempty"`
 }
 
 // BatchJobInput drives a fan-out over a bounded URL list.
@@ -69,6 +76,8 @@ type BatchJobInput struct {
 	OrgID  string   `json:"org_id,omitempty"`
 	URLs   []string `json:"urls"`
 	Policy Policy   `json:"policy,omitempty"`
+	// Robots is the robots mode the batch runs with (WS14.S5). Absent or unknown is respect.
+	Robots string `json:"robots,omitempty"`
 }
 
 // CrawlJobInput drives a bounded BFS crawl.
@@ -84,6 +93,13 @@ type CrawlJobInput struct {
 	MaxDepth uint32   `json:"max_depth"`
 	MaxPages uint32   `json:"max_pages"`
 	Policy   Policy   `json:"policy,omitempty"`
+	// Scope is the crawl scope the edge stamped on the job (WS14.S3). Nil or
+	// Legacy runs the crawl as it did before scope existed.
+	Scope *activities.CrawlScope `json:"scope,omitempty"`
+	// ScopeMode is enforce or observe. Empty means observe.
+	ScopeMode string `json:"scope_mode,omitempty"`
+	// Robots is respect or ignore. Empty means respect.
+	Robots string `json:"robots,omitempty"`
 }
 
 type frontierEntry struct {
@@ -163,14 +179,7 @@ func deterministicEventID(idemHex string) quarrycontracts.ID {
 	return quarrycontracts.ID("evt_" + suffix)
 }
 
-// runPage invokes the page activity and emits lifecycle events based on the
-// returned error's classification.
-//
-// org is the originating tenant id. It rides into the RunPageInput so the
-// activity can HMAC-bind org_id+url on the /v1/internal/run_page call (a
-// leaked runtime bearer can't then forge another tenant's org). Empty org
-// is allowed at this layer (the edge enforces a non-empty org_id itself);
-// passing it through is deterministic — no new wall-clock/rand calls.
+// runPage is runPageWith for a page that carries no crawl context.
 func runPage(
 	ctx workflow.Context,
 	a *activities.Activities,
@@ -178,7 +187,30 @@ func runPage(
 	org string,
 	userID string,
 	ingest bool,
+	kind string,
 	url string,
+) (activities.RunPageResult, error) {
+	return runPageWith(ctx, a, ids, org, userID, ingest, kind, url, nil)
+}
+
+// runPageWith invokes the page activity and emits lifecycle events based on the
+// returned error's classification.
+//
+// org is the originating tenant id. It rides into the RunPageInput so the
+// activity can HMAC-bind org_id+url on the /v1/internal/run_page call (a
+// leaked runtime bearer can't then forge another tenant's org). Empty org
+// is allowed at this layer (the edge enforces a non-empty org_id itself);
+// passing it through is deterministic — no new wall-clock/rand calls.
+func runPageWith(
+	ctx workflow.Context,
+	a *activities.Activities,
+	ids runIDs,
+	org string,
+	userID string,
+	ingest bool,
+	kind string,
+	url string,
+	crawl *activities.CrawlContext,
 ) (activities.RunPageResult, error) {
 	var res activities.RunPageResult
 	err := workflow.ExecuteActivity(ctx, a.RunPage, activities.RunPageInput{
@@ -187,27 +219,54 @@ func runPage(
 		OrgID:  org,
 		UserID: userID,
 		Ingest: ingest,
+		Kind:   kind,
+		Crawl:  crawl,
 	}).Get(ctx, &res)
 	if err != nil {
 		cat := errs.CategoryUnknown
 		if e, ok := errs.Classify(err); ok {
 			cat = e.Category
 		}
-		_ = emitEvent(ctx, a, ids, cat.Event(), map[string]any{
+		// final: the activity's retries are exhausted, so this attempt is the last
+		// one and the control errors view lists it. code is the closed category.
+		payload := map[string]any{
 			"url":      url,
 			"category": cat.String(),
+			"code":     cat.String(),
+			"final":    true,
 			"error":    err.Error(),
-		}, ids.RunID, url, string(cat.Event()))
+		}
+		if crawl != nil {
+			// WS14.S3: a page under scope reports the edge's denial (code, message, remedy)
+			// and counts as blocked when the edge refused it.
+			cat = errs.CategoryOf(err)
+			payload["category"] = cat.String()
+			payload["code"] = cat.String()
+			payload["source"] = "fetch"
+			if denial, ok := errs.DenialOf(err); ok {
+				payload["code"] = denial["code"]
+				payload["message"] = denial["message"]
+				payload["remedy"] = denial["remedy"]
+			}
+		}
+		_ = emitEvent(ctx, a, ids, cat.Event(), payload, ids.RunID, url, string(cat.Event()))
 		return res, err
 	}
-	_ = emitEvent(ctx, a, ids, quarrycontracts.EvtPageFetched, map[string]any{
+	fetched := map[string]any{
 		"url":          url,
 		"status":       res.Status,
 		"fingerprint":  res.Fingerprint,
 		"links":        len(res.Links),
 		"content_type": res.ContentType,
 		"title":        res.Title,
-	}, ids.RunID, url, string(quarrycontracts.EvtPageFetched))
+	}
+	// WS14.S4: the host's robots.txt Crawl-delay, when the edge reported one. Only a
+	// page run under scope (the crawl-scope-v1 path) carries a crawl report.
+	if crawl != nil && res.Crawl != nil && res.Crawl.CrawlDelayMS != nil {
+		fetched["crawl_delay_ms"] = *res.Crawl.CrawlDelayMS
+	}
+	_ = emitEvent(ctx, a, ids, quarrycontracts.EvtPageFetched, fetched,
+		ids.RunID, url, string(quarrycontracts.EvtPageFetched))
 	// Re-emit branding extracted from the seed page back through the
 	// control event log so consumers polling /v1/jobs/{id}/events see it
 	// alongside page_fetched. The runtime emits BrandingExtracted on its
@@ -278,7 +337,7 @@ func ScrapeJobWF(ctx workflow.Context, in ScrapeJobInput, a *activities.Activiti
 		return err
 	}
 
-	if _, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, in.URL); err != nil {
+	if _, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "", in.URL); err != nil {
 		_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, map[string]any{
 			"url":   in.URL,
 			"error": err.Error(),
@@ -324,6 +383,7 @@ func ChangeMonitorWF(ctx workflow.Context, in ChangeMonitorInput, a *activities.
 		RunID: runID,
 		OrgID: in.OrgID,
 		URL:   in.URL,
+		Zdr:   in.Zdr,
 	}).Get(ctx, &res)
 	if err != nil {
 		_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, map[string]any{
@@ -331,6 +391,19 @@ func ChangeMonitorWF(ctx workflow.Context, in ChangeMonitorInput, a *activities.
 			"error": err.Error(),
 		}, runID, string(quarrycontracts.EvtRunFailed))
 		return err
+	}
+
+	// The edge refused to record the probe because the organization is under
+	// Zero Data Retention (a baseline is durable). Terminal and clean: the run
+	// is recorded as failed with reason zdr_refused, no change event is emitted
+	// and the workflow completes without error, so nothing retries it. The
+	// payload carries no URL.
+	if res.ZDRRefused {
+		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, map[string]any{
+			"kind":         "change_monitor",
+			"reason":       activities.StatusZDRRefused,
+			"refusal_code": activities.ZDRRefusalCode,
+		}, runID, string(quarrycontracts.EvtRunFailed))
 	}
 
 	evt := quarrycontracts.EvtChangeUnchanged
@@ -356,9 +429,22 @@ func ChangeMonitorWF(ctx workflow.Context, in ChangeMonitorInput, a *activities.
 
 // BatchJobWF fans out page activities for each URL sequentially (bounded
 // concurrency is enforced by the runtime) and aggregates the result.
+//
+// From batch-control-v1 the batch takes the same control requests as a crawl:
+// pause holds it before the next URL (run_paused, then run_resumed), cancel ends
+// it before the next URL with run_cancelled. Executions recorded before that
+// version run to the end as they did.
 func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities) error {
 	ctx = workflow.WithActivityOptions(ctx, defaultActivityOpts())
 	ids := runIDs{RunID: in.RunID, JobID: in.JobID}
+
+	var ctrl *crawlControl
+	if workflow.GetVersion(ctx, "batch-control-v1", workflow.DefaultVersion, 1) >= 1 {
+		var err error
+		if ctrl, err = installControlHandlers(ctx); err != nil {
+			return err
+		}
+	}
 
 	if err := emitEvent(ctx, a, ids, quarrycontracts.EvtRunStarted, map[string]any{
 		"kind":  "batch",
@@ -367,19 +453,95 @@ func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities
 		return err
 	}
 
-	var visited, failed uint32
-	for _, url := range in.URLs {
-		if _, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, url); err != nil {
+	var visited, failed, blocked, blockedRobots uint32
+	stats := newJobStatistics(workflow.Now(ctx))
+	cancelled := false
+	// WS14.S5: the batch context on each page and the blocked count. A history recorded before
+	// the marker runs as it did (no context, no blocked count).
+	checked := workflow.GetVersion(ctx, batchCheckVersion, workflow.DefaultVersion, 1) >= 1
+	for i, url := range in.URLs {
+		if ctrl != nil {
+			remaining := uint32(len(in.URLs) - i)
+			counts := map[string]any{"pages_visited": visited, "pages_failed": failed, "pending": remaining}
+			if !controlGate(ctx, a, ids, ctrl, in.RunID, counts) {
+				cancelled = true
+				break
+			}
+		}
+		var crawl *activities.CrawlContext
+		if checked {
+			crawl = batchCrawlContext(in.Robots)
+		}
+		res, err := runPageWith(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "batch", url, crawl)
+		if err != nil {
+			if checked && errs.CategoryOf(err) == errs.CategoryBlocklist {
+				// WS14.S5: a page the edge refused (a denial) is also counted as blocked. It stays
+				// in pages_failed and the error classes, so the statistics keep their shape.
+				blocked++
+				if robotsRefused(err) {
+					blockedRobots++
+				}
+			}
 			failed++
+			stats.recordFailure(err)
 			continue
 		}
 		visited++
+		stats.recordPage(res)
 	}
 
-	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, map[string]any{
+	if cancelled {
+		cancelPayload := map[string]any{
+			"pages_visited": visited,
+			"pages_failed":  failed,
+			"pending":       uint32(len(in.URLs)) - visited - failed,
+			"statistics":    stats.payload(visited, failed, workflow.Now(ctx)),
+		}
+		if checked {
+			cancelPayload["pages_blocked"] = blocked
+			cancelPayload["pages_blocked_robots"] = blockedRobots
+		}
+		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCancelled, cancelPayload, in.RunID, string(quarrycontracts.EvtRunCancelled))
+	}
+
+	completed := map[string]any{
 		"pages_visited": visited,
 		"pages_failed":  failed,
-	}, in.RunID, string(quarrycontracts.EvtRunCompleted))
+		"statistics":    stats.payload(visited, failed, workflow.Now(ctx)),
+	}
+	if checked {
+		completed["pages_blocked"] = blocked
+		completed["pages_blocked_robots"] = blockedRobots
+	}
+	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, completed, in.RunID, string(quarrycontracts.EvtRunCompleted))
+}
+
+// controlGate holds the workflow at a safe boundary while it is paused. It emits
+// run_paused once for each pause (the pause count is part of the event id) and
+// run_resumed when it goes on. It reports false when the run was cancelled, and
+// the caller then stops before the next unit of work. The per-unit gate of the
+// batch and the single hook between the waves of later slices (F-t2-040).
+func controlGate(
+	ctx workflow.Context,
+	a *activities.Activities,
+	ids runIDs,
+	ctrl *crawlControl,
+	runID string,
+	counts map[string]any,
+) bool {
+	if ctrl.state != statePaused {
+		return ctrl.state != stateCancelled
+	}
+	seq := strconv.Itoa(ctrl.pauseSeq)
+	_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunPaused, counts,
+		runID, string(quarrycontracts.EvtRunPaused), seq)
+	_ = workflow.Await(ctx, func() bool { return ctrl.state != statePaused })
+	if ctrl.state == stateCancelled {
+		return false
+	}
+	_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunResumed, map[string]any{"pages_visited": counts["pages_visited"]},
+		runID, string(quarrycontracts.EvtRunResumed), seq)
+	return true
 }
 
 // CrawlJobWF runs a BFS crawl bounded by MaxDepth and MaxPages. Checkpoints
@@ -397,6 +559,30 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 	ctx = workflow.WithActivityOptions(ctx, defaultActivityOpts())
 	ids := runIDs{RunID: in.RunID, JobID: in.JobID}
 
+	// Bounded crawls. Before this version a MaxPages or MaxDepth of zero meant
+	// "unlimited" and failed pages were never counted, so one request could
+	// walk until the workflow timeout. Executions started from now on carry a
+	// finite bound whatever the input says; histories recorded before the
+	// version marker replay with the legacy behaviour. A workflow must not read
+	// the environment, so the fallbacks are constants: the dispatcher normally
+	// resolves the configured values into the input first.
+	bounded := workflow.GetVersion(ctx, "crawl-bounded-v1", workflow.DefaultVersion, 1) >= 1
+	if bounded {
+		if in.MaxPages == 0 {
+			in.MaxPages = workflowFallbackMaxPages
+		}
+		if in.MaxDepth == 0 {
+			in.MaxDepth = workflowFallbackMaxDepth
+		}
+	}
+
+	// WS14.S3: a crawl that carries a scope runs under the crawl-scope-v1 marker.
+	// Executions recorded before it run as they did. A legacy crawl has no scope.
+	var scope *crawlScopeRun
+	if workflow.GetVersion(ctx, "crawl-scope-v1", workflow.DefaultVersion, 1) >= 1 {
+		scope = newCrawlScopeRun(in)
+	}
+
 	ctrl, err := installControlHandlers(ctx)
 	if err != nil {
 		return err
@@ -411,7 +597,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		return err
 	}
 	if a.DurableFrontier {
-		return crawlJobDurableFrontier(ctx, in, a, ids, ctrl)
+		return crawlJobDurableFrontier(ctx, in, a, ids, ctrl, bounded, scope)
 	}
 
 	visited := map[string]struct{}{}
@@ -427,7 +613,9 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		visited[seed] = struct{}{}
 	}
 
-	var pagesVisited, pagesFailed uint32
+	var pagesVisited, pagesFailed, pagesBlocked, pagesBlockedRobots uint32
+	stopReason := ""
+	stats := newJobStatistics(workflow.Now(ctx))
 
 	emitPaused := false
 	for len(frontier) > 0 {
@@ -438,7 +626,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 					"pages_visited": pagesVisited,
 					"pages_failed":  pagesFailed,
 					"pending":       uint32(len(frontier)),
-				}, in.RunID, string(quarrycontracts.EvtRunPaused))
+				}, in.RunID, string(quarrycontracts.EvtRunPaused), strconv.Itoa(ctrl.pauseSeq))
 				emitPaused = true
 			}
 			if !ctrl.waitWhilePaused(ctx) {
@@ -446,7 +634,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 			}
 			_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunResumed, map[string]any{
 				"pages_visited": pagesVisited,
-			}, in.RunID, string(quarrycontracts.EvtRunResumed))
+			}, in.RunID, string(quarrycontracts.EvtRunResumed), strconv.Itoa(ctrl.pauseSeq))
 			emitPaused = false
 		}
 		if ctrl.state == stateCancelled {
@@ -460,14 +648,46 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		cur := frontier[0]
 		frontier = frontier[1:]
 
-		res, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, cur.URL)
-		if err != nil {
-			pagesFailed++
-			ctrl.progress.Failed = pagesFailed
+		var crawl *activities.CrawlContext
+		if scope != nil {
+			crawl = scope.contextFor(cur.Depth)
+		}
+		res, err := runPageWith(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", cur.URL, crawl)
+		if err != nil && scope != nil && errs.CategoryOf(err) == errs.CategoryBlocklist {
+			// The edge refused the page (scope or robots). It is counted as blocked.
+			pagesBlocked++
+			if robotsRefused(err) {
+				pagesBlockedRobots++
+			}
+			ctrl.progress.Blocked = pagesBlocked
+			ctrl.progress.Denied = scope.linksDenied
 			ctrl.progress.Pending = uint32(len(frontier))
 			continue
 		}
+		if err != nil {
+			pagesFailed++
+			stats.recordFailure(err)
+			ctrl.progress.Failed = pagesFailed
+			ctrl.progress.Pending = uint32(len(frontier))
+			// Failed pages count toward the same bound as visited ones, so a
+			// site that fails every page cannot be walked indefinitely.
+			if bounded && pagesFailed >= in.MaxPages {
+				stopReason = crawlStopMaxFailures
+				break
+			}
+			continue
+		}
+		if scope != nil {
+			// An edge that did not apply the scope ends the run: nothing of this page is followed.
+			if !appliedBy(res.Crawl) {
+				stopReason = edgeScopeUnsupported
+				break
+			}
+			scope.absorb(res.Crawl)
+			ctrl.progress.Denied = scope.linksDenied
+		}
 		pagesVisited++
+		stats.recordPage(res)
 		ctrl.progress.Visited = pagesVisited
 
 		// enqueue child links within depth bound
@@ -502,14 +722,47 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 			"pages_visited": pagesVisited,
 			"pages_failed":  pagesFailed,
 			"pending":       uint32(len(frontier)),
+			"statistics":    stats.payload(pagesVisited, pagesFailed, workflow.Now(ctx)),
 		}, in.RunID, string(quarrycontracts.EvtRunCancelled))
 	}
 
-	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, map[string]any{
+	completed := map[string]any{
 		"pages_visited": pagesVisited,
 		"pages_failed":  pagesFailed,
-	}, in.RunID, string(quarrycontracts.EvtRunCompleted))
+		"statistics":    stats.payload(pagesVisited, pagesFailed, workflow.Now(ctx)),
+	}
+	if stopReason == edgeScopeUnsupported {
+		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, map[string]any{
+			"code":          edgeScopeUnsupported,
+			"message":       "the edge did not apply the crawl scope; no link of the refused page was followed",
+			"pages_visited": pagesVisited,
+			"pages_failed":  pagesFailed,
+			"pages_blocked": pagesBlocked,
+		}, in.RunID, string(quarrycontracts.EvtRunFailed))
+	}
+	if scope != nil {
+		for k, v := range scope.terminal(pagesBlocked, pagesBlockedRobots) {
+			completed[k] = v
+		}
+	}
+	if stopReason != "" {
+		completed["reason"] = stopReason
+	}
+	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, completed,
+		in.RunID, string(quarrycontracts.EvtRunCompleted))
 }
+
+// Fallback bounds used inside the workflow when the input carries none. The
+// dispatcher resolves the operator-configured values (QUARRY_CRAWL_*) into the
+// input before the workflow starts; these constants only cover an input that
+// arrives with a zero, and match the built-in defaults of the jobs package.
+const (
+	workflowFallbackMaxPages uint32 = 1000
+	workflowFallbackMaxDepth uint32 = 5
+	// crawlStopMaxFailures is the terminal reason when failed pages alone
+	// reached the page bound.
+	crawlStopMaxFailures = "max_failures"
+)
 
 // crawlJobDurableFrontier keeps only counters in Temporal workflow state. All
 // URLs/depths/deduplication/in-flight visibility live in the Rust-owned
@@ -521,6 +774,8 @@ func crawlJobDurableFrontier(
 	a *activities.Activities,
 	ids runIDs,
 	ctrl *crawlControl,
+	bounded bool,
+	scope *crawlScopeRun,
 ) error {
 	queueName := durableFrontierQueueName(in.RunID)
 	for _, seed := range in.Seeds {
@@ -534,14 +789,16 @@ func crawlJobDurableFrontier(
 		}
 	}
 
-	var pagesVisited, pagesFailed uint32
+	var pagesVisited, pagesFailed, pagesBlocked, pagesBlockedRobots uint32
+	stopReason := ""
+	stats := newJobStatistics(workflow.Now(ctx))
 	emitPaused := false
 	for {
 		if ctrl.state == statePaused {
 			if !emitPaused {
 				_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunPaused, map[string]any{
 					"pages_visited": pagesVisited, "pages_failed": pagesFailed, "pending": 0,
-				}, in.RunID, string(quarrycontracts.EvtRunPaused))
+				}, in.RunID, string(quarrycontracts.EvtRunPaused), strconv.Itoa(ctrl.pauseSeq))
 				emitPaused = true
 			}
 			if !ctrl.waitWhilePaused(ctx) {
@@ -549,7 +806,7 @@ func crawlJobDurableFrontier(
 			}
 			_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunResumed, map[string]any{
 				"pages_visited": pagesVisited,
-			}, in.RunID, string(quarrycontracts.EvtRunResumed))
+			}, in.RunID, string(quarrycontracts.EvtRunResumed), strconv.Itoa(ctrl.pauseSeq))
 			emitPaused = false
 		}
 		if ctrl.state == stateCancelled || (in.MaxPages > 0 && pagesVisited >= in.MaxPages) {
@@ -566,12 +823,36 @@ func crawlJobDurableFrontier(
 			break
 		}
 		depth := frontierPayloadDepth(item.Payload)
-		res, pageErr := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, item.URL)
-		if pageErr != nil {
+		var crawl *activities.CrawlContext
+		if scope != nil {
+			crawl = scope.contextFor(depth)
+		}
+		res, pageErr := runPageWith(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", item.URL, crawl)
+		if pageErr != nil && scope != nil && errs.CategoryOf(pageErr) == errs.CategoryBlocklist {
+			pagesBlocked++
+			if robotsRefused(pageErr) {
+				pagesBlockedRobots++
+			}
+		} else if pageErr != nil {
 			pagesFailed++
+			stats.recordFailure(pageErr)
+			if bounded && pagesFailed >= in.MaxPages {
+				stopReason = crawlStopMaxFailures
+			}
+		} else if scope != nil && !appliedBy(res.Crawl) {
+			stopReason = edgeScopeUnsupported
 		} else {
+			if scope != nil {
+				scope.absorb(res.Crawl)
+			}
 			pagesVisited++
-			if in.MaxDepth == 0 || depth+1 <= in.MaxDepth {
+			stats.recordPage(res)
+			if scope != nil && (in.MaxDepth == 0 || depth+1 <= in.MaxDepth) {
+				// WS14.S3: the children of a page under scope go in one batch call.
+				if err := enqueueChildrenBatch(ctx, a, queueName, in.OrgID, in.RunID, depth+1, res.Links); err != nil {
+					return err
+				}
+			} else if in.MaxDepth == 0 || depth+1 <= in.MaxDepth {
 				for _, link := range res.Links {
 					if strings.TrimSpace(link) == "" {
 						continue
@@ -591,22 +872,47 @@ func crawlJobDurableFrontier(
 		}
 		ctrl.progress.Visited = pagesVisited
 		ctrl.progress.Failed = pagesFailed
+		ctrl.progress.Blocked = pagesBlocked
 		ctrl.progress.Pending = 0 // queue depth is read from the durable queue view
 		if pagesVisited > 0 && pagesVisited%50 == 0 {
 			_ = workflow.ExecuteActivity(ctx, a.Checkpoint, activities.CheckpointInput{
 				RunID: in.RunID, Visited: pagesVisited, Frontier: 0,
 			}).Get(ctx, nil)
 		}
+		if stopReason != "" {
+			break
+		}
 	}
 
 	if ctrl.state == stateCancelled {
 		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCancelled, map[string]any{
 			"pages_visited": pagesVisited, "pages_failed": pagesFailed,
+			"statistics": stats.payload(pagesVisited, pagesFailed, workflow.Now(ctx)),
 		}, in.RunID, string(quarrycontracts.EvtRunCancelled))
 	}
-	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, map[string]any{
+	completed := map[string]any{
 		"pages_visited": pagesVisited, "pages_failed": pagesFailed,
-	}, in.RunID, string(quarrycontracts.EvtRunCompleted))
+		"statistics": stats.payload(pagesVisited, pagesFailed, workflow.Now(ctx)),
+	}
+	if stopReason == edgeScopeUnsupported {
+		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, map[string]any{
+			"code":          edgeScopeUnsupported,
+			"message":       "the edge did not apply the crawl scope; no link of the refused page was followed",
+			"pages_visited": pagesVisited,
+			"pages_failed":  pagesFailed,
+			"pages_blocked": pagesBlocked,
+		}, in.RunID, string(quarrycontracts.EvtRunFailed))
+	}
+	if scope != nil {
+		for k, v := range scope.terminal(pagesBlocked, pagesBlockedRobots) {
+			completed[k] = v
+		}
+	}
+	if stopReason != "" {
+		completed["reason"] = stopReason
+	}
+	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, completed,
+		in.RunID, string(quarrycontracts.EvtRunCompleted))
 }
 
 func durableFrontierQueueName(runID string) string {

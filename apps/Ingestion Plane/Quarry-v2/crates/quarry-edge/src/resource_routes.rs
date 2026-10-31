@@ -17,9 +17,9 @@
 use axum::{
     body::Body,
     extract::{Path, Query, State},
-    http::{header, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
-        sse::{Event, Sse},
+        sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
     Extension, Json,
@@ -28,6 +28,8 @@ use serde::Deserialize;
 
 use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
+
+use crate::job_stream;
 use quarry_core::ids::kinds::{ArtifactKind, RequestKind};
 use quarry_core::pagination::{ListFilter, Page};
 use quarry_core::resources::{
@@ -120,7 +122,7 @@ pub async fn list_artifacts(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<ArtifactSummary>>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
     let page = state
         .artifacts
@@ -142,7 +144,7 @@ pub async fn get_artifact(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(id): Path<String>,
 ) -> Response {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let artifact_id = match id.parse::<ArtifactKind>() {
         Ok(value) => value,
         Err(err) => return err_response(&request_id, err).into_response(),
@@ -197,7 +199,7 @@ pub async fn get_page_image(
     State(state): State<AppState>,
     Path((org, doc, page, hash)): Path<(String, String, i64, String)>,
 ) -> Response {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let Some(renderer) = state.page_renderer.as_ref() else {
         return err_response(
             &request_id,
@@ -261,7 +263,7 @@ where
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {e}")))?;
+        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {}", e.without_url())))?;
     let mut req = client.get(&url).query(&[("org_id", org_id)]);
     if let Some(s) = &filter.status {
         req = req.query(&[("status", s)]);
@@ -334,7 +336,7 @@ where
     let resp = req.send().await.map_err(|e| {
         QuarryError::new(
             ErrorCode::DriverFailed,
-            format!("control-plane GET {path} failed: {e}"),
+            format!("control-plane GET {path} failed: {}", e.without_url()),
         )
     })?;
     let status = resp.status();
@@ -353,7 +355,7 @@ where
     let raw: serde_json::Value = resp.json().await.map_err(|e| {
         QuarryError::new(
             ErrorCode::Internal,
-            format!("control-plane GET {path} read: {e}"),
+            format!("control-plane GET {path} read: {}", e.without_url()),
         )
     })?;
     let inner = raw.get("data").cloned().unwrap_or(raw);
@@ -384,7 +386,7 @@ pub async fn list_sources(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<Source>>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
     let page = forward_list::<Source>(&state, &request_id, &claims.org_id, "/v1/sources", &filter)
         .await
@@ -425,6 +427,13 @@ pub struct CreateSourceRequest {
     /// Free-form per-source config (max_pages, include_patterns, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<serde_json::Value>,
+    /// The ZDR posture of a `monitor: true` create (WS4.H). In a client body it is
+    /// only a declaration that raises the posture ([`Claims::effective_zdr`] never
+    /// lets it lower the token's floor); the edge replaces it with the effective
+    /// posture on the forwarded copy, so control can stamp it on the change-monitor
+    /// schedule it registers. A plain source forwards none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zdr: Option<bool>,
 }
 
 const VALID_SOURCE_KINDS: [&str; 3] = ["crawl", "scrape", "search"];
@@ -457,7 +466,7 @@ async fn forward_mutation(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {e}")))?;
+        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {}", e.without_url())))?;
 
     let mut req = client
         .request(method.clone(), &url)
@@ -490,7 +499,7 @@ async fn forward_mutation(
     let resp = req.send().await.map_err(|e| {
         QuarryError::new(
             ErrorCode::DriverFailed,
-            format!("control-plane {method} {path} failed: {e}"),
+            format!("control-plane {method} {path} failed: {}", e.without_url()),
         )
     })?;
     let status = resp.status();
@@ -515,7 +524,7 @@ async fn forward_mutation(
     let text = resp.text().await.map_err(|e| {
         QuarryError::new(
             ErrorCode::Internal,
-            format!("control-plane {method} {path} read: {e}"),
+            format!("control-plane {method} {path} read: {}", e.without_url()),
         )
     })?;
     if text.trim().is_empty() {
@@ -534,7 +543,27 @@ pub async fn create_source(
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<CreateSourceRequest>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
+
+    // A `monitor: true` source registers a recurring change-monitor schedule in
+    // control: a durable resource, the same one `POST /v1/schedules` refuses for a
+    // ZDR organization (matrix row `schedules`). A plain source is a record only
+    // and is not touched here. The posture is computed once and stamped on the
+    // forwarded copy below.
+    let monitor_zdr = if req.monitor {
+        let zdr = claims.effective_zdr(req.zdr.unwrap_or(false));
+        crate::zdr_refusal::refuse(
+            &state,
+            &claims.org_id,
+            zdr,
+            &request_id,
+            "schedules",
+            "create",
+        )?;
+        Some(zdr)
+    } else {
+        None
+    };
 
     let name = req.name.trim();
     let url = req.url.trim();
@@ -569,6 +598,7 @@ pub async fn create_source(
             .filter(|s| !s.is_empty())
             .map(str::to_owned),
         config: req.config.clone(),
+        zdr: monitor_zdr,
     };
     let body_bytes = serde_json::to_vec(&body).map_err(|e| {
         err_response(
@@ -616,6 +646,7 @@ pub(crate) async fn upsert_source_internal(
         monitor: false,
         preset: None,
         config: None,
+        zdr: None,
     };
     let body_bytes = serde_json::to_vec(&body)
         .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("encode body: {e}")))?;
@@ -635,7 +666,7 @@ pub async fn delete_source(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let path = format!("/v1/sources/{id}");
     forward_mutation(&state, reqwest::Method::DELETE, &path, &claims.org_id, b"")
         .await
@@ -648,7 +679,7 @@ pub async fn list_snapshots(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<Snapshot>>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
     let page = forward_list::<Snapshot>(
         &state,
@@ -684,7 +715,7 @@ where
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {e}")))?;
+        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {}", e.without_url())))?;
     let mut req = client.get(&url).query(&[("org_id", org_id)]);
     for (k, v) in query {
         req = req.query(&[(*k, v)]);
@@ -706,7 +737,7 @@ where
     let resp = req.send().await.map_err(|e| {
         QuarryError::new(
             ErrorCode::DriverFailed,
-            format!("control-plane GET {path} failed: {e}"),
+            format!("control-plane GET {path} failed: {}", e.without_url()),
         )
     })?;
     let status = resp.status();
@@ -720,7 +751,7 @@ where
     let parsed: T = resp.json().await.map_err(|e| {
         QuarryError::new(
             ErrorCode::Internal,
-            format!("control-plane GET {path} parse: {e}"),
+            format!("control-plane GET {path} parse: {}", e.without_url()),
         )
     })?;
     Ok(Some(parsed))
@@ -735,7 +766,7 @@ pub async fn list_jobs(
     Path(kind): Path<String>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<JobSummary>>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let resource_kind = JobResourceKind::from_path_segment(&kind).ok_or_else(|| {
         err_response(
             &request_id,
@@ -759,7 +790,7 @@ pub async fn list_request_queues(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<RequestQueueSummary>>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
     let page = forward_list::<RequestQueueSummary>(
         &state,
@@ -778,7 +809,7 @@ pub async fn list_benchmarks(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<BenchmarkSummary>>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
     let page = forward_list::<BenchmarkSummary>(
         &state,
@@ -797,7 +828,7 @@ pub async fn list_schedules(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<serde_json::Value>>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
     // control's /v1/schedules serves the orchestrator-facing `scheduleWire`
     // projection (id / target_kind / target_ref / enabled / created_at-as-unix),
@@ -838,7 +869,7 @@ pub async fn team_credit_usage(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<TeamQuery>,
 ) -> Result<Json<Envelope<TeamCreditUsage>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let period = team_period(&q);
     let body = forward_one::<TeamCreditUsage>(
         &state,
@@ -864,7 +895,7 @@ pub async fn team_token_usage(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<TeamQuery>,
 ) -> Result<Json<Envelope<TeamTokenUsage>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let period = team_period(&q);
     let body = forward_one::<TeamTokenUsage>(
         &state,
@@ -890,7 +921,7 @@ pub async fn team_concurrency(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
 ) -> Result<Json<Envelope<TeamConcurrency>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let body = forward_one::<TeamConcurrency>(
         &state,
         &request_id,
@@ -913,7 +944,7 @@ pub async fn team_queue_status(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
 ) -> Result<Json<Envelope<TeamQueueStatus>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let body = forward_one::<TeamQueueStatus>(
         &state,
         &request_id,
@@ -937,7 +968,7 @@ pub async fn team_activity(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<TeamActivityEntry>>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
     let page = forward_list::<TeamActivityEntry>(
         &state,
@@ -969,6 +1000,9 @@ pub struct RunEventsQuery {
     /// Only return events with `seq` strictly greater than this watermark
     /// (control filters server-side). Lets incremental pollers such as the
     /// onboarding crawl preview avoid re-downloading the whole event log.
+    /// Not read by `list_run_events` (it was read only by the job route, which now has
+    /// `JobEventsQuery`); kept so the query shape does not change for callers.
+    #[allow(dead_code)]
     #[serde(default)]
     pub after_seq: Option<u64>,
 }
@@ -982,7 +1016,7 @@ pub async fn list_run_events(
     Json<Envelope<Page<quarry_core::job_history::JobHistoryEvent>>>,
     (StatusCode, Json<Envelope<()>>),
 > {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let parsed_run_id: quarry_core::ids::kinds::RunKind =
         run_id
             .parse()
@@ -1054,13 +1088,70 @@ pub async fn list_run_events(
 // gateway forward the bytes verbatim via `proxy_sse_stream`, unlike the
 // JSON-returning `/v1/runs/:id/events` which the SSE reader can't parse.
 // =============================================================================
+/// Query of the job event routes. `follow` and `replay` are read only when the
+/// job-stream flag is on; with the flag off the route is the legacy drain.
+#[derive(Debug, Default, Deserialize)]
+pub struct JobEventsQuery {
+    /// Page size of the legacy drain (default 500, clamped to [1, 1000]).
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Events after this seq. A `Last-Event-ID` header wins over it.
+    #[serde(default)]
+    pub after_seq: Option<u64>,
+    /// `true` or `1` keeps the stream open (WS15.L3).
+    #[serde(default)]
+    pub follow: Option<String>,
+    /// `all` (default) or `none`. With no cursor, `none` starts at the snapshot.
+    #[serde(default)]
+    pub replay: Option<String>,
+}
+
+/// Pages of the legacy drain read before it stops (500 events a page).
+const LEGACY_MAX_PAGES: usize = 200;
+
+/// `GET /v1/jobs/:id/events`. Legacy drain: every event the job has, then
+/// `done`. With `follow=true` on a flagged edge, a live tail (`job_stream`).
 pub async fn list_job_events(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
+    headers: HeaderMap,
     Path(job_id): Path<String>,
-    Query(q): Query<RunEventsQuery>,
+    Query(q): Query<JobEventsQuery>,
 ) -> Response {
-    let request_id = RequestKind::new().to_string();
+    job_events(state, claims, headers, job_id, q, None).await
+}
+
+/// `GET /v1/crawl/:id/events`: as `list_job_events`, for crawl jobs only.
+pub async fn list_crawl_events(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+    Query(q): Query<JobEventsQuery>,
+) -> Response {
+    job_events(state, claims, headers, job_id, q, Some("crawl")).await
+}
+
+/// `GET /v1/batch/:id/events`: as `list_job_events`, for batch jobs only.
+pub async fn list_batch_events(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+    Query(q): Query<JobEventsQuery>,
+) -> Response {
+    job_events(state, claims, headers, job_id, q, Some("batch")).await
+}
+
+async fn job_events(
+    state: AppState,
+    claims: crate::auth::Claims,
+    headers: HeaderMap,
+    job_id: String,
+    q: JobEventsQuery,
+    kind: Option<&'static str>,
+) -> Response {
+    let request_id = crate::request_id::current();
     // Validate the id is a job id (job_*) so we never proxy garbage / a
     // run id (which belongs on /v1/runs/:id/events) to control.
     if let Err(e) = job_id.parse::<quarry_core::ids::kinds::JobKind>() {
@@ -1070,40 +1161,38 @@ pub async fn list_job_events(
         )
         .into_response();
     }
-    let limit = q.limit.unwrap_or(500).clamp(1, 1000).to_string();
-    let after_seq = q.after_seq.unwrap_or(0).to_string();
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
 
-    let events: Vec<serde_json::Value> = if state.control_base_url.is_empty() {
-        tracing::debug!(%job_id, "control_base_url unset; emitting empty job-events stream");
-        Vec::new()
-    } else {
-        let path = format!("/v1/jobs/{job_id}/events");
-        match forward_one::<serde_json::Value>(
-            &state,
-            &request_id,
-            &claims.org_id,
-            &path,
-            &[("limit", limit), ("after_seq", after_seq)],
-        )
-        .await
-        {
-            // Control serves these events through `httpx.WriteJSON`, which
-            // wraps the `[]Event` slice in an envelope: `{"data": [ ... ]}`
-            // (and `{"data": null}` when there are none). It is NOT a bare
-            // top-level array. Unwrap `data` first — same tolerance as
-            // `forward_list` — then accept the inner array; otherwise we'd
-            // fall through to `Vec::new()` on every real response and emit
-            // only the terminal `done`, which is the 0-pages bug.
-            Ok(Some(raw)) => {
-                let inner = raw.get("data").cloned().unwrap_or(raw);
-                match inner {
-                    serde_json::Value::Array(items) => items,
-                    _ => Vec::new(),
-                }
-            }
-            Ok(None) => Vec::new(),
-            Err(e) => return err_response(&request_id, e).into_response(),
+    let follow_requested = q
+        .follow
+        .as_deref()
+        .is_some_and(|v| matches!(v.trim(), "1" | "true"));
+    if follow_requested && job_stream::follow_enabled() {
+        return follow_job(state, claims, request_id, job_id, q, last_event_id, kind).await;
+    }
+
+    if kind.is_some() {
+        if let Err(e) = ensure_job(&state, &claims, &job_id, kind).await {
+            return err_response(&request_id, e).into_response();
         }
+    }
+    let limit = q.limit.unwrap_or(500).clamp(1, 1000);
+    let first_after = last_event_id.or(q.after_seq).unwrap_or(0);
+    let events = match legacy_events(
+        &state,
+        &request_id,
+        &claims.org_id,
+        &job_id,
+        limit,
+        first_after,
+    )
+    .await
+    {
+        Ok(events) => events,
+        Err(e) => return err_response(&request_id, e).into_response(),
     };
 
     let stream = async_stream::stream! {
@@ -1117,8 +1206,8 @@ pub async fn list_job_events(
                 .to_owned();
             match Event::default().event(name).json_data(&event) {
                 Ok(ev) => yield Ok::<Event, std::convert::Infallible>(ev),
-                Err(err) => {
-                    tracing::warn!(error = %err, "job-event serialize failed; skipping frame");
+                Err(_) => {
+                    tracing::warn!(error_class = "serialize", "job-event serialize failed; skipping frame");
                 }
             }
         }
@@ -1128,6 +1217,132 @@ pub async fn list_job_events(
     };
 
     Sse::new(stream).into_response()
+}
+
+/// Reads control's summary of the job, org-scoped. A foreign id is a 404, and so
+/// is a job of another kind than the path names, both before any frame is sent.
+async fn ensure_job(
+    state: &AppState,
+    claims: &crate::auth::Claims,
+    job_id: &str,
+    kind: Option<&str>,
+) -> Result<serde_json::Value, QuarryError> {
+    let summary = crate::control_client::get_json(
+        state,
+        &format!("/v1/jobs/{job_id}/summary"),
+        &claims.org_id,
+        &[],
+    )
+    .await?;
+    if let Some(kind) = kind {
+        let actual = summary
+            .get("job")
+            .and_then(|job| job.get("kind"))
+            .and_then(serde_json::Value::as_str);
+        if actual != Some(kind) {
+            return Err(QuarryError::new(ErrorCode::NotFound, "not found"));
+        }
+    }
+    Ok(summary)
+}
+
+/// Every event of the job after `first_after`, read page by page until the log
+/// is caught up (a page shorter than `limit` ends it). The legacy drain used to
+/// stop at one page, which truncated any job with more events than a page.
+async fn legacy_events(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    job_id: &str,
+    limit: u32,
+    first_after: u64,
+) -> Result<Vec<serde_json::Value>, QuarryError> {
+    let path = format!("/v1/jobs/{job_id}/events");
+    let mut after = first_after;
+    let mut events: Vec<serde_json::Value> = Vec::new();
+    for _ in 0..LEGACY_MAX_PAGES {
+        let page = forward_one::<serde_json::Value>(
+            state,
+            request_id,
+            org_id,
+            &path,
+            &[("limit", limit.to_string()), ("after_seq", after.to_string())],
+        )
+        .await?;
+        // Control serves these events through `httpx.WriteJSON`, which
+        // wraps the `[]Event` slice in an envelope: `{"data": [ ... ]}`
+        // (and `{"data": null}` when there are none). Unwrap `data` first.
+        let items: Vec<serde_json::Value> = match page {
+            Some(raw) => match raw.get("data").cloned().unwrap_or(raw) {
+                serde_json::Value::Array(items) => items,
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+        let full = items.len() >= limit as usize;
+        let last = items
+            .last()
+            .and_then(|event| event.get("seq"))
+            .and_then(serde_json::Value::as_u64);
+        events.extend(items);
+        match (full, last) {
+            (true, Some(seq)) if seq > after => after = seq,
+            _ => break,
+        }
+    }
+    Ok(events)
+}
+
+/// The follow path: checks the job, takes a stream permit, and returns the live
+/// tail with its snapshot first. Refusals (foreign id, bad replay, over the cap)
+/// are answered before any frame.
+async fn follow_job(
+    state: AppState,
+    claims: crate::auth::Claims,
+    request_id: String,
+    job_id: String,
+    q: JobEventsQuery,
+    last_event_id: Option<u64>,
+    kind: Option<&'static str>,
+) -> Response {
+    let summary = match ensure_job(&state, &claims, &job_id, kind).await {
+        Ok(summary) => summary,
+        Err(e) => return err_response(&request_id, e).into_response(),
+    };
+    let Some(replay) = job_stream::parse_replay(q.replay.as_deref()) else {
+        return err_response(
+            &request_id,
+            QuarryError::new(ErrorCode::BadRequest, "replay must be none or all"),
+        )
+        .into_response();
+    };
+    let Some(permit) = job_stream::acquire(&claims.org_id) else {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(crate::api_error::ApiError::rate_limited(
+                "too many open job event streams for this organization",
+                30,
+            )),
+        )
+            .into_response();
+    };
+    let last_seq = summary
+        .get("last_seq")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let cursor = job_stream::start_cursor(last_event_id, q.after_seq, replay, last_seq);
+    let snapshot = job_stream::snapshot(&job_id, &summary, cursor);
+    let stream = job_stream::follow(
+        state,
+        claims.org_id.clone(),
+        job_id,
+        cursor,
+        snapshot,
+        permit,
+    );
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(job_stream::KEEP_ALIVE))
+        .into_response()
 }
 
 #[cfg(test)]

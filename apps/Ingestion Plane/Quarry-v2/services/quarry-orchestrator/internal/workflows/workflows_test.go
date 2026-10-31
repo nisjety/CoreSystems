@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/testsuite"
+	"go.temporal.io/sdk/workflow"
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
 	"github.com/triodelab/quarry-v2/services/quarry-orchestrator/internal/activities"
@@ -405,6 +406,64 @@ func TestChangeMonitorWF_ActivityFailureEmitsRunFailed(t *testing.T) {
 	require.Error(t, env.GetWorkflowError())
 }
 
+// A probe the edge refused under Zero Data Retention (a baseline would be a
+// durable resource) ends the run cleanly: one run_failed event whose reason is
+// zdr_refused and which carries no URL (the run_started before it still does: see the
+// known-gap comment below), no change event, and a workflow that
+// completes WITHOUT an error (so nothing retries it).
+func TestChangeMonitorWF_ZDRRefusalEndsTheRunCleanly(t *testing.T) {
+	env, a := newEnv(t)
+
+	env.OnActivity(a.CheckChange, mock.Anything, mock.Anything).Return(activities.CheckChangeResult{
+		Status:     activities.StatusZDRRefused,
+		ZDRRefused: true,
+	}, nil).Once()
+
+	var emitted []quarrycontracts.Event
+	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ string, evt quarrycontracts.Event) error {
+			emitted = append(emitted, evt)
+			return nil
+		})
+
+	env.ExecuteWorkflow(ChangeMonitorWF, ChangeMonitorInput{
+		RunID: "run_cm_zdr",
+		OrgID: "org_zdr",
+		URL:   "https://example.com/secret-path",
+	}, a)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError(), "a ZDR refusal is a clean terminal outcome, not a workflow failure")
+
+	types := make([]quarrycontracts.EventType, 0, len(emitted))
+	for _, evt := range emitted {
+		types = append(types, evt.Type)
+	}
+	require.Equal(t, []quarrycontracts.EventType{quarrycontracts.EvtRunStarted, quarrycontracts.EvtRunFailed}, types,
+		"no change_detected, change_unchanged or run_completed for a refused probe")
+
+	// KNOWN RETENTION GAP, NOT DESIRED BEHAVIOUR. This assertion records today's defect so it
+	// cannot change unnoticed: run_started is emitted BEFORE the record call (the orchestrator
+	// cannot know the refusal beforehand), so a refused run's first event still carries the
+	// monitored URL. Only the run_failed event is URL-free. The change that closes the gap
+	// (for example by emitting run_started after the record call, or without the URL for a
+	// ZDR job) must flip this assertion to NotContains in the same commit.
+	// See docs/RUNBOOKS.md "What the orchestrator lacks".
+	require.Equal(t, "https://example.com/secret-path", emitted[0].Payload["url"],
+		"run_started carries the URL of a run that is refused afterwards")
+
+	failed := emitted[1]
+	require.Equal(t, "zdr_refused", failed.Payload["reason"])
+	require.Equal(t, "zdr_durable_mutation_forbidden", failed.Payload["refusal_code"])
+	require.Equal(t, "change_monitor", failed.Payload["kind"])
+	for key, value := range failed.Payload {
+		require.NotContains(t, key, "url")
+		if text, ok := value.(string); ok {
+			require.NotContains(t, text, "secret-path")
+		}
+	}
+}
+
 // emitCallCount returns the number of times EmitEvent was invoked. Temporal's
 // test environment does not expose call counts directly, so we count via the
 // AssertExpectations side-effect on the Mock.
@@ -440,4 +499,181 @@ func intStr(n int) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
+}
+
+// A zero MaxPages used to mean "unlimited". Executions started now are bounded
+// by the fallback cap whatever the input says, and the run reports why it ended.
+func TestCrawlJobWF_ZeroMaxPagesFallsBackToCap(t *testing.T) {
+	env, a := newEnv(t)
+
+	var counter int
+	env.OnActivity(a.RunPage, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ activities.RunPageInput) (activities.RunPageResult, error) {
+			counter++
+			// Endless fresh links: only the bound can stop this crawl.
+			return activities.RunPageResult{
+				Status:      200,
+				Fingerprint: "blake3:fp",
+				Links:       []string{"https://crawl.example/p" + intStr(counter)},
+			}, nil
+		},
+	)
+	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.Checkpoint, mock.Anything, mock.Anything).Return(nil)
+
+	env.ExecuteWorkflow(CrawlJobWF, CrawlJobInput{
+		RunID:    "run_zero_pages",
+		Seeds:    []string{"https://crawl.example/seed"},
+		MaxDepth: 100000, // depth is not the limiter here
+		MaxPages: 0,
+	}, a)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	require.Equal(t, int(workflowFallbackMaxPages), counter,
+		"a zero MaxPages must stop at the fallback cap, visited %d", counter)
+}
+
+// Failed pages count toward the same bound, so a site that fails every page
+// cannot be walked indefinitely, and the terminal reason says so.
+func TestCrawlJobWF_FailuresCountTowardCap(t *testing.T) {
+	env, a := newEnv(t)
+
+	// The activity is retried by its retry policy, so count distinct pages.
+	seen := map[string]struct{}{}
+	env.OnActivity(a.RunPage, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, in activities.RunPageInput) (activities.RunPageResult, error) {
+			seen[in.URL] = struct{}{}
+			return activities.RunPageResult{}, errors.New("blocked")
+		},
+	)
+	var completed map[string]any
+	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ string, evt quarrycontracts.Event) error {
+			if evt.Type == quarrycontracts.EvtRunCompleted {
+				completed = evt.Payload
+			}
+			return nil
+		},
+	)
+	env.OnActivity(a.Checkpoint, mock.Anything, mock.Anything).Return(nil)
+
+	seeds := make([]string, 0, 20)
+	for i := 0; i < 20; i++ {
+		seeds = append(seeds, "https://crawl.example/seed"+intStr(i))
+	}
+	env.ExecuteWorkflow(CrawlJobWF, CrawlJobInput{
+		RunID:    "run_failures",
+		Seeds:    seeds,
+		MaxDepth: 2,
+		MaxPages: 3,
+	}, a)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	require.Len(t, seen, 3, "three failed pages reach the bound of 3")
+	require.NotNil(t, completed)
+	require.Equal(t, crawlStopMaxFailures, completed["reason"])
+}
+
+func TestCrawlJobWF_ZeroMaxDepthFallsBackToDepthCap(t *testing.T) {
+	env, a := newEnv(t)
+
+	var visits int
+	env.OnActivity(a.RunPage, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ activities.RunPageInput) (activities.RunPageResult, error) {
+			visits++
+			// A single endless chain: each page links to one deeper page.
+			return activities.RunPageResult{
+				Status:      200,
+				Fingerprint: "blake3:fp",
+				Links:       []string{"https://crawl.example/deeper" + intStr(visits)},
+			}, nil
+		},
+	)
+	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.Checkpoint, mock.Anything, mock.Anything).Return(nil)
+
+	env.ExecuteWorkflow(CrawlJobWF, CrawlJobInput{
+		RunID:    "run_zero_depth",
+		Seeds:    []string{"https://crawl.example/seed"},
+		MaxDepth: 0,
+		MaxPages: 500,
+	}, a)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	// Depth 0 (the seed) plus one page per level up to the fallback depth.
+	require.Equal(t, int(workflowFallbackMaxDepth)+1, visits)
+}
+
+// An execution that started before the version marker replays with the legacy
+// behaviour: a zero MaxPages is unbounded and failures are not counted.
+func TestCrawlJobWF_OldVersionHistoryKeepsLegacyBehaviour(t *testing.T) {
+	env, a := newEnv(t)
+	env.OnGetVersion("crawl-bounded-v1", workflow.DefaultVersion, 1).Return(workflow.DefaultVersion)
+
+	seen := map[string]struct{}{}
+	env.OnActivity(a.RunPage, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, in activities.RunPageInput) (activities.RunPageResult, error) {
+			seen[in.URL] = struct{}{}
+			return activities.RunPageResult{}, errors.New("blocked")
+		},
+	)
+	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.Checkpoint, mock.Anything, mock.Anything).Return(nil)
+
+	seeds := make([]string, 0, 8)
+	for i := 0; i < 8; i++ {
+		seeds = append(seeds, "https://crawl.example/seed"+intStr(i))
+	}
+	env.ExecuteWorkflow(CrawlJobWF, CrawlJobInput{
+		RunID:    "run_legacy",
+		Seeds:    seeds,
+		MaxPages: 2,
+	}, a)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	require.Len(t, seen, 8, "the legacy path never counted failures toward the bound")
+}
+
+// TestCrawlJobWF_CharacterizesExternalLinkFollowing_Legacy pins today's
+// behaviour (WS14.S0). The in-workflow loop has no host scope, so a link from
+// the seed to another host is handed to RunPage like any other link. WS14.S3
+// changes this under crawl-scope-v1; that change must show up as a deliberate
+// diff to this test, not as a surprise.
+func TestCrawlJobWF_CharacterizesExternalLinkFollowing_Legacy(t *testing.T) {
+	env, a := newEnv(t)
+
+	var fetched []string
+	env.OnActivity(a.RunPage, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, in activities.RunPageInput) (activities.RunPageResult, error) {
+			fetched = append(fetched, in.URL)
+			if in.URL == "https://seed.example/start" {
+				return activities.RunPageResult{
+					Status:      200,
+					Fingerprint: "blake3:seed",
+					Links:       []string{"https://other.example/"},
+				}, nil
+			}
+			return activities.RunPageResult{Status: 200, Fingerprint: "blake3:other"}, nil
+		},
+	)
+	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.Checkpoint, mock.Anything, mock.Anything).Return(nil)
+
+	env.ExecuteWorkflow(CrawlJobWF, CrawlJobInput{
+		RunID:    "run_s0_external_legacy",
+		Seeds:    []string{"https://seed.example/start"},
+		MaxDepth: 2,
+		MaxPages: 10,
+	}, a)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	require.Equal(t,
+		[]string{"https://seed.example/start", "https://other.example/"},
+		fetched,
+		"the legacy loop fetches a cross-host link today; WS14.S3 changes this on purpose")
 }

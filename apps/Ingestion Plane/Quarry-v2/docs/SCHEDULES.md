@@ -1,78 +1,114 @@
-# Schedules — Lifecycle Convergence
+# Schedules: lifecycle, tenancy and creation
 
-Cycle 23 / cluster #5.
+Cycle 23 / cluster #5 (lifecycle), WS15.S1 (tenant-safe persistence and creation).
 
 ## Why
 
-Pre-cycle-23, operators had to use `temporal` CLI (or write Go code)
-to pause / unpause / trigger / backfill a scheduled crawl. That's a
-high-cost dependency on a vendor-specific tool. Cluster #5's
-acceptance criterion was "Operators never need direct Temporal access
-for schedule work" — the lifecycle endpoints below close that gap.
+Operators must not need direct Temporal access for schedule work. The edge
+exposes the lifecycle verbs below; control owns the rows and the Temporal client.
 
 ## Endpoints
 
-| Method | Path                                | Effect                                                  |
-| ------ | ----------------------------------- | ------------------------------------------------------- |
-| `GET`  | `/v1/schedules`                     | Paginated list, org-scoped                              |
-| `POST` | `/v1/schedules`                     | Create (cron OR `schedule_at` one-shot)                  |
-| `POST` | `/v1/schedules/:id/pause`           | Pause — stops firing; preserves config                   |
-| `POST` | `/v1/schedules/:id/unpause`         | Resume after pause                                       |
-| `POST` | `/v1/schedules/:id/trigger`         | Fire once manually, immediately                          |
-| `POST` | `/v1/schedules/:id/backfill`        | Run for a specific time-range window                     |
-| `DELETE` | `/v1/schedules/:id`               | Soft-delete (Temporal stops; row kept for audit)         |
+| Method   | Path                           | Effect                                                         |
+| -------- | ------------------------------ | -------------------------------------------------------------- |
+| `GET`    | `/v1/schedules`                | The caller's schedules, keyset-paged, newest first             |
+| `POST`   | `/v1/schedules`                | Create an executable schedule or a change monitor              |
+| `POST`   | `/v1/schedules/:id/pause`      | Disable: stops firing, keeps the definition                    |
+| `POST`   | `/v1/schedules/:id/unpause`    | Enable again                                                   |
+| `POST`   | `/v1/schedules/:id/trigger`    | Fire once now (control answers 501 until a Temporal client is wired) |
+| `POST`   | `/v1/schedules/:id/backfill`   | Replay a time range (control answers 501 until a Temporal client is wired) |
+| `DELETE` | `/v1/schedules/:id`            | Remove the row. The orchestrator reaps the Temporal schedule on its next pass |
 
-All routes:
-- Require auth (JWT middleware applies to every `/v1/*`).
-- `org_id` is the verified claim — query-string overrides are ignored.
-- Forward to Go control plane (Temporal client lives there).
-- 502/500 mapped to `DriverFailed`; `404` to `NotFound`; `400` to
-  `BadRequest`; `401/403` to `Forbidden`.
+Every route takes the org from the edge-verified JWT. The edge sends it to
+control as the `org_id` query parameter and never reads it from a body.
 
-## State machine
+## Tenancy (WS15.S1)
 
-```
-                    POST /v1/schedules
-                              │
-                              ▼
-                       ┌─────────────┐
-            ┌─────────►│   active    │
-            │          └─────┬───────┘
-            │                │  POST /:id/pause
-            │                ▼
-  POST /:id/unpause     ┌─────────┐
-            ◄───────────┤ paused  │
-                        └─────────┘
-                              │
-                              ▼  DELETE /:id
-                       ┌─────────────┐
-                       │   deleted   │  (terminal, soft)
-                       └─────────────┘
-```
+- A row belongs to one org. A request for another org's row answers `404`, the
+  same answer as a missing row. This covers read, delete, pause, unpause,
+  enable, disable, trigger, backfill and the run history.
+- Control's `GET /v1/schedules` requires `org_id`. Without it, the legacy
+  unscoped list still answers (with every org's rows, in the orchestrator's
+  wire shape) and logs a deprecation. Set `QUARRY_CONTROL_SCHEDULES_REQUIRE_ORG=1`
+  to make it a `400`. Remove the legacy path once the orchestrator reads
+  `GET /v1/internal/schedules/desired` (all orgs, internal path only).
+- A body `org_id` is ignored by control.
 
-`trigger` and `backfill` don't change schedule state — they fire
-runs against the current state.
+## Create
 
-## Create-request shape
-
-```rust
-pub struct CreateScheduleRequest {
-    pub name: String,
-    pub kind: JobResourceKind,          // crawl | search | extract | research | agent | batch
-    pub cron: Option<String>,           // EXACTLY one of cron / schedule_at
-    pub schedule_at: Option<DateTime>,
-    pub overlap_policy: OverlapPolicy,   // skip (default) | cancel | allow
-    pub catchup_window_s: u64,           // 0 disables catchup
-    pub pause_on_failure: bool,
-    pub config: serde_json::Value,       // per-kind payload (URL, query, etc.)
+```json
+{
+  "name": "Nightly docs crawl",
+  "kind": "crawl",
+  "cron": "0 7 * * *",
+  "timezone": "Europe/Oslo",
+  "overlap_policy": "skip",
+  "catchup_window_s": 0,
+  "pause_on_failure": false,
+  "config": { "url": "https://example.com/docs", "max_pages": 20 },
+  "activate": false
 }
 ```
 
-Validation at the edge:
-- Exactly one of `cron` / `schedule_at` must be set (BadRequest).
-- `cron` must have ≥ 5 whitespace-separated fields (BadRequest).
-- All deeper cron validation happens in the control plane (vendor
-  parser quirks).
+- `kind` is `scrape`, `crawl` or `batch`. Any other kind is a `400` with
+  `error.details.reason = "unsupported_schedule_kind"`.
+- `cron` is exactly five fields. A six-field cron is a `400` (`invalid_cron`).
+- `schedule_at` (one-shot) is not supported yet: `400`, `unsupported_schedule_at`.
+- `config.url` (scrape, crawl) or `config.urls` (batch, 1 to 200 URLs) must be
+  http or https with no credentials. Otherwise `400`, `invalid_config`.
+- `max_pages` is 1 to 5000 and `max_depth` 0 to 10 when present.
+- `timezone` is an IANA zone. `Local` and unknown names are `400`,
+  `invalid_timezone`.
+- `overlap_policy` is `skip`, `allow` or `cancel`. `catchup_window_s` is 0 to 86400.
+- The cadence floor is 5 minutes for scrape and 15 minutes for crawl and batch,
+  measured by `cron.MinInterval` (smallest gap over three sample instants). A
+  faster cron is `400`, `cadence_too_frequent`. `QUARRY_SCHEDULE_MIN_INTERVAL_S`
+  overrides the floor for every kind.
+
+Refusals carry `error.details.reason`. Control's own refusals (for example
+`invalid_timezone`) are passed through with the same field.
+
+### Activation
+
+A new executable schedule starts **disabled**. The response has
+`enabled: false`, `status: "paused"` and `needs_activation: true`. A user token
+may send `activate: true` to start it at once. The edge ignores `activate` from
+a service principal. The body's `enabled` field is not read.
+
+A change monitor (`preset` + `target_ref`) starts when created, as before. Its
+posture is stamped (WS4.H). See `RUNBOOKS.md`.
+
+### Response shape
+
+The view carries `schedule_id`, `name`, `kind`, `cron`, `timezone`,
+`overlap_policy`, `catchup_window_s`, `pause_on_failure`, `jitter_s`, `status`
+(`active` or `paused`), `needs_activation`, `config`, RFC 3339 `created_at`,
+`updated_at`, `last_run_at`, `next_run_at`, and the legacy `id`, `target_kind`,
+`target_ref`, `enabled`. The create answers `200` through the edge (the WS4.H
+tests pin that status).
+
+## Not yet
+
+- Nothing fires. The executor (WS15.S2) reads these rows, behind
+  `QUARRY_SCHEDULED_JOBS_ENABLED`.
+- `schedule_at`, `trigger` and `backfill` are unavailable.
+- An invalid `overlap_policy` value is rejected by the edge's JSON decoder
+  (`422`), before control sees it.
+
+## State
+
+```
+POST /v1/schedules (activate:false) ──► paused (needs_activation: true)
+                                          │  POST /:id/unpause or /enable
+                                          ▼
+                                       active ◄──── POST /:id/pause or /disable ──┐
+                                          │                                       │
+                                          └───────────────────────────────────────┘
+DELETE /:id ──► row removed (hard delete)
+```
+
+Migration 017 leaves pre-existing scrape, crawl and batch rows disabled (they
+never ran). It does not touch change monitors.
 
 ## Backfill
 
@@ -84,37 +120,21 @@ pub struct BackfillRequest {
 }
 ```
 
-A backfill replays the schedule against every firing time between
-`start_at` and `end_at`. Common pattern: after a long outage, set
-`overlap_policy: allow` so the catchup work parallelises.
-
-## OverlapPolicy
-
-- `skip` (default) — if a previous run is still in flight when the
-  next firing time arrives, skip the new run.
-- `cancel` — cancel the in-flight run and start the new one.
-- `allow` — let both run concurrently. Most workloads don't tolerate
-  this; use sparingly.
+Control answers `501` until a Temporal client is configured.
 
 ## Idempotency
 
-Backend (control plane) MUST dedupe creates by `(org_id, name)` so
-retrying a 5xx network error doesn't produce two identical schedules.
-The edge does not yet emit an idempotency-key header — that's wired
-in cluster #14 alongside HMAC.
-
-## Tenant isolation
-
-- Verified `org_id` from JWT claim is the only org gate.
-- Schedule IDs are globally unique ULIDs (`sch_...`) so cross-tenant
-  ID-guessing is impractical, but the control plane also enforces
-  `WHERE org_id = $verified` on every lookup.
+The edge sends an `Idempotency-Key` on every mutating call. Control does not yet
+dedupe creates by `(org_id, name)`, so a retried create can produce a second row.
 
 ## Tests
 
-- 2 unit tests in `crates/quarry-edge/src/schedule_routes.rs` pin
-  request body shape (`create_schedule_request_requires_cron_xor_schedule_at_check_pattern`, `backfill_request_serializes_with_required_fields`).
-- 5 resource shape tests in `crates/quarry-core/src/resources.rs`
-  pin `ScheduleSummary`, `OverlapPolicy`, and team shapes.
-- Integration tests against a live Go control plane are deferred to
-  cycle 28's benchmark harness.
+- Control (`services/quarry-control/internal/resources/schedules_test.go`,
+  `schedules_zdr_test.go`, `cycle23_aliases_test.go`; `store/pg/schedules_017_test.go`
+  against `QUARRY_TEST_DSN`; `cron/interval_test.go`).
+- Edge (`crates/quarry-edge/tests/schedule_create.rs`; in-file unit tests in
+  `src/schedule_routes.rs`; the WS4.H posture tests in `tests/zdr_posture_stamp.rs`).
+- Core (`crates/quarry-core/src/resources.rs`, `schedule_summary_json_wire_shape`).
+- Gateway (`apps/gateway/src/domains/ingestions/schedules.rs`).
+
+These were written in the WS15.S1 build and have not been run yet.

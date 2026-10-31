@@ -31,7 +31,162 @@ use crate::host_scheduler::{BadKind, HostScheduler};
 use crate::ingest_client::DataPlaneIngest;
 use crate::local_index::{LocalDocument, TantivyLocalIndex};
 use crate::policy::RunPolicy;
+use crate::robots_cache::origin_key;
+use crate::robots_gate::{RobotsEnforceMode, RobotsEnforcement};
 use crate::source_registrar::SourceRegistrar;
+
+/// What a run returns besides its [`NormalizedOutput`]: the parts that cannot
+/// be stored artifacts. Under Zero Data Retention no artifact is written, so
+/// the extracted text is handed back inline instead.
+#[derive(Debug, Clone, Default)]
+pub struct InlineParts {
+    /// The extracted text. `Some` when it was asked for, and by default when
+    /// this run stores nothing (ZDR).
+    pub markdown: Option<String>,
+    /// The fetched document as text, when asked for. Not for a document
+    /// (PDF, DOCX): its bytes are not text.
+    pub html: Option<String>,
+    pub raw_html: Option<String>,
+    /// Fields cut at the inline cap (ZDR only: nothing stored to point at).
+    pub truncated: Vec<String>,
+    /// Fields left out for being over the cap (not ZDR: read the artifact).
+    pub omitted: Vec<String>,
+    pub warnings: Vec<quarry_core::scrape::ScrapeWarning>,
+    /// WS13.4b: the screenshot inline. Under ZDR only.
+    pub screenshot: Option<quarry_core::scrape::InlineCapture>,
+    /// WS13.4b: the PDF inline. Under ZDR only.
+    pub pdf: Option<quarry_core::scrape::InlineCapture>,
+    /// WS13.4b: what the captures measured, in both modes.
+    pub captures: Option<quarry_core::scrape::CapturesReport>,
+    /// WS13.5: what each scrape-time action did, in request order (empty when
+    /// the run had none). A capture an action took is referenced by artifact id
+    /// (not ZDR) or carried as base64 under the inline cap (ZDR).
+    pub actions: Vec<quarry_core::scrape::ActionOutcomeView>,
+}
+
+/// What [`PageRunner::persist_captures`] made of one run's captures. The refs
+/// go on the output's `formats`. The inline parts and warnings join the
+/// [`InlineParts`] the caller reads.
+#[derive(Debug, Clone, Default)]
+pub struct CaptureOutput {
+    pub screenshot_ref: Option<FormatRef>,
+    pub pdf_ref: Option<FormatRef>,
+    pub inline_screenshot: Option<quarry_core::scrape::InlineCapture>,
+    pub inline_pdf: Option<quarry_core::scrape::InlineCapture>,
+    pub captures: Option<quarry_core::scrape::CapturesReport>,
+    pub actions: Vec<quarry_core::scrape::ActionOutcomeView>,
+    pub omitted: Vec<String>,
+    pub warnings: Vec<quarry_core::scrape::ScrapeWarning>,
+}
+
+/// What a caller wants returned inline, and how much.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineRequest {
+    pub markdown: bool,
+    pub html: bool,
+    pub raw_html: bool,
+    pub max_bytes: usize,
+    /// How the page becomes markdown. The default is the standard
+    /// main-content extraction, byte-identical to what a run always did.
+    pub clean: quarry_transform::clean_html::CleanOptions,
+}
+
+impl InlineRequest {
+    /// What a run returned before request options existed: the text under ZDR,
+    /// nothing otherwise, capped at the default.
+    pub fn default_for(zdr: ZdrMode) -> Self {
+        Self {
+            markdown: zdr.is_active(),
+            html: false,
+            raw_html: false,
+            max_bytes: quarry_core::scrape::DEFAULT_INLINE_MAX_BYTES,
+            clean: quarry_transform::clean_html::CleanOptions::default(),
+        }
+    }
+}
+
+/// Put `text` inline if it fits the cap. Over the cap, ZDR cuts it on a
+/// character boundary (and says so); otherwise the field is left out and named,
+/// because a stored artifact holds it.
+fn offer_inline(
+    field: &str,
+    text: &str,
+    max_bytes: usize,
+    zdr: bool,
+    slot: &mut Option<String>,
+    truncated: &mut Vec<String>,
+    omitted: &mut Vec<String>,
+) {
+    if text.len() <= max_bytes {
+        *slot = Some(text.to_owned());
+    } else if zdr {
+        let (cut, _) = quarry_core::scrape::truncate_on_char_boundary(text, max_bytes);
+        *slot = Some(cut);
+        truncated.push(field.to_owned());
+    } else {
+        omitted.push(field.to_owned());
+    }
+}
+
+/// What the scrape pipeline does with the kind of body it fetched
+/// (`quarry_transform::sniff`).
+///
+/// - `Off`: no detection; every body takes the HTML path, as before.
+/// - `Shadow`: detect and record (`metadata.content_kind`, the `page_fetched`
+///   event) but change nothing else.
+/// - `Skip`: also refuse bodies Quarry has no extractor for (images, archives,
+///   spreadsheets, ...) with a typed `UNSUPPORTED_MEDIA` (415) instead of
+///   running readability over binary data.
+/// - `On`: also route PDF and DOCX to their text extractors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DocRouting {
+    Off,
+    #[default]
+    Shadow,
+    Skip,
+    On,
+}
+
+impl DocRouting {
+    pub const ENV: &'static str = "QUARRY_EDGE__DOC_ROUTING";
+
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "off" | "0" | "false" => Ok(Self::Off),
+            "" | "shadow" => Ok(Self::Shadow),
+            "skip" => Ok(Self::Skip),
+            "on" | "1" | "true" => Ok(Self::On),
+            other => Err(format!(
+                "{}={other:?} is not one of off, shadow, skip, on",
+                Self::ENV
+            )),
+        }
+    }
+
+    /// Read from `QUARRY_EDGE__DOC_ROUTING`; unset is `Shadow`, an unknown
+    /// value is an error naming the variable.
+    pub fn from_env() -> Result<Self, String> {
+        match std::env::var(Self::ENV) {
+            Ok(raw) => Self::parse(&raw),
+            Err(_) => Ok(Self::default()),
+        }
+    }
+
+    /// The process-wide mode, read once. Boot validates the environment first,
+    /// so the fallback only covers a value that was valid at start-up.
+    pub fn cached() -> Self {
+        static MODE: std::sync::OnceLock<DocRouting> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| Self::from_env().unwrap_or_default())
+    }
+
+    fn detects(self) -> bool {
+        self != Self::Off
+    }
+
+    fn rejects_unsupported(self) -> bool {
+        matches!(self, Self::Skip | Self::On)
+    }
+}
 
 pub struct PageRunner {
     pub driver: Arc<dyn Driver>,
@@ -104,6 +259,42 @@ pub struct PageRunner {
     /// `QUARRY_EDGE__MODEL_PLANE_URL` + `QUARRY_EDGE__PAGE_TITLE_MODEL`;
     /// test harnesses and ad-hoc runners leave it `None`.
     pub title_enricher: Option<Arc<crate::page_extract::PageTitleEnricher>>,
+    /// Content-kind routing mode; see [`DocRouting`]. Edge wires
+    /// [`DocRouting::cached`].
+    pub doc_routing: DocRouting,
+    /// WS14.S4: the robots.txt gate and the mode this run applies it under. `None`
+    /// (every ad-hoc scrape, every test harness, a crawl that ignores robots)
+    /// checks nothing. `Observe` evaluates and counts without blocking or slowing
+    /// a fetch; `Enforce` refuses a disallowed or unreachable URL with a 403
+    /// `SECURITY_BLOCKED` `details.denial` and applies `Crawl-delay`.
+    pub robots: Option<RobotsEnforcement>,
+}
+
+/// The challenge settings the scrape path runs under (`QUARRY_CHALLENGE_*`),
+/// read per run like the agent path reads them per run. A test installs its own
+/// for the thread it runs on instead of touching the process environment.
+fn scrape_challenge_config() -> crate::challenge::ChallengeConfig {
+    #[cfg(test)]
+    if let Some(config) = TEST_CHALLENGE_CONFIG.with(|slot| slot.get()) {
+        return config;
+    }
+    crate::challenge::ChallengeConfig::from_env()
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CHALLENGE_CONFIG: std::cell::Cell<Option<crate::challenge::ChallengeConfig>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Whether the body is something a bot wall can be: HTML, XML or text. An
+/// image, a PDF or a JSON answer is not classified. No content type is read as
+/// HTML, as everywhere else on this path.
+fn is_markup_content_type(content_type: Option<&str>) -> bool {
+    content_type.is_none_or(|ct| {
+        let ct = ct.to_ascii_lowercase();
+        ct.contains("html") || ct.contains("xml") || ct.starts_with("text/")
+    })
 }
 
 #[cfg(test)]
@@ -175,6 +366,17 @@ pub struct LocalIndexWriteback {
     zdr: ZdrMode,
 }
 
+/// The URL to put in a log field: none while Zero Data Retention is active,
+/// because a log line is a durable copy of a page the organization asked us
+/// not to keep.
+fn log_url(zdr: ZdrMode, url: &str) -> Option<&str> {
+    if zdr.is_active() {
+        None
+    } else {
+        Some(url)
+    }
+}
+
 impl LocalIndexWriteback {
     pub fn new(index: Option<TantivyLocalIndex>, zdr: ZdrMode) -> Self {
         Self { index, zdr }
@@ -209,8 +411,9 @@ impl LocalIndexWriteback {
     pub fn submit(&self, page: IndexedPage) -> WritebackDecision {
         let decision = self.decide(&page);
         if decision != WritebackDecision::Index {
+            // zdr-log-ok: log_url() is None while ZDR is active
             tracing::debug!(
-                url = %page.url,
+                url = log_url(self.zdr, &page.url),
                 decision = ?decision,
                 "local index write-back skipped"
             );
@@ -241,6 +444,7 @@ impl LocalIndexWriteback {
         };
         tokio::spawn(async move {
             if let Err(e) = idx.add_document(doc).await {
+                // zdr-log-ok: `decide` skips the write-back when the ZDR guard blocks an artifact write, so a ZDR request never reaches this detached task
                 tracing::warn!(error = %e, "local index add_document failed (non-fatal)");
             }
         });
@@ -254,6 +458,75 @@ impl PageRunner {
     /// of sync with `self.zdr`.
     fn local_index_writeback(&self) -> LocalIndexWriteback {
         LocalIndexWriteback::new(self.local_index.clone(), self.zdr)
+    }
+
+    /// WS14.S4: check `url` against robots.txt when this run has a gate. `stage` is
+    /// `"request"` (before anything is fetched) or `"final_url"` (after a redirect
+    /// to another origin). `Observe` counts and logs a count, and changes nothing.
+    /// `Enforce` refuses a denial with `PageBlocked` and a typed error, and returns
+    /// the host's `Crawl-delay` (zero when it sets none) for an allowed URL.
+    /// `None` when there is no gate, the mode is `Off`, or the run only observes.
+    async fn robots_check(
+        &self,
+        run_id: &RunKind,
+        url: &Url,
+        stage: &'static str,
+    ) -> QuarryResult<Option<std::time::Duration>> {
+        let Some(robots) = self
+            .robots
+            .as_ref()
+            .filter(|r| r.mode != RobotsEnforceMode::Off)
+        else {
+            return Ok(None);
+        };
+        let decision = robots
+            .gate
+            .check(
+                url,
+                self.org_id.as_deref().unwrap_or_default(),
+                self.zdr.is_active(),
+            )
+            .await;
+        robots.gate.record(robots.mode, &decision);
+        if !decision.is_denial() {
+            return Ok(match (&decision, robots.mode) {
+                (crate::robots_gate::RobotsDecision::Allowed { crawl_delay }, RobotsEnforceMode::Enforce) => {
+                    Some(crawl_delay.unwrap_or_default())
+                }
+                _ => None,
+            });
+        }
+        if robots.mode == RobotsEnforceMode::Observe {
+            tracing::info!(stage, "robots.txt would deny this fetch (observe mode)");
+            return Ok(None);
+        }
+        let denial = decision.denial_json().unwrap_or_else(|| json!({}));
+        let code = denial["code"].as_str().unwrap_or("robots_disallowed").to_string();
+        let message = denial["message"].as_str().unwrap_or("robots.txt refused").to_string();
+        let mut payload = denial.clone();
+        payload["url"] = json!(url.to_string());
+        payload["reason"] = json!(code);
+        payload["source"] = json!("fetch");
+        payload["stage"] = json!(stage);
+        self.emit_page_event(
+            run_id.clone(),
+            EventType::PageBlocked,
+            payload,
+            format!("{}:{}:robots_blocked", run_id, url),
+        )
+        .await;
+        Err(QuarryError::new(ErrorCode::SecurityBlocked, message)
+            .with_details(json!({ "denial": denial })))
+    }
+
+    /// WS14.S4, D2-161: the robots decision for `url` before a page that is about to be
+    /// served from the page cache. The route reads the cache before any fetch, so without
+    /// this a cached page was served and metered without the fetch-time check ever running.
+    /// It is the same decision as `run` makes (one `record`, the same typed refusal and
+    /// `page_blocked` event), so a page gets one decision whether it is cached or fetched:
+    /// a run that fetches does not repeat it. `Ok` also covers observe and `Off`.
+    pub async fn precheck_robots(&self, run_id: &RunKind, url: &Url) -> QuarryResult<()> {
+        self.robots_check(run_id, url, "request").await.map(|_| ())
     }
 
     async fn emit_page_event(
@@ -274,11 +547,43 @@ impl PageRunner {
         requested_url: &Url,
         prev_fingerprint: Option<String>,
     ) -> QuarryResult<NormalizedOutput> {
+        self.run_with_inline(run_id, requested_url, prev_fingerprint)
+            .await
+            .map(|(output, _inline)| output)
+    }
+
+    /// Like [`Self::run`], also returning the inline parts (the extracted text
+    /// under ZDR, and warnings). `/v1/scrape` uses this; crawl and batch keep
+    /// `run`.
+    pub async fn run_with_inline(
+        &self,
+        run_id: &RunKind,
+        requested_url: &Url,
+        prev_fingerprint: Option<String>,
+    ) -> QuarryResult<(NormalizedOutput, InlineParts)> {
+        self.run_with_inline_request(
+            run_id,
+            requested_url,
+            prev_fingerprint,
+            &InlineRequest::default_for(self.zdr),
+        )
+        .await
+    }
+
+    /// [`Self::run_with_inline`] returning exactly the inline parts asked for.
+    pub async fn run_with_inline_request(
+        &self,
+        run_id: &RunKind,
+        requested_url: &Url,
+        prev_fingerprint: Option<String>,
+        inline_request: &InlineRequest,
+    ) -> QuarryResult<(NormalizedOutput, InlineParts)> {
         match self
-            .run_inner(run_id, requested_url, prev_fingerprint)
+            .run_inner(run_id, requested_url, prev_fingerprint, inline_request)
             .await
         {
-            Ok(out) => Ok(out),
+            Ok(parts) => Ok(parts),
+            Err(e) if is_robots_denial(&e) => Err(e),
             Err(e) => {
                 self.emit_page_event(
                     run_id.clone(),
@@ -295,12 +600,221 @@ impl PageRunner {
         }
     }
 
+    /// WS13.4b: store or inline what the browser captured for this run.
+    /// Not ZDR: each capture is an artifact under a label of its own
+    /// (`final.screenshot`, `final.pdf`), with one content-free
+    /// `ArtifactWritten` per capture. ZDR: nothing is written or emitted, and
+    /// the bytes travel inline under the cap. A capture over the cap is omitted
+    /// with `capture_exceeds_inline_cap`.
+    async fn persist_captures(
+        &self,
+        run_id: &RunKind,
+        resp: &crate::fetch::FetchResponse,
+        fingerprint: &str,
+    ) -> QuarryResult<CaptureOutput> {
+        use base64::Engine as _;
+        let mut out = CaptureOutput::default();
+        let Some(caps) = resp.captures.as_deref() else {
+            return Ok(out);
+        };
+        out.warnings = caps
+            .warnings
+            .iter()
+            .map(|w| quarry_core::scrape::ScrapeWarning::new(&w.code, w.message.clone()))
+            .collect();
+        let mut report = quarry_core::scrape::CapturesReport {
+            blocked_requests: caps.blocked_requests,
+            ..Default::default()
+        };
+        let store = zdr::guard(self.zdr, WriteKind::Artifact).is_ok();
+        let org = self.org_id.clone().unwrap_or_default();
+        let inline_cap = self
+            .render
+            .capture_inline_max_bytes
+            .unwrap_or(crate::capture::DEFAULT_INLINE_CAPTURE_MAX_BYTES)
+            .min(crate::capture::MAX_INLINE_CAPTURE_BYTES);
+        let mut inline_used = 0usize;
+
+        if let Some(image) = caps.screenshot.as_ref() {
+            let (kind, content_type) = match image.format {
+                quarry_core::capture::ImageFormat::Png => ("screenshot", "image/png"),
+                quarry_core::capture::ImageFormat::Jpeg => ("screenshot_jpeg", "image/jpeg"),
+            };
+            report.screenshot = Some(quarry_core::scrape::ScreenshotReport {
+                content_type: content_type.to_owned(),
+                width: image.width_px,
+                height: image.height_px,
+                bytes: image.bytes.len() as u64,
+                tiles: image.tiles,
+                stitched: image.stitched,
+                truncated: image.truncated,
+            });
+            if store {
+                let label = quarry_core::artifact::page_hash(
+                    resp.final_url.as_ref(),
+                    &format!("{fingerprint}#cap:final.{kind}"),
+                );
+                let handle = self
+                    .artifacts
+                    .put(&org, run_id, &label, kind, image.bytes.clone())
+                    .await?;
+                self.event_sink
+                    .emit(
+                        run_id.clone(),
+                        EventType::ArtifactWritten,
+                        json!({
+                            "url": resp.final_url.to_string(),
+                            "format": "screenshot",
+                            "artifact_id": handle.artifact_id.to_string(),
+                            "bytes": handle.bytes,
+                        }),
+                        format!("{}:{}:artifact:screenshot", run_id, resp.final_url),
+                    )
+                    .await;
+                out.screenshot_ref = Some(FormatRef {
+                    artifact_id: handle.artifact_id,
+                    bytes: handle.bytes,
+                });
+            } else if image.bytes.len() <= inline_cap.saturating_sub(inline_used) {
+                inline_used += image.bytes.len();
+                out.inline_screenshot = Some(quarry_core::scrape::InlineCapture {
+                    content_type: content_type.to_owned(),
+                    bytes: image.bytes.len() as u64,
+                    width: Some(image.width_px),
+                    height: Some(image.height_px),
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+                });
+            } else {
+                out.omitted.push("screenshot".to_owned());
+                out.warnings.push(quarry_core::scrape::ScrapeWarning::new(
+                    "capture_exceeds_inline_cap",
+                    "the screenshot is larger than the inline cap and is left out",
+                ));
+            }
+        }
+
+        if let Some(pdf) = caps.pdf.as_ref() {
+            report.pdf = Some(quarry_core::scrape::PdfReport {
+                bytes: pdf.bytes.len() as u64,
+            });
+            if store {
+                let label = quarry_core::artifact::page_hash(
+                    resp.final_url.as_ref(),
+                    &format!("{fingerprint}#cap:final.pdf"),
+                );
+                let handle = self
+                    .artifacts
+                    .put(&org, run_id, &label, "pdf", pdf.bytes.clone())
+                    .await?;
+                self.event_sink
+                    .emit(
+                        run_id.clone(),
+                        EventType::ArtifactWritten,
+                        json!({
+                            "url": resp.final_url.to_string(),
+                            "format": "pdf",
+                            "artifact_id": handle.artifact_id.to_string(),
+                            "bytes": handle.bytes,
+                        }),
+                        format!("{}:{}:artifact:pdf", run_id, resp.final_url),
+                    )
+                    .await;
+                out.pdf_ref = Some(FormatRef {
+                    artifact_id: handle.artifact_id,
+                    bytes: handle.bytes,
+                });
+            } else if pdf.bytes.len() <= inline_cap.saturating_sub(inline_used) {
+                out.inline_pdf = Some(quarry_core::scrape::InlineCapture {
+                    content_type: "application/pdf".to_owned(),
+                    bytes: pdf.bytes.len() as u64,
+                    width: None,
+                    height: None,
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(&pdf.bytes),
+                });
+            } else {
+                out.omitted.push("pdf".to_owned());
+                out.warnings.push(quarry_core::scrape::ScrapeWarning::new(
+                    "capture_exceeds_inline_cap",
+                    "the PDF is larger than the inline cap and is left out",
+                ));
+            }
+        }
+
+        // WS13.5: what the scrape-time actions took. Each output goes through the same
+        // path as a final capture: stored under a label of its own (not ZDR), or inline
+        // under the cap that the final captures also draw on (ZDR). The outcome list is
+        // index-aligned with the output bytes.
+        for (position, outcome) in caps.actions.iter().enumerate() {
+            let mut view = quarry_core::scrape::ActionOutcomeView::from_outcome(outcome);
+            let bytes = caps
+                .action_outputs
+                .get(position)
+                .and_then(Option::as_ref)
+                .filter(|held| !held.bytes.is_empty());
+            if let (Some(output), Some(held)) = (view.output.as_mut(), bytes) {
+                if store {
+                    let kind = if output.kind == "pdf" { "pdf" } else { "screenshot" };
+                    let label = quarry_core::artifact::page_hash(
+                        resp.final_url.as_ref(),
+                        &format!("{fingerprint}#cap:action.{}.{}", outcome.index, output.kind),
+                    );
+                    let handle = self
+                        .artifacts
+                        .put(&org, run_id, &label, kind, held.bytes.clone())
+                        .await?;
+                    self.event_sink
+                        .emit(
+                            run_id.clone(),
+                            EventType::ArtifactWritten,
+                            json!({
+                                "url": resp.final_url.to_string(),
+                                "format": format!("action_{}", output.kind),
+                                "action_index": outcome.index,
+                                "artifact_id": handle.artifact_id.to_string(),
+                                "bytes": handle.bytes,
+                            }),
+                            format!(
+                                "{}:{}:artifact:action.{}",
+                                run_id, resp.final_url, outcome.index
+                            ),
+                        )
+                        .await;
+                    output.bytes = handle.bytes;
+                    output.artifact_id = Some(handle.artifact_id.to_string());
+                } else if held.bytes.len() <= inline_cap.saturating_sub(inline_used) {
+                    inline_used += held.bytes.len();
+                    output.bytes = held.bytes.len() as u64;
+                    output.data_base64 =
+                        Some(base64::engine::general_purpose::STANDARD.encode(&held.bytes));
+                } else {
+                    out.omitted.push(format!("actions[{}].output", outcome.index));
+                    out.warnings.push(quarry_core::scrape::ScrapeWarning::new(
+                        "capture_exceeds_inline_cap",
+                        format!(
+                            "the output of actions[{}] is larger than the inline cap and is left out",
+                            outcome.index
+                        ),
+                    ));
+                }
+            }
+            out.actions.push(view);
+        }
+
+        // The report is the final captures' measurements; a run that only ran actions
+        // and saw nothing blocked has none to give.
+        if self.render.capture.is_some() || report != quarry_core::scrape::CapturesReport::default() {
+            out.captures = Some(report);
+        }
+        Ok(out)
+    }
+
     async fn run_inner(
         &self,
         run_id: &RunKind,
         requested_url: &Url,
         prev_fingerprint: Option<String>,
-    ) -> QuarryResult<NormalizedOutput> {
+        inline_request: &InlineRequest,
+    ) -> QuarryResult<(NormalizedOutput, InlineParts)> {
         // Preflight
         let verdict = self.security.preflight(requested_url).await;
         if verdict.decision == quarry_security::Decision::Block {
@@ -318,6 +832,16 @@ impl PageRunner {
                 quarry_core::error::ErrorCode::SecurityBlocked,
                 verdict.reasons.join("; "),
             ));
+        }
+
+        // WS14.S4: robots.txt, after the preflight and before DNS resolution and the
+        // scheduler slot, so a denial never reaches `record_bad` (which reads an
+        // unknown error as a server error and halves the host's concurrency).
+        if let Some(delay) = self.robots_check(run_id, requested_url, "request").await? {
+            if let Some(s) = self.scheduler.as_ref() {
+                s.set_min_interval(requested_url.host_str().unwrap_or("unknown"), delay)
+                    .await;
+            }
         }
 
         // Resolve and inspect the target before we hand it to a driver. Static
@@ -411,6 +935,39 @@ impl PageRunner {
         drop(_slot);
         drop(_global_slot);
 
+        // WS7.G: a redirect can land the fetch on a host the requested URL's preflight never
+        // saw. When the engine asks for it, the final URL is preflighted too (host rules,
+        // blocklists, URL reputation). A block ends the run here: nothing is parsed, stored,
+        // cached or ingested. A final URL equal to the requested one is not asked twice.
+        if self.security.recheck_final_url() && resp.final_url != *requested_url {
+            let verdict = self.security.preflight(&resp.final_url).await;
+            if verdict.decision == quarry_security::Decision::Block {
+                self.emit_page_event(
+                    run_id.clone(),
+                    EventType::PageBlocked,
+                    json!({
+                        "url": resp.final_url.to_string(),
+                        "reason": "redirect_target_blocked",
+                        "reasons": verdict.reasons.clone(),
+                    }),
+                    format!("{}:{}:redirect_blocked", run_id, resp.final_url),
+                )
+                .await;
+                return Err(quarry_core::error::QuarryError::new(
+                    quarry_core::error::ErrorCode::SecurityBlocked,
+                    verdict.reasons.join("; "),
+                ));
+            }
+        }
+
+        // WS14.S4: a redirect to another origin is checked against that origin's
+        // robots.txt before anything is parsed, stored, cached or ingested.
+        if resp.final_url != *requested_url
+            && origin_key(&resp.final_url) != origin_key(requested_url)
+        {
+            self.robots_check(run_id, &resp.final_url, "final_url").await?;
+        }
+
         // Defensive body-size cap. `scraper::Html::parse_document`
         // (used by readability, branding, metadata) builds a full
         // in-memory DOM — fine on normal pages, can blow up on a
@@ -446,6 +1003,12 @@ impl PageRunner {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
             .map(|(_, v)| v.clone());
+        // What the body is, decided by its first bytes before its header
+        // (many document links are served as octet-stream or text/html). Only
+        // successful responses are classified: an error page keeps the legacy
+        // path whatever it contains.
+        let detected = (self.doc_routing.detects() && (200..300).contains(&resp.status))
+            .then(|| quarry_transform::sniff::detect(ct.as_deref(), &resp.body));
         // PageFetched payload includes `content_type` so downstream
         // consumers (e.g. the onboarding wizard) can pick the right
         // card style without re-parsing the HTML.
@@ -457,10 +1020,48 @@ impl PageRunner {
                 "status": resp.status,
                 "duration_ms": resp.duration_ms,
                 "content_type": ct.clone(),
+                "content_kind": detected.map(|d| d.kind.label()),
+                "content_kind_source": detected.map(|d| d.source.label()),
             }),
             format!("{}:{}:fetched", run_id, resp.final_url),
         )
         .await;
+
+        // A body Quarry has no extractor for is refused with a typed error
+        // rather than decoded as text: an image or an archive run through
+        // readability yields mojibake that then gets ingested.
+        if let Some(found) = detected {
+            let supported = found.kind.is_text_pipeline() || found.kind.is_parseable_document();
+            if self.doc_routing.rejects_unsupported() && !supported {
+                let details = json!({
+                    "reason": "unsupported_media",
+                    "kind": found.kind.label(),
+                    "subtype": found.subtype,
+                    "content_type": ct,
+                    "bytes": resp.body.len(),
+                    "source": found.source.label(),
+                    "supported": ["html", "text", "json", "xml", "pdf", "docx"],
+                });
+                self.emit_page_event(
+                    run_id.clone(),
+                    EventType::PageBlocked,
+                    json!({
+                        "url": resp.final_url.to_string(),
+                        "reason": "unsupported_media",
+                        "kind": found.kind.label(),
+                        "content_type": ct,
+                        "bytes": resp.body.len(),
+                    }),
+                    format!("{}:{}:unsupported_media", run_id, resp.final_url),
+                )
+                .await;
+                return Err(QuarryError::new(
+                    ErrorCode::UnsupportedMedia,
+                    unsupported_media_message(found.kind.label()),
+                )
+                .with_details(details));
+            }
+        }
 
         // Transform
         //
@@ -470,13 +1071,48 @@ impl PageRunner {
         // so downstream readability + extraction see correct text.
         // Falls through to UTF-8 lossy when no signal is available
         // (preserves previous behaviour for well-behaved servers).
+        // PDF and DOCX go to their text extractors (bounded, off-thread) when
+        // routing is `on`; everything else takes the HTML path below. A file
+        // the parser cannot read is a typed 415 with a reason, not mojibake.
+        let document = match detected {
+            Some(found)
+                if self.doc_routing == DocRouting::On && found.kind.is_parseable_document() =>
+            {
+                match crate::content_route::parse_document(found.kind, resp.body.clone()).await {
+                    Ok(parsed) => Some(parsed),
+                    Err(error) => {
+                        self.emit_page_event(
+                            run_id.clone(),
+                            EventType::PageBlocked,
+                            json!({
+                                "url": resp.final_url.to_string(),
+                                "reason": "document_parse_failed",
+                                "kind": found.kind.label(),
+                                "code": format!("{:?}", error.code),
+                                "bytes": resp.body.len(),
+                            }),
+                            format!("{}:{}:document_parse_failed", run_id, resp.final_url),
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                }
+            }
+            _ => None,
+        };
+        let is_doc = document.is_some();
         let declared_charset = ct
             .as_deref()
             .and_then(quarry_transform::charset::charset_from_content_type);
-        let body_decoded = quarry_transform::charset::decode(&resp.body, declared_charset);
+        // A document body is binary: do not charset-decode megabytes of it.
+        let body_decoded = quarry_transform::charset::decode(
+            if is_doc { &[] } else { &resp.body },
+            declared_charset,
+        );
         if !body_decoded.from_header && body_decoded.encoding != "UTF-8" {
+            // zdr-log-ok: log_url() is None while ZDR is active
             tracing::debug!(
-                url = %resp.final_url,
+                url = log_url(self.zdr, resp.final_url.as_str()),
                 detected = body_decoded.encoding,
                 "charset sniff overrode declared header"
             );
@@ -487,8 +1123,9 @@ impl PageRunner {
         // shouldn't be ingested as content. Flag here and emit a
         // dedicated event so downstream consumers can drop it from
         // indexing without a content heuristic at every callsite.
-        if let Some(reason) =
-            quarry_transform::soft_404::detect(resp.status, resp.body.len(), &body_text)
+        if let Some(reason) = (!is_doc)
+            .then(|| quarry_transform::soft_404::detect(resp.status, resp.body.len(), &body_text))
+            .flatten()
         {
             self.emit_page_event(
                 run_id.clone(),
@@ -503,9 +1140,79 @@ impl PageRunner {
             .await;
         }
 
-        let md = html_to_readable_markdown(&body_text);
-        let link_list = links::extract(&body_text, &resp.final_url);
-        let mut meta = metadata::extract(&body_text, ct.clone());
+        // Cleaning options only apply to a page; a document's text is its own.
+        let mut cleaned_html: Option<String> = None;
+        let mut clean_warnings = Vec::new();
+        let md = match &document {
+            Some(parsed) => parsed.text.clone(),
+            None if inline_request.clean.is_default() => html_to_readable_markdown(&body_text),
+            None => {
+                let cleaned = quarry_transform::clean_html::to_markdown(&body_text, &inline_request.clean);
+                cleaned_html = Some(cleaned.html);
+                clean_warnings = cleaned.warnings;
+                cleaned.markdown
+            }
+        };
+        let link_list = if is_doc {
+            Vec::new()
+        } else {
+            links::extract(&body_text, &resp.final_url)
+        };
+        let mut meta = if is_doc {
+            quarry_core::output::PageMetadata {
+                content_type: ct.clone(),
+                ..Default::default()
+            }
+        } else {
+            metadata::extract(&body_text, ct.clone())
+        };
+        if let Some(found) = detected {
+            meta.content_kind = Some(found.kind.label().to_owned());
+            meta.content_kind_source = Some(found.source.label().to_owned());
+        }
+
+        // WS3.J: a page that is itself a bot wall (a CAPTCHA widget, a WAF
+        // interstitial, two independent block markers) is not content. Its
+        // markdown, links and metadata are computed above (the title for the
+        // classifier comes from the metadata pass) and dropped here: nothing of
+        // the wall is stored, indexed, ingested or returned, and the scrape fails with a typed
+        // `CHALLENGE_DETECTED` whose details carry the block reason and nothing of
+        // the page. A status alone never gets here (see `classify_fetched`), and a
+        // run under `QUARRY_CHALLENGE_CLASSIFIER=legacy` is not classified at all.
+        // `QUARRY_CHALLENGE_ENFORCE=log` counts the page by reason and lets it
+        // through. Nothing here logs the URL or the host, ZDR or not.
+        if !is_doc && is_markup_content_type(ct.as_deref()) {
+            let challenge_config = scrape_challenge_config();
+            if let Some(reason) = crate::challenge::classify_fetched(
+                challenge_config,
+                resp.final_url.as_str(),
+                resp.status,
+                meta.title.as_deref(),
+                &resp.body,
+            )
+            .and_then(|signal| signal.block_reason)
+            {
+                let reason = reason.as_str();
+                if challenge_config.enforce == crate::challenge::EnforceMode::Enforce {
+                    tracing::info!(reason, status = resp.status, "quarry.challenge.scrape_refused");
+                    self.emit_page_event(
+                        run_id.clone(),
+                        EventType::PageBlocked,
+                        json!({
+                            "url": resp.final_url.to_string(),
+                            "reason": "challenge_detected",
+                            "block_reason": reason,
+                            "status": resp.status,
+                        }),
+                        format!("{}:{}:challenge_detected", run_id, resp.final_url),
+                    )
+                    .await;
+                    return Err(QuarryError::challenge_detected_on_fetch(reason));
+                }
+                // Validation period: say what would have happened.
+                tracing::warn!(reason, status = resp.status, "quarry.challenge.would_refuse_scrape");
+            }
+        }
 
         // Body-content language detection when the HTML lang
         // attribute is missing or generic. Helps downstream LLM
@@ -556,7 +1263,11 @@ impl PageRunner {
         // what reaches verevon's onboarding wizard when NATS fan-out is
         // disabled. UTF-8 conversion is best-effort — binary responses
         // (images, PDFs) skip both paths cleanly.
-        let branding_json: Option<serde_json::Value> = match std::str::from_utf8(&resp.body) {
+        let branding_json: Option<serde_json::Value> = match if is_doc {
+            Err(())
+        } else {
+            std::str::from_utf8(&resp.body).map_err(|_| ())
+        } {
             Ok(html_str) => {
                 let branding =
                     quarry_transform::branding_rendered::extract(html_str, &resp.final_url);
@@ -578,9 +1289,10 @@ impl PageRunner {
                 match serde_json::to_value(&branding) {
                     Ok(v) => Some(v),
                     Err(e) => {
+                        // zdr-log-ok: log_url() is None while ZDR is active
                         tracing::warn!(
                             error = %e,
-                            url = %resp.final_url,
+                            url = log_url(self.zdr, resp.final_url.as_str()),
                             "branding serialization failed; NormalizedOutput.branding will be None despite a successful event emit"
                         );
                         None
@@ -593,15 +1305,25 @@ impl PageRunner {
         // Canonical page hash combines normalized URL with content fingerprint,
         // giving a stable artifact key that is independent of run_id.
         let page_hash = quarry_core::artifact::page_hash(resp.final_url.as_ref(), &fp.0);
+        // WS13.4b: the captures this run took (no-op unless the request asked).
+        let mut captured = self.persist_captures(run_id, &resp, &fp.0).await?;
 
         // Artifacts — skip durable writes when ZDR is active. Every artifact is
         // stamped with the run's org so `GET /v1/artifacts/{id}` can bind the
         // read back to the same tenant.
         let artifact_org = self.org_id.as_deref().unwrap_or_default();
+        // A document's original bytes are stored as `raw`, never as `html`.
+        let source_label = if is_doc { "raw" } else { "html" };
         let (html_fmt, md_fmt) = if zdr::guard(self.zdr, WriteKind::Artifact).is_ok() {
             let html_art = self
                 .artifacts
-                .put(artifact_org, run_id, &page_hash, "html", resp.body.clone())
+                .put(
+                    artifact_org,
+                    run_id,
+                    &page_hash,
+                    source_label,
+                    resp.body.clone(),
+                )
                 .await?;
             let md_art = self
                 .artifacts
@@ -619,11 +1341,11 @@ impl PageRunner {
                     EventType::ArtifactWritten,
                     json!({
                         "url": resp.final_url.to_string(),
-                        "format": "html",
+                        "format": source_label,
                         "artifact_id": html_art.artifact_id.to_string(),
                         "bytes": html_art.bytes,
                     }),
-                    format!("{}:{}:artifact:html", run_id, resp.final_url),
+                    format!("{}:{}:artifact:{source_label}", run_id, resp.final_url),
                 )
                 .await;
             self.event_sink
@@ -695,12 +1417,12 @@ impl PageRunner {
             fetched_at,
             fingerprint: fp.0.clone(),
             formats: OutputFormats {
-                html: html_fmt.clone(),
+                html: if is_doc { None } else { html_fmt.clone() },
                 markdown: md_fmt.clone(),
-                raw: None,
+                raw: if is_doc { html_fmt.clone() } else { None },
                 links: link_list,
-                screenshot: None,
-                pdf: None,
+                screenshot: captured.screenshot_ref.clone(),
+                pdf: captured.pdf_ref.clone(),
                 extract: None,
             },
             change: ChangeInfo {
@@ -811,22 +1533,30 @@ impl PageRunner {
                                 );
                             }
                         } else {
-                            tracing::debug!(
-                                url = %resp.final_url,
-                                "page-title model hop skipped by ZDR/privacy posture"
-                            );
+                            tracing::debug!("page-title model hop skipped by ZDR/privacy posture");
                         }
                     }
                 }
-                tracing::info!(
-                    url = %resp.final_url,
-                    driver = ?resp.served_by,
-                    title = %extraction.title,
-                    title_source = extraction.title_source.as_str(),
-                    excerpt_chars = extraction.excerpt.chars().count(),
-                    word_count = extraction.word_count,
-                    "page extracted"
-                );
+                if self.zdr.is_active() {
+                    // A ZDR run logs the shape of the page, never which page.
+                    tracing::info!(
+                        driver = ?resp.served_by,
+                        excerpt_chars = extraction.excerpt.chars().count(),
+                        word_count = extraction.word_count,
+                        "page extracted"
+                    );
+                } else {
+                    // zdr-log-ok: the non-ZDR branch of the `if self.zdr.is_active()` above
+                    tracing::info!(
+                        url = %resp.final_url,
+                        driver = ?resp.served_by,
+                        title = %extraction.title,
+                        title_source = extraction.title_source.as_str(),
+                        excerpt_chars = extraction.excerpt.chars().count(),
+                        word_count = extraction.word_count,
+                        "page extracted"
+                    );
+                }
                 self.emit_page_event(
                     run_id.clone(),
                     EventType::PageExtracted,
@@ -838,6 +1568,97 @@ impl PageRunner {
             }
             output
         };
+
+        // What is returned inline besides the output. Under ZDR nothing was
+        // stored, so the text itself comes back here (capped); a document with
+        // no extractable text, or one cut at the parser cap, says so.
+        let inline = {
+            let mut parts = InlineParts::default();
+            let zdr = self.zdr.is_active();
+            parts.screenshot = captured.inline_screenshot.take();
+            parts.pdf = captured.inline_pdf.take();
+            parts.captures = captured.captures.take();
+            parts.actions = std::mem::take(&mut captured.actions);
+            parts.omitted.append(&mut captured.omitted);
+            parts.warnings.append(&mut captured.warnings);
+            let cap = inline_request.max_bytes;
+            if inline_request.markdown {
+                offer_inline(
+                    "markdown",
+                    &md,
+                    cap,
+                    zdr,
+                    &mut parts.markdown,
+                    &mut parts.truncated,
+                    &mut parts.omitted,
+                );
+            }
+            if is_doc {
+                // A document's bytes are not text; its extracted text is the
+                // markdown format.
+                for (wanted, field) in [(inline_request.html, "html"), (inline_request.raw_html, "raw_html")] {
+                    if wanted {
+                        parts.omitted.push(field.to_owned());
+                    }
+                }
+                if inline_request.html || inline_request.raw_html {
+                    parts.warnings.push(quarry_core::scrape::ScrapeWarning::new(
+                        "format_unavailable_for_documents",
+                        "html and rawHtml are not available for a PDF or DOCX; use markdown",
+                    ));
+                }
+            } else {
+                if inline_request.html {
+                    // The HTML the markdown was made from: after exclusion,
+                    // inclusion and cleaning, or the main content by default.
+                    let html_text = cleaned_html.clone().unwrap_or_else(|| {
+                        quarry_transform::clean_html::to_markdown(&body_text, &inline_request.clean).html
+                    });
+                    offer_inline(
+                        "html",
+                        &html_text,
+                        cap,
+                        zdr,
+                        &mut parts.html,
+                        &mut parts.truncated,
+                        &mut parts.omitted,
+                    );
+                }
+                if inline_request.raw_html {
+                    offer_inline(
+                        "raw_html",
+                        &body_text,
+                        cap,
+                        zdr,
+                        &mut parts.raw_html,
+                        &mut parts.truncated,
+                        &mut parts.omitted,
+                    );
+                }
+            }
+            for warning in &clean_warnings {
+                parts
+                    .warnings
+                    .push(quarry_core::scrape::ScrapeWarning::new(warning.code, warning.message));
+            }
+            if let Some(parsed) = &document {
+                if parsed.truncated {
+                    parts.warnings.push(quarry_core::scrape::ScrapeWarning::new(
+                        "document_text_truncated",
+                        "the document's text was cut at the parser's output cap",
+                    ));
+                }
+                if md.trim().is_empty() {
+                    parts.warnings.push(quarry_core::scrape::ScrapeWarning::new(
+                        "document_has_no_text_layer",
+                        "no text could be extracted; the file may be a scan (OCR is not applied)",
+                    ));
+                }
+            }
+            parts
+        };
+        // An empty document is not worth ingesting.
+        let skip_ingest = is_doc && md.trim().is_empty();
 
         // Cycle 19 / cluster #16: index successful scrape into the local
         // Tantivy corpus so subsequent `/v1/search` queries hit warm.
@@ -853,7 +1674,7 @@ impl PageRunner {
         });
 
         if let (Some(ingest), Some(org_id)) = (&self.ingest, &self.org_id) {
-            if zdr::guard(self.zdr, WriteKind::Artifact).is_ok() {
+            if zdr::guard(self.zdr, WriteKind::Artifact).is_ok() && !skip_ingest {
                 let chunks: Vec<ChunkRef> = chunk::paragraph_chunks(&md, 1000)
                     .into_iter()
                     .map(|c| ChunkRef {
@@ -973,8 +1794,16 @@ impl PageRunner {
                     source_url: resp.final_url.to_string(),
                     title: output.metadata.title.clone(),
                     markdown: Some(md),
-                    html_ref: html_fmt.as_ref().map(|f| f.artifact_id.clone()),
-                    raw_ref: None,
+                    html_ref: if is_doc {
+                        None
+                    } else {
+                        html_fmt.as_ref().map(|f| f.artifact_id.clone())
+                    },
+                    raw_ref: if is_doc {
+                        html_fmt.as_ref().map(|f| f.artifact_id.clone())
+                    } else {
+                        None
+                    },
                     chunks,
                     metadata: ingest_metadata,
                     fingerprint: fp.0.clone(),
@@ -1026,7 +1855,7 @@ impl PageRunner {
                                         )
                                         .await
                                     {
-                                        tracing::warn!(error = %e, document_id = %resp.document_id, "page-image render/emit failed (non-fatal)");
+                                        tracing::warn!(error_class = e.code.wire_name(), document_id = %resp.document_id, "page-image render/emit failed (non-fatal)");
                                     }
                                 }
                                 event_sink
@@ -1069,8 +1898,7 @@ impl PageRunner {
                                                 .await
                                             {
                                                 tracing::warn!(
-                                                    error = %e,
-                                                    url = %root,
+                                                    error_class = e.code.wire_name(),
                                                     "tracked-source registration failed (non-fatal)"
                                                 );
                                             }
@@ -1079,7 +1907,7 @@ impl PageRunner {
                                 }
                             }
                             Err(e) => {
-                                tracing::warn!(error = %e, "data plane ingest failed (non-fatal)");
+                                tracing::warn!(error_class = e.code.wire_name(), "data plane ingest failed (non-fatal)");
                                 // P0 fix — Aquatiq crawl-to-KB pipeline (2026-07-20): a
                                 // failed Data Plane write was previously ONLY logged,
                                 // never surfaced on the job's event stream, so a crawl
@@ -1125,7 +1953,41 @@ impl PageRunner {
             }
         }
 
-        Ok(output)
+        Ok((output, inline))
+    }
+}
+
+/// WS14.S4: an error that is a robots.txt refusal. Its `PageBlocked` event is
+/// already out, so the caller does not add a `PageFailed`.
+fn is_robots_denial(e: &QuarryError) -> bool {
+    e.code == ErrorCode::SecurityBlocked
+        && e.details
+            .as_ref()
+            .and_then(|d| d.get("denial"))
+            .and_then(|d| d.get("code"))
+            .and_then(|c| c.as_str())
+            .is_some_and(|c| c.starts_with("robots_"))
+}
+
+/// "the page is an image file ...", "a PDF file ..." - the article follows the label.
+fn unsupported_media_message(label: &str) -> String {
+    let article = if label.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
+    format!("the page is {article} {label} file, which Quarry cannot extract text from")
+}
+
+#[cfg(test)]
+mod unsupported_media_message_tests {
+    use super::unsupported_media_message;
+
+    #[test]
+    fn the_article_follows_the_label() {
+        assert!(unsupported_media_message("image").starts_with("the page is an image file"));
+        assert!(unsupported_media_message("archive").starts_with("the page is an archive file"));
+        assert!(unsupported_media_message("spreadsheet").starts_with("the page is a spreadsheet file"));
     }
 }
 
@@ -1169,6 +2031,7 @@ mod page_extracted_tests {
                 body: PAGE.as_bytes().to_vec(),
                 duration_ms: 3,
                 served_by: DriverKind::Browser,
+                captures: None,
             })
         }
     }
@@ -1195,6 +2058,8 @@ mod page_extracted_tests {
             page_renderer: None,
             source_registrar: None,
             title_enricher: None,
+            doc_routing: DocRouting::Off,
+            robots: None,
         }
     }
 
@@ -1305,6 +2170,7 @@ mod local_index_writeback_tests {
                 body: PAGE.as_bytes().to_vec(),
                 duration_ms: 2,
                 served_by: DriverKind::Static,
+                captures: None,
             })
         }
     }
@@ -1336,6 +2202,8 @@ mod local_index_writeback_tests {
             page_renderer: None,
             source_registrar: None,
             title_enricher: None,
+            doc_routing: DocRouting::Off,
+            robots: None,
         }
     }
 
@@ -1499,5 +2367,1968 @@ mod local_index_writeback_tests {
             idx.flush().await.unwrap();
         }
         assert_eq!(idx.doc_count(), 1, "re-fetch must upsert, not append");
+    }
+}
+
+#[cfg(test)]
+mod content_routing_tests {
+    use super::*;
+    use crate::artifact_store::InMemoryStore;
+    use crate::driver::Driver;
+    use crate::fetch::FetchResponse;
+    use async_trait::async_trait;
+    use quarry_core::output::DriverKind;
+    use tokio::sync::mpsc;
+
+    /// Serves one canned body with a chosen status and Content-Type.
+    struct BodyDriver {
+        status: u16,
+        content_type: Option<&'static str>,
+        body: Vec<u8>,
+    }
+
+    #[async_trait]
+    impl Driver for BodyDriver {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Static
+        }
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            Ok(FetchResponse {
+                status: self.status,
+                final_url: url.clone(),
+                headers: self
+                    .content_type
+                    .map(|ct| vec![("content-type".into(), ct.into())])
+                    .unwrap_or_default(),
+                body: self.body.clone(),
+                duration_ms: 1,
+                served_by: DriverKind::Static,
+                captures: None,
+            })
+        }
+    }
+
+    const HTML: &str = "<html><head><title>Hei</title></head><body><main><h1>Hei</h1><p>En vanlig nettside med nok tekst til at den teller som innhold.</p></main></body></html>";
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01";
+
+    fn runner_for(
+        mode: DocRouting,
+        status: u16,
+        content_type: Option<&'static str>,
+        body: &[u8],
+    ) -> (PageRunner, mpsc::Receiver<quarry_core::event::Event>) {
+        let (tx, rx) = mpsc::channel(64);
+        let runner = PageRunner {
+            driver: Arc::new(BodyDriver {
+                status,
+                content_type,
+                body: body.to_vec(),
+            }),
+            security: Arc::new(
+                quarry_security::preflight::DefaultEngine::new().with_allow_private_hosts(true),
+            ),
+            artifacts: Arc::new(InMemoryStore::new()),
+            event_sink: EventSink::new(tx),
+            zdr: ZdrMode::Off,
+            ingest: None,
+            org_id: Some("org_test".into()),
+            user_id: None,
+            privacy: PrivacyPolicy::default(),
+            cancel_token: None,
+            local_index: None,
+            policy: RunPolicy::default(),
+            scheduler: None,
+            autoscale: None,
+            render: RenderHints::default(),
+            page_renderer: None,
+            source_registrar: None,
+            title_enricher: None,
+            doc_routing: mode,
+            robots: None,
+        };
+        (runner, rx)
+    }
+
+    fn url() -> Url {
+        "https://docs.example.test/file".parse().unwrap()
+    }
+
+    fn drain(rx: &mut mpsc::Receiver<quarry_core::event::Event>) -> Vec<quarry_core::event::Event> {
+        let mut events = Vec::new();
+        while let Ok(evt) = rx.try_recv() {
+            events.push(evt);
+        }
+        events
+    }
+
+    #[tokio::test]
+    async fn png_body_is_skipped_with_unsupported_media_and_a_page_blocked_event() {
+        let (runner, mut rx) = runner_for(DocRouting::Skip, 200, Some("image/png"), PNG);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let error = runner
+            .run(&run_id, &url(), None)
+            .await
+            .expect_err("an image must be refused");
+        assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+        assert_eq!(error.code.http_status(), 415);
+        assert!(!error.retryable);
+        let details = error.details.expect("typed details");
+        assert_eq!(details["reason"], "unsupported_media");
+        assert_eq!(details["kind"], "image");
+        assert_eq!(details["subtype"], "png");
+        assert_eq!(details["source"], "magic");
+        assert_eq!(details["bytes"], PNG.len());
+
+        let events = drain(&mut rx);
+        let blocked = events
+            .iter()
+            .find(|e| e.event_type == EventType::PageBlocked)
+            .expect("page_blocked emitted");
+        assert_eq!(blocked.payload["reason"], "unsupported_media");
+        assert_eq!(blocked.payload["kind"], "image");
+        let fetched = events
+            .iter()
+            .find(|e| e.event_type == EventType::PageFetched)
+            .expect("page_fetched emitted");
+        assert_eq!(fetched.payload["content_kind"], "image");
+    }
+
+    #[tokio::test]
+    async fn shadow_records_kind_but_never_skips() {
+        let (runner, mut rx) = runner_for(DocRouting::Shadow, 200, Some("image/png"), PNG);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner
+            .run(&run_id, &url(), None)
+            .await
+            .expect("shadow never refuses");
+        assert_eq!(out.metadata.content_kind.as_deref(), Some("image"));
+        assert_eq!(out.metadata.content_kind_source.as_deref(), Some("magic"));
+        let fetched = drain(&mut rx)
+            .into_iter()
+            .find(|e| e.event_type == EventType::PageFetched)
+            .unwrap();
+        assert_eq!(fetched.payload["content_kind"], "image");
+    }
+
+    #[tokio::test]
+    async fn off_detects_nothing_and_changes_nothing() {
+        let (runner, mut rx) = runner_for(DocRouting::Off, 200, Some("image/png"), PNG);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner
+            .run(&run_id, &url(), None)
+            .await
+            .expect("legacy path");
+        assert!(out.metadata.content_kind.is_none());
+        let fetched = drain(&mut rx)
+            .into_iter()
+            .find(|e| e.event_type == EventType::PageFetched)
+            .unwrap();
+        assert!(fetched.payload["content_kind"].is_null());
+    }
+
+    #[tokio::test]
+    async fn non_2xx_binary_keeps_legacy_path() {
+        let (runner, _rx) = runner_for(DocRouting::Skip, 404, Some("image/png"), PNG);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner
+            .run(&run_id, &url(), None)
+            .await
+            .expect("an error status is not classified");
+        assert!(out.metadata.content_kind.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_pdf_body_is_recorded_and_not_skipped_in_skip_mode() {
+        let (runner, _rx) = runner_for(
+            DocRouting::Skip,
+            200,
+            Some("application/octet-stream"),
+            b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n",
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner
+            .run(&run_id, &url(), None)
+            .await
+            .expect("pdf takes the legacy path until routing is on");
+        assert_eq!(out.metadata.content_kind.as_deref(), Some("pdf"));
+        assert_eq!(out.metadata.content_kind_source.as_deref(), Some("magic"));
+    }
+
+    #[tokio::test]
+    async fn html_output_is_identical_across_off_shadow_and_skip() {
+        fn comparable(out: &NormalizedOutput) -> serde_json::Value {
+            let mut value = serde_json::to_value(out).unwrap();
+            let object = value.as_object_mut().unwrap();
+            for volatile in ["run_id", "fetched_at", "driver", "determinism"] {
+                object.remove(volatile);
+            }
+            if let Some(meta) = object.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+                meta.remove("content_kind");
+                meta.remove("content_kind_source");
+            }
+            // Artifact ids are minted per run.
+            if let Some(formats) = object.get_mut("formats").and_then(|m| m.as_object_mut()) {
+                formats.remove("html");
+                formats.remove("markdown");
+            }
+            value
+        }
+        let mut outputs = Vec::new();
+        for mode in [DocRouting::Off, DocRouting::Shadow, DocRouting::Skip] {
+            let (runner, _rx) =
+                runner_for(mode, 200, Some("text/html; charset=utf-8"), HTML.as_bytes());
+            let run_id: RunKind = quarry_core::ids::Id::new();
+            let out = runner.run(&run_id, &url(), None).await.expect("html ok");
+            outputs.push((mode, out));
+        }
+        let baseline = comparable(&outputs[0].1);
+        for (mode, out) in &outputs[1..] {
+            assert_eq!(
+                comparable(out),
+                baseline,
+                "{mode:?} changed the HTML output"
+            );
+            assert_eq!(out.metadata.content_kind.as_deref(), Some("html"));
+        }
+        // The fingerprint (what change monitors compare) never moves.
+        assert!(outputs
+            .iter()
+            .all(|(_, o)| o.fingerprint == outputs[0].1.fingerprint));
+    }
+
+    // ---- routing PDF and DOCX to their text extractors (mode `on`) ----
+
+    /// A valid one-page PDF whose text layer is `text`, with a correct xref table.
+    fn minimal_pdf(text: &str) -> Vec<u8> {
+        let content = format!("BT /F1 24 Tf 100 700 Td ({text}) Tj ET");
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        ];
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+        }
+        let xref_at = out.len();
+        out.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for (name, data) in entries {
+                zw.start_file(*name, opts).unwrap();
+                zw.write_all(data).unwrap();
+            }
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    fn docx_with(text: &str) -> Vec<u8> {
+        zip_bytes(&[
+            (
+                "[Content_Types].xml",
+                b"<Types>application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml</Types>",
+            ),
+            (
+                "word/document.xml",
+                format!("<w:document><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>").as_bytes(),
+            ),
+        ])
+    }
+
+    async fn stored_text(runner: &PageRunner, out: &NormalizedOutput) -> String {
+        let id = out
+            .formats
+            .markdown
+            .as_ref()
+            .expect("a markdown artifact")
+            .artifact_id
+            .clone();
+        String::from_utf8(runner.artifacts.get("org_test", &id).await.unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn pdf_body_routes_to_pdf_parser_not_readability() {
+        let pdf = minimal_pdf("Hallo dokument fra Verevon");
+        let (runner, _rx) = runner_for(DocRouting::On, 200, Some("application/octet-stream"), &pdf);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner.run(&run_id, &url(), None).await.expect("pdf parsed");
+        assert_eq!(out.metadata.content_kind.as_deref(), Some("pdf"));
+        assert!(stored_text(&runner, &out)
+            .await
+            .contains("Hallo dokument fra Verevon"));
+        // The original bytes are the `raw` format, never `html`.
+        assert!(out.formats.html.is_none());
+        let raw = out.formats.raw.as_ref().expect("raw format");
+        let bytes = runner
+            .artifacts
+            .get("org_test", &raw.artifact_id)
+            .await
+            .unwrap();
+        assert_eq!(bytes, pdf);
+        assert!(out.formats.links.is_empty());
+        // The fingerprint stays the hash of the raw body.
+        assert_eq!(
+            out.fingerprint,
+            quarry_transform::fingerprint::content_fingerprint(&pdf).0
+        );
+    }
+
+    #[tokio::test]
+    async fn docx_zip_routes_to_docx_parser() {
+        let docx = docx_with("Kontrakt mellom partene");
+        let (runner, _rx) = runner_for(DocRouting::On, 200, Some("application/zip"), &docx);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner
+            .run(&run_id, &url(), None)
+            .await
+            .expect("docx parsed");
+        assert_eq!(out.metadata.content_kind.as_deref(), Some("docx"));
+        assert!(stored_text(&runner, &out)
+            .await
+            .contains("Kontrakt mellom partene"));
+    }
+
+    #[tokio::test]
+    async fn plain_zip_and_xlsx_are_unsupported_media() {
+        let plain = zip_bytes(&[("a.txt", b"hello"), ("b.txt", b"world")]);
+        let xlsx = zip_bytes(&[(
+            "[Content_Types].xml",
+            b"<Types>spreadsheetml.sheet.main</Types>",
+        )]);
+        for (body, kind) in [(plain, "archive"), (xlsx, "xlsx")] {
+            let (runner, _rx) =
+                runner_for(DocRouting::On, 200, Some("application/octet-stream"), &body);
+            let run_id: RunKind = quarry_core::ids::Id::new();
+            let error = runner.run(&run_id, &url(), None).await.unwrap_err();
+            assert_eq!(error.code, ErrorCode::UnsupportedMedia, "{kind}");
+            assert_eq!(error.details.unwrap()["kind"], kind);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_pdf_is_a_typed_415_with_a_parse_reason() {
+        let (runner, mut rx) = runner_for(
+            DocRouting::On,
+            200,
+            Some("application/pdf"),
+            b"%PDF-1.4 not really a pdf",
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let error = runner.run(&run_id, &url(), None).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+        assert_eq!(error.details.unwrap()["reason"], "pdf_parse_failed");
+        let blocked = drain(&mut rx)
+            .into_iter()
+            .find(|e| e.event_type == EventType::PageBlocked)
+            .expect("page_blocked for the parse failure");
+        assert_eq!(blocked.payload["reason"], "document_parse_failed");
+    }
+
+    #[tokio::test]
+    async fn skip_mode_does_not_parse_documents() {
+        let pdf = minimal_pdf("Hallo");
+        let (runner, _rx) = runner_for(DocRouting::Skip, 200, Some("application/pdf"), &pdf);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner
+            .run(&run_id, &url(), None)
+            .await
+            .expect("legacy path");
+        // Legacy path: the PDF is stored as html, exactly as before.
+        assert!(out.formats.html.is_some());
+        assert!(out.formats.raw.is_none());
+    }
+
+    #[tokio::test]
+    async fn zdr_pdf_writes_no_artifact_and_returns_inline_markdown() {
+        let pdf = minimal_pdf("Hemmelig dokument");
+        let (mut runner, _rx) = runner_for(DocRouting::On, 200, Some("application/pdf"), &pdf);
+        runner.zdr = ZdrMode::On;
+        let store = Arc::new(InMemoryStore::new());
+        runner.artifacts = store.clone();
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (out, inline) = runner
+            .run_with_inline(&run_id, &url(), None)
+            .await
+            .expect("zdr pdf parsed");
+        assert!(
+            out.formats.markdown.is_none()
+                && out.formats.raw.is_none()
+                && out.formats.html.is_none()
+        );
+        let listed = store
+            .list("org_test", &quarry_core::pagination::ListFilter::default())
+            .await
+            .unwrap();
+        assert!(listed.items.is_empty(), "ZDR must write no artifact");
+        let text = inline.markdown.expect("inline text under ZDR");
+        assert!(text.contains("Hemmelig dokument"), "{text}");
+        assert!(inline.truncated.is_empty());
+    }
+
+    #[tokio::test]
+    async fn zdr_html_returns_inline_markdown_and_non_zdr_does_not() {
+        let (mut zdr_runner, _rx) =
+            runner_for(DocRouting::Off, 200, Some("text/html"), HTML.as_bytes());
+        zdr_runner.zdr = ZdrMode::On;
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (_, inline) = zdr_runner
+            .run_with_inline(&run_id, &url(), None)
+            .await
+            .unwrap();
+        assert!(inline.markdown.unwrap().contains("En vanlig nettside"));
+
+        let (runner, _rx) = runner_for(DocRouting::Off, 200, Some("text/html"), HTML.as_bytes());
+        let (_, inline) = runner.run_with_inline(&run_id, &url(), None).await.unwrap();
+        assert!(
+            inline.markdown.is_none(),
+            "stored runs return no inline text"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pdf_without_a_text_layer_warns_and_skips_ingest() {
+        let pdf = minimal_pdf("");
+        let (runner, _rx) = runner_for(DocRouting::On, 200, Some("application/pdf"), &pdf);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (_, inline) = runner.run_with_inline(&run_id, &url(), None).await.unwrap();
+        assert!(inline
+            .warnings
+            .iter()
+            .any(|w| w.code == "document_has_no_text_layer"));
+    }
+
+    #[tokio::test]
+    async fn html_output_is_unchanged_with_routing_on() {
+        let (off, _r1) = runner_for(
+            DocRouting::Off,
+            200,
+            Some("text/html; charset=utf-8"),
+            HTML.as_bytes(),
+        );
+        let (on, _r2) = runner_for(
+            DocRouting::On,
+            200,
+            Some("text/html; charset=utf-8"),
+            HTML.as_bytes(),
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let a = off.run(&run_id, &url(), None).await.unwrap();
+        let b = on.run(&run_id, &url(), None).await.unwrap();
+        assert_eq!(a.fingerprint, b.fingerprint);
+        assert_eq!(a.metadata.title, b.metadata.title);
+        assert_eq!(a.formats.links.len(), b.formats.links.len());
+        assert_eq!(
+            a.formats.markdown.as_ref().map(|f| f.bytes),
+            b.formats.markdown.as_ref().map(|f| f.bytes)
+        );
+        assert!(b.formats.raw.is_none() && b.formats.html.is_some());
+    }
+
+    #[test]
+    fn doc_routing_parses_known_values_and_names_the_variable_on_error() {
+        assert_eq!(DocRouting::parse("off"), Ok(DocRouting::Off));
+        assert_eq!(DocRouting::parse(" Shadow "), Ok(DocRouting::Shadow));
+        assert_eq!(DocRouting::parse(""), Ok(DocRouting::Shadow));
+        assert_eq!(DocRouting::parse("SKIP"), Ok(DocRouting::Skip));
+        assert_eq!(DocRouting::parse("on"), Ok(DocRouting::On));
+        let error = DocRouting::parse("maybe").unwrap_err();
+        assert!(error.contains("QUARRY_EDGE__DOC_ROUTING"), "{error}");
+        assert_eq!(DocRouting::default(), DocRouting::Shadow);
+    }
+    // ---- WS5.D: what a caller can ask to get inline -------------------------
+
+    fn want(markdown: bool, html: bool, raw_html: bool, max_bytes: usize) -> InlineRequest {
+        InlineRequest {
+            markdown,
+            html,
+            raw_html,
+            max_bytes,
+            clean: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn html_and_raw_html_come_back_only_when_asked_for() {
+        let (runner, _rx) = runner_for(DocRouting::Off, 200, Some("text/html"), HTML.as_bytes());
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (_, none) = runner
+            .run_with_inline_request(&run_id, &url(), None, &want(false, false, false, 1 << 20))
+            .await
+            .unwrap();
+        assert!(none.markdown.is_none() && none.html.is_none() && none.raw_html.is_none());
+        assert!(none.truncated.is_empty() && none.omitted.is_empty());
+
+        let (_, both) = runner
+            .run_with_inline_request(&run_id, &url(), None, &want(true, true, true, 1 << 20))
+            .await
+            .unwrap();
+        assert!(both.markdown.unwrap().contains("En vanlig nettside"));
+        // html is what the markdown came from; raw_html is the document as fetched.
+        assert!(both.html.unwrap().contains("En vanlig nettside"));
+        assert_eq!(both.raw_html.as_deref(), Some(HTML));
+    }
+
+    #[tokio::test]
+    async fn an_over_cap_field_is_omitted_outside_zdr_and_cut_under_it() {
+        let (runner, _rx) = runner_for(DocRouting::Off, 200, Some("text/html"), HTML.as_bytes());
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (out, inline) = runner
+            .run_with_inline_request(&run_id, &url(), None, &want(true, true, false, 8))
+            .await
+            .unwrap();
+        assert!(inline.markdown.is_none() && inline.html.is_none());
+        assert_eq!(inline.omitted, vec!["markdown", "html"]);
+        assert!(out.formats.markdown.is_some(), "the stored artifact still holds it");
+
+        let (mut zdr, _rx) = runner_for(DocRouting::Off, 200, Some("text/html"), HTML.as_bytes());
+        zdr.zdr = ZdrMode::On;
+        let (_, inline) = zdr
+            .run_with_inline_request(&run_id, &url(), None, &want(true, true, false, 8))
+            .await
+            .unwrap();
+        assert!(inline.markdown.as_ref().unwrap().len() <= 8);
+        assert!(inline.html.as_ref().unwrap().len() <= 8);
+        assert_eq!(inline.truncated, vec!["markdown", "html"]);
+        assert!(inline.omitted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_multibyte_character_straddling_the_cap_is_cut_whole_not_split() {
+        // "æøå" is six bytes; a cap of 5 must keep two characters, not panic.
+        let page = "<html><body><p>æøåæøå</p></body></html>";
+        let (mut runner, _rx) = runner_for(DocRouting::Off, 200, Some("text/html"), page.as_bytes());
+        runner.zdr = ZdrMode::On;
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (_, inline) = runner
+            .run_with_inline_request(&run_id, &url(), None, &want(false, false, true, 5))
+            .await
+            .unwrap();
+        let cut = inline.raw_html.expect("cut raw html");
+        assert!(cut.len() <= 5 && std::str::from_utf8(cut.as_bytes()).is_ok());
+        assert_eq!(inline.truncated, vec!["raw_html"]);
+    }
+
+    #[tokio::test]
+    async fn a_document_has_markdown_inline_but_no_html() {
+        let pdf = minimal_pdf("Dokumenttekst");
+        let (runner, _rx) = runner_for(DocRouting::On, 200, Some("application/pdf"), &pdf);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (_, inline) = runner
+            .run_with_inline_request(&run_id, &url(), None, &want(true, true, true, 1 << 20))
+            .await
+            .expect("pdf parsed");
+        assert!(inline.markdown.unwrap().contains("Dokumenttekst"));
+        assert!(inline.html.is_none() && inline.raw_html.is_none());
+        assert_eq!(inline.omitted, vec!["html", "raw_html"]);
+        assert!(inline
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "format_unavailable_for_documents"));
+    }
+
+    #[tokio::test]
+    async fn the_default_inline_request_is_the_old_behaviour() {
+        assert_eq!(
+            InlineRequest::default_for(ZdrMode::On),
+            want(true, false, false, quarry_core::scrape::DEFAULT_INLINE_MAX_BYTES)
+        );
+        assert_eq!(
+            InlineRequest::default_for(ZdrMode::Off),
+            want(false, false, false, quarry_core::scrape::DEFAULT_INLINE_MAX_BYTES)
+        );
+    }
+
+}
+
+#[cfg(test)]
+mod scrape_challenge_tests {
+    use super::*;
+    use crate::artifact_store::InMemoryStore;
+    use crate::challenge::{ChallengeConfig, EnforceMode};
+    use crate::driver::Driver;
+    use crate::fetch::FetchResponse;
+    use async_trait::async_trait;
+    use quarry_core::output::DriverKind;
+    use tokio::sync::mpsc;
+
+    struct BodyDriver {
+        status: u16,
+        content_type: Option<&'static str>,
+        body: Vec<u8>,
+    }
+
+    #[async_trait]
+    impl Driver for BodyDriver {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Static
+        }
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            Ok(FetchResponse {
+                status: self.status,
+                final_url: url.clone(),
+                headers: self
+                    .content_type
+                    .map(|ct| vec![("content-type".into(), ct.into())])
+                    .unwrap_or_default(),
+                body: self.body.clone(),
+                duration_ms: 1,
+                served_by: DriverKind::Static,
+                captures: None,
+            })
+        }
+    }
+
+    const CF_INTERSTITIAL: &str = r#"<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title></head><body class="no-js"><h2 id="challenge-running">Checking if the site connection is secure</h2><div id="challenge-stage"></div><script>window._cf_chl_opt={cvId:'3'};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=8abc';</script><script src="https://challenges.cloudflare.com/turnstile/v0/g/abc/api.js"></script></body></html>"#;
+    const TURNSTILE_PAGE: &str = r#"<html><head><title>Turnstile Test</title></head><body><h1>Demo</h1><div class="cf-turnstile" data-sitekey="1x00000000000000000000AA"></div><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script></body></html>"#;
+    const NGINX_403: &str = "<html>\r\n<head><title>403 Forbidden</title></head>\r\n<body>\r\n<center><h1>403 Forbidden</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>";
+    const LOGIN_PAGE: &str = r#"<html><head><title>Sign in</title></head><body><form action="/session" method="post"><label>Email <input type="email" name="email"></label><label>Password <input type="password" name="password"></label><button>Sign in</button></form></body></html>"#;
+    const ARTICLE: &str = "<html><head><title>How CAPTCHAs work</title></head><body><main><h1>How CAPTCHAs work</h1><p>A CAPTCHA is a test that tells computers and humans apart. This article explains what a CAPTCHA is and why access to a page is sometimes forbidden to a bot.</p></main></body></html>";
+    const CONTACT_WITH_WIDGET: &str = r#"<html><head><title>Contact us</title></head><body><form action="/send" method="post"><label>Name <input type="text" name="n"></label><label>Email <input type="email" name="e"></label><textarea name="m"></textarea><div class="g-recaptcha" data-sitekey="k"></div><button>Send</button></form><script src="https://www.google.com/recaptcha/api.js"></script></body></html>"#;
+
+    /// Makes per-thread tracing subscribers (`set_default`) reliable for every test in
+    /// this module, whatever order the parallel tests reach a callsite in.
+    ///
+    /// tracing-core caches an "interest" per callsite, computed when the callsite is
+    /// first hit. While only ONE dispatcher is registered process-wide it takes a
+    /// shortcut and asks only the CURRENT THREAD's default dispatcher. A test thread
+    /// with no subscriber that is first to hit a callsite (the two challenge lines in
+    /// `PageRunner::run`) therefore caches "never", and can overwrite the "sometimes"
+    /// that a concurrent `set_default` in the log test had just computed. The log test
+    /// then sees zero events: the flake of R8b (assertion left 0, right 1). Two
+    /// dispatchers that live for the whole process turn the shortcut off for good: the
+    /// interest is then always computed over every registered dispatcher, so a callsite
+    /// is never cached as "never" while a capturing subscriber is alive, and each event
+    /// asks the hitting thread's own subscriber. Called before any scrape in the module.
+    fn keep_per_thread_subscribers_reliable() {
+        static KEEP: std::sync::OnceLock<[tracing::Dispatch; 2]> = std::sync::OnceLock::new();
+        KEEP.get_or_init(|| {
+            [
+                tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
+                tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
+            ]
+        });
+    }
+
+    /// Installs a challenge config for the current thread and removes it again.
+    /// `#[tokio::test]` runs on the current thread, so the scrape sees it.
+    struct Installed;
+    impl Installed {
+        fn new(config: ChallengeConfig) -> Self {
+            keep_per_thread_subscribers_reliable();
+            TEST_CHALLENGE_CONFIG.with(|slot| slot.set(Some(config)));
+            Installed
+        }
+    }
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            TEST_CHALLENGE_CONFIG.with(|slot| slot.set(None));
+        }
+    }
+
+    fn runner_for(
+        zdr: ZdrMode,
+        status: u16,
+        content_type: Option<&'static str>,
+        body: &str,
+    ) -> (PageRunner, mpsc::Receiver<quarry_core::event::Event>, Arc<InMemoryStore>) {
+        let (tx, rx) = mpsc::channel(64);
+        let artifacts = Arc::new(InMemoryStore::new());
+        let runner = PageRunner {
+            driver: Arc::new(BodyDriver { status, content_type, body: body.as_bytes().to_vec() }),
+            security: Arc::new(
+                quarry_security::preflight::DefaultEngine::new().with_allow_private_hosts(true),
+            ),
+            artifacts: artifacts.clone(),
+            event_sink: EventSink::new(tx),
+            zdr,
+            ingest: None,
+            org_id: Some("org_test".into()),
+            user_id: None,
+            privacy: PrivacyPolicy::default(),
+            cancel_token: None,
+            local_index: None,
+            policy: RunPolicy::default(),
+            scheduler: None,
+            autoscale: None,
+            render: RenderHints::default(),
+            page_renderer: None,
+            source_registrar: None,
+            title_enricher: None,
+            doc_routing: DocRouting::Off,
+            robots: None,
+        };
+        (runner, rx, artifacts)
+    }
+
+    fn target() -> Url {
+        "https://walled.example.test/page".parse().unwrap()
+    }
+
+    fn drain(rx: &mut mpsc::Receiver<quarry_core::event::Event>) -> Vec<quarry_core::event::Event> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    async fn scrape(
+        zdr: ZdrMode,
+        status: u16,
+        content_type: Option<&'static str>,
+        body: &str,
+    ) -> (QuarryResult<NormalizedOutput>, Vec<quarry_core::event::Event>) {
+        let (runner, mut rx, _) = runner_for(zdr, status, content_type, body);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let result = runner.run(&run_id, &target(), None).await;
+        (result, drain(&mut rx))
+    }
+
+    #[tokio::test]
+    async fn a_strong_block_page_fails_the_scrape_with_its_block_reason() {
+        let _config = Installed::new(ChallengeConfig::enforcing());
+        // (what the driver served, status, expected block reason)
+        let cases = [
+            ("cloudflare interstitial", 403, CF_INTERSTITIAL, "waf_interstitial"),
+            ("cloudflare interstitial served as 200", 200, CF_INTERSTITIAL, "waf_interstitial"),
+            ("a turnstile page", 200, TURNSTILE_PAGE, "captcha_widget"),
+        ];
+        for (name, status, body, reason) in cases {
+            let (result, events) = scrape(ZdrMode::Off, status, Some("text/html"), body).await;
+            let error = result.expect_err(name);
+            assert_eq!(error.code, ErrorCode::ChallengeDetected, "{name}");
+            assert_eq!(error.code.http_status(), 403, "{name}");
+            let details = error.details.as_ref().expect("details");
+            assert_eq!(details["block_reason"], reason, "{name}");
+            assert_eq!(details["recovery"], "not_applicable", "{name}");
+            assert_eq!(details["next"], "other_source", "{name}");
+            // Nothing of the page, the host or the URL in the error.
+            let wire = serde_json::to_string(&error).unwrap();
+            for secret in ["walled.example", "cloudflare", "turnstile", "Just a moment"] {
+                assert!(!wire.contains(secret), "{name}: {secret} in {wire}");
+            }
+            let blocked = events
+                .iter()
+                .find(|e| e.event_type == EventType::PageBlocked)
+                .unwrap_or_else(|| panic!("{name}: page_blocked emitted"));
+            assert_eq!(blocked.payload["reason"], "challenge_detected", "{name}");
+            assert_eq!(blocked.payload["block_reason"], reason, "{name}");
+            // The wall is not content: nothing past the fetch event was emitted.
+            for event in &events {
+                assert!(
+                    !matches!(
+                        event.event_type,
+                        EventType::ChangeDetected | EventType::BrandingExtracted | EventType::ArtifactWritten
+                    ),
+                    "{name}: {:?}",
+                    event.event_type
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_wall_stores_no_artifact() {
+        let _config = Installed::new(ChallengeConfig::enforcing());
+        let (runner, _rx, artifacts) = runner_for(ZdrMode::Off, 403, Some("text/html"), CF_INTERSTITIAL);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        assert!(runner.run(&run_id, &target(), None).await.is_err());
+        assert_eq!(
+            artifacts.count("org_test").await.unwrap(),
+            Some(0),
+            "a refused wall must not be stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn pages_that_are_not_walls_still_scrape() {
+        let _config = Installed::new(ChallengeConfig::enforcing());
+        let cases = [
+            ("an ordinary article about captchas", 200, ARTICLE),
+            ("a login page", 200, LOGIN_PAGE),
+            ("a bare nginx 403 (a status alone is no verdict)", 403, NGINX_403),
+            ("a 429 page", 429, "<html><head><title>Too many requests</title></head><body>Slow down.</body></html>"),
+            ("a contact form with a recaptcha", 200, CONTACT_WITH_WIDGET),
+        ];
+        for (name, status, body) in cases {
+            let (result, _events) = scrape(ZdrMode::Off, status, Some("text/html"), body).await;
+            let out = result.unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(out.status, status, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn only_markup_is_classified() {
+        let _config = Installed::new(ChallengeConfig::enforcing());
+        // The same bytes under a binary or JSON type are not a page to classify.
+        for content_type in ["application/json", "application/octet-stream", "image/png"] {
+            let (result, _) = scrape(ZdrMode::Off, 200, Some(content_type), CF_INTERSTITIAL).await;
+            assert!(result.is_ok(), "{content_type}: {:?}", result.err());
+        }
+        // No content type reads as HTML.
+        let (result, _) = scrape(ZdrMode::Off, 200, None, CF_INTERSTITIAL).await;
+        assert_eq!(result.expect_err("html").code, ErrorCode::ChallengeDetected);
+    }
+
+    #[tokio::test]
+    async fn the_legacy_classifier_leaves_the_scrape_path_as_it_was() {
+        let _config = Installed::new(ChallengeConfig::from_values(Some("legacy"), None));
+        let (result, _) = scrape(ZdrMode::Off, 403, Some("text/html"), CF_INTERSTITIAL).await;
+        assert_eq!(result.expect("legacy scrapes the wall as before").status, 403);
+    }
+
+    /// Collects tracing events as text for the thread that installs it.
+    #[derive(Clone, Default)]
+    struct EventLog(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl EventLog {
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+        fn matching(&self, message: &str) -> Vec<String> {
+            self.lines().into_iter().filter(|line| line.contains(message)).collect()
+        }
+    }
+
+    impl tracing::Subscriber for EventLog {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Fields(String);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                    if !self.0.is_empty() {
+                        self.0.push(' ');
+                    }
+                    self.0.push_str(&format!("{}={:?}", field.name(), value));
+                }
+            }
+            let mut fields = Fields(String::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(format!("{} {}", event.metadata().level(), fields.0));
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    // The EventLog is installed with `set_default`, which is per THREAD, so this test
+    // needs the scrape to run on the test's own thread: a current-thread runtime
+    // (spelled out here, not left to the default) guarantees that. If the scrape work
+    // were ever spawned elsewhere the `len() == 1` assertions below would fail loudly
+    // (zero lines), never pass vacuously.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_scrape_path_logs_the_reason_and_the_status_and_never_the_host() {
+        // Before the first `set_default` below, so no registration races it.
+        keep_per_thread_subscribers_reliable();
+        for zdr in [ZdrMode::Off, ZdrMode::On] {
+            // Enforce: one refusal line.
+            let events = EventLog::default();
+            {
+                let _log = tracing::subscriber::set_default(events.clone());
+                let _config = Installed::new(ChallengeConfig::enforcing());
+                let (result, _) = scrape(zdr, 403, Some("text/html"), CF_INTERSTITIAL).await;
+                assert!(result.is_err(), "{zdr:?}");
+            }
+            let refused = events.matching("quarry.challenge.scrape_refused");
+            assert_eq!(refused.len(), 1, "{:?}", events.lines());
+            assert!(refused[0].contains("reason=\"waf_interstitial\""), "{refused:?}");
+            assert!(refused[0].contains("status=403"), "{refused:?}");
+            assert!(events.matching("would_refuse_scrape").is_empty(), "{:?}", events.lines());
+
+            // Log: one would-refuse line, the page goes through.
+            let events = EventLog::default();
+            {
+                let _log = tracing::subscriber::set_default(events.clone());
+                let _config = Installed::new(ChallengeConfig::from_values(None, Some("log")));
+                let (result, _) = scrape(zdr, 403, Some("text/html"), CF_INTERSTITIAL).await;
+                assert!(result.is_ok(), "{zdr:?}");
+            }
+            let would = events.matching("quarry.challenge.would_refuse_scrape");
+            assert_eq!(would.len(), 1, "{:?}", events.lines());
+            assert!(would[0].contains("reason=\"waf_interstitial\""), "{would:?}");
+            assert!(would[0].contains("status=403"), "{would:?}");
+            assert!(events.matching("scrape_refused").is_empty(), "{:?}", events.lines());
+
+            // Neither the host nor anything of the page is in a challenge line. (The
+            // generic "page extracted" line of a page that goes through logs its URL
+            // on a non-ZDR run like every other page does; that is the existing
+            // behaviour of the scrape path and not part of this contract.)
+            for line in events.matching("quarry.challenge") {
+                assert!(!line.contains("walled.example"), "{line}");
+                assert!(!line.contains("Just a moment"), "{line}");
+            }
+            // Under ZDR the walled page that goes through in log mode leaves no
+            // host in ANY line, the generic "page extracted" line included.
+            if zdr == ZdrMode::On {
+                for line in events.lines() {
+                    assert!(!line.contains("walled.example"), "{line}");
+                }
+            }
+        }
+        // A page that is not a wall logs nothing about challenges.
+        let events = EventLog::default();
+        {
+            let _log = tracing::subscriber::set_default(events.clone());
+            let _config = Installed::new(ChallengeConfig::enforcing());
+            let (result, _) = scrape(ZdrMode::Off, 200, Some("text/html"), ARTICLE).await;
+            assert!(result.is_ok());
+        }
+        assert!(events.matching("quarry.challenge").is_empty(), "{:?}", events.lines());
+    }
+
+    #[tokio::test]
+    async fn the_log_phase_lets_the_wall_through_and_emits_no_page_blocked() {
+        let config = ChallengeConfig::from_values(None, Some("log"));
+        assert_eq!(config.enforce, EnforceMode::Log);
+        let _config = Installed::new(config);
+        let (result, events) = scrape(ZdrMode::Off, 403, Some("text/html"), CF_INTERSTITIAL).await;
+        assert_eq!(result.expect("log mode refuses nothing").status, 403);
+        assert!(
+            events.iter().all(|e| e.event_type != EventType::PageBlocked),
+            "no page_blocked in log mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zdr_scrape_is_refused_the_same_and_the_error_has_no_host() {
+        let _config = Installed::new(ChallengeConfig::enforcing());
+        let (result, _events) = scrape(ZdrMode::On, 403, Some("text/html"), CF_INTERSTITIAL).await;
+        let error = result.expect_err("refused under ZDR as well");
+        assert_eq!(error.code, ErrorCode::ChallengeDetected);
+        let wire = serde_json::to_string(&error).unwrap();
+        assert!(!wire.contains("walled.example"), "{wire}");
+        assert_eq!(error.details.unwrap()["block_reason"], "waf_interstitial");
+    }
+
+    #[test]
+    fn classify_fetched_reads_at_most_the_scan_window_and_never_returns_a_hint() {
+        let config = ChallengeConfig::enforcing();
+        let signal = crate::challenge::classify_fetched(
+            config,
+            "https://walled.example.test/page",
+            403,
+            Some("Just a moment..."),
+            CF_INTERSTITIAL.as_bytes(),
+        )
+        .expect("strong");
+        assert!(signal.requires_escalation);
+        // A wall past the scan window is not seen.
+        let mut padded = vec![b' '; crate::challenge::MAX_SCANNED_BYTES + 10];
+        padded.extend_from_slice(CF_INTERSTITIAL.as_bytes());
+        assert!(crate::challenge::classify_fetched(config, "https://walled.example.test/page", 200, None, &padded).is_none());
+        // A hint is not a verdict.
+        assert!(crate::challenge::classify_fetched(
+            config,
+            "https://x.example/contact",
+            200,
+            Some("Contact us"),
+            CONTACT_WITH_WIDGET.as_bytes()
+        )
+        .is_none());
+        // Bytes that are not UTF-8 do not panic.
+        assert!(crate::challenge::classify_fetched(config, "https://x.example/", 200, None, &[0xff, 0xfe, 0x00, 0xc3]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod capture_pipeline_tests {
+    use super::*;
+    use crate::artifact_store::InMemoryStore;
+    use crate::driver::Driver;
+    use crate::fetch::FetchResponse;
+    use async_trait::async_trait;
+    use quarry_core::capture::{CapturedImage, CapturedPdf, ImageFormat};
+    use quarry_core::output::DriverKind;
+    use tokio::sync::mpsc;
+
+    const PAGE: &str = "<html><head><title>Capture page</title></head><body><main><h1>Capture</h1><p>Some body text for the capture test page, long enough to be extracted as the main content of the page.</p></main></body></html>";
+
+    /// A driver whose fetch carries the captures it is given.
+    struct CaptureDriver {
+        captures: crate::capture::PageCaptures,
+    }
+
+    #[async_trait]
+    impl Driver for CaptureDriver {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Browser
+        }
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            Ok(FetchResponse {
+                status: 200,
+                final_url: url.clone(),
+                headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                body: PAGE.as_bytes().to_vec(),
+                duration_ms: 3,
+                served_by: DriverKind::Browser,
+                captures: Some(Box::new(self.captures.clone())),
+            })
+        }
+    }
+
+    fn png(bytes: usize) -> CapturedImage {
+        CapturedImage {
+            bytes: vec![0x89; bytes],
+            format: ImageFormat::Png,
+            width_px: 1280,
+            height_px: 720,
+            tiles: 1,
+            stitched: false,
+            truncated: false,
+        }
+    }
+
+    fn captures(screenshot: Option<CapturedImage>, pdf: Option<CapturedPdf>) -> crate::capture::PageCaptures {
+        crate::capture::PageCaptures {
+            screenshot,
+            pdf,
+            ..Default::default()
+        }
+    }
+
+    fn runner(
+        tx: mpsc::Sender<quarry_core::event::Event>,
+        zdr: ZdrMode,
+        driver: CaptureDriver,
+        render: RenderHints,
+    ) -> PageRunner {
+        PageRunner {
+            driver: Arc::new(driver),
+            security: Arc::new(
+                quarry_security::preflight::DefaultEngine::new().with_allow_private_hosts(true),
+            ),
+            artifacts: Arc::new(InMemoryStore::new()),
+            event_sink: EventSink::new(tx),
+            zdr,
+            ingest: None,
+            org_id: Some("org_capture".into()),
+            user_id: None,
+            privacy: PrivacyPolicy::default(),
+            cancel_token: None,
+            local_index: None,
+            policy: RunPolicy::default(),
+            scheduler: None,
+            autoscale: None,
+            render,
+            page_renderer: None,
+            source_registrar: None,
+            title_enricher: None,
+            doc_routing: DocRouting::Off,
+            robots: None,
+        }
+    }
+
+    fn both_render() -> RenderHints {
+        RenderHints {
+            capture: Some(quarry_core::capture::CapturePlan {
+                screenshot: Some(Default::default()),
+                pdf: Some(Default::default()),
+            }),
+            ..RenderHints::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_refs_fill_output_formats() {
+        let (tx, _rx) = mpsc::channel(64);
+        let driver = CaptureDriver {
+            captures: captures(
+                Some(png(64)),
+                Some(CapturedPdf {
+                    bytes: b"%PDF-1.7 test".to_vec(),
+                }),
+            ),
+        };
+        let runner = runner(tx, ZdrMode::Off, driver, both_render());
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://www.example.com/".parse().unwrap();
+        let out = runner.run(&run_id, &url, None).await.expect("run ok");
+
+        let shot = out.formats.screenshot.expect("screenshot ref");
+        assert_eq!(shot.bytes, 64);
+        let pdf = out.formats.pdf.expect("pdf ref");
+        assert_eq!(pdf.bytes, 13);
+    }
+
+    #[tokio::test]
+    async fn zdr_capture_is_inline_and_writes_no_artifact_event_or_index() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let driver = CaptureDriver {
+            captures: captures(Some(png(64)), None),
+        };
+        let runner = runner(tx, ZdrMode::On, driver, both_render());
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://www.example.com/".parse().unwrap();
+        let (out, inline) = runner
+            .run_with_inline_request(&run_id, &url, None, &InlineRequest::default_for(ZdrMode::On))
+            .await
+            .expect("run ok");
+
+        assert!(out.formats.screenshot.is_none(), "nothing is stored under ZDR");
+        let shot = inline.screenshot.expect("inline screenshot");
+        assert_eq!(shot.bytes, 64);
+        assert_eq!(shot.content_type, "image/png");
+        assert!(!shot.data_base64.is_empty());
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(event.event_type, EventType::ArtifactWritten),
+                "no artifact event for a capture under ZDR"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn over_cap_zdr_capture_is_omitted_with_a_warning() {
+        let (tx, _rx) = mpsc::channel(64);
+        let driver = CaptureDriver {
+            captures: captures(Some(png(64)), None),
+        };
+        let mut render = both_render();
+        render.capture_inline_max_bytes = Some(16);
+        let runner = runner(tx, ZdrMode::On, driver, render);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://www.example.com/".parse().unwrap();
+        let (_out, inline) = runner
+            .run_with_inline_request(&run_id, &url, None, &InlineRequest::default_for(ZdrMode::On))
+            .await
+            .expect("run ok");
+
+        assert!(inline.screenshot.is_none());
+        assert!(inline.omitted.iter().any(|field| field == "screenshot"));
+        assert!(inline
+            .warnings
+            .iter()
+            .any(|w| w.code == "capture_exceeds_inline_cap"));
+    }
+
+    // ---- WS13.5: what the scrape-time actions took ----
+
+    use crate::artifact_store::ArtifactStore;
+    use crate::capture::ActionOutputBytes;
+    use quarry_core::scrape_actions::{ActionOutcome, ActionOutput, ActionStatus};
+
+    fn plain_outcome(index: usize, kind: &str) -> ActionOutcome {
+        ActionOutcome {
+            index,
+            kind: kind.to_owned(),
+            status: ActionStatus::Ok,
+            duration_ms: 4,
+            error: None,
+            output: None,
+        }
+    }
+
+    fn capture_outcome(index: usize, kind: &str, content_type: &str, bytes: usize) -> ActionOutcome {
+        ActionOutcome {
+            output: Some(ActionOutput {
+                kind: kind.to_owned(),
+                content_type: content_type.to_owned(),
+                bytes: bytes as u64,
+                width: (kind == "screenshot").then_some(800),
+                height: (kind == "screenshot").then_some(600),
+            }),
+            ..plain_outcome(index, kind)
+        }
+    }
+
+    /// Captures as a browser fetch hands them over after `click, screenshot, wait, pdf`.
+    fn action_captures(
+        screenshot_bytes: usize,
+        pdf_bytes: usize,
+        final_screenshot: Option<CapturedImage>,
+    ) -> crate::capture::PageCaptures {
+        crate::capture::PageCaptures {
+            screenshot: final_screenshot,
+            actions: vec![
+                plain_outcome(0, "click"),
+                capture_outcome(1, "screenshot", "image/png", screenshot_bytes),
+                plain_outcome(2, "wait"),
+                capture_outcome(3, "pdf", "application/pdf", pdf_bytes),
+            ],
+            action_outputs: vec![
+                None,
+                Some(ActionOutputBytes {
+                    content_type: "image/png".into(),
+                    bytes: vec![0x89; screenshot_bytes],
+                }),
+                None,
+                Some(ActionOutputBytes {
+                    content_type: "application/pdf".into(),
+                    bytes: vec![0x25; pdf_bytes],
+                }),
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn actions_render() -> RenderHints {
+        RenderHints {
+            actions: Some(Arc::new(
+                quarry_core::scrape_actions::validate_actions(
+                    vec![
+                        serde_json::json!({ "type": "click", "selector": "#go" }),
+                        serde_json::json!({ "type": "screenshot" }),
+                        serde_json::json!({ "type": "wait", "milliseconds": 10 }),
+                        serde_json::json!({ "type": "pdf" }),
+                    ],
+                    quarry_core::scrape_actions::ActionOnError::Abort,
+                    &quarry_core::scrape_actions::ActionLimits::default(),
+                    &quarry_core::capture::CaptureLimits::default(),
+                )
+                .expect("the actions validate"),
+            )),
+            ..RenderHints::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn action_outputs_are_stored_with_distinct_keys_and_org() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let driver = CaptureDriver {
+            captures: action_captures(48, 32, Some(png(64))),
+        };
+        let mut render = actions_render();
+        render.capture = both_render().capture;
+        let store = Arc::new(InMemoryStore::new());
+        let mut runner = runner(tx, ZdrMode::Off, driver, render);
+        runner.artifacts = store.clone();
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://www.example.com/".parse().unwrap();
+        let (out, inline) = runner
+            .run_with_inline_request(&run_id, &url, None, &InlineRequest::default_for(ZdrMode::Off))
+            .await
+            .expect("run ok");
+
+        // Four entries, in request order, with the capture entries pointing at artifacts.
+        let kinds: Vec<_> = inline.actions.iter().map(|a| (a.index, a.kind.as_str())).collect();
+        assert_eq!(kinds, vec![(0, "click"), (1, "screenshot"), (2, "wait"), (3, "pdf")]);
+        assert!(inline.actions[0].output.is_none() && inline.actions[2].output.is_none());
+        let shot = inline.actions[1].output.as_ref().expect("screenshot output");
+        let pdf = inline.actions[3].output.as_ref().expect("pdf output");
+        let shot_id = shot.artifact_id.clone().expect("a stored screenshot has an id");
+        let pdf_id = pdf.artifact_id.clone().expect("a stored pdf has an id");
+        assert!(shot.data_base64.is_none() && pdf.data_base64.is_none(), "nothing inline when stored");
+        assert_eq!((shot.bytes, pdf.bytes), (48, 32));
+        assert_eq!((shot.width, shot.height), (Some(800), Some(600)));
+
+        // Distinct keys: the two action outputs and the final screenshot are three artifacts.
+        let final_shot = out.formats.screenshot.expect("the final screenshot is stored too");
+        let ids = [shot_id.clone(), pdf_id.clone(), final_shot.artifact_id.to_string()];
+        assert_eq!(
+            ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            3,
+            "an action output never overwrites a final capture: {ids:?}"
+        );
+
+        // Org stamp: the request's org reads each back; another org reads nothing.
+        for (id, expected) in [(&shot_id, 48usize), (&pdf_id, 32usize)] {
+            let artifact: quarry_core::ids::kinds::ArtifactKind = id.parse().expect("an artifact id");
+            let bytes = store.get("org_capture", &artifact).await.expect("same org reads it");
+            assert_eq!(bytes.len(), expected);
+            assert!(
+                store.get("org_other", &artifact).await.is_err(),
+                "another org must not read an action output"
+            );
+        }
+
+        // One content-free ArtifactWritten per stored action output (and no bytes in it).
+        let mut action_events = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event.event_type, EventType::ArtifactWritten)
+                && event.payload.get("action_index").is_some()
+            {
+                action_events += 1;
+                assert!(event.payload.get("data_base64").is_none());
+            }
+        }
+        assert_eq!(action_events, 2);
+    }
+
+    #[tokio::test]
+    async fn action_outputs_inline_under_zdr_without_artifact_events() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let driver = CaptureDriver {
+            captures: action_captures(48, 32, None),
+        };
+        let store = Arc::new(InMemoryStore::new());
+        let mut runner = runner(tx, ZdrMode::On, driver, actions_render());
+        runner.artifacts = store.clone();
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://www.example.com/".parse().unwrap();
+        let (_out, inline) = runner
+            .run_with_inline_request(&run_id, &url, None, &InlineRequest::default_for(ZdrMode::On))
+            .await
+            .expect("run ok");
+
+        let shot = inline.actions[1].output.as_ref().expect("screenshot output");
+        let pdf = inline.actions[3].output.as_ref().expect("pdf output");
+        assert!(shot.artifact_id.is_none() && pdf.artifact_id.is_none(), "no id under ZDR");
+        assert!(shot.data_base64.as_deref().is_some_and(|data| !data.is_empty()));
+        assert!(pdf.data_base64.as_deref().is_some_and(|data| !data.is_empty()));
+        assert_eq!(shot.bytes, 48);
+        // ZDR floor: nothing reached the store and no artifact event was emitted.
+        let listed = store
+            .list("org_capture", &quarry_core::pagination::ListFilter::default())
+            .await
+            .expect("list");
+        assert!(listed.items.is_empty(), "ZDR writes no artifact for an action output");
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(event.event_type, EventType::ArtifactWritten),
+                "no artifact event for an action output under ZDR"
+            );
+        }
+        // No action-only captures block when nothing was captured at the end.
+        assert!(inline.captures.is_none());
+    }
+
+    #[tokio::test]
+    async fn zdr_action_output_over_the_shared_inline_cap_is_left_out_and_named() {
+        let (tx, _rx) = mpsc::channel(64);
+        // 48 + 32 = 80 bytes of action output against a 60-byte cap: the screenshot fits,
+        // the pdf does not (the cap is one budget across the run, final captures included).
+        let driver = CaptureDriver {
+            captures: action_captures(48, 32, None),
+        };
+        let mut render = actions_render();
+        render.capture_inline_max_bytes = Some(60);
+        let runner = runner(tx, ZdrMode::On, driver, render);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://www.example.com/".parse().unwrap();
+        let (_out, inline) = runner
+            .run_with_inline_request(&run_id, &url, None, &InlineRequest::default_for(ZdrMode::On))
+            .await
+            .expect("run ok");
+
+        assert!(inline.actions[1].output.as_ref().unwrap().data_base64.is_some());
+        let pdf = inline.actions[3].output.as_ref().unwrap();
+        assert!(pdf.data_base64.is_none() && pdf.artifact_id.is_none());
+        assert_eq!(pdf.bytes, 32, "the size is still reported");
+        assert!(inline.omitted.iter().any(|field| field == "actions[3].output"));
+        assert!(inline.warnings.iter().any(|w| w.code == "capture_exceeds_inline_cap"));
+    }
+
+    #[tokio::test]
+    async fn a_run_without_actions_reports_no_actions() {
+        let (tx, _rx) = mpsc::channel(64);
+        let driver = CaptureDriver {
+            captures: captures(Some(png(64)), None),
+        };
+        let runner = runner(tx, ZdrMode::Off, driver, both_render());
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://www.example.com/".parse().unwrap();
+        let (_out, inline) = runner
+            .run_with_inline_request(&run_id, &url, None, &InlineRequest::default_for(ZdrMode::Off))
+            .await
+            .expect("run ok");
+        assert!(inline.actions.is_empty());
+        assert!(inline.captures.is_some(), "a final capture still reports its measurements");
+    }
+}
+
+#[cfg(test)]
+mod final_url_recheck_tests {
+    //! WS7.G: a redirect to a host the policy denies ends the run before anything is
+    //! stored, and a final URL equal to the requested one is asked about once.
+    use super::*;
+    use crate::artifact_store::{ArtifactStore, InMemoryStore};
+    use crate::driver::Driver;
+    use crate::fetch::FetchResponse;
+    use crate::policy_gate::{PolicySecurityEngine, BLOCK_PREFIX};
+    use async_trait::async_trait;
+    use quarry_core::output::DriverKind;
+    use quarry_core::web_policy::{resolve, OrgInput, PolicyInputs, PolicyLayer, Principal};
+    use quarry_security::{SecurityEngine, Verdict};
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::mpsc;
+
+    const PAGE: &str = "<html><head><title>Landing</title></head><body><main><h1>Landing page</h1><p>Some body text that is long enough to be a page worth keeping in a store.</p></main></body></html>";
+
+    /// Answers every fetch with `PAGE` served from `final_host` (a redirect when it
+    /// differs from the requested host).
+    struct RedirectDriver {
+        final_host: &'static str,
+    }
+
+    #[async_trait]
+    impl Driver for RedirectDriver {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Static
+        }
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            let mut final_url = url.clone();
+            final_url.set_host(Some(self.final_host)).unwrap();
+            Ok(FetchResponse {
+                status: 200,
+                final_url,
+                headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                body: PAGE.as_bytes().to_vec(),
+                duration_ms: 1,
+                served_by: DriverKind::Static,
+                captures: None,
+            })
+        }
+    }
+
+    /// Counts the preflights it is asked and allows them all.
+    #[derive(Default)]
+    struct CountingEngine {
+        preflights: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl SecurityEngine for CountingEngine {
+        async fn preflight(&self, _url: &Url) -> Verdict {
+            self.preflights.fetch_add(1, Ordering::SeqCst);
+            Verdict::allow()
+        }
+        async fn check_discovered(&self, _parent: &Url, _child: &Url) -> Verdict {
+            Verdict::allow()
+        }
+        fn allow_private_hosts(&self) -> bool {
+            true
+        }
+    }
+
+    fn deny_policy(host: &str) -> quarry_core::web_policy::ResolvedPolicy {
+        let layer = PolicyLayer::new(BTreeMap::new(), None, None, None, vec![host.to_string()])
+            .expect("a valid layer");
+        resolve(&PolicyInputs {
+            principal: Principal::Human,
+            zdr: false,
+            baseline: PolicyLayer::default(),
+            org: OrgInput::Absent,
+            grant: None,
+            request: Some(layer),
+        })
+        .expect("the policy resolves")
+    }
+
+    fn runner(
+        tx: mpsc::Sender<quarry_core::event::Event>,
+        driver: RedirectDriver,
+        security: Arc<dyn SecurityEngine>,
+        artifacts: Arc<InMemoryStore>,
+    ) -> PageRunner {
+        PageRunner {
+            driver: Arc::new(driver),
+            security,
+            artifacts,
+            event_sink: EventSink::new(tx),
+            zdr: ZdrMode::Off,
+            ingest: None,
+            org_id: Some("org_test".into()),
+            user_id: None,
+            privacy: PrivacyPolicy::default(),
+            cancel_token: None,
+            local_index: None,
+            policy: RunPolicy::default(),
+            scheduler: None,
+            autoscale: None,
+            render: RenderHints::default(),
+            page_renderer: None,
+            source_registrar: None,
+            title_enricher: None,
+            doc_routing: DocRouting::Off,
+            robots: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn redirect_to_a_denied_host_returns_security_blocked_and_persists_nothing() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let artifacts = Arc::new(InMemoryStore::new());
+        let engine = PolicySecurityEngine::new(
+            Arc::new(CountingEngine::default()),
+            deny_policy("denied.example"),
+        )
+        .with_final_url_check(true);
+        let runner = runner(
+            tx,
+            RedirectDriver {
+                final_host: "denied.example",
+            },
+            Arc::new(engine),
+            artifacts.clone(),
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://start.example/page".parse().unwrap();
+
+        let error = runner.run(&run_id, &url, None).await.expect_err("the redirect is refused");
+        assert_eq!(error.code, quarry_core::error::ErrorCode::SecurityBlocked);
+        assert!(error.message.starts_with(BLOCK_PREFIX), "{}", error.message);
+
+        assert_eq!(
+            artifacts.count("org_test").await.unwrap(),
+            Some(0),
+            "nothing is written to the artifact store"
+        );
+        let mut types = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            types.push(event.event_type);
+        }
+        assert!(types.contains(&EventType::PageBlocked), "{types:?}");
+        assert!(
+            !types.contains(&EventType::PageFetched) && !types.contains(&EventType::ArtifactWritten),
+            "no fetched page and no artifact event: {types:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn final_url_equal_to_requested_is_not_preflighted_twice() {
+        let (tx, _rx) = mpsc::channel(64);
+        let inner = Arc::new(CountingEngine::default());
+        let engine = PolicySecurityEngine::new(inner.clone(), deny_policy("denied.example"))
+            .with_final_url_check(true);
+        let runner = runner(
+            tx,
+            RedirectDriver {
+                final_host: "start.example",
+            },
+            Arc::new(engine),
+            Arc::new(InMemoryStore::new()),
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://start.example/page".parse().unwrap();
+        runner.run(&run_id, &url, None).await.expect("an allowed page runs");
+        assert_eq!(inner.preflights.load(Ordering::SeqCst), 1, "one preflight, for the requested URL");
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_an_allowed_host_is_preflighted_once_more() {
+        let (tx, _rx) = mpsc::channel(64);
+        let inner = Arc::new(CountingEngine::default());
+        let engine = PolicySecurityEngine::new(inner.clone(), deny_policy("denied.example"))
+            .with_final_url_check(true);
+        let runner = runner(
+            tx,
+            RedirectDriver {
+                final_host: "www.start.example",
+            },
+            Arc::new(engine),
+            Arc::new(InMemoryStore::new()),
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://start.example/page".parse().unwrap();
+        runner.run(&run_id, &url, None).await.expect("a redirect within the allowed hosts runs");
+        assert_eq!(inner.preflights.load(Ordering::SeqCst), 2, "requested URL, then the final URL");
+    }
+
+    #[tokio::test]
+    async fn with_the_flag_off_the_final_url_is_not_rechecked() {
+        let (tx, _rx) = mpsc::channel(64);
+        let inner = Arc::new(CountingEngine::default());
+        let engine = PolicySecurityEngine::new(inner.clone(), deny_policy("denied.example"));
+        let runner = runner(
+            tx,
+            RedirectDriver {
+                final_host: "www.start.example",
+            },
+            Arc::new(engine),
+            Arc::new(InMemoryStore::new()),
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://start.example/page".parse().unwrap();
+        runner.run(&run_id, &url, None).await.expect("runs as before");
+        assert_eq!(inner.preflights.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod robots_gate_tests {
+    //! WS14.S4: the robots.txt gate inside `PageRunner::run_inner`.
+    use super::*;
+    use crate::artifact_store::InMemoryStore;
+    use crate::fetch::FetchResponse;
+    use crate::robots_cache::{RobotsFetch, RobotsFetcher};
+    use crate::robots_gate::{RobotsGate, RobotsGateConfig};
+    use async_trait::async_trait;
+    use quarry_core::output::DriverKind;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::mpsc;
+
+    const PAGE: &str = "<html><head><title>Docs</title></head><body><main><h1>Docs</h1><p>Some readable body text for the page, long enough to extract.</p></main></body></html>";
+
+    /// Serves one canned page and counts how often it was asked. `redirect_to`
+    /// makes the answer come from another URL, as after a redirect.
+    struct PageDriver {
+        calls: Arc<AtomicUsize>,
+        redirect_to: Option<Url>,
+    }
+
+    #[async_trait]
+    impl Driver for PageDriver {
+        fn kind(&self) -> quarry_core::output::DriverKind {
+            DriverKind::Static
+        }
+        async fn fetch(&self, url: &Url) -> QuarryResult<crate::fetch::FetchResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(FetchResponse::new(
+                200,
+                self.redirect_to.clone().unwrap_or_else(|| url.clone()),
+                vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                PAGE.as_bytes().to_vec(),
+                2,
+                DriverKind::Static,
+            ))
+        }
+    }
+
+    /// Answers robots.txt from a map keyed by origin key; an origin not in the
+    /// map has no robots.txt.
+    struct MapFetcher(HashMap<String, RobotsFetch>);
+
+    #[async_trait]
+    impl RobotsFetcher for MapFetcher {
+        async fn fetch(&self, origin: &str, _org_id: &str) -> RobotsFetch {
+            self.0.get(origin).cloned().unwrap_or(RobotsFetch::Absent)
+        }
+    }
+
+    fn gate(rules: &[(&str, &str)]) -> Arc<RobotsGate> {
+        let map = rules
+            .iter()
+            .map(|(origin, body)| ((*origin).to_string(), RobotsFetch::Found((*body).to_string())))
+            .collect();
+        Arc::new(RobotsGate::with_fetcher(
+            Arc::new(MapFetcher(map)),
+            RobotsGateConfig::default(),
+        ))
+    }
+
+    struct Harness {
+        runner: PageRunner,
+        rx: mpsc::Receiver<quarry_core::event::Event>,
+        calls: Arc<AtomicUsize>,
+        gate: Arc<RobotsGate>,
+    }
+
+    fn harness(
+        gate: Arc<RobotsGate>,
+        mode: Option<RobotsEnforceMode>,
+        scheduler: Option<Arc<HostScheduler>>,
+        redirect_to: Option<&str>,
+    ) -> Harness {
+        let (tx, rx) = mpsc::channel(64);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runner = PageRunner {
+            driver: Arc::new(PageDriver {
+                calls: calls.clone(),
+                redirect_to: redirect_to.map(|u| u.parse().unwrap()),
+            }),
+            security: Arc::new(
+                quarry_security::preflight::DefaultEngine::new().with_allow_private_hosts(true),
+            ),
+            artifacts: Arc::new(InMemoryStore::new()),
+            event_sink: EventSink::new(tx),
+            zdr: ZdrMode::Off,
+            ingest: None,
+            org_id: Some("org_test".into()),
+            user_id: None,
+            privacy: PrivacyPolicy::default(),
+            cancel_token: None,
+            local_index: None,
+            policy: RunPolicy::default(),
+            scheduler,
+            autoscale: None,
+            render: RenderHints::default(),
+            page_renderer: None,
+            source_registrar: None,
+            title_enricher: None,
+            doc_routing: DocRouting::Off,
+            robots: mode.map(|mode| RobotsEnforcement::new(gate.clone(), mode)),
+        };
+        Harness {
+            runner,
+            rx,
+            calls,
+            gate,
+        }
+    }
+
+    fn drain(rx: &mut mpsc::Receiver<quarry_core::event::Event>) -> Vec<quarry_core::event::Event> {
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            out.push(event);
+        }
+        out
+    }
+
+    fn count(events: &[quarry_core::event::Event], kind: EventType) -> usize {
+        events.iter().filter(|e| e.event_type == kind).count()
+    }
+
+    const PRIVATE: &str = "User-agent: *\nDisallow: /private/\nCrawl-delay: 3\n";
+    const ORIGIN: &str = "https://example.test:443";
+
+    #[tokio::test]
+    async fn a_disallowed_url_never_reaches_the_driver_and_emits_one_page_blocked() {
+        let mut h = harness(gate(&[(ORIGIN, PRIVATE)]), Some(RobotsEnforceMode::Enforce), None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/private/secret".parse().unwrap();
+        let err = h.runner.run(&run_id, &url, None).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+        let denial = &err.details.as_ref().unwrap()["denial"];
+        assert_eq!(denial["code"], "robots_disallowed");
+        assert_eq!(denial["path"], "/private/secret");
+        assert!(denial["user_agent"].is_string());
+        assert_eq!(h.calls.load(Ordering::SeqCst), 0, "the page driver was never called");
+        let events = drain(&mut h.rx);
+        assert_eq!(count(&events, EventType::PageBlocked), 1, "exactly one PageBlocked");
+        assert_eq!(count(&events, EventType::PageFailed), 0, "no PageFailed on top of it");
+        let blocked = events.iter().find(|e| e.event_type == EventType::PageBlocked).unwrap();
+        assert_eq!(blocked.payload["code"], "robots_disallowed");
+        assert_eq!(blocked.payload["path"], "/private/secret");
+        assert_eq!(blocked.payload["source"], "fetch");
+    }
+
+    #[tokio::test]
+    async fn a_robots_denial_does_not_shrink_the_hosts_concurrency() {
+        let scheduler = Arc::new(HostScheduler::with_defaults());
+        drop(scheduler.acquire("example.test").await);
+        let before = scheduler.stats("example.test").await.unwrap().target_concurrency;
+        let h = harness(
+            gate(&[(ORIGIN, PRIVATE)]),
+            Some(RobotsEnforceMode::Enforce),
+            Some(scheduler.clone()),
+            None,
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/private/secret".parse().unwrap();
+        h.runner.run(&run_id, &url, None).await.unwrap_err();
+        let stats = scheduler.stats("example.test").await.unwrap();
+        assert_eq!(stats.target_concurrency, before);
+        assert!(stats.last_failure_at.is_none(), "record_bad was not called");
+    }
+
+    #[tokio::test]
+    async fn observe_fetches_and_counts_would_deny() {
+        let mut h = harness(gate(&[(ORIGIN, PRIVATE)]), Some(RobotsEnforceMode::Observe), None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/private/secret".parse().unwrap();
+        h.runner.run(&run_id, &url, None).await.expect("observe never blocks");
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(h.gate.stats().would_deny, 1);
+        let events = drain(&mut h.rx);
+        assert_eq!(count(&events, EventType::PageBlocked), 0);
+    }
+
+    #[tokio::test]
+    async fn a_run_without_a_gate_fetches() {
+        let h = harness(gate(&[(ORIGIN, PRIVATE)]), None, None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/private/secret".parse().unwrap();
+        h.runner.run(&run_id, &url, None).await.expect("no gate, no check");
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        assert!(h.gate.is_empty(), "robots.txt was not even fetched");
+    }
+
+    #[tokio::test]
+    async fn off_does_not_evaluate() {
+        let h = harness(gate(&[(ORIGIN, PRIVATE)]), Some(RobotsEnforceMode::Off), None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/private/secret".parse().unwrap();
+        h.runner.run(&run_id, &url, None).await.expect("off fetches");
+        assert!(h.gate.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enforce_feeds_crawl_delay_to_the_scheduler_and_observe_does_not() {
+        let url: Url = "https://example.test/docs/a".parse().unwrap();
+        let run_id: RunKind = quarry_core::ids::Id::new();
+
+        let scheduler = Arc::new(HostScheduler::with_defaults());
+        let h = harness(
+            gate(&[(ORIGIN, PRIVATE)]),
+            Some(RobotsEnforceMode::Enforce),
+            Some(scheduler.clone()),
+            None,
+        );
+        h.runner.run(&run_id, &url, None).await.expect("allowed path fetches");
+        assert_eq!(
+            scheduler.min_interval("example.test").await,
+            std::time::Duration::from_secs(3)
+        );
+
+        let scheduler = Arc::new(HostScheduler::with_defaults());
+        let h = harness(
+            gate(&[(ORIGIN, PRIVATE)]),
+            Some(RobotsEnforceMode::Observe),
+            Some(scheduler.clone()),
+            None,
+        );
+        h.runner.run(&run_id, &url, None).await.expect("observe fetches");
+        assert_eq!(
+            scheduler.min_interval("example.test").await,
+            std::time::Duration::ZERO,
+            "observe changes no timing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_a_disallowed_origin_persists_nothing() {
+        let rules = [("https://other.test:443", "User-agent: *\nDisallow: /\n")];
+        let mut h = harness(
+            gate(&rules),
+            Some(RobotsEnforceMode::Enforce),
+            None,
+            Some("https://other.test/landing"),
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/start".parse().unwrap();
+        let err = h.runner.run(&run_id, &url, None).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1, "the page was fetched once");
+        let events = drain(&mut h.rx);
+        assert_eq!(count(&events, EventType::PageBlocked), 1);
+        assert_eq!(count(&events, EventType::PageFetched), 0);
+        assert_eq!(count(&events, EventType::ArtifactWritten), 0);
+        assert_eq!(count(&events, EventType::PageFailed), 0);
+        let blocked = events.iter().find(|e| e.event_type == EventType::PageBlocked).unwrap();
+        assert_eq!(blocked.payload["stage"], "final_url");
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_robots_txt_blocks_in_enforce_and_names_the_host() {
+        let unreachable: HashMap<String, RobotsFetch> =
+            [(ORIGIN.to_string(), RobotsFetch::Unreachable("status_5xx".into()))].into();
+        let gate = Arc::new(RobotsGate::with_fetcher(
+            Arc::new(MapFetcher(unreachable)),
+            RobotsGateConfig::default(),
+        ));
+        let h = harness(gate, Some(RobotsEnforceMode::Enforce), None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/docs/a".parse().unwrap();
+        let err = h.runner.run(&run_id, &url, None).await.unwrap_err();
+        let denial = &err.details.as_ref().unwrap()["denial"];
+        assert_eq!(denial["code"], "robots_unreachable");
+        assert_eq!(denial["host"], "example.test");
+        assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn an_enforcing_run_under_zdr_leaves_no_cache_entry() {
+        let (tx, _rx) = mpsc::channel(64);
+        let gate = gate(&[(ORIGIN, PRIVATE)]);
+        let mut h = harness(gate.clone(), Some(RobotsEnforceMode::Enforce), None, None);
+        h.runner.zdr = ZdrMode::On;
+        h.runner.event_sink = EventSink::new(tx);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/private/secret".parse().unwrap();
+        h.runner.run(&run_id, &url, None).await.unwrap_err();
+        assert!(gate.is_empty(), "ZDR reads and fills no robots cache");
+    }
+
+    #[tokio::test]
+    async fn a_cached_page_is_refused_before_it_is_served_under_enforce() {
+        let mut h = harness(gate(&[(ORIGIN, PRIVATE)]), Some(RobotsEnforceMode::Enforce), None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/private/secret".parse().unwrap();
+        let err = h.runner.precheck_robots(&run_id, &url).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+        let denial = &err.details.as_ref().unwrap()["denial"];
+        assert_eq!(denial["code"], "robots_disallowed");
+        assert_eq!(denial["path"], "/private/secret");
+        assert_eq!(h.calls.load(Ordering::SeqCst), 0, "the page driver is not asked");
+        assert_eq!(h.gate.stats().denied, 1);
+        let events = drain(&mut h.rx);
+        assert_eq!(count(&events, EventType::PageBlocked), 1, "exactly one PageBlocked");
+        let blocked = events.iter().find(|e| e.event_type == EventType::PageBlocked).unwrap();
+        assert_eq!(blocked.payload["stage"], "request");
+    }
+
+    #[tokio::test]
+    async fn a_cached_page_under_observe_is_counted_once_and_not_refused() {
+        let mut h = harness(gate(&[(ORIGIN, PRIVATE)]), Some(RobotsEnforceMode::Observe), None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/private/secret".parse().unwrap();
+        h.runner.precheck_robots(&run_id, &url).await.expect("observe never refuses");
+        let stats = h.gate.stats();
+        assert_eq!(stats.would_deny, 1);
+        assert_eq!(stats.total(), 1, "one decision for the cached page");
+        assert_eq!(h.calls.load(Ordering::SeqCst), 0, "the precheck fetches nothing");
+        assert!(drain(&mut h.rx).is_empty(), "observe emits no PageBlocked");
+    }
+
+    #[tokio::test]
+    async fn a_fetched_page_gets_one_decision_not_two() {
+        let h = harness(gate(&[(ORIGIN, PRIVATE)]), Some(RobotsEnforceMode::Observe), None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/private/secret".parse().unwrap();
+        h.runner.run(&run_id, &url, None).await.expect("observe fetches");
+        assert_eq!(h.gate.stats().total(), 1);
+        assert_eq!(h.gate.stats().would_deny, 1);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_robots_txt_under_observe_is_counted_as_would_unreachable() {
+        let unreachable: HashMap<String, RobotsFetch> =
+            [(ORIGIN.to_string(), RobotsFetch::Unreachable("status_5xx".into()))].into();
+        let gate = Arc::new(RobotsGate::with_fetcher(
+            Arc::new(MapFetcher(unreachable)),
+            RobotsGateConfig::default(),
+        ));
+        let h = harness(gate, Some(RobotsEnforceMode::Observe), None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/docs/a".parse().unwrap();
+        h.runner.run(&run_id, &url, None).await.expect("observe fetches");
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        let stats = h.gate.stats();
+        assert_eq!(stats.would_deny_unreachable, 1);
+        assert_eq!(stats.would_deny, 0);
+        assert_eq!(stats.denied_unreachable, 0);
+        assert_eq!(stats.total(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_cached_page_is_refused_under_enforce_before_it_is_served() {
+        let unreachable: HashMap<String, RobotsFetch> =
+            [(ORIGIN.to_string(), RobotsFetch::Unreachable("status_5xx".into()))].into();
+        let gate = Arc::new(RobotsGate::with_fetcher(
+            Arc::new(MapFetcher(unreachable)),
+            RobotsGateConfig::default(),
+        ));
+        let h = harness(gate, Some(RobotsEnforceMode::Enforce), None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/docs/a".parse().unwrap();
+        let err = h.runner.precheck_robots(&run_id, &url).await.unwrap_err();
+        let denial = &err.details.as_ref().unwrap()["denial"];
+        assert_eq!(denial["code"], "robots_unreachable");
+        assert_eq!(denial["host"], "example.test");
+        assert_eq!(h.gate.stats().denied_unreachable, 1);
+        assert_eq!(h.calls.load(Ordering::SeqCst), 0);
     }
 }

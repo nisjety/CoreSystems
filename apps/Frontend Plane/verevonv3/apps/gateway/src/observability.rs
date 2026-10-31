@@ -57,3 +57,16 @@ pub(crate) fn record_authenticated_request(org: &str) {
     )
     .increment(1);
 }
+
+/// Count a content-cache decision. `ns` is the cache namespace (`search-web`,
+/// `scrape-preview`); `outcome` is one of `hit`, `stale_hit`, `miss`, `store` or a
+/// `bypass_*` reason from `cache_admission::Denied`. No org or user label: the
+/// counter must not become a per-tenant activity log.
+pub(crate) fn record_result_cache(ns: &str, outcome: &str) {
+    metrics::counter!(
+        "gateway_result_cache_total",
+        "ns" => ns.to_owned(),
+        "outcome" => outcome.to_owned(),
+    )
+    .increment(1);
+}

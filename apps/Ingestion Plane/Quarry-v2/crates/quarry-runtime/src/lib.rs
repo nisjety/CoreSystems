@@ -17,12 +17,15 @@ pub mod artifact_store;
 pub mod browser_driver;
 pub mod browser_egress_proxy;
 pub mod browser_procedure;
+pub mod capture;
 pub mod cas_store;
+pub mod challenge;
 pub mod dns_guard;
 pub mod driver;
 pub mod driver_plan;
 pub mod driver_registry;
 pub mod egress_broker;
+pub mod escalation;
 pub mod event_bus;
 pub mod events;
 pub mod host_scheduler;
@@ -36,28 +39,40 @@ pub mod agent_memory;
 pub mod autoprompt;
 pub mod autoscale;
 pub mod cached_profile_store;
+pub mod content_route;
+pub mod crawl_filter;
 pub mod crawl_frontier;
 pub mod crawl_ranker;
 pub mod crawl_signals;
+pub mod data_plane_http;
 pub mod deep_research;
 pub mod fallback_driver;
 pub mod fetch;
 pub mod fingerprint_rotation;
 pub mod fusion;
 pub mod grant_validator;
+pub mod envelope_profile_store;
+pub mod profile_blob_store;
+pub mod profile_crypto;
+pub mod profile_keys;
+pub mod org_erasure;
+pub mod profile_backfill;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 #[cfg(feature = "http3")]
 pub mod http3;
 pub mod hybrid;
 pub mod ingest_client;
+pub mod job_pricing;
 pub mod lease_pool;
 pub mod local_index;
 #[cfg(feature = "postgres-queue")]
 pub mod migrations;
 pub mod mp_client;
 pub mod observation;
+pub mod observation_redaction;
 pub mod pipeline;
+pub mod policy_gate;
 pub mod planner;
 pub mod policy;
 pub mod proxy_affinity;
@@ -71,12 +86,17 @@ pub mod postgres_profile_store;
 pub mod postgres_queue;
 #[cfg(feature = "postgres-queue")]
 pub mod postgres_step_receipts;
+// One schema per test for the postgres_* store tests (see the module doc).
+#[cfg(all(test, feature = "postgres-queue"))]
+mod postgres_test_support;
 pub mod proxy_pool;
+pub mod request_context;
 pub mod publisher;
 pub mod request_queue;
 pub mod rerank;
 pub mod retry;
 pub mod robots_cache;
+pub mod robots_gate;
 pub mod s3_profile_store;
 pub mod serp;
 pub mod service_tokens;
@@ -124,10 +144,10 @@ pub use driver_plan::DriverPlan;
 pub use driver_registry::DriverRegistry;
 pub use egress_broker::{EgressBroker, EgressDecision, EgressIdentity};
 pub use event_bus::{EventBus, EventReceiver, InProcessEventBus};
-pub use events::EventSink;
+pub use events::{EventSink, ReplayGap, ReplaySubscription, RingLimits};
 pub use fallback_driver::FallbackDriver;
 pub use fetch::StaticDriver;
-pub use fingerprint_rotation::{is_block_status, FingerprintRotator};
+pub use fingerprint_rotation::is_block_status;
 pub use fusion::{rrf_fuse, RRF_K};
 pub use grant_validator::{
     GrantValidation, GrantValidator, HttpGrantValidator, NoopGrantValidator,
@@ -145,7 +165,8 @@ pub use mp_client::{
 };
 pub use nats_event_bus::{NatsConfig, NatsEventBus};
 pub use observation::build_dom_summary;
-pub use pipeline::PageRunner;
+pub use pipeline::{DocRouting, InlineParts, InlineRequest, PageRunner};
+pub use policy_gate::PolicySecurityEngine;
 pub use planner::{MockPlanner, Planner, PlannerDecision};
 pub use policy::{
     policy_fingerprint, record_determinism_inputs, BlockPolicy, CheckpointPolicy, Determinism,
@@ -156,9 +177,16 @@ pub use postgres_step_receipts::PostgresStepReceiptStore;
 pub use publisher::EventPublisher;
 pub use quarry_tls::TlsProfile;
 pub use request_queue::{InMemoryRequestQueue, Priority, QueueStats, QueuedRequest, RequestQueue};
-pub use rerank::{ModelPlaneSearchReranker, RerankingSearchProvider, SearchReranker};
+pub use rerank::{
+    DataPlaneSearchReranker, RerankContext, RerankEpoch, RerankOutcome, RerankReport, RerankStatus,
+    RerankingSearchProvider, SearchReranker,
+};
 pub use retry::{backoff_delay, classify, execute_with_retry, wait, IdempotencyKey, RetryClass};
-pub use robots_cache::{ReqwestRobotsFetcher, RobotsCache, RobotsFetcher};
+pub use robots_cache::{origin_key, RobotsCache, RobotsFetch, RobotsFetcher, RobotsState};
+pub use robots_gate::{
+    RobotsDecision, RobotsEnforceMode, RobotsEnforcement, RobotsGate, RobotsGateConfig,
+    RobotsStats, UnreachablePolicy, ROBOTS_PRODUCT_TOKENS,
+};
 pub use s3_profile_store::S3ProfileStore;
 pub use serp::{
     BraveSearch, FallbackSearchProvider, SearXNGSearch, SearchOptions, SearchProvider,
@@ -174,7 +202,10 @@ pub use step_receipts::{
 pub use structured_extract::StructuredExtractClient;
 pub use tls_driver::TlsProfileDriver;
 pub use transport_fallback_driver::TransportFallbackDriver;
-pub use usage::{metrics as usage_metrics, NatsUsageMeter, NoopUsageMeter, UsageEvent, UsageMeter};
+pub use usage::{
+    metrics as usage_metrics, BrowserMetricsMode, NatsUsageMeter, NoopUsageMeter, UsageEvent,
+    UsageIdError, UsageMeter,
+};
 pub use vector_index::{DataPlaneVectorIndex, NoopVectorIndex, VectorHit, VectorIndex};
 pub use vision::{
     SidecarVisualProcessor, VisualChangeArtifact, VisualObservationArtifact,
@@ -221,6 +252,7 @@ pub(crate) mod tests {
         async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
             Ok(BrowserSession {
                 lease: lease.clone(),
+                tab_pin: None,
                 inner: Arc::new(Mutex::new(SessionInner::default())),
             })
         }

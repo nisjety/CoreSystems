@@ -51,6 +51,7 @@ use quarry_core::output::DriverKind;
 use quarry_core::QuarryResult;
 use quarry_edge::state::AppState;
 use quarry_runtime::answer::{AnswerPipeline, SimpleHttpMarkdownFetcher};
+use quarry_runtime::artifact_store::{ArtifactStore, InMemoryStore};
 use quarry_runtime::driver::{Driver, FetchHints};
 use quarry_runtime::fetch::FetchResponse;
 use quarry_runtime::serp::{SearchOptions, SearchProvider, SearchResult};
@@ -122,6 +123,13 @@ fn fixture() -> &'static TokenFixture {
         std::env::set_var("AUTH_CORE_JWKS_URL", format!("{jwks_uri}/jwks"));
         std::env::set_var("AUTH_CORE_AUDIENCE", DEPLOYED_AUDIENCE);
         std::env::set_var("AUTH_CORE_ISSUER", DEPLOYED_ISSUER);
+        // The document route reads QUARRY_EDGE__DOC_ROUTING once per process
+        // (DocRouting::cached). Every harness starts with this initializer, so
+        // no request can run before it, and the whole binary runs with the
+        // route on. The two PDF tests below need that: with the route off the
+        // same bytes take the HTML path, and their document-route checks fail.
+        // An HTML page takes the same path either way.
+        std::env::set_var(quarry_runtime::DocRouting::ENV, "on");
 
         TokenFixture { private_pem }
     })
@@ -239,6 +247,9 @@ impl UsageMeter for RecordingMeter {
 #[derive(Default)]
 struct RecordingDriver {
     fetch_zdr: Mutex<Vec<bool>>,
+    /// When set, every fetch answers with these bytes as a PDF instead of the
+    /// HTML page (the document route of `/v1/scrape`).
+    document: Mutex<Option<Vec<u8>>>,
 }
 
 #[async_trait]
@@ -260,6 +271,17 @@ impl Driver for RecordingDriver {
             .lock()
             .unwrap()
             .push(hints.privacy.zdr.is_active());
+        if let Some(body) = self.document.lock().unwrap().clone() {
+            return Ok(FetchResponse {
+                status: 200,
+                final_url: url.clone(),
+                headers: vec![("content-type".to_owned(), "application/pdf".to_owned())],
+                body,
+                duration_ms: 1,
+                served_by: DriverKind::Static,
+                captures: None,
+            });
+        }
         Ok(FetchResponse {
             status: 200,
             final_url: url.clone(),
@@ -272,6 +294,7 @@ impl Driver for RecordingDriver {
             .into_bytes(),
             duration_ms: 1,
             served_by: DriverKind::Static,
+            captures: None,
         })
     }
 }
@@ -353,6 +376,15 @@ impl Harness {
             .post(format!("http://{}{route}", self.addr))
             .bearer_auth(bearer)
             .json(&body)
+            .send()
+            .await
+            .expect("request reaches the edge")
+    }
+
+    async fn get(&self, bearer: &str, route: &str) -> reqwest::Response {
+        self.client
+            .get(format!("http://{}{route}", self.addr))
+            .bearer_auth(bearer)
             .send()
             .await
             .expect("request reaches the edge")
@@ -685,6 +717,152 @@ async fn scrape_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_servic
     assert!(is_page_fetched(&harness.settled_events().await));
 }
 
+/// A one-page PDF with `text` in Helvetica, built in place so the test needs no
+/// fixture file (the same shape the pipeline's own PDF tests use).
+fn minimal_pdf(text: &str) -> Vec<u8> {
+    let content = format!("BT /F1 24 Tf 100 700 Td ({text}) Tj ET");
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_owned(),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+    ];
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+    }
+    let xref_at = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// The document route under ZDR: a PDF is read in memory and its text comes
+/// back inline. Nothing is kept: no artifact, no `scrape_id` to read it back by,
+/// and the page event stays off the durable channel.
+#[tokio::test]
+async fn a_zdr_scrape_of_a_pdf_returns_inline_text_and_persists_nothing() {
+    let store = Arc::new(InMemoryStore::new());
+    let for_state = store.clone();
+    let harness = Harness::start_with(move |state| AppState {
+        artifacts: for_state,
+        ..state
+    })
+    .await;
+    *harness.driver.document.lock().unwrap() = Some(minimal_pdf("Hemmelig dokument"));
+
+    let response = harness
+        .post(
+            &user_in_zdr_org(),
+            "/v1/scrape",
+            json!({ "url": "https://page.test/rapport.pdf", "zdr": false }),
+        )
+        .await;
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.expect("a JSON envelope");
+    let data = &body["data"];
+    let markdown = data["markdown"].as_str().unwrap_or_default();
+    assert!(
+        markdown.contains("Hemmelig dokument"),
+        "the PDF's text is inline under ZDR: {body}"
+    );
+    // The markdown is the parser's text: none of the file's own syntax is in it.
+    for syntax in ["%PDF", "/Type", "Tj"] {
+        assert!(
+            !markdown.contains(syntax),
+            "the markdown is the parsed text, not the PDF source ({syntax}): {body}"
+        );
+    }
+    assert!(
+        data["scrape_id"].is_null(),
+        "a ZDR scrape stores no record, so it has no scrape_id: {body}"
+    );
+    assert!(
+        data["formats"]["raw"].is_null(),
+        "the original bytes are not kept under ZDR: {body}"
+    );
+    let stored = store
+        .list(
+            &golden_org("user_in_zdr_org"),
+            &quarry_core::pagination::ListFilter::default(),
+        )
+        .await
+        .expect("list artifacts");
+    assert!(stored.items.is_empty(), "a ZDR document writes no artifact");
+    assert_eq!(harness.fetch_zdr(), vec![true]);
+    assert!(
+        !is_page_fetched(&harness.settled_events().await),
+        "a ZDR document keeps its page events off the durable channel"
+    );
+}
+
+/// The control for the test above: the same bytes from a standard organisation.
+/// The document route keeps the original bytes as `formats.raw` and stores the
+/// parsed text as markdown. A binary that runs with the route off returns the
+/// HTML path's output instead, and fails here.
+#[tokio::test]
+async fn a_standard_org_scrape_of_the_same_pdf_keeps_its_bytes_as_raw() {
+    let store = Arc::new(InMemoryStore::new());
+    let for_state = store.clone();
+    let harness = Harness::start_with(move |state| AppState {
+        artifacts: for_state,
+        ..state
+    })
+    .await;
+    let pdf = minimal_pdf("Hemmelig dokument");
+    *harness.driver.document.lock().unwrap() = Some(pdf.clone());
+
+    let response = harness
+        .post(
+            &user_in_standard_org(),
+            "/v1/scrape",
+            json!({ "url": "https://page.test/rapport.pdf", "zdr": false }),
+        )
+        .await;
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.expect("a JSON envelope");
+    let data = &body["data"];
+    assert_eq!(
+        data["formats"]["raw"]["bytes"].as_u64(),
+        Some(pdf.len() as u64),
+        "the document's original bytes are kept as formats.raw: {body}"
+    );
+    assert!(
+        data["formats"]["html"].is_null(),
+        "a document is never stored as html: {body}"
+    );
+    assert!(
+        data["formats"]["markdown"]["artifact_id"].is_string(),
+        "the parsed text is stored as markdown: {body}"
+    );
+    assert_eq!(harness.fetch_zdr(), vec![false]);
+    let stored = store
+        .list(
+            &golden_org("user_in_standard_org"),
+            &quarry_core::pagination::ListFilter::default(),
+        )
+        .await
+        .expect("list artifacts");
+    assert!(
+        !stored.items.is_empty(),
+        "a standard org's document is stored"
+    );
+}
+
 #[tokio::test]
 async fn scrape_stream_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_service() {
     let harness = Harness::start().await;
@@ -902,6 +1080,112 @@ async fn durable_crawl_and_batch_are_refused_for_a_zdr_org_user_and_open_otherwi
     assert_eq!(control.received_requests().await.unwrap().len(), 2);
 }
 
+// ── /v1/{crawl,batch,jobs}/:id/errors (D2-047) ──────────────────────────────
+
+/// Control Plane as the edge reads it for a job's status and errors. The errors
+/// carry page URLs, which is what the ZDR floor must keep from a ZDR caller.
+async fn control_plane_job_reads_double() -> MockServer {
+    let control = MockServer::start().await;
+    for (id, kind) in [
+        ("job_01J9MMMMMMMMMMMMMMMMMMMMMM", "crawl"),
+        ("job_01J9BBBBBBBBBBBBBBBBBBBBBB", "batch"),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/jobs/{id}/summary")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {
+                "job": {
+                    "id": id,
+                    "org_id": "ignored-by-the-edge",
+                    "kind": kind,
+                    "status": "running",
+                    "created_at": "2026-10-27T10:00:00Z",
+                    "desired_seq": 0,
+                    "applied_seq": 0
+                },
+                "phase": "running",
+                "counts": { "completed": 1, "failed": 1, "blocked": 0, "retried": 0, "extracted": 0 },
+                "total": 2,
+                "total_kind": "budget",
+                "last_seq": 2,
+                "warnings": []
+            } })))
+            .mount(&control)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/jobs/{id}/errors")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {
+                "errors": [{
+                    "id": "evt_1", "seq": 1, "ts": "2026-10-27T10:00:01Z",
+                    "url": "https://zdr-errors-canary.test/private",
+                    "code": "client_4xx", "category": "client_4xx", "retryable": false, "status": 404
+                }],
+                "blocked": []
+            } })))
+            .mount(&control)
+            .await;
+    }
+    control
+}
+
+/// The errors of a job name the URLs of the pages that failed. Under the token's ZDR
+/// floor the three errors routes refuse before control is asked anything (not even the
+/// status read); a standard organization still gets its errors, and the read carries
+/// its own org id. The body cannot lower the floor: these routes take no body.
+#[tokio::test]
+async fn job_errors_are_refused_for_a_zdr_org_user_and_open_to_a_standard_org() {
+    let control = control_plane_job_reads_double().await;
+    let control_url = control.uri();
+    let harness = Harness::start_with(move |state| AppState {
+        control_base_url: control_url,
+        ..state
+    })
+    .await;
+    let routes = [
+        "/v1/crawl/job_01J9MMMMMMMMMMMMMMMMMMMMMM/errors",
+        "/v1/batch/job_01J9BBBBBBBBBBBBBBBBBBBBBB/errors",
+        "/v1/jobs/job_01J9MMMMMMMMMMMMMMMMMMMMMM/errors",
+    ];
+
+    for route in routes {
+        let refused = harness.get(&user_in_zdr_org(), route).await;
+        assert_eq!(refused.status().as_u16(), 403, "{route}");
+        let text = refused.text().await.unwrap();
+        assert!(
+            text.contains("zero data retention"),
+            "{route}: the refusal says why: {text}"
+        );
+        assert!(
+            !text.contains("zdr-errors-canary"),
+            "{route}: a refused read leaked an error URL: {text}"
+        );
+    }
+    assert!(
+        control.received_requests().await.unwrap().is_empty(),
+        "a refused errors read never reaches Control Plane, not even for the status"
+    );
+
+    for route in routes {
+        let served = harness.get(&user_in_standard_org(), route).await;
+        assert_eq!(served.status().as_u16(), 200, "{route}");
+        let payload: Value = served.json().await.unwrap();
+        assert_eq!(
+            payload["data"]["errors"][0]["url"], "https://zdr-errors-canary.test/private",
+            "{route}: a standard organization reads its errors: {payload}"
+        );
+    }
+    let standard_org = golden_org("user_in_standard_org");
+    let reads = control.received_requests().await.unwrap();
+    assert!(!reads.is_empty());
+    for request in reads {
+        assert_eq!(
+            request.url.query_pairs().find(|(key, _)| key == "org_id").map(|(_, value)| value.into_owned()),
+            Some(standard_org.clone()),
+            "the read is scoped to the verified org: {}",
+            request.url
+        );
+    }
+}
+
 // ── /v1/audio ───────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -916,6 +1200,11 @@ async fn audio_forwards_the_floored_posture_to_the_model_plane() {
     let harness = Harness::start_with(move |state| AppState {
         model_plane_url: Some(model_plane_url),
         model_plane_token: Some("model-plane-test-token".into()),
+        // QB-T17: /v1/audio is off unless its switch is on; this test is about the posture it forwards.
+        model_plane: quarry_edge::model_plane_gate::ModelPlaneFeatures {
+            model_audio: true,
+            ..Default::default()
+        },
         ..state
     })
     .await;
@@ -971,6 +1260,11 @@ async fn audio_transcription_forwards_the_floored_posture_to_the_model_plane() {
     let harness = Harness::start_with(move |state| AppState {
         model_plane_url: Some(model_plane_url),
         model_plane_token: Some("model-plane-test-token".into()),
+        // QB-T17: /v1/audio is off unless its switch is on; this test is about the posture it forwards.
+        model_plane: quarry_edge::model_plane_gate::ModelPlaneFeatures {
+            model_audio: true,
+            ..Default::default()
+        },
         ..state
     })
     .await;
@@ -1018,9 +1312,10 @@ async fn audio_transcription_forwards_the_floored_posture_to_the_model_plane() {
 /// Without one it skips on a developer machine, but never under
 /// `REQUIRE_CONTRACT`: a contract that quietly skips is not a contract. `CI` is
 /// deliberately NOT a trigger: GitHub Actions sets it on every job, and
-/// `quarry-v2-ci.yml` runs `cargo test --workspace` without a Redis service, so
-/// keying on it turned that job red. A job that provides a Redis opts in with
-/// `REQUIRE_CONTRACT=1`, as the other contract tests of this repo do.
+/// `quarry-v2-ci.yml` runs `cargo test --workspace` with no Redis at the default
+/// address, so keying on it turned that job red. The job's gate step provides a
+/// Redis and opts in with `REQUIRE_CONTRACT=1`, as the other contract tests of this
+/// repo do.
 async fn redis_connection() -> Option<redis::aio::ConnectionManager> {
     let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
     let connected = async {
@@ -1294,14 +1589,27 @@ async fn a_zdr_org_user_never_reads_or_writes_a_cache_and_a_registry_zdr_service
         .as_str()
         .expect("fingerprint")
         .to_owned();
-    let written: bool = conn
-        .exists(format!("quarry:page:{zdr_fingerprint}"))
-        .await
-        .expect("redis EXISTS");
-    assert!(!written, "a ZDR scrape must not write the page cache");
+    // Probe the page cache through its public get, which reads the key PageCache
+    // writes: quarry:page:{org}:{fingerprint}. The positive control comes first:
+    // the standard org's first scrape must be visible to the probe, or the
+    // negative answer for the ZDR org proves nothing.
+    let page_cache = quarry_edge::cache::PageCache::new(conn.clone(), Duration::from_secs(300));
+    assert!(
+        page_cache.get(&standard_org, &cached_fingerprint).await.is_some(),
+        "the standard org's scrape must be in the page cache, or the ZDR check below proves nothing"
+    );
+    assert!(
+        page_cache.get(&zdr_org, &zdr_fingerprint).await.is_none(),
+        "a ZDR scrape must not write the page cache"
+    );
 
+    // Delete both entries under the keys PageCache writes, so that neither
+    // outlives the run.
     let _: i64 = conn
-        .del(format!("quarry:page:{cached_fingerprint}"))
+        .del(vec![
+            format!("quarry:page:{zdr_org}:{zdr_fingerprint}"),
+            format!("quarry:page:{standard_org}:{cached_fingerprint}"),
+        ])
         .await
         .expect("cleanup");
 }

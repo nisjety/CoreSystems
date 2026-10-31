@@ -1,0 +1,51 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero invoice headers, retaining deleted and voided status markers.",
+  assertions: {
+    nonNull: ["tenant_id", "invoice_id", "invoice_key"],
+    uniqueKey: ["invoice_key"]
+  }
+}
+
+WITH latest AS (
+SELECT
+  CONCAT(tenant_id, '|', invoice_id) AS invoice_key,
+  tenant_id,
+  invoice_id,
+  record_id AS invoice_internal_id,
+  invoice_number,
+  invoice_type,
+  status,
+  COALESCE(status = 'DELETED', FALSE) AS is_deleted,
+  COALESCE(status = 'VOIDED', FALSE) AS is_voided,
+  contact_id,
+  contact_name,
+  branding_theme_id,
+  currency_code,
+  currency_rate,
+  line_amount_types,
+  line_item_count,
+  sub_total,
+  total_tax,
+  total,
+  amount_paid,
+  amount_due,
+  invoice_date_local,
+  due_date_local,
+  updated_at,
+  synced_at,
+  first_seen_at,
+  version_id
+FROM ${ref("dw_bronze_xero", "xero_invoices")}
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY tenant_id, record_id
+  ORDER BY synced_at DESC, version_id DESC
+) = 1
+)
+
+SELECT latest.*, staging.record_id IS NULL AS is_missing_from_staging
+FROM latest
+LEFT JOIN ${ref("dw_staging_xero", "invoices")} AS staging
+  ON latest.tenant_id = staging.tenant_id
+ AND latest.invoice_internal_id = staging.record_id

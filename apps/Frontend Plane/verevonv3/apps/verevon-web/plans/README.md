@@ -1,5 +1,6 @@
 # Verevon web plans
 
+- [Launch promises](launch-promises.md): what the homepage must be able to prove with connected product behavior before launch.
 - [Product recordings](product-recordings/README.md): maintained four-scenario package, release gates, manifest and [dated evidence](product-recordings/evidence/README.md).
 - [Hybrid recording plan](product-recordings-hybrid/VEIEN_TIL_EKTE.md): later connected-data demonstration; its source audit is in the same folder.
 - [Chat workspace](chat-workspace/README.md): design and implementation plan.

@@ -4,14 +4,84 @@ All URIs are relative to *http://localhost:8080*
 
 | Method | HTTP request | Description |
 |------------- | ------------- | -------------|
+| [**getScrape**](ScrapeApi.md#getscrape) | **GET** /v1/scrape/{id} | Read back an earlier scrape |
 | [**scrape**](ScrapeApi.md#scrapeoperation) | **POST** /v1/scrape | Scrape a single URL |
 | [**scrapeStream**](ScrapeApi.md#scrapestream) | **POST** /v1/scrape/stream | Scrape with SSE event stream |
 
 
 
+## getScrape
+
+> EnvelopeScrapeResponse getScrape(id)
+
+Read back an earlier scrape
+
+Returns the record a non-ZDR scrape stored: the normalized output and the effective options, without inline text. The id is the &#x60;scrape_id&#x60; of the scrape response. Another organization\&#39;s id, or an id that is not a scrape record, is a 404. A caller whose organization is under ZDR is refused with 403, even for a record written before the organization turned ZDR on. A ZDR scrape stores nothing and has no id.
+
+### Example
+
+```ts
+import {
+  Configuration,
+  ScrapeApi,
+} from '@quarry/client';
+import type { GetScrapeRequest } from '@quarry/client';
+
+async function example() {
+  console.log("🚀 Testing @quarry/client SDK...");
+  const api = new ScrapeApi();
+
+  const body = {
+    // string | The scrape_id from a scrape response.
+    id: id_example,
+  } satisfies GetScrapeRequest;
+
+  try {
+    const data = await api.getScrape(body);
+    console.log(data);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+// Run the test
+example().catch(console.error);
+```
+
+### Parameters
+
+
+| Name | Type | Description  | Notes |
+|------------- | ------------- | ------------- | -------------|
+| **id** | `string` | The scrape_id from a scrape response. | [Defaults to `undefined`] |
+
+### Return type
+
+[**EnvelopeScrapeResponse**](EnvelopeScrapeResponse.md)
+
+### Authorization
+
+No authorization required
+
+### HTTP request headers
+
+- **Content-Type**: Not defined
+- **Accept**: `application/json`
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+| **200** | The stored scrape |  * Cache-Control - private, max-age&#x3D;30 <br>  |
+| **403** | The caller\&#39;s organization is under Zero Data Retention |  -  |
+| **404** | No such scrape for this organization |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
+
+
 ## scrape
 
-> EnvelopeNormalizedOutput scrape(scrapeRequest)
+> EnvelopeScrapeResponse scrape(scrapeRequest)
 
 Scrape a single URL
 
@@ -56,7 +126,7 @@ example().catch(console.error);
 
 ### Return type
 
-[**EnvelopeNormalizedOutput**](EnvelopeNormalizedOutput.md)
+[**EnvelopeScrapeResponse**](EnvelopeScrapeResponse.md)
 
 ### Authorization
 
@@ -72,10 +142,13 @@ No authorization required
 | Status code | Description | Response headers |
 |-------------|-------------|------------------|
 | **200** | Successful scrape |  -  |
+| **415** | The page is a kind of file Quarry cannot extract text from (image, archive, spreadsheet, ...), or a PDF/DOCX that could not be read. Code UNSUPPORTED_MEDIA; details name the kind and, for a document that failed to parse, a reason (pdf_parse_failed, docx_parse_failed, too_large). Only returned when QUARRY_EDGE__DOC_ROUTING is skip or on. |  -  |
 | **400** | Invalid request (bad URL, missing fields) |  -  |
-| **403** | Security blocked (SSRF, blocklist, policy) |  -  |
-| **429** | Rate limited |  -  |
-| **502** | Upstream fetch failed |  -  |
+| **403** | Security blocked (SSRF, blocklist, policy), or the fetched page is itself a bot challenge. A challenge is code CHALLENGE_DETECTED with details.block_reason (captcha_widget, waf_interstitial or unexpected_bot_error; the same value is given as details.reason), details.recovery not_applicable and details.next other_source. It carries no host, URL or page text. A status alone (a bare 403, a 429, a login page) is never a challenge, and a page that is not a challenge scrapes as before. Classified by QUARRY_CHALLENGE_CLASSIFIER&#x3D;v2 (the default; legacy does not classify a scrape). The refusal itself is switched on with QUARRY_CHALLENGE_ENFORCE&#x3D;enforce; under the default log the page is returned as before and only counted by reason in a log line. |  -  |
+| **429** | Rate limited. With actions, details.reason heavy_browser_busy means the browser\&#39;s heavy lane is held by another action run; retry shortly. |  -  |
+| **501** | The browser cannot do what was asked: a capture or actions on a browser that cannot run them, or no browser wired on the endpoint. Code UNSUPPORTED, details.reason browser_capability_unavailable. |  -  |
+| **504** | The run hit a deadline. Without actions: code TIMEOUT with details.op scrape and deadline_ms. With actions (the handler bound is 115 s and the route allows 125 s): details.reason actions_deadline. A single wait over its limit (wait_too_long) or a run over the wait budget (wait_budget_exhausted) fails that action; under actions_on_error abort the request then answers 502 action_failed. |  -  |
+| **502** | Upstream fetch failed. With actions, an action that failed under abort answers DRIVER_FAILED with details.reason action_failed, details.action_index, details.action_type and details.actions: the outcome of each action in order (index, kind, status, duration_ms, and an error code and message). Page text and typed values are never in it. details.reason no_browser_session means the run held no browser session. |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 

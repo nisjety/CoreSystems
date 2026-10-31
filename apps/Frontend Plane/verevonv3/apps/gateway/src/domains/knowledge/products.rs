@@ -93,7 +93,7 @@ pub(crate) async fn extract_products(
     .await;
 
     if !status.is_success() {
-        tracing::warn!(%status, target = %target, "product extraction model call failed");
+        tracing::warn!(%status, "product extraction model call failed");
         return (
             StatusCode::BAD_GATEWAY,
             Json(error(
@@ -178,12 +178,12 @@ pub(crate) async fn summarize_products(
 
 // ── page fetch (basic → owned escalation → optional enhanced) ───────────────
 
-/// Returns `(markdown, source)` for the listing. Tries quarry's `/v1/extract`
-/// first with the default plan, then with Quarry's TLS-first waterfall.
-/// `None` when no path yields content.
+/// Returns `(markdown, source)` for the listing. One call to quarry's
+/// `/v1/extract` with the default plan; Quarry's own waterfall decides how the
+/// page is fetched. `None` when it yields no content.
 ///
-/// Both attempts stay inside the Ingestion Plane, which owns web fetch. There is
-/// deliberately no third tier here: a commercial stealth-proxy fallback
+/// The call stays inside the Ingestion Plane, which owns web fetch. There is
+/// deliberately no second tier here: a commercial stealth-proxy fallback
 /// (Scrapfly / Bright Data Web Unlocker) used to run in-process at this point,
 /// which shipped the org's target URL and the page's full content to a
 /// third-party processor with no `zdr` bit, no org scoping, no robots check, no
@@ -201,28 +201,21 @@ async fn fetch_listing_markdown(
     let cookie = shared::cookie_header(headers);
     let token = shared::quarry_token(state, user, &cookie).await;
     let url = format!("{}/v1/extract", state.quarry_edge_url);
-    let body = json!({ "urls": [target], "max_urls": 1 });
+    let body = listing_extract_body(target);
     if let Some(markdown) = fetch_extract_markdown(state, &token, &user.user_id, &url, body).await {
         return Some((markdown, "basic"));
     }
 
-    // Retry through Quarry's owned TLS-first waterfall. This catches pages where
-    // the static path returns an empty JS shell or trips a bot-wall that a
-    // browser-like transport profile can handle. It still stays inside Quarry;
-    // no Scrapfly/BrightData-style provider is used here.
-    let escalated_body = json!({
-        "urls": [target],
-        "max_urls": 1,
-        "signals": { "prior_block_signals": 1 }
-    });
-    if let Some(markdown) =
-        fetch_extract_markdown(state, &token, &user.user_id, &url, escalated_body).await
-    {
-        return Some((markdown, "quarry_tls"));
-    }
-
-    // Still blocked or empty after Quarry's own waterfall: that is the answer.
+    // Empty or refused after Quarry's own waterfall: that is the answer. There is
+    // no second request with a "this was blocked" signal (`prior_block_signals`):
+    // under the honest escalation mode (ADR-5) a status never changes the identity
+    // of the next attempt, so that retry only repeated the static fetch (D1-025).
     None
+}
+
+/// The body of the one `/v1/extract` call for a listing page.
+fn listing_extract_body(target: &str) -> Value {
+    json!({ "urls": [target], "max_urls": 1 })
 }
 
 async fn fetch_extract_markdown(
@@ -457,6 +450,15 @@ mod tests {
     fn parse_products_tolerates_non_json_content() {
         let resp = json!({ "content": "sorry, I could not parse the page" });
         assert!(parse_products(&resp, "https://x.io").is_empty());
+    }
+
+    #[test]
+    fn the_listing_extract_body_sends_no_block_signal() {
+        let body = listing_extract_body("https://www.elkjop.no/cat/mac");
+        assert_eq!(body["urls"][0], "https://www.elkjop.no/cat/mac");
+        assert_eq!(body["max_urls"], 1);
+        assert!(body.get("signals").is_none(), "{body}");
+        assert!(!body.to_string().contains("prior_block_signals"));
     }
 
     #[test]

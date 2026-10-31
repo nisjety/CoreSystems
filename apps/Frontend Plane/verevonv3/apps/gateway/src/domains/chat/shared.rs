@@ -24,12 +24,24 @@ pub(super) fn cookie_header(headers: &HeaderMap) -> String {
         .to_owned()
 }
 
-pub(crate) fn zdr_flag(headers: &HeaderMap) -> bool {
+/// Whether the `x-zdr` header asks for ZDR. Pure: marks nothing, so the router
+/// can call it while it is still building the request's span.
+pub(crate) fn zdr_header(headers: &HeaderMap) -> bool {
     headers
         .get("x-zdr")
         .and_then(|v| v.to_str().ok())
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
         .unwrap_or(false)
+}
+
+pub(crate) fn zdr_flag(headers: &HeaderMap) -> bool {
+    let flagged = zdr_header(headers);
+    if flagged {
+        // The earliest place a request's ZDR header is read: mark the span so
+        // the log drops URL/query/error events for it (`crate::zdr_log`).
+        crate::zdr_log::mark_current_span();
+    }
+    flagged
 }
 
 pub(crate) fn normalized_model_body(mut body: Value, headers: &HeaderMap) -> Value {
@@ -59,6 +71,9 @@ pub(crate) fn normalized_model_body(mut body: Value, headers: &HeaderMap) -> Val
                 object.insert("zdr".to_owned(), Value::Bool(zdr_flag(headers)));
             }
             Some(Value::Bool(body_zdr)) => {
+                if *body_zdr {
+                    crate::zdr_log::mark_current_span();
+                }
                 object.insert(
                     "zdr".to_owned(),
                     Value::Bool(zdr_flag(headers) || *body_zdr),
@@ -707,6 +722,7 @@ async fn proxy_model_json_with_delegations(
         .request(method, url)
         .header("x-user-id", &user.user_id)
         .header("x-user-role", user_role);
+    req = crate::request_id::apply(req);
     if let Some(timeout) = request_timeout {
         req = req.timeout(timeout);
     }
@@ -795,6 +811,8 @@ mod tests {
             streaming_client: reqwest::Client::new(),
             internal_api_key: "test-key".into(),
             enforcement_mode: "off".to_string(),
+            browser_grant_mode: crate::config::BrowserGrantMode::Permissive,
+            browser_human_browse: false,
             auth_core_url: "http://127.0.0.1:1".into(),
             verevon_public_origin: "http://localhost:5173".into(),
             session_core_url: "http://127.0.0.1:1".into(),
@@ -810,6 +828,12 @@ mod tests {
             audit_core_service_token: "audit-test-secret-at-least-32-bytes".into(),
             insight_core_url: "http://127.0.0.1:1".into(),
             leads_core_url: "http://127.0.0.1:1".into(),
+            anbud_core_url: "http://127.0.0.1:1".into(),
+            anbud_api_key: String::new(),
+            anbud_api_key_header: "X-API-Key".into(),
+            marketing_core_url: "http://127.0.0.1:1".into(),
+            marketing_core_service_key: String::new(),
+            marketing_core_organization_id: String::new(),
             shipping_core_url: "http://127.0.0.1:1".into(),
             user_core_url: "http://127.0.0.1:1".into(),
             application_convex_url: String::new(),
@@ -846,6 +870,7 @@ mod tests {
             rate_limiter: crate::rate_limit::RateLimiter::from_cache(&ResultCache::disabled()),
             cache: ResultCache::disabled(),
             studio_store: crate::domains::studio::StudioStore::new(),
+            schedule_capabilities: crate::config::ScheduleCapabilities::default(),
             allow_dev_actor_headers: false,
             allow_dev_auth_bypass,
             mail_task_ingest_service_token: "mail-task-test-secret-at-least-32-bytes".into(),

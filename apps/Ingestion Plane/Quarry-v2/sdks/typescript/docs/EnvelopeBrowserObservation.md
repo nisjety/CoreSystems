@@ -9,6 +9,7 @@ Name | Type
 `requestId` | string
 `success` | boolean
 `data` | [BrowserObservation](BrowserObservation.md)
+`meta` | [EnvelopeBrowserObservationMeta](EnvelopeBrowserObservationMeta.md)
 
 ## Example
 
@@ -20,6 +21,7 @@ const example = {
   "requestId": null,
   "success": null,
   "data": null,
+  "meta": null,
 } satisfies EnvelopeBrowserObservation
 
 console.log(example)

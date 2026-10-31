@@ -10,6 +10,8 @@ import { clearHomeDrafts } from './home-draft-storage'
 // sit in shared code that must not import a feature.
 const SEARCH_SNAPSHOT_KEY_PREFIX = 'verevon.dashboard.search.session'
 const WEB_HISTORY_KEY_PREFIX = 'verevon.home-web-history.v1'
+// The browser omnibox's own visit history (features/browser/omnibox), kept apart from the Nett record.
+const OMNIBOX_HISTORY_KEY_PREFIX = 'verevon.browser-omnibox.v1'
 
 function scopedKey(prefix: string, userId: string | undefined, orgId: string | undefined): string | null {
   const user = userId?.trim()
@@ -25,6 +27,11 @@ export function webHistoryStorageKey(userId: string | undefined, orgId: string |
 /** Where the Nett search snapshot of this user and workspace lives; null until both are known. */
 export function searchSnapshotStorageKey(userId: string | undefined, orgId: string | undefined): string | null {
   return scopedKey(SEARCH_SNAPSHOT_KEY_PREFIX, userId, orgId)
+}
+
+/** Where the browser omnibox's visit history of this user and workspace lives; null until both are known. */
+export function omniboxHistoryStorageKey(userId: string | undefined, orgId: string | undefined): string | null {
+  return scopedKey(OMNIBOX_HISTORY_KEY_PREFIX, userId, orgId)
 }
 
 const snapshotClearListeners = new Set<() => void>()
@@ -61,6 +68,11 @@ export function clearWebHistories(): void {
   removeClientValuesWithPrefix(`${WEB_HISTORY_KEY_PREFIX}:`)
 }
 
+/** Removes every account's browser omnibox history from this browser. */
+export function clearOmniboxHistories(): void {
+  removeClientValuesWithPrefix(`${OMNIBOX_HISTORY_KEY_PREFIX}:`)
+}
+
 /**
  * A workspace that is zero-data-retention allows no local copy of what a person
  * typed or searched for: drafts, saved searches and the Nett history all go.
@@ -68,5 +80,6 @@ export function clearWebHistories(): void {
 export function clearHomeLocalContent(): void {
   clearHomeDrafts()
   clearWebHistories()
+  clearOmniboxHistories()
   clearSearchSnapshots()
 }

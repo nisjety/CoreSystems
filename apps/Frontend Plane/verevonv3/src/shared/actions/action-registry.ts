@@ -563,11 +563,29 @@ const socialDecideApprovalInput = z.object({
 
 const scrapeUrlInput = z.object({
   url: z.string().min(1),
+  // WS13.7: screenshot and PDF captures. Actions are not exposed in v1.
+  capture: z
+    .object({
+      screenshot: z
+        .union([
+          z.boolean(),
+          z.object({ fullPage: z.boolean().optional(), quality: z.number().int().min(1).max(100).optional() }),
+        ])
+        .optional(),
+      pdf: z.boolean().optional(),
+    })
+    .optional(),
 })
 
 const crawlSiteInput = z.object({
   url: z.string().min(1),
   maxPages: z.number().int().positive().optional(),
+  // WS14.S6: the Model-visible scope subset. No external-links or robots key exists here
+  // (a test in the shared actions folder asserts it); the gateway drops them too.
+  maxDepth: z.number().int().positive().max(10).optional(),
+  includePaths: z.array(z.string().min(1).max(512)).max(100).optional(),
+  excludePaths: z.array(z.string().min(1).max(512)).max(100).optional(),
+  allowSubdomains: z.boolean().optional(),
 })
 
 const importSourceInput = z.object({
@@ -1295,10 +1313,17 @@ const audioDictateInput = z.object({
   zdr: z.boolean().optional(),
 })
 
-const orchestrationDecideApprovalInput = z.object({
+/**
+ * Upper bound on the decision `reason`. On a reject it can carry redirect text
+ * (the person telling the agent what to do instead). The owner does not read
+ * the text yet on every path; see the description on `orchestration.decide_approval`.
+ */
+export const ORCHESTRATION_APPROVAL_REASON_MAX = 1000
+
+export const orchestrationDecideApprovalInput = z.object({
   approvalId: z.string().min(1),
   decision: z.enum(['approve', 'reject']),
-  reason: z.string().trim().optional(),
+  reason: z.string().trim().max(ORCHESTRATION_APPROVAL_REASON_MAX).optional(),
 })
 
 const orchestrationResumeRunInput = z.object({
@@ -1328,6 +1353,20 @@ const browserRunControlInput = z.object({
   action: z.enum(['pause', 'resume', 'stop']),
 })
 
+const browserOmniboxSearchInput = z.object({
+  query: z.string().trim().min(1).max(500),
+  limit: z.number().int().min(1).max(10).optional(),
+})
+
+const browserOmniboxSuggestInput = z.object({
+  query: z.string().trim().min(1).max(200),
+})
+
+const browserEvidenceCompileProcedureInput = z.object({
+  sessionId: z.string().trim().min(1).max(128),
+  procedureId: z.string().trim().min(1).max(64).optional(),
+})
+
 const browserProfileScopeEnum = z.enum(['user_private', 'org_shared', 'run_scoped'])
 
 const browserCreateSessionInput = z.object({
@@ -1346,19 +1385,29 @@ const browserCloseSessionInput = z.object({
   sessionId: z.string().min(1),
 })
 
+const browserKeepAliveSessionInput = z.object({
+  sessionId: z.string().min(1),
+})
+
+// `actor` is who is asking, as on `browser_action.run`: `agent` marks a tab call the
+// model proposed, which the owner refuses while the person holds the browser. Absent
+// is the person; it can only tighten.
 const browserCreateTabInput = z.object({
   sessionId: z.string().min(1),
   url: z.string().trim().min(1).optional(),
+  actor: z.enum(['human', 'agent']),
 })
 
 const browserSelectTabInput = z.object({
   sessionId: z.string().min(1),
   tabId: z.string().min(1),
+  actor: z.enum(['human', 'agent']),
 })
 
 const browserCloseTabInput = z.object({
   sessionId: z.string().min(1),
   tabId: z.string().min(1),
+  actor: z.enum(['human', 'agent']),
 })
 
 // `action` is passed through as a raw object: `sanitize_action` in browser.rs
@@ -1375,6 +1424,8 @@ const browserRunActionInput = z.object({
 const browserSetControlModeInput = z.object({
   sessionId: z.string().min(1),
   mode: z.enum(['agent_control', 'human_takeover']),
+  /** WS9.I: the control epoch the caller saw; a stale one is refused with a typed 409. */
+  expectedEpoch: z.number().int().nonnegative().optional(),
 })
 
 const browserSuggestActionInput = z.object({
@@ -1401,6 +1452,13 @@ const browserDeleteProfileInput = z.object({
 const browserProbeProfileRestoreInput = z.object({
   profileId: z.string().min(1),
   url: z.string().trim().min(1),
+})
+
+// `runId` is the AI run on the session, when there is one. Nothing about the page
+// travels: the owner needs only which session to close and which run to stop.
+const browserBlockedTryOtherSourceInput = z.object({
+  sessionId: z.string().min(1),
+  runId: z.string().min(1).optional(),
 })
 
 const routerPolicyModeTableInput = z.object({
@@ -3403,7 +3461,7 @@ export const actionRegistry = [
   {
     id: 'orchestration.decide_approval',
     label: 'Decide orchestration approval',
-    description: 'Approve or reject a pending orchestration-run approval. This is the human checkpoint the run is waiting on.',
+    description: 'Approve or reject a pending orchestration-run approval. This is the human checkpoint the run is waiting on. On a reject, reason may carry redirect text (what the person wants the agent to do instead); it is capped at 1000 characters. A reject with reason aborts the run today unless the owner accepts the redirect.',
     ownerPlane: 'model',
     risk: 'high',
     requiresApproval: false,
@@ -3456,6 +3514,39 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'browser_omnibox.search',
+    label: 'Search from the browser omnibox',
+    description: 'Run a Verevon web search for free text typed in the browser address bar and show the results in the browser frame. Human-only: the person operates the omnibox, a model does not.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: browserOmniboxSearchInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'browser_omnibox.suggest',
+    label: 'Suggest browser omnibox queries',
+    description: 'Query suggestions for the browser omnibox dropdown. Empty for zero-data-retention callers. Human-only.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: browserOmniboxSuggestInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'browser_evidence.compile_procedure',
+    label: 'Compile browser procedure',
+    description: 'Compile a replay candidate from the receipts of a browser session and show its promotion check. Typed text is never shown. Human-only, and unavailable to zero-data-retention sessions.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: browserEvidenceCompileProcedureInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'browser_session.create',
     label: 'Create browser session',
     description: 'Open a new managed browser session at a target URL, optionally attaching a persistent or ephemeral profile.',
@@ -3475,6 +3566,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: false,
     inputSchema: browserCloseSessionInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'browser_session.keepalive',
+    label: 'Keep browser session alive',
+    description: 'Extend a person\'s open browser session grant by one broker interval while the session is still in use. Returns only the new expiry time. Starts no run and changes no page.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: browserKeepAliveSessionInput,
     outputSchema: envelopeStatusOutput,
   },
   {
@@ -3585,6 +3687,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: browserProbeProfileRestoreInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'browser.blocked.try_other_source',
+    label: 'Leave a site that blocks automation',
+    description: 'The person chose another source after a site blocked automated browsing (a strong bot-wall signal): stops the given browser-agent run when one is named (it must be one of the caller own runs; it is not checked against the session), treating a run that already ended as nothing left to stop, and closes the session. Where run controls are disabled (zero data retention) the run cannot be stopped, so the session is closed anyway and the result says runControlsDisabled. Any other failure to stop the run fails the action before the session is closed. No page content is read or kept, and nothing tries to get past the block.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: browserBlockedTryOtherSourceInput,
     outputSchema: envelopeStatusOutput,
   },
   {

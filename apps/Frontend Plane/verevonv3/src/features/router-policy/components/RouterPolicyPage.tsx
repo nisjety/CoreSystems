@@ -3,6 +3,8 @@ import { createResource } from '@/shared/lib/create-resource-compat'
 import { getRouterPolicy, updateRouterPolicy } from '@/shared/api/router-policy-client'
 import { listModels, type ModelInfo } from '@/shared/api/chat-client'
 import { getSession } from '@/shared/session/session-store'
+import { useI18n } from '@/shared/i18n'
+import { translateApiError } from '@/shared/i18n/errors'
 import {
   SectionHeader,
   SettingsButton,
@@ -52,6 +54,7 @@ function toNumber(value: string): number {
 }
 
 export default function RouterPolicyPage() {
+  const i18n = useI18n()
   const session = getSession()
   const orgId = createMemo(() => session.activeOrg?.id ?? '')
 
@@ -97,7 +100,7 @@ export default function RouterPolicyPage() {
       setKeywordsText(stored.complexity.keywords.join(', '))
       setNotice('Router policy saved.')
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not save router policy.')
+      setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke lagre ruterpolicyen.', en: 'Could not save router policy.' }))
     } finally {
       setBusy(false)
     }

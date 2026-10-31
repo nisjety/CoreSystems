@@ -11,8 +11,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 url = { workspace = true }
 scraper = { workspace = true }
+roxmltree = "0.20"
 html2md = { workspace = true }
 blake3 = { workspace = true }
+# SHA-256 key for the (org, sha256) parse cache (E3.6-9); the workspace pin is shared with quarry-runtime.
+sha2 = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 regex = "1"
@@ -26,6 +29,8 @@ whatlang = { workspace = true }
 # `pdf_extract` give us a flat text dump but throw away the size
 # information we need.
 lopdf = { version = "0.42", default-features = false }
+# The inflate pre-scan of pdf.rs (check_inflate_budget); lopdf already depends on it.
+flate2 = "1"
 # DOCX is a ZIP container of XML parts; `zip` (deflate only) unpacks
 # `word/document.xml`, which we then text-strip. (OSS-parity P2 3C.)
 zip = { version = "2", default-features = false, features = ["deflate"] }

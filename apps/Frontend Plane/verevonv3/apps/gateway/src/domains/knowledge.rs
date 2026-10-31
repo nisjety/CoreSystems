@@ -3,7 +3,7 @@ pub(crate) mod documents;
 mod imports;
 mod operating_map;
 pub(crate) mod products;
-mod quarry;
+pub(crate) mod quarry;
 mod retrieval;
 pub(crate) mod shared;
 pub(crate) mod sync;
@@ -15,9 +15,40 @@ use axum::{
     Router,
 };
 
-use crate::{config::AppState, middleware::require_session};
+use crate::{
+    config::AppState,
+    middleware::require_session,
+    rate_limit::{with_rate_class, RateClass},
+};
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
+    // Submitting a crawl is the expensive, queue-filling call: its own
+    // per-organization bucket, so a burst of submissions cannot starve search or
+    // scrape, and the other way round (see `rate_limit::RateClass`).
+    let job_submit = Router::new()
+        .route(
+            "/api/v1/knowledge/crawl/discover",
+            post(quarry::discover_crawl_pages),
+        )
+        .route("/api/v1/knowledge/crawl", post(quarry::start_crawl));
+    let search_scrape = Router::new()
+        .route(
+            "/api/v1/knowledge/scrape-preview",
+            post(quarry::scrape_preview),
+        )
+        .route("/api/v1/knowledge/scrape", post(quarry::scrape))
+        .route(
+            "/api/v1/knowledge/scrape-artifacts/{artifact_id}",
+            get(quarry::scrape_artifact),
+        )
+        .route(
+            "/api/v1/knowledge/scrape/products",
+            post(products::extract_products),
+        )
+        .route(
+            "/api/v1/knowledge/scrape/products/summary",
+            post(products::summarize_products),
+        );
     Router::new()
         // Documents
         .route(
@@ -162,24 +193,6 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(imports::import_job_events),
         )
         // Quarry
-        .route(
-            "/api/v1/knowledge/scrape-preview",
-            post(quarry::scrape_preview),
-        )
-        .route("/api/v1/knowledge/scrape", post(quarry::scrape))
-        .route(
-            "/api/v1/knowledge/scrape/products",
-            post(products::extract_products),
-        )
-        .route(
-            "/api/v1/knowledge/scrape/products/summary",
-            post(products::summarize_products),
-        )
-        .route(
-            "/api/v1/knowledge/crawl/discover",
-            post(quarry::discover_crawl_pages),
-        )
-        .route("/api/v1/knowledge/crawl", post(quarry::start_crawl))
         .route("/api/v1/knowledge/crawl/jobs", get(quarry::list_crawl_jobs))
         .route(
             "/api/v1/knowledge/runs/{id}/events",
@@ -192,5 +205,15 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/knowledge/jobs/{id}/events",
             get(quarry::crawl_job_events),
         )
+        .merge(with_rate_class(
+            job_submit,
+            &state.rate_limiter,
+            RateClass::JobSubmit,
+        ))
+        .merge(with_rate_class(
+            search_scrape,
+            &state.rate_limiter,
+            RateClass::SearchScrape,
+        ))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }

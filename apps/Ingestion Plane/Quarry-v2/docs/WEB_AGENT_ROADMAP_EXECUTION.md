@@ -102,3 +102,13 @@ owns planning and synthesis; Data Plane owns promoted knowledge.
 
 These gates are intentionally visible: an endpoint count or a green process
 probe is not evidence that durable, tenant-safe agent browsing is complete.
+
+## Observability status (corrected by WS6.I)
+
+Earlier text in this tree called Prometheus metrics "already wired" in the edge. That was not true: the
+`metrics` crates were dependencies with no recorder installed and nothing served, so every counter was a
+silent no-op. Now: the recorder and an internal, bearer-authenticated `/metrics` listener exist and stay off
+unless `QUARRY_EDGE__METRICS_ENABLED=1`; HTTP, scrape, lease-pool, agent-run, agent-step, budget and cache
+series are recorded (names and labels in `RUNBOOKS.md`, section "WS6.I series"). Not built: the usage series
+(waits for the usage emission work), the Control Plane Prometheus scrape job and its token secret, and alert
+rules. A green `/metrics` read is not evidence that a run was metered or billed.

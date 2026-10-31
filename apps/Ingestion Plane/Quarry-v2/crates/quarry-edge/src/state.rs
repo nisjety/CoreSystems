@@ -36,6 +36,14 @@ pub struct AppState {
     /// development; production must configure an HTTP/gRPC-backed validator.
     pub grant_validator: Arc<dyn quarry_runtime::GrantValidator>,
     pub require_browser_grants: bool,
+    /// WS4.H: when true a ZDR organization's durable-resource writes (schedules,
+    /// change monitors and snapshots, profile writes) are refused with
+    /// `zdr_durable_mutation_forbidden`; when false they are served and only a
+    /// `zdr.would_refuse` event is logged. See `crate::zdr_refusal`.
+    pub zdr_refuse_durable_resources: bool,
+    /// WS17.P2 owner and ACL check on `/v1/profiles*`: `off`, `observe` (logs, serves)
+    /// or `enforce` (404 for a non-owner). See `crate::profile_guard`.
+    pub profile_owner_enforce: crate::profile_guard::OwnerEnforce,
     pub driver: Arc<dyn Driver>,
     pub drivers: DriverRegistry,
     /// Wave 7 — optional HTTP/3 driver. `Some` when the runtime was
@@ -50,11 +58,16 @@ pub struct AppState {
     pub event_sink: quarry_runtime::EventSink,
     pub ingest: Option<Arc<dyn DataPlaneIngest>>,
     pub profiles: Arc<dyn ProfileStore>,
+    /// WS17.E3: the data families an org erasure reaches, profiles first. Empty when
+    /// no durable profile store is wired (nothing durable to purge). Read by
+    /// `internal_routes::purge_org_profiles`.
+    pub org_erasables: Vec<Arc<dyn quarry_runtime::org_erasure::OrgErasable>>,
     pub search: Option<Arc<dyn SearchProvider>>,
     /// Semantic retrieval backend (Data Plane v2 `retrieval_v2` → Qdrant).
     /// Powers `POST /v1/search/similar` (find-similar) directly, and is the
     /// same handle fused into the hybrid `search` provider above. `Some` when
-    /// `DATA_PLANE_URL` is configured; `None` makes find-similar return 501.
+    /// `QUARRY_EDGE__VECTOR_RETRIEVAL` is on and `DATA_PLANE_URL` is configured;
+    /// `None` makes find-similar return 501.
     pub vector_index: Option<Arc<dyn VectorIndex>>,
     /// W1 — operator-configured proxy pool name (from
     /// `QUARRY_PROXY_POOL`). Empty string means "no operator pool
@@ -67,15 +80,15 @@ pub struct AppState {
     /// search talks to SearXNG directly. `Some` when `SEARXNG_URL` is
     /// configured; `None` makes the image route return 501 with a hint.
     pub searxng_url: Option<String>,
-    /// Model Plane gateway URL (e.g. `http://model-gateway:8080`). When set,
-    /// `/v1/audio` proxies to `/v1/ai/speech` + `/v1/ai/transcribe`. When
-    /// unset, the route returns 501 Unsupported.
+    /// Model Plane gateway URL (e.g. `http://model-gateway:8080`). With
+    /// `QUARRY_EDGE__MODEL_AUDIO` on, `/v1/audio` proxies to `/v1/ai/speech` +
+    /// `/v1/ai/transcribe`. Otherwise, or when unset, the route returns 501 Unsupported.
     pub model_plane_url: Option<String>,
     /// Bearer token for the Model Plane gateway.
     pub model_plane_token: Option<String>,
     /// Best-effort Model Plane title enricher shared by every `PageRunner`
-    /// this edge builds (scrape, scrape/stream, internal run_page). `Some`
-    /// when `model_plane_url` is set and `page_title_enrich` is not `false`.
+    /// this edge builds (scrape, scrape/stream, internal run_page). `Some` only
+    /// when `QUARRY_EDGE__PAGE_TITLE_ENRICH` is on (QB-T17) and a model path exists.
     /// Holds the fingerprint-keyed title cache, so it must be process-wide,
     /// not per-request.
     pub page_title_enricher: Option<Arc<quarry_runtime::page_extract::PageTitleEnricher>>,
@@ -83,9 +96,13 @@ pub struct AppState {
     /// obtain bounded Model/Data Plane service tokens.
     pub service_token_provider: Option<quarry_runtime::service_tokens::SharedServiceTokenProvider>,
     /// Cycle 19 / cluster #18: Tavily-replacement answer pipeline.
-    /// Wired only when both a SearchProvider AND model_plane_url are
-    /// configured. `/v1/answer` returns 501 Unsupported otherwise.
+    /// Wired only when `QUARRY_EDGE__ANSWER_SYNTHESIS` is on (QB-T17), a SearchProvider
+    /// is configured and a model path exists. `/v1/answer` returns 501 Unsupported otherwise.
     pub answer_pipeline: Option<Arc<AnswerPipeline>>,
+    /// Which Model Plane features this edge serves (QB-T17, see `model_plane_gate`). All off
+    /// unless switched on AND a model path exists. Routes read their own field before they
+    /// call the Model Plane.
+    pub model_plane: crate::model_plane_gate::ModelPlaneFeatures,
     /// Cycle 19 / cluster #16: own-corpus Tantivy index. Cloned cheaply
     /// (interior Arc). PageRunner's success path pushes new docs here.
     pub local_index: Option<TantivyLocalIndex>,
@@ -94,11 +111,19 @@ pub struct AppState {
     /// that Control Plane's billing-core consumes. Tests / dev wire
     /// `NoopUsageMeter`. Always populated; never `Option`.
     pub usage: Arc<dyn UsageMeter>,
-    /// Cycle 21 / cluster #2 — default RunPolicy applied to every
-    /// scrape unless the handler overrides it. Defaults to
-    /// `best_effort`; operators flip to `strict` via config for
-    /// reproducibility-critical workloads.
-    pub policy: quarry_runtime::RunPolicy,
+    /// WS6.D-s — what each organization has left of its metered allowances and
+    /// how much capacity its plan allows. `StaticFloor` (the default) knows no
+    /// organization and changes nothing; see `crate::limits`.
+    pub limits: Arc<dyn crate::limits::LimitsResolver>,
+    /// WS7.C — the web-policy baseline and enforcement mode. Each request's
+    /// resolved policy (and the RunPolicy it implies) is decided per request
+    /// from this; see `crate::policy_baseline`.
+    pub policy: crate::policy_baseline::PolicyBaseline,
+    /// WS14.S4 — the robots.txt gate (cache of per-origin rules over the guarded
+    /// default driver). `None` when `QUARRY_EDGE__CRAWL_ROBOTS=off` and in tests
+    /// that do not exercise robots.txt; `/v1/map` and the crawl and batch page
+    /// route then behave as before.
+    pub robots: Option<Arc<quarry_runtime::RobotsGate>>,
     /// Cycle 21 / cluster #3 — per-host adaptive scheduler shared
     /// across handlers so concurrent scrapes coordinate. `None`
     /// disables throttling (test harnesses).
@@ -108,6 +133,11 @@ pub struct AppState {
     /// forward; when `None`, calls go out unsigned (acceptable only
     /// in private-network single-tenant dev).
     pub internal_signer: Option<Arc<crate::internal_auth::InternalSigner>>,
+    /// WS4.J: the ZDR run tombstone emitter. `None` (the default everywhere) emits
+    /// nothing; `Some` only when `QUARRY_EDGE__ZDR_TOMBSTONE` is on and control and
+    /// the signer are configured. Counsel review gates turning it on. See
+    /// `crate::zdr_tombstone`.
+    pub tombstones: Option<Arc<crate::zdr_tombstone::TombstoneEmitter>>,
     /// Phase-2 visual RAG — page-image producer. `Some` when configured (CAS
     /// bucket + Data Plane NATS + edge base URL, browser-agent feature on);
     /// injected into every `PageRunner` so ingested pages get rendered → CAS →

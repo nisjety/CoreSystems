@@ -17,6 +17,22 @@ pub struct ProcedureStep {
     pub step: u32,
     pub action: AgentActionWire,
     pub expected_outcome: ActionOutcomeStatus,
+    /// The action carries a redaction marker: what was typed or selected was
+    /// masked when the receipt was written, so the replay must supply it. Such a
+    /// step is never reported as an exact replay (WS12.S3).
+    #[serde(default)]
+    pub redacted_input: bool,
+}
+
+/// Does this action JSON carry a redaction marker (`[redacted:password]`, or the
+/// `[redacted]` of a metadata-only receipt) in any string?
+fn carries_redaction_marker(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(s) => s.contains("[redacted:") || s == "[redacted]",
+        serde_json::Value::Array(items) => items.iter().any(carries_redaction_marker),
+        serde_json::Value::Object(map) => map.values().any(carries_redaction_marker),
+        _ => false,
+    }
 }
 
 /// JSON-backed action representation keeps this crate independent of a
@@ -97,10 +113,12 @@ pub fn compile_procedure(
                 format!("encode procedure action: {error}"),
             )
         })?;
+        let redacted_input = carries_redaction_marker(&action);
         steps.push(ProcedureStep {
             step: receipt.step,
             action,
             expected_outcome: observation.action_outcome.status.clone(),
+            redacted_input,
         });
     }
     Ok(BrowserProcedure {
@@ -119,6 +137,13 @@ pub fn compare_replay(procedure: &BrowserProcedure, actions: &[AgentAction]) -> 
                 reason: "replay ended before the procedure completed".to_owned(),
             };
         };
+        if expected.redacted_input {
+            return ReplayDecision::RepairRequired {
+                step: expected.step,
+                reason: "typed input was redacted at capture; the replay must supply it"
+                    .to_owned(),
+            };
+        }
         let actual = match serde_json::to_value(actual) {
             Ok(value) => value,
             Err(_) => {
@@ -238,6 +263,10 @@ mod tests {
             finished_at: Utc::now(),
             action,
             outcome: StepOutcome::Completed { latency_ms: 1 },
+            cost_source: None,
+            redaction_rule_version: None,
+            tab_id: None,
+            attach_id: None,
             observation: Some(BrowserObservation {
                 run_id: Id::new(),
                 step: 0,
@@ -261,11 +290,72 @@ mod tests {
                 proof_bundle: None,
                 target_resolution: None,
                 telemetry: quarry_core::contracts::BrowserTelemetry::default(),
+                redaction: None,
                 observed_at: Utc::now(),
             }),
             correction_of: None,
             cost_micro_usd: 0,
+            initiated_by: None,
+            control_epoch: None,
+            agent: None,
         }
+    }
+
+    #[test]
+    fn compile_procedure_flags_redacted_input() {
+        let typed = AgentAction::TypeRef {
+            snapshot_id: "snap_x".into(),
+            generation: 1,
+            ref_id: "@e1".into(),
+            text: "[redacted:password]".into(),
+        };
+        let click = AgentAction::Click {
+            selector: "#go".into(),
+        };
+        let p = compile_procedure(
+            "proc_test",
+            &[
+                receipt(typed, ActionOutcome::verified("typed")),
+                receipt(click, ActionOutcome::verified("clicked")),
+            ],
+        )
+        .unwrap();
+        assert!(p.steps[0].redacted_input);
+        assert!(!p.steps[1].redacted_input);
+    }
+
+    #[test]
+    fn compare_replay_returns_repair_required_for_redacted_input() {
+        let typed = AgentAction::TypeRef {
+            snapshot_id: "snap_x".into(),
+            generation: 1,
+            ref_id: "@e1".into(),
+            text: "[redacted:password]".into(),
+        };
+        let p = compile_procedure(
+            "proc_test",
+            &[receipt(typed.clone(), ActionOutcome::verified("typed"))],
+        )
+        .unwrap();
+        // Even the very same marker text is not an exact replay: nothing real was typed.
+        match compare_replay(&p, &[typed]) {
+            ReplayDecision::RepairRequired { step, reason } => {
+                assert_eq!(step, 0);
+                assert!(reason.contains("redacted at capture"));
+            }
+            other => panic!("expected RepairRequired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_procedure_stored_before_the_flag_existed_still_reads() {
+        let old = serde_json::json!({
+            "step": 3,
+            "action": {"type": "click", "selector": "#go"},
+            "expected_outcome": "verified"
+        });
+        let step: ProcedureStep = serde_json::from_value(old).unwrap();
+        assert!(!step.redacted_input);
     }
 
     #[test]
@@ -309,11 +399,13 @@ mod tests {
                     step: 2,
                     action: serde_json::json!({"type": "click"}),
                     expected_outcome: ActionOutcomeStatus::Unknown,
+                    redacted_input: false,
                 },
                 ProcedureStep {
                     step: 1,
                     action: serde_json::json!({"type": "click"}),
                     expected_outcome: ActionOutcomeStatus::Verified,
+                    redacted_input: false,
                 },
             ],
         };
@@ -342,6 +434,7 @@ mod tests {
                     "url": "https://example.test/path"
                 }),
                 expected_outcome: ActionOutcomeStatus::Verified,
+                redacted_input: false,
             }],
         };
         let report = analyze_impact(&procedure, &["https://example.test/path".into()]);

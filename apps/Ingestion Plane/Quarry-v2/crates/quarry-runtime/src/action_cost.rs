@@ -21,7 +21,7 @@ pub enum CostSource {
 pub fn estimate_action_cost(action: &str, bytes_transferred: u64) -> ActionCost {
     let browser_usd = match action {
         "click" | "type" | "press" | "scroll" | "select" | "wait" | "mouse_wheel"
-        | "back" | "forward" | "get_content" | "download_ref" | "frame_download_ref" => 0.0001,
+        | "back" | "forward" | "reload" | "get_content" | "download_ref" | "frame_download_ref" => 0.0001,
         "navigate" => 0.001 + (bytes_transferred as f64 * 0.0000001),
         "screenshot" | "pdf" => 0.005,
         "evaluate" => 0.001,

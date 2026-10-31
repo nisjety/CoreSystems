@@ -1,0 +1,9 @@
+config {
+  type: "view",
+  schema: "dw_1_silver_xero",
+  description: "Xero accounts-receivable invoice payments, including rows marked deleted in Xero."
+}
+
+SELECT *
+FROM ${ref("fact_payment")}
+WHERE payment_type = 'ACCRECPAYMENT'

@@ -91,6 +91,9 @@ type Error struct {
 	Status   int    // HTTP status when applicable; 0 otherwise
 	Body     string // truncated response body for diagnostics
 	Err      error
+	// Denial is the edge's refusal for a page (code, message, remedy), set for a
+	// scope or robots refusal (WS14.S3). Nil otherwise.
+	Denial   map[string]any
 }
 
 func (e *Error) Error() string {
@@ -134,19 +137,13 @@ func (e *Error) Temporal() error {
 		return nil
 	}
 	if !e.Category.Retryable() {
-		return temporal.NewNonRetryableApplicationError(e.Error(), e.Category.String(), e.Err, map[string]any{
-			"status": e.Status,
-			"op":     e.Op,
-		})
+		return temporal.NewNonRetryableApplicationError(e.Error(), e.Category.String(), e.Err, e.details())
 	}
 	// Preserve the underlying cause chain. The variadic arg on
 	// `NewApplicationError` is `details`, not `cause`; using the
 	// `WithCause` variant keeps `errors.Is/As` working on `e.Err`
 	// when callers unwrap the Temporal error.
-	return temporal.NewApplicationErrorWithCause(e.Error(), e.Category.String(), e.Err, map[string]any{
-		"status": e.Status,
-		"op":     e.Op,
-	})
+	return temporal.NewApplicationErrorWithCause(e.Error(), e.Category.String(), e.Err, e.details())
 }
 
 // New builds a categorised error.

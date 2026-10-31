@@ -1,0 +1,23 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Atomic Xero financial-report cells with source numeric and percentage values explicitly kept non-additive.",
+  assertions: { nonNull: ["tenant_id", "report_cell_key"], uniqueKey: ["report_cell_key"] }
+}
+
+SELECT FARM_FINGERPRINT(c.tenant_id) AS company_key,
+       FARM_FINGERPRINT(CAST(COALESCE(c.report_to, SAFE_CAST(c.report_date AS DATE)) AS STRING)) AS date_key,
+       IF(c.attribute_id = 'account' AND c.attribute_value IS NOT NULL,
+          FARM_FINGERPRINT(CONCAT(c.tenant_id, '|', c.attribute_value)), NULL) AS account_key,
+       c.report_cell_key, c.report_snapshot_key, c.tenant_id, c.report_snapshot_id,
+       c.report, c.report_type, c.report_name, c.report_titles,
+       c.report_from, c.report_to, c.report_date, c.contact_id,
+       c.report_params, c.report_parameter_hash,
+       c.report_index, c.section_index, c.section_title, c.row_index, c.row_type,
+       c.row_label, c.cell_index, c.column_header, c.cell_value,
+       c.attribute_id, c.attribute_value, c.attributes_json,
+       c.is_summary_row, c.is_numeric_value, c.is_percentage_value, c.numeric_value_kind,
+       c.is_orphan_snapshot,
+       TRUE AS is_report_snapshot, TRUE AS is_non_additive,
+       c.source_numeric_value, c.report_synced_at, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_financial_report_cell")} AS c

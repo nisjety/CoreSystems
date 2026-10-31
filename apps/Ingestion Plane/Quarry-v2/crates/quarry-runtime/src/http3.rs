@@ -119,6 +119,7 @@ impl Http3Driver {
             duration_ms: start.elapsed().as_millis() as u64,
             // Same rationale as `kind()`: no dedicated Http3 variant.
             served_by: DriverKind::Static,
+            captures: None,
         })
     }
 }

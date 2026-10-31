@@ -50,6 +50,12 @@ func eventStageStatus(t quarrycontracts.EventType) (stage string, status string)
 		return "completed", "ok"
 	case quarrycontracts.EvtRunFailed:
 		return "failed", "error"
+	case quarrycontracts.EvtControlRequested:
+		return "running", "ok"
+	case quarrycontracts.EvtRunTimedOut:
+		return "failed", "error"
+	case quarrycontracts.EvtScheduleSkipped:
+		return "cancelled", "warn"
 	case quarrycontracts.EvtPageQueued:
 		return "running", "ok"
 	case quarrycontracts.EvtPageFetched:

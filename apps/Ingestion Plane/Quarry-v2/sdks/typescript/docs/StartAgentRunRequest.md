@@ -13,7 +13,9 @@ Name | Type
 `zdr` | boolean
 `grantId` | string
 `resumeRunId` | string
+`initiatedBy` | string
 `executionTier` | string
+`policy` | [RequestAsk](RequestAsk.md)
 `driverRequirements` | [BrowserDriverCapabilities](BrowserDriverCapabilities.md)
 
 ## Example
@@ -30,7 +32,9 @@ const example = {
   "zdr": null,
   "grantId": null,
   "resumeRunId": null,
+  "initiatedBy": null,
   "executionTier": null,
+  "policy": null,
   "driverRequirements": null,
 } satisfies StartAgentRunRequest
 

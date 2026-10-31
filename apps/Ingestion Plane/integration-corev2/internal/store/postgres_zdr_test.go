@@ -287,6 +287,7 @@ func TestPostgresAcknowledgementLocksTheRecordSharedThenInserts(t *testing.T) {
 	mock.MatchExpectationsInOrder(true)
 	mock.ExpectBegin()
 	mock.ExpectQuery(sqlLockForAck).WithArgs("conn-1").WillReturnRows(pgxmock.NewRows(zdrLockColumns).AddRow(lockRow(a, "org-1", "user-1", nil)...))
+	mock.ExpectQuery(sqlReadConnectionDeletedAt).WithArgs("conn-1").WillReturnRows(pgxmock.NewRows([]string{"deleted_at"}).AddRow((*time.Time)(nil)))
 	mock.ExpectQuery(sqlInsertAck).WithArgs("ack-1", "org-1", "conn-1", "user-1", a.ProviderKey, "not_supported", "provider_terms_known", 1, a.Digest,
 		"2026-10-a", "no", in.TextSHA256, "text", true, "connect", "req-1", pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(zdrAckColumns).AddRow(ackRow("ack-1", a.Digest, nil, "", at)...))
@@ -308,6 +309,7 @@ func TestPostgresAcknowledgementReplayReturnsTheStoredRow(t *testing.T) {
 	mock.MatchExpectationsInOrder(true)
 	mock.ExpectBegin()
 	mock.ExpectQuery(sqlLockForAck).WithArgs("conn-1").WillReturnRows(pgxmock.NewRows(zdrLockColumns).AddRow(lockRow(a, "org-1", "user-1", nil)...))
+	mock.ExpectQuery(sqlReadConnectionDeletedAt).WithArgs("conn-1").WillReturnRows(pgxmock.NewRows([]string{"deleted_at"}).AddRow((*time.Time)(nil)))
 	mock.ExpectQuery(sqlInsertAck).WithArgs("ack-1", "org-1", "conn-1", "user-1", a.ProviderKey, "not_supported", "provider_terms_known", 1, a.Digest,
 		"2026-10-a", "no", in.TextSHA256, "text", true, "connect", "req-1", pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(zdrAckColumns)) // DO NOTHING: an active row exists
@@ -317,6 +319,27 @@ func TestPostgresAcknowledgementReplayReturnsTheStoredRow(t *testing.T) {
 	saved, created, err := repo.InsertConnectionZDRAcknowledgement(t.Context(), in)
 	if err != nil || created || saved.ID != "ack-original" {
 		t.Fatalf("replay = (%+v, created=%v, %v), want the stored row and created=false", saved, created, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+const sqlReadConnectionDeletedAt = `SELECT deleted_at FROM integration_connections WHERE id = \$1`
+
+// A removal that commits while the insert waits for the record lock is seen by the connection read
+// that follows the lock, not by the lock statement, which read its snapshot before the wait.
+func TestPostgresAcknowledgementRefusesAConnectionRemovedWhileItWaitedForTheLock(t *testing.T) {
+	mock, repo := newZDRMock(t)
+	a := testAssessment(t, 1)
+	removed := time.Now().UTC()
+	mock.MatchExpectationsInOrder(true)
+	mock.ExpectBegin()
+	mock.ExpectQuery(sqlLockForAck).WithArgs("conn-1").WillReturnRows(pgxmock.NewRows(zdrLockColumns).AddRow(lockRow(a, "org-1", "user-1", nil)...))
+	mock.ExpectQuery(sqlReadConnectionDeletedAt).WithArgs("conn-1").WillReturnRows(pgxmock.NewRows([]string{"deleted_at"}).AddRow(&removed))
+	mock.ExpectRollback() // nothing may be inserted
+	if _, _, err := repo.InsertConnectionZDRAcknowledgement(t.Context(), rehash(t, testAck(t, a.Digest))); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
@@ -396,9 +419,15 @@ func TestPostgresListAndRevokeAcknowledgements(t *testing.T) {
 		t.Fatalf("list = (%+v, %v), want newest first with revocation decoded", rows, err)
 	}
 
+	// A revocation runs in its own transaction and takes the record's row lock first, so it
+	// serialises with an acknowledgement insert that holds the record shared.
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT connection_id FROM integration_connection_zdr WHERE connection_id = \$1 FOR UPDATE`).
+		WithArgs("conn-1").WillReturnRows(pgxmock.NewRows([]string{"connection_id"}))
 	mock.ExpectQuery(`UPDATE integration_connection_zdr_acknowledgements SET revoked_at = \$2, revoke_reason = \$3 WHERE connection_id = \$1 AND revoked_at IS NULL RETURNING`).
 		WithArgs("conn-1", pgxmock.AnyArg(), ZDRRevokeConnectionRemoved).
 		WillReturnRows(pgxmock.NewRows(zdrAckColumns).AddRow(ackRow("ack-new", strings.Repeat("b", 64), &revoked, ZDRRevokeConnectionRemoved, now)...))
+	mock.ExpectCommit()
 	got, err := repo.RevokeConnectionZDRAcknowledgements(t.Context(), "conn-1", ZDRRevokeConnectionRemoved, time.Time{})
 	if err != nil || len(got) != 1 || got[0].RevokeReason != ZDRRevokeConnectionRemoved {
 		t.Fatalf("revoke = (%+v, %v)", got, err)

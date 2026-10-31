@@ -8,15 +8,15 @@ import { VerevonMark } from "../sections/VerevonMark";
 import styles from "./SensesMotion.module.css";
 
 const descriptions: Record<SenseKind, string> = {
-	delegate: "Verevon mottar en oppgave, finner en forfalt faktura i innboksen, kontrollerer beløpet mot regnskapet, sender oppfølgingen og oppdaterer loggen innenfor rammene dere har satt.",
-	learn: "Dere viser hvordan en ukesrapport lages. Verevon husker at avvikene skal komme først og bruker tilbakemeldingen når neste rapport blir klar.",
-	oversee: "Teamet følger tre oppgaver, vurderer en leverandøravtale sammen og gir klarsignal før Verevon går videre.",
+	delegate: "Et signal settes i sammenheng med relevant kunnskap og systemdata. Arbeid som følger virksomhetens regler kan gå videre, mens vurderinger går til riktig person.",
+	learn: "Tidligere vurderinger, dokumenter og arbeidsmåter gir nye saker den konteksten virksomheten allerede har.",
+	oversee: "Én arbeidsflate viser grunnlag, ansvar og forslag. Når noe krever en beslutning, venter Verevon på den riktige personen.",
 };
 
 const captions: Record<SenseKind, string> = {
-	delegate: "Fra oppgave til ferdig oppfølging",
-	learn: "Deres erfaring blir en del av arbeidet",
-	oversee: "Felles oversikt. Menneskelig kontroll.",
+	delegate: "Fra signal til styrt arbeid",
+	learn: "Kunnskap som følger arbeidet",
+	oversee: "Felles oversikt. Kontroll ved behov.",
 };
 
 function backgroundStyle(backgroundSrc: string): CSSProperties {
@@ -24,7 +24,7 @@ function backgroundStyle(backgroundSrc: string): CSSProperties {
 }
 
 function Placeholder({ backgroundSrc }: { backgroundSrc: string }) {
-	return <div aria-hidden="true"><div className={styles.placeholder} style={backgroundStyle(backgroundSrc)}><span><VerevonMark style={{ display: "block", width: "100%", height: "100%", transform: "scale(1.3)" }} /></span></div><div className={styles.transport} /></div>;
+	return <div aria-hidden="true" className={styles.placeholder} style={backgroundStyle(backgroundSrc)}><span><VerevonMark style={{ display: "block", width: "100%", height: "100%", transform: "scale(1.3)" }} /></span></div>;
 }
 
 const defaultBackground = "/verevon-senses/glass-study.webp";
@@ -42,7 +42,7 @@ export function SensesMotion({ kind, backgroundSrc = defaultBackground }: { kind
 	}, []);
 
 	return <figure className={styles.figure} ref={ref}>
-		<div className={styles.frame}>{ready ? <SensePlayer kind={kind} backgroundSrc={backgroundSrc} /> : <Placeholder backgroundSrc={backgroundSrc} />}</div>
+		<div className={styles.frame} data-sense-kind={kind}>{ready ? <SensePlayer kind={kind} backgroundSrc={backgroundSrc} /> : <Placeholder backgroundSrc={backgroundSrc} />}</div>
 		<figcaption className={styles.caption}><span>{captions[kind]}</span><span className="sr-only">{descriptions[kind]}</span></figcaption>
 	</figure>;
 }

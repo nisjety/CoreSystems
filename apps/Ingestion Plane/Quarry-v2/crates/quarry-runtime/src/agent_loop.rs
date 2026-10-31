@@ -131,6 +131,7 @@ impl AgentLoop {
                 .publish(self.run_id.clone(), event_type, payload, idempotency_key)
                 .await
             {
+                // zdr-log-ok: inside `if !self.zdr.is_active()` above; a ZDR run never publishes to the bus, so this line is never emitted for one
                 tracing::warn!(error = %e, "agent event bus publish failed");
             }
         }
@@ -205,6 +206,7 @@ impl AgentLoop {
             active_snapshot: None,
             observed_action_count: 0,
             challenge_observation_count: 0,
+            ..Default::default()
         };
 
         let mut observations = Vec::new();
@@ -776,6 +778,7 @@ mod tests {
             proof_bundle: None,
             target_resolution: None,
             telemetry: quarry_core::contracts::BrowserTelemetry::default(),
+            redaction: None,
             observed_at: chrono::Utc::now(),
         };
 

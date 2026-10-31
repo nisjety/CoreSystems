@@ -8,6 +8,7 @@ mod roles;
 pub(crate) mod settings;
 mod shared;
 pub(crate) mod switch;
+mod website;
 
 use axum::{
     routing::{delete, get, patch, post, put},
@@ -38,6 +39,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/orgs/{id}/settings",
             patch(settings::update_org_settings),
+        )
+        // The organisation's own website, recorded in org-core (the company facts owner)
+        .route(
+            "/api/v1/orgs/{id}/website",
+            patch(website::update_org_website),
         )
         // ADR-0003 — org layer of the authored-instruction hierarchy (Convex,
         // not org-core, hence a separate route from `/settings` above).

@@ -157,6 +157,7 @@ mod tests {
     #[tokio::test]
     async fn jobs_query_with_auth_returns_empty_page() {
         let claims = Claims {
+            web_policy: None,
             sub: "u1".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,

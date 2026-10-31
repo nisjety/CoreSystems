@@ -41,7 +41,31 @@ pub struct ErrorBody {
     pub hint: Option<String>,
 }
 
+/// `POST /v1/answer`. WS4.J: wraps `answer_run` so a ZDR run's metadata-only tombstone is
+/// sent once, from the response status (off unless the flag is on; fail open). The
+/// streamed variant (`answer_stream`) ends inside its stream, so it sends its tombstone
+/// from the stream's end instead (D1-003, [`crate::zdr_tombstone::StreamEnd`]).
 pub async fn answer(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Json(req): Json<AnswerHttpRequest>,
+) -> axum::response::Response {
+    let pending = crate::zdr_tombstone::Pending::begin(
+        state.tombstones.as_ref(),
+        claims.effective_zdr(req.zdr.unwrap_or(false)),
+        &claims.org_id,
+        crate::zdr_tombstone::Kind::Answer,
+    );
+    let response = answer_run(State(state), Extension(claims), Json(req))
+        .await
+        .into_response();
+    if let Some(pending) = pending {
+        pending.finish_status(response.status().as_u16());
+    }
+    response
+}
+
+async fn answer_run(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<AnswerHttpRequest>,
@@ -69,7 +93,7 @@ pub async fn answer(
                     error: "answer pipeline not configured".into(),
                     code: "UNSUPPORTED".into(),
                     hint: Some(
-                        "configure a SearchProvider AND a Model Plane URL to enable /v1/answer"
+                        "set QUARRY_EDGE__ANSWER_SYNTHESIS=1 (with a SearchProvider and a granted Model Plane path) to enable /v1/answer"
                             .into(),
                     ),
                 })
@@ -161,7 +185,17 @@ pub async fn answer_stream(
         )
             .into_response();
     }
+    // D1-003: a streamed ZDR answer leaves its tombstone from the stream's end, whether the
+    // stream finishes, fails or is dropped by a client that went away. Off unless the
+    // tombstone flag is on (it stays off until counsel signs it off); a standard run is None.
+    let mut tombstone = crate::zdr_tombstone::StreamEnd::new(crate::zdr_tombstone::Pending::begin(
+        state.tombstones.as_ref(),
+        claims.effective_zdr(req.zdr.unwrap_or(false)),
+        &claims.org_id,
+        crate::zdr_tombstone::Kind::Answer,
+    ));
     let Some(pipeline) = state.answer_pipeline.clone() else {
+        tombstone.status(StatusCode::NOT_IMPLEMENTED.as_u16());
         return (
             StatusCode::NOT_IMPLEMENTED,
             Json(
@@ -169,7 +203,7 @@ pub async fn answer_stream(
                     error: "answer pipeline not configured".into(),
                     code: "UNSUPPORTED".into(),
                     hint: Some(
-                        "configure a SearchProvider AND a Model Plane URL to enable /v1/answer"
+                        "set QUARRY_EDGE__ANSWER_SYNTHESIS=1 (with a SearchProvider and a granted Model Plane path) to enable /v1/answer"
                             .into(),
                     ),
                 })
@@ -207,6 +241,8 @@ pub async fn answer_stream(
     let usage = state.usage.clone();
 
     let sse = Sse::new(async_stream::stream! {
+        // Held for the life of the stream: dropped (and sent) when the stream ends or is dropped.
+        let mut tombstone = tombstone;
         // Warm answer-cache hit → replay instantly, skip search + synthesis.
         if let Some(c) = &scache {
             if let Some(cached) = c.get::<String>(&cache_key).await {
@@ -226,6 +262,7 @@ pub async fn answer_stream(
         let prepared = match pipeline.prepare(&pipeline_req).await {
             Ok(p) => p,
             Err(e) => {
+                tombstone.failed(&e);
                 yield Ok(Event::default()
                     .event("error")
                     .data(serde_json::json!({ "message": e.message }).to_string()));
@@ -238,6 +275,7 @@ pub async fn answer_stream(
         yield Ok(Event::default().event("citations").data(citations_json));
 
         if prepared.sources_used == 0 {
+            tombstone.ok();
             yield Ok(Event::default()
                 .event("done")
                 .data(serde_json::json!({ "answer": "", "cached": false }).to_string()));
@@ -279,6 +317,7 @@ pub async fn answer_stream(
                 }
             }
             Err(e) => {
+                tombstone.failed(&e);
                 yield Ok(Event::default()
                     .event("error")
                     .data(serde_json::json!({ "message": e.message }).to_string()));
@@ -309,6 +348,7 @@ pub async fn answer_stream(
                 .await;
         }
 
+        tombstone.ok();
         yield Ok(Event::default()
             .event("done")
             .data(serde_json::json!({ "answer": full, "cached": false }).to_string()));
@@ -328,6 +368,32 @@ fn _type_check_marker(_a: AnswerResult) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// QB-T17: with `QUARRY_EDGE__ANSWER_SYNTHESIS` off there is no pipeline, so `/v1/answer` answers
+    /// 501 and says which switch turns it on (the hint is what an operator reads at the 501).
+    #[tokio::test]
+    async fn answer_without_a_pipeline_names_the_switch() {
+        use crate::test_support::{claims_for_org, test_state, StubDriver};
+
+        let state = test_state(StubDriver::ok());
+        let request: AnswerHttpRequest =
+            serde_json::from_value(serde_json::json!({ "query": "rust async" })).unwrap();
+
+        let response = answer(
+            State(state),
+            Extension(claims_for_org("org_answer")),
+            Json(request),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("QUARRY_EDGE__ANSWER_SYNTHESIS"), "{body}");
+    }
 
     #[test]
     fn http_request_decodes_minimal_shape() {

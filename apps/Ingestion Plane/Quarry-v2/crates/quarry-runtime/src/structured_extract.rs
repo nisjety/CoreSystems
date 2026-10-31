@@ -37,7 +37,7 @@ impl StructuredExtractClient {
             .map_err(|e| {
                 QuarryError::new(
                     ErrorCode::Internal,
-                    format!("http client build failed: {e}"),
+                    format!("http client build failed: {}", e.without_url()),
                 )
             })?;
         Ok(Self {
@@ -92,7 +92,7 @@ impl StructuredExtractClient {
         let resp = builder.send().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("structured extract transport failure: {e}"),
+                format!("structured extract transport failure: {}", e.without_url()),
             )
         })?;
 
@@ -108,7 +108,7 @@ impl StructuredExtractClient {
         let mut response: StructuredExtractResponse = resp.json().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("structured extract decode failure: {e}"),
+                format!("structured extract decode failure: {}", e.without_url()),
             )
         })?;
 

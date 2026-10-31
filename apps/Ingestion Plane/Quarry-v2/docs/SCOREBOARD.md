@@ -67,3 +67,15 @@ Delta on a lower-better metric uses the same bands inverted.
 - Implement the remaining local baselines and fixture/gold scoring, then run
   the credential-gated external jobs from a protected release workflow.
 - This file becomes auto-generated from the latest scorecard rows.
+
+## Eval CI rows (quarry-v2-eval, E3.9.1)
+
+Source: `.github/workflows/quarry-v2-eval.yml`. Each run writes `lab/evals/release_score.json` with the commit it ran on, the gate counts, the fixture pass rate, the bakeoff net wins and the captured provider count. The job summary and the `quarry-v2-eval-<sha>` artifact carry the same file. A row below is filled from the score file of the named commit only.
+
+| Run (commit)  | Fixtures (quarry-eval) | Fixture pass rate | Bakeoff net (solo) | Gates failed | Overall |
+| ------------- | ---------------------- | ----------------- | ------------------ | ------------ | ------- |
+| _pending_     | _pending_              | _pending_         | _pending_          | _pending_    | _pending_ |
+
+No row is filled yet: the first run on a pushed commit does that. The committed `lab/evals/*.json` outputs (2026-05-08, no commit id) show 10/10 fixtures and a PASS matrix, but they predate this job and are not a release score, so they are not recorded here.
+
+Not measured by this job: Chromium suites (`bench-*` rows above stay `_pending_`), the provider matrix (Tier C, capped credential), and the default-on gate thresholds (`[placeholder, ratify]` in D11).

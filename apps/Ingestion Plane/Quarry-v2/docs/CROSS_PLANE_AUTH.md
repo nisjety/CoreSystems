@@ -8,8 +8,8 @@ D2 + D3 / cluster #14.
 | ------------------------------ | ----- | ---------------- | ------------------- |
 | **client → quarry-edge**       | JWT (auth-core JWKS, P0) | n/a (request-fresh) | not yet |
 | **quarry-edge → quarry-control** | **HMAC-SHA256** (this doc) | timestamp + nonce  | `Idempotency-Key` header |
-| **quarry-edge → data-plane** | Per-org Auth Core service JWT (`aud=data-plane`, route-minimal scopes) | cached until 30s before expiry; one 401 refresh | implemented over HTTP |
-| **quarry-edge → model-plane** | Per-org Auth Core service JWT (`aud=model-gateway`, `models:invoke`) | cached until 30s before expiry; one 401 refresh | implemented |
+| **quarry-edge → data-plane** | Per-org Auth Core service JWT (`aud=data-plane`), one request per route with route-minimal scopes: `data:read` (vector retrieve), `documents:write` and `org:data:read_all` (ingest; `org:data:read_all` marks a system write and is never requested for a ZDR run), `data:rerank` (the rerank route, requested alone) | cached until 30s before expiry; one 401 refresh | implemented over HTTP. `data:rerank` is in the committed Control Plane registry (QB-T01) and live in auth-service (read-only check, 2026-10-13) |
+| **quarry-edge → model-plane** | None. The registry gives quarry-edge no `model-gateway` audience (D16, QB-T17), so Auth Core refuses every Model Plane mint with 403 (`model-invoke`, `model-stream` and `model-audio` are `granted: false`) | not granted: the callers that need it default off (QB-T17) | not granted (refused; no working path); every model-gateway call degrades |
 
 ## Wire shape
 

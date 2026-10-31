@@ -164,13 +164,13 @@ impl BrowserlessDriver {
         let url = self.endpoint(path);
         let resp = self.http.post(&url).json(&body).send().await.map_err(|e| {
             QuarryError::new(ErrorCode::DriverFailed, "browserless request failed")
-                .with_details(json!({ "error": e.to_string(), "endpoint": path }))
+                .with_details(json!({ "error": e.without_url().to_string(), "endpoint": path }))
         })?;
 
         let status = resp.status();
         let bytes = resp.bytes().await.map_err(|e| {
             QuarryError::new(ErrorCode::DriverFailed, "browserless body read failed")
-                .with_details(json!({ "error": e.to_string(), "endpoint": path }))
+                .with_details(json!({ "error": e.without_url().to_string(), "endpoint": path }))
         })?;
 
         if !status.is_success() {
@@ -222,6 +222,7 @@ impl BrowserDriver for BrowserlessDriver {
 
         Ok(BrowserSession {
             lease: lease.clone(),
+            tab_pin: None,
             inner: Arc::new(Mutex::new(SessionInner {
                 connected: true,
                 pages_served: 0,

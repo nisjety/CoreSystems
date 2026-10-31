@@ -1,0 +1,24 @@
+# V2-quarry-findings progress (round 6)
+Started. Scratch: scratchpad/V2/.
+- F1 CONTRACTS.md edited (uncommitted: docs/CONTRACTS.md; also tests/agent_run_control.rs +13 lines body-422 assertion). RUNBOOKS.md line 385 already fixed (no stale text found).
+- F2 design: tabs.rs already prunes closed tabs first; plan: beyond 256 full records store class-only marker `unattributed:true` (TabOrigin field), openapi TabOpener gets `unattributed`, regenerate TabOpener.md only.
+- next: F3, F5c, F7, F8, F6, F4, F5ab
+- DONE+committed: F6 (aa54623a, gateway browser.rs test, mutation red/green), F8 (PROGRESS.md).
+- EDITED, uncommitted (mine): docs/CONTRACTS.md + tests/agent_run_control.rs (F1, needs test run); sdks/python/tests/test_smoke.py (F3, 28 pass vs U6 out-a); .github/workflows/verevonv3-ci.yml (F3 CI step, needs actionlint); scripts/tests/bootstrap-broker-db.test.sh (F5c, needs docker run + mutation); crates/quarry-runtime/tests/browser_egress_boundary.rs (F7 done, F5a/b pending).
+- TODO: F2 (tabs.rs unattributed marker + openapi TabOpener + TabOpener.md regen), F4 (postgres tests), F5a/b mutations, final test runs.
+- F2 code written (uncommitted): agent_routes/{types,tabs,tests}.rs (tests.rs ALSO carries V4's hunk at the end: hunk-only commit via qcommit-patch), docs/openapi.yaml TabOpener.unattributed, CONTRACTS line 593, tests/agent_run_control.rs new test (29 passed in agent_run_control). lib test of quarry-edge could not compile once because of V4's tests.rs json! error: retry.
+- F4 code written (uncommitted): quarry-runtime/src/postgres_test_support.rs (new), lib.rs mod, 5 postgres_*.rs fresh_pool -> isolated_pool. pg 5x run: V2/pg-new.log (script V2/pg-new.sh, pg-run.sh); old tree copy for before-evidence: V2/old-copy.
+- SDK regen job queued: V2/sdk/run.log (out-a/out-b), then copy changed TabOpener.md etc.
+- Mutation copy: V2/mutation-copy with mut.sh (needs seeded volume quarry-mut-target from quarry-target; remove volume afterwards).
+- COMMITTED: F6 aa54623a, F8 721fd400, F3 py test 17360e6a, F3 CI step 2daa3f0c.
+- F4: new tree pg x5 parallel: 5/5 passed (23 tests each, REQUIRE_CONTRACT=1). quarry-v2-ci.yml --test-threads=1 removed (uncommitted edit). 115 qt_ schemas left after 5 runs (swept after 6h).
+- SDK: regenerated working-tree spec twice (identical); only TabOpener.md differs from committed docs (copied, uncommitted). python 28 passed vs regenerated package.
+- actionlint verevonv3-ci.yml rc 0.
+- TRAP: docker volume quarry-target is 228 GB: never copy it. My seeding attempt was killed, partial volume quarry-mut-target removed. Mutation now = cold build in own volume (V2/mut-all.sh, log V2/mut-all.log), rm volume at end.
+- bootstrap test runs: V2/bt.log (real, head, headmut, mut).
+- COMMITTED so far: aa54623a (F6), 721fd400 (F8), 17360e6a (F3 py), 2daa3f0c (F3 CI), c9d61e31 (F4 + quarry-v2-ci --test-threads removed), a1cb37c4 (F5c, 4 runs: head pass, head-without-role pass, new pass, new-without-role FAIL), d49dfd48 (F1), 1932afdf + 55a3831a (F2; 1932afdf wrongly stored CRLF blobs for tabs.rs/types.rs/agent_run_control.rs, fixed by 55a3831a - TRAP: qcommit-blobs needs LF content; working tree is CRLF).
+- Full runs on working tree: quarry-edge --no-fail-fast 972 passed 0 failed (27 binaries incl. log_field_discipline, agent_run_control 29); quarry-runtime 757 passed 0 failed 1 ignored; cargo check --workspace --all-targets rc 0; node --test 23 pass.
+- PENDING: F5a/b mutation run (V2/mut-all.log, cold build own volume, then old-tree pg x5, then volume rm); F7 commit (browser_egress_boundary.rs comment+message, adjust per mutation result); RUNBOOKS append (hunk-only, other units edit it); hand-over notes wf-V2-quarry-findings.md.
+- Round 4: tab-opener prune finding FIXED+committed 73b6003b (prune_tab_openers on all tab-listing routes; tests; RUNBOOKS).
+- Round 4 (second part): COMMITTED dbc27a55: drift step fixed (working-directory sdks, compare '.', >=100 pages guard), new CI step for the Python SDK tests, RUNBOOKS paragraph corrected. Negative controls: untracked page rc 1, modified tracked page rc 1, clean rc 0 (281 pages); old command from SPA dir = warning only. Python 28 passed (8.6 s). actionlint rc 0. Tab-opener claim finding: no change needed (73b6003b). Nothing pending.
+- Round 4b: COMMITTED f8e67a04: python tests path in both filters, pytest>=8,<9, failure-surface comment; actionlint rc 0.

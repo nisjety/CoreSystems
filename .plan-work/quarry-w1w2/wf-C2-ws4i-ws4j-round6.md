@@ -1,0 +1,2 @@
+# C2 round 6 notes
+Commit 81f46f58. See RUNBOOKS "ZDR run tombstone: round 6 review fixes". Traps: the PG test asserting against a constant (zdrPutSlots) can never fail when the constant is raised, use a literal; run-pg.sh splits its 2nd arg on spaces so -run "a|b" quoting breaks, pass the package only; a stray `cat >` on the shared lib-edit.js path nearly truncated it (it was intact). Lock timeout and put timeout each alone bound the wait (single removals survive by design).

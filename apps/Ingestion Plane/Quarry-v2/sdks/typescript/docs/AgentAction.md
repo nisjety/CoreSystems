@@ -1,7 +1,7 @@
 
 # AgentAction
 
-Tagged action. Existing CSS selector actions remain supported. Snapshot actions (`*_ref` and `*_semantic`) must include the exact snapshot_id and generation from BrowserObservation.snapshot; stale, missing, or ambiguous targets return TARGET_REPAIR_REQUIRED (409).
+Tagged action. Existing CSS selector actions remain supported. Snapshot actions (`*_ref` and `*_semantic`) must include the exact snapshot_id and generation from BrowserObservation.snapshot; stale, missing, or ambiguous targets return TARGET_REPAIR_REQUIRED (409). With driver_capabilities.trusted_input true, a click_ref, type_ref or select_ref that cannot be performed as a person would also returns TARGET_REPAIR_REQUIRED (409), with details.reason one of target_not_attached, target_not_visible, target_disabled, target_covered (plus details.covered_by_tag, a tag name only), target_unstable, target_has_no_box or target_unreachable_after_scroll. The details never carry a selector, URL or page text.
 
 ## Properties
 
@@ -26,6 +26,7 @@ Name | Type
 `deltaY` | number
 `url` | string
 `key` | string
+`ignoreCache` | boolean
 `dialogId` | string
 `accept` | boolean
 `promptText` | string
@@ -59,6 +60,7 @@ const example = {
   "deltaY": null,
   "url": null,
   "key": null,
+  "ignoreCache": null,
   "dialogId": null,
   "accept": null,
   "promptText": null,

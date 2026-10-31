@@ -178,6 +178,20 @@ type RunPageInput struct {
 	// Ingest (Phase 2 selective ingest): true = the edge persists+embeds this
 	// page into the Data Plane; absent/false = working-set only (default NEVER).
 	Ingest bool `json:"ingest,omitempty"`
+	// Zdr is the ZDR posture stamped on the schedule at create (WS4.H). When
+	// non-nil it is declared on the run_page body so the edge fetches the page
+	// in ZDR mode (no artifact, event or local-index write-back). nil (a
+	// schedule that predates the stamp, a job, a crawl) leaves the body
+	// byte-identical to before.
+	Zdr *bool `json:"zdr,omitempty"`
+	// Kind is the job kind the page belongs to: "crawl" or "batch". Empty (a scrape or a
+	// monitor) leaves the body byte-identical to before. The edge meters only a crawl page
+	// (quarry.crawl.page, WS6.C-e).
+	Kind string `json:"kind,omitempty"`
+	// Crawl is the scope of a crawl page (WS14.S3). Nil for scrape, monitor and
+	// batch pages and for a crawl accepted before scope existed: the body is then
+	// byte-identical to before.
+	Crawl *CrawlContext `json:"crawl,omitempty"`
 }
 
 // RunPageResult is returned by the runtime after a successful page execution.
@@ -205,12 +219,25 @@ type RunPageResult struct {
 	WordCount    uint64 `json:"word_count,omitempty"`
 	Lang         string `json:"lang,omitempty"`
 	Driver       string `json:"driver,omitempty"`
+	// Crawl is the edge's report on the scope, set only when the request carried a
+	// `crawl` context (WS14.S3).
+	Crawl *CrawlReport `json:"crawl,omitempty"`
 }
 
 // RunPage executes a single page via Quarry Runtime.
 func (a *Activities) RunPage(ctx context.Context, in RunPageInput) (RunPageResult, error) {
 	const op = "activities.RunPage"
-	body, err := json.Marshal(map[string]any{"url": in.URL, "org_id": in.OrgID, "user_id": in.UserID, "ingest": in.Ingest})
+	payload := map[string]any{"url": in.URL, "org_id": in.OrgID, "user_id": in.UserID, "ingest": in.Ingest}
+	if in.Zdr != nil {
+		payload["zdr"] = *in.Zdr
+	}
+	if in.Kind != "" {
+		payload["kind"] = in.Kind
+	}
+	if in.Crawl != nil {
+		payload["crawl"] = in.Crawl
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return RunPageResult{}, errs.New(errs.CategoryValidation, op, err).Temporal()
 	}
@@ -252,7 +279,7 @@ func (a *Activities) RunPage(ctx context.Context, in RunPageInput) (RunPageResul
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return RunPageResult{}, errs.FromHTTPStatus(op, resp.StatusCode, respBody).Temporal()
+		return RunPageResult{}, errs.FromHTTPResponse(op, resp.StatusCode, respBody).Temporal()
 	}
 
 	var out RunPageResult
@@ -357,6 +384,12 @@ type CheckChangeInput struct {
 	RunID string `json:"run_id"`
 	OrgID string `json:"org_id"`
 	URL   string `json:"url"`
+	// Zdr is the ZDR posture stamped on the schedule when it was created
+	// (WS4.H, quarry-control migration 023). nil = a schedule that predates the
+	// stamp: nothing is declared, exactly as before. It is forwarded verbatim
+	// on /v1/internal/change/record, where the edge refuses (flag on) or logs
+	// would-refuse (flag off) for a true value.
+	Zdr *bool `json:"zdr,omitempty"`
 }
 
 // CheckChangeResult is the outcome of comparing a fresh fetch against the
@@ -368,6 +401,44 @@ type CheckChangeResult struct {
 	PrevFingerprint string `json:"prev_fingerprint,omitempty"`
 	BaselineID      string `json:"baseline_id,omitempty"`
 	DiffID          string `json:"diff_id,omitempty"`
+	// ZDRRefused is true when the edge refused to record the probe because
+	// the organization is under Zero Data Retention (WS4.H): a baseline is a
+	// durable resource, so nothing was compared or stored. It is a terminal,
+	// non-retryable outcome of the job, not an error: Status is "zdr_refused"
+	// and no other field is set.
+	ZDRRefused bool `json:"zdr_refused,omitempty"`
+}
+
+// ZDRRefusalCode is the catalogue code the edge puts in
+// error.details.zdr_refusal.code when it refuses a durable-resource write for a
+// Zero Data Retention organization (crates/quarry-edge/src/zdr_refusal.rs).
+const ZDRRefusalCode = "zdr_durable_mutation_forbidden"
+
+// StatusZDRRefused is the CheckChangeResult.Status of a probe the edge refused
+// under ZDR.
+const StatusZDRRefused = "zdr_refused"
+
+// isZDRRefusal reports whether an edge response is the ZDR durable-resource
+// refusal: a 403 whose error envelope carries details.zdr_refusal.code ==
+// ZDRRefusalCode. Any other 403 (a wrong internal token, a bot wall) is NOT
+// one, and keeps its CategoryAuth classification.
+func isZDRRefusal(status int, body []byte) bool {
+	if status != http.StatusForbidden {
+		return false
+	}
+	var env struct {
+		Error struct {
+			Details struct {
+				ZDRRefusal struct {
+					Code string `json:"code"`
+				} `json:"zdr_refusal"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return false
+	}
+	return env.Error.Details.ZDRRefusal.Code == ZDRRefusalCode
 }
 
 // changeRecordRequest is the body POSTed to quarry-edge's internal
@@ -379,6 +450,9 @@ type changeRecordRequest struct {
 	URL              string `json:"url"`
 	FreshFingerprint string `json:"fresh_fingerprint"`
 	RunID            string `json:"run_id"`
+	// Zdr declares the posture stamped at schedule create. Omitted (nil) for a
+	// legacy schedule, so its request body is byte-identical to before.
+	Zdr *bool `json:"zdr,omitempty"`
 }
 
 // CheckChange fetches the URL fresh (via the runtime), then asks the edge to
@@ -395,8 +469,10 @@ func (a *Activities) CheckChange(ctx context.Context, in CheckChangeInput) (Chec
 
 	// 1) Fresh fetch via the runtime — reuse RunPage's classified HTTP path.
 	// Pass OrgID so RunPage stamps the HMAC org-binding (the edge enforces
-	// it on /v1/internal/run_page).
-	page, err := a.RunPage(ctx, RunPageInput{RunID: in.RunID, URL: in.URL, OrgID: in.OrgID})
+	// it on /v1/internal/run_page). The stamped posture rides along (WS4.H) so
+	// a ZDR monitor's fetch persists no page content either, not only the
+	// baseline write that the record route refuses.
+	page, err := a.RunPage(ctx, RunPageInput{RunID: in.RunID, URL: in.URL, OrgID: in.OrgID, Zdr: in.Zdr})
 	if err != nil {
 		return CheckChangeResult{}, err
 	}
@@ -410,6 +486,7 @@ func (a *Activities) CheckChange(ctx context.Context, in CheckChangeInput) (Chec
 		URL:              in.URL,
 		FreshFingerprint: page.Fingerprint,
 		RunID:            in.RunID,
+		Zdr:              in.Zdr,
 	})
 	if err != nil {
 		return CheckChangeResult{}, errs.New(errs.CategoryValidation, op, err).Temporal()
@@ -438,6 +515,13 @@ func (a *Activities) CheckChange(ctx context.Context, in CheckChangeInput) (Chec
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
+	// A ZDR organization's baseline would be a durable resource, so the edge
+	// refuses it. That is a clean terminal outcome of the job, not a failed
+	// activity: returning it as an error would classify it CategoryAuth and the
+	// workflow would record a crash.
+	if isZDRRefusal(resp.StatusCode, respBody) {
+		return CheckChangeResult{Status: StatusZDRRefused, ZDRRefused: true}, nil
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return CheckChangeResult{}, errs.FromHTTPStatus(op, resp.StatusCode, respBody).Temporal()
 	}

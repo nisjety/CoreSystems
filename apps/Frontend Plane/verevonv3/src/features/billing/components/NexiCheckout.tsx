@@ -1,5 +1,7 @@
 import { Show, createEffect, createSignal, onCleanup } from 'solid-js'
 import type { CheckoutSession } from '@/features/billing/lib/api'
+import { useI18n } from '@/shared/i18n'
+import { LocalizedError, translateApiError } from '@/shared/i18n/errors'
 
 type ConfirmedPayment = {
   paymentId?: string
@@ -74,6 +76,7 @@ function amountLabel(session: CheckoutSession) {
  * server-side via the Nexi webhook; onConfirmed advances the UI optimistically.
  */
 export function NexiCheckout(props: NexiCheckoutProps) {
+  const i18n = useI18n()
   const containerId = checkoutContainerId()
   const [loading, setLoading] = createSignal(true)
   const [message, setMessage] = createSignal<string>()
@@ -99,7 +102,7 @@ export function NexiCheckout(props: NexiCheckoutProps) {
 
       void loadNexiScript(clientURL)
         .then(() => {
-          if (!window.Dibs) throw new Error('Payment checkout is unavailable.')
+          if (!window.Dibs) throw new LocalizedError({ no: 'Betalingssiden er ikke tilgjengelig akkurat nå. Prøv igjen senere.', en: 'The payment page is not available right now. Try again later.' })
 
           instance = window.Dibs.Checkout({
             checkoutKey,
@@ -120,7 +123,7 @@ export function NexiCheckout(props: NexiCheckoutProps) {
         })
         .catch((reason: unknown) => {
           setLoading(false)
-          setMessage(reason instanceof Error ? reason.message : 'Could not load payment checkout.')
+          setMessage(translateApiError(reason, i18n.tr, { no: 'Kunne ikke laste betalingssiden.', en: 'Could not load payment checkout.' }))
         })
     },
   )

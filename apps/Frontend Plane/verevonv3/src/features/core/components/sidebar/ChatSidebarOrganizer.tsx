@@ -1,12 +1,13 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import { Folder, FolderPlus, MessageSquarePlus, MoreHorizontal, Pin, Search, SlidersHorizontal, X } from '@/shared/icons'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError, LocalizedError } from '@/shared/i18n'
 import { getSession } from '@/shared/session/session-store'
 import type { ChatOrganizationAction } from '@/shared/actions/chat-organization'
 import { searchChatThreads, type ChatSearchHit } from '@/shared/api/chat-client'
 import { applyChatOrganizationAction, chatDateGroup, chatOrganizationStorageKey, emptyChatOrganization, readChatOrganization, saveChatOrganization, selectOrganizedChats } from '@/features/chat/lib/chat-organization'
 import type { ChatThreadHistoryItem } from '@/features/chat/lib/chat-thread-history'
+import { ChatWorkLinks } from './ChatWorkLinks'
 import { ChatSearchResults, nextSearchIndex, SEARCH_DEBOUNCE_MS, SEARCH_MIN_CHARS, searchListboxId, searchOptionId, type ChatSearchStatus } from './ChatSearchResults'
 import './chat-sidebar-organizer.css'
 
@@ -138,7 +139,7 @@ export function ChatSidebarOrganizer(props: {
 
   const dispatch = (...actions: ChatOrganizationAction[]) => {
     const key = scope()
-    if (!key) throw new Error(i18n.tr('Logg inn på et arbeidsområde først.', 'Sign in to a workspace first.'))
+    if (!key) throw new LocalizedError({ no: 'Logg inn på et arbeidsområde først.', en: 'Sign in to a workspace first.' })
     // Solid batches signal writes. Apply related changes in one transaction so
     // a view update cannot overwrite a project created in the same event.
     const next = actions.reduce(applyChatOrganizationAction, organization())
@@ -190,7 +191,7 @@ export function ChatSidebarOrganizer(props: {
       setMoveNotice(i18n.tr(`Flyttet til ${group.label}.`, `Moved to ${group.label}.`) +
         (thread?.pinned ? i18n.tr(' Samtalen er fortsatt festet.', ' The chat stays pinned.') : ''))
     } catch (reason) {
-      setMoveNotice(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke flytte samtalen.', 'Could not move the chat.'))
+      setMoveNotice(translateApiError(reason, i18n.tr, { no: 'Kunne ikke flytte samtalen.', en: 'Could not move the chat.' }))
     }
     endDrag()
   }
@@ -263,7 +264,7 @@ export function ChatSidebarOrganizer(props: {
         setSearchText('')
       }
       setMode(null)
-    } catch (reason) { setError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke lagre.', 'Could not save.')) }
+    } catch (reason) { setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke lagre.', en: 'Could not save.' })) }
   }
 
   return (
@@ -285,6 +286,7 @@ export function ChatSidebarOrganizer(props: {
         <div class="chat-organizer__search"><Search size={15} /><input ref={searchInput} type="search" role="combobox" maxlength="200" aria-expanded={serverHits().length ? 'true' : 'false'} aria-autocomplete="list" aria-controls={serverHits().length ? searchListboxId(SEARCH_ID_PREFIX) : undefined} aria-activedescendant={serverHits().length && activeHit() >= 0 ? searchOptionId(SEARCH_ID_PREFIX, activeHit()) : undefined} aria-label={i18n.tr('Søk i samtaler', 'Search chats')} placeholder={i18n.tr('Søk i samtaler …', 'Search chats…')} value={query()} onInput={(event) => setSearchText(event.currentTarget.value)} onKeyDown={onSearchKeyDown} /><button type="button" aria-label={i18n.tr('Lukk samtalesøk', 'Close chat search')} onClick={() => { setSearchText(''); setSearchOpen(false) }}><X size={14} /></button></div>
       </Show>
       <a href="/chat" link class="core-chat-sidebar__new" onClick={() => props.onNewChat()}><MessageSquarePlus size={17} />{i18n.tr('Ny samtale', 'New chat')}</a>
+      <ChatWorkLinks />
       {/* Shown only once the caller passes the starred set; without it the filter would empty the list. */}
       <Show when={props.starredThreadIds}>
         <button type="button" class="chat-organizer__starred-toggle" aria-pressed={starredOnly() ? 'true' : 'false'} onClick={() => setStarredOnly((on) => !on)}>{i18n.tr('Stjernemerkede', 'Starred')}</button>
@@ -341,8 +343,8 @@ export function ChatSidebarOrganizer(props: {
           <Show when={error()}><p role="alert">{error()}</p></Show>
           <Show when={mode()?.kind === 'project'}>
             <div class="chat-project-dialog__manage">
-              <button type="button" onClick={() => { const staticCurrent = mode(); if (staticCurrent?.kind !== 'project') return; const pinned = organization().projects.find((project) => project.id === staticCurrent.id)?.pinned; try { dispatch({ type: 'project.pin', id: staticCurrent.id, pinned: !pinned }) } catch (reason) { setError(String(reason)) } }}>{organization().projects.find((project) => project.id === (mode() as { id?: string })?.id)?.pinned ? i18n.tr('Løsne prosjekt', 'Unpin project') : i18n.tr('Fest prosjekt', 'Pin project')}</button>
-              <button type="button" onClick={() => { const current = mode(); if (current?.kind !== 'project') return; try { dispatch({ type: 'project.remove', id: current.id }); setMode(null) } catch (reason) { setError(String(reason)) } }}>{i18n.tr('Fjern prosjekt, behold samtaler', 'Remove project, keep chats')}</button>
+              <button type="button" onClick={() => { const staticCurrent = mode(); if (staticCurrent?.kind !== 'project') return; const pinned = organization().projects.find((project) => project.id === staticCurrent.id)?.pinned; try { dispatch({ type: 'project.pin', id: staticCurrent.id, pinned: !pinned }) } catch (reason) { setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke lagre.', en: 'Could not save.' })) } }}>{organization().projects.find((project) => project.id === (mode() as { id?: string })?.id)?.pinned ? i18n.tr('Løsne prosjekt', 'Unpin project') : i18n.tr('Fest prosjekt', 'Pin project')}</button>
+              <button type="button" onClick={() => { const current = mode(); if (current?.kind !== 'project') return; try { dispatch({ type: 'project.remove', id: current.id }); setMode(null) } catch (reason) { setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke fjerne prosjektet.', en: 'Could not remove the project.' })) } }}>{i18n.tr('Fjern prosjekt, behold samtaler', 'Remove project, keep chats')}</button>
             </div>
           </Show>
           <div class="chat-project-dialog__footer"><button type="button" onClick={() => setMode(null)}>{i18n.tr('Avbryt', 'Cancel')}</button><button type="submit">{mode()?.kind === 'create' ? i18n.tr('Opprett prosjekt', 'Create project') : i18n.tr('Lagre', 'Save')}</button></div>

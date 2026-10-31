@@ -40,3 +40,11 @@ path = "src/release_matrix.rs"
 [[bin]]
 name = "quarry-browser-benchmark"
 path = "src/browser_benchmark.rs"
+
+[[bin]]
+name = "quarry-tier-b"
+path = "src/tier_b.rs"
+
+[[bin]]
+name = "quarry-web-rerank-gate"
+path = "src/web_rerank_gate.rs"

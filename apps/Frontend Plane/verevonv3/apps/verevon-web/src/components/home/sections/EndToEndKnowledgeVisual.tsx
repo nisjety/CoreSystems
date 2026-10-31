@@ -1,26 +1,21 @@
 "use client";
 
 import Image from "next/image";
+import Link from "next/link";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { usePrefersReducedMotion } from "@/shared/hooks/usePrefersReducedMotion";
 import { KnowledgeGraph } from "./KnowledgeGraph";
+import {
+	SYSTEM_FIELD_ITEMS,
+	getSystemFieldSelection,
+} from "./brand-connector-data";
+import { DEFAULT_CARD_INTEGRATIONS } from "@/components/integrations/integration-catalog";
 import styles from "./KnowledgeCards.module.css";
 
 export type KnowledgeCardVisual = "business" | "connect" | "knowledge";
 
-const integrations = ["slack.svg", "notion.svg", "outlook.svg", "sharepoint.svg", "gmail.svg", "onedrive.svg", "teams.svg", "microsoft-365.svg", "google.svg", "bring.svg", "linkedin.svg", "meta.svg"];
-const systems = [
-	{ name: "Visma", file: "visma", category: "ERP" },
-	{ name: "Fiken", file: "fiken", category: "Regnskap" },
-	{ name: "Sanity", file: "sanity", category: "Innhold" },
-	{ name: "SuperOffice", file: "superoffice", category: "CRM" },
-	{ name: "Bring", file: "bring", category: "Logistikk" },
-	{ name: "Shopify", file: "shopify", category: "Netthandel" },
-	{ name: "ShipHero", file: "shiphero", category: "Lager" },
-	{ name: "ChatGPT", file: "chatgpt", category: "AI" },
-];
-
 export function ConnectVisual({ expanded = false }: { expanded?: boolean }) {
+	const [selected, setSelected] = useState<string | null>(null);
 	const tiles = [null, 0, null, 1, null, 2, 3, null, 4, null, 5, null, null, 6, null, 7, null, 8, 9, null, 10, null, 11, null];
 	return (
 		<div className={styles.connectionScene} data-expanded={expanded}>
@@ -28,20 +23,39 @@ export function ConnectVisual({ expanded = false }: { expanded?: boolean }) {
 				<div className={styles.tiles}>
 					{tiles.map((iconIndex, index) => (
 						<div className={styles.tile} key={index}>
-							{iconIndex !== null && <Image alt="" height={28} src={`/brand-logos/${integrations[iconIndex]}`} width={28} />}
+							{iconIndex !== null && (
+								DEFAULT_CARD_INTEGRATIONS[iconIndex].logo ? (
+									<Image alt="" height={28} src={`/brand-logos/${DEFAULT_CARD_INTEGRATIONS[iconIndex].logo}`} width={28} />
+								) : <span aria-hidden="true" className={styles.tileMark}>{DEFAULT_CARD_INTEGRATIONS[iconIndex].mark}</span>
+							)}
 						</div>
 					))}
 				</div>
 			</div>
 			<div aria-hidden={!expanded} className={styles.systems} inert={!expanded}>
-				<p className={styles.systemsCaption}>Fra ERP og CRM til resten av virksomheten</p>
-				<div className={styles.systemGrid}>
-					{systems.map((system, index) => (
-						<div className={styles.system} key={system.file} style={{ "--tile-order": index } as CSSProperties}>
-							<Image alt={system.name} src={`/brand-logos/${system.file}.svg`} width={100} height={32} />
-							<span>{system.category}</span>
-						</div>
-					))}
+				<p className={styles.systemsCaption} aria-live="polite">{getSystemFieldSelection(selected)}</p>
+				<div className={styles.systemField}>
+					<div aria-label="Systemer i arbeidshverdagen" className={styles.systemGrid} role="group">
+						{SYSTEM_FIELD_ITEMS.map((system, index) => (
+							<Link
+								aria-label={`Utforsk ${system.name} i integrasjonskatalogen`}
+								className={styles.system}
+								data-context={system.kind}
+								data-integration-id={system.id}
+								data-selected={selected === system.name}
+								data-system-link=""
+								data-system={system.name}
+								href={`/integrasjoner?integration=${system.id}#katalog`}
+								key={system.name}
+								onFocus={() => setSelected(system.name)}
+								onPointerEnter={(event) => { if (event.pointerType === "mouse") setSelected(system.name); }}
+								style={{ "--tile-order": index } as CSSProperties}
+							>
+								{system.logo ? <Image alt="" src={`/brand-logos/${system.logo}`} width={52} height={36} /> : <span aria-hidden="true" className={styles.systemMark}>{system.mark}</span>}
+								<span className={styles.systemName}>{system.name}</span>
+							</Link>
+						))}
+					</div>
 				</div>
 			</div>
 		</div>

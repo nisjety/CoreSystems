@@ -82,7 +82,7 @@ impl ModelPlaneQueryRewriter {
         match response {
             Ok(resp) => sanitize_rewrite(&resp.content, original),
             Err(e) => {
-                tracing::warn!(error = %e, "autoprompt: rewrite failed; using original query");
+                tracing::warn!(error_class = e.code.wire_name(), "autoprompt: rewrite failed; using original query");
                 original.to_string()
             }
         }

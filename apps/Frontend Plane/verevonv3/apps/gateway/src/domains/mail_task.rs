@@ -430,7 +430,7 @@ async fn ingest(State(state): State<AppState>, Json(request): Json<IngestRequest
                 .into_response()
         }
         Err(pipeline_error) => {
-            tracing::warn!(error = %pipeline_error, "mail-task pipeline run failed");
+            tracing::warn!(error_class = "pipeline_failed", error_len = pipeline_error.0.len(), "mail-task pipeline run failed");
             (
                 StatusCode::BAD_GATEWAY,
                 Json(error("mail_task_pipeline_failed", "Mail-task turn execution failed.")),
@@ -499,6 +499,7 @@ async fn publish_mail_task_drafted(state: &AppState, request: &IngestRequest, ou
     let payload = match serde_json::to_vec(&event) {
         Ok(payload) => payload,
         Err(error) => {
+            // zdr-log-ok: a serde serialisation error for the closed mail_task_drafted struct (ids, flags); mail content is not in it
             tracing::warn!(%error, "failed to encode mail_task_drafted event");
             return;
         }
@@ -511,6 +512,7 @@ async fn publish_mail_task_drafted(state: &AppState, request: &IngestRequest, ou
     )
     .await
     {
+        // zdr-log-ok: a NATS client error (connection state) from publishing a closed event of ids and flags; mail content is not in it
         tracing::warn!(%error, "mail_task_drafted publish failed");
     }
 }

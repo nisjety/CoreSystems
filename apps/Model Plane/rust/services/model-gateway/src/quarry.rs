@@ -58,6 +58,34 @@ pub enum QuarryError {
     Authentication(String),
 }
 
+impl QuarryError {
+    /// A class of this error that is safe to log: a typed envelope's code, or a
+    /// fixed word. Never the display text, which can carry the page URL.
+    pub(crate) fn log_class(&self) -> String {
+        match self {
+            Self::Unavailable => "unavailable".to_string(),
+            Self::Typed { code, .. } => code.clone(),
+            Self::Transport(_) => "transport".to_string(),
+            Self::EmptyEnvelope => "empty_envelope".to_string(),
+            Self::Decode(_) => "decode".to_string(),
+            Self::Authentication(_) => "authentication".to_string(),
+        }
+    }
+}
+
+/// What kind of host a caller URL names, for log lines: the URL itself is the
+/// caller's data and stays out of the logs.
+fn host_class(url: &str) -> &'static str {
+    let parsed = reqwest::Url::parse(url).ok();
+    match parsed.as_ref().and_then(|u| u.host_str()) {
+        Some(host) if host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok() => {
+            "ip_literal"
+        }
+        Some(_) => "hostname",
+        None => "invalid",
+    }
+}
+
 /// Browser-only render hints. Static / TLS-profile fetches ignore these.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RenderHints {
@@ -667,7 +695,7 @@ impl Client {
         }
         if let Some(kind) = content_kind(&first.raw).filter(|kind| *kind != "html") {
             tracing::debug!(
-                %url,
+                host_class = host_class(url),
                 content_kind = kind,
                 "quarry scrape returned no readable text for a non-html body; not escalating"
             );
@@ -684,7 +712,7 @@ impl Client {
         // this client has.
         if is_block_status(first.status) {
             tracing::debug!(
-                %url,
+                host_class = host_class(url),
                 status = first.status,
                 "quarry scrape answered with a block status and no readable text; not escalating"
             );
@@ -692,7 +720,7 @@ impl Client {
         }
 
         tracing::debug!(
-            %url,
+            host_class = host_class(url),
             status = first.status,
             "quarry scrape returned no readable text; escalating once to the browser driver"
         );
@@ -702,18 +730,22 @@ impl Client {
         {
             Ok(rendered) if !rendered.text.trim().is_empty() => {
                 tracing::debug!(
-                    %url,
+                    host_class = host_class(url),
                     chars = rendered.text.chars().count(),
                     "rendered retry recovered readable text"
                 );
                 Ok(rendered)
             }
             Ok(_) => {
-                tracing::debug!(%url, "rendered retry also returned no readable text");
+                tracing::debug!(host_class = host_class(url), "rendered retry also returned no readable text");
                 Ok(first)
             }
             Err(error) => {
-                tracing::debug!(%url, %error, "rendered retry failed; keeping the empty result");
+                tracing::debug!(
+                    host_class = host_class(url),
+                    error_class = %error.log_class(),
+                    "rendered retry failed; keeping the empty result"
+                );
                 Ok(first)
             }
         }
@@ -864,7 +896,7 @@ impl Client {
             Ok(text) if !text.trim().is_empty() => Some(text),
             Ok(_) => {
                 tracing::debug!(
-                    %url,
+                    host_class = host_class(url),
                     artifact_id = %reference.artifact_id,
                     "quarry markdown artifact resolved to an empty body"
                 );
@@ -872,10 +904,10 @@ impl Client {
             }
             Err(error) => {
                 tracing::warn!(
-                    %url,
+                    host_class = host_class(url),
                     artifact_id = %reference.artifact_id,
                     bytes = reference.bytes,
-                    %error,
+                    error_class = %error.log_class(),
                     "quarry returned page text as an artifact reference that could not be \
                      resolved; the page will be reported as unread"
                 );
@@ -1382,6 +1414,23 @@ mod tests {
     use super::*;
     use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    #[test]
+    fn log_lines_carry_a_host_class_and_an_error_class_never_the_url() {
+        assert_eq!(host_class("https://shop.example/cat?q=secret"), "hostname");
+        assert_eq!(host_class("http://10.0.0.7:8080/x"), "ip_literal");
+        assert_eq!(host_class("http://[::1]/x"), "ip_literal");
+        assert_eq!(host_class("not a url"), "invalid");
+        let typed = QuarryError::Typed {
+            code: "UPSTREAM_BLOCKED".to_owned(),
+            message: "blocked https://shop.example/cat?q=secret".to_owned(),
+            status: 502,
+        };
+        assert_eq!(typed.log_class(), "UPSTREAM_BLOCKED");
+        assert!(!typed.log_class().contains("shop.example"));
+        assert_eq!(QuarryError::EmptyEnvelope.log_class(), "empty_envelope");
+        assert_eq!(QuarryError::Unavailable.log_class(), "unavailable");
+    }
 
     #[derive(Clone)]
     struct RotatingTokenResponse(Arc<AtomicUsize>);

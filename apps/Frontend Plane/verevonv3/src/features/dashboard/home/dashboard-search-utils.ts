@@ -18,6 +18,8 @@ export type SearchSourceItem = {
 }
 
 export function faviconUrlForResult(url: string): string | null {
+  // The demo makes no third-party request, so no favicon lookup leaves the page.
+  if (import.meta.env.VITE_DEMO === '1') return null
   const hostname = safeHostname(url)
   if (!hostname || hostname === url) return null
   return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(hostname)}&sz=64`

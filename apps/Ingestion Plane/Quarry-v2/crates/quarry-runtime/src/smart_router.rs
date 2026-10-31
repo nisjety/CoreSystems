@@ -69,12 +69,11 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
-use url::Url;
 
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 
 use crate::autoprompt::QueryRewriter;
-use crate::fusion::RRF_K;
+use crate::fusion::{dedupe_key, RRF_K};
 use crate::intent_classifier::IntentClassifier;
 use crate::serp::{SearchOptions, SearchProvider, SearchResult};
 
@@ -541,7 +540,7 @@ impl SmartSearchRouter {
             }
             Err(e) => {
                 state.record_failure(&self.config);
-                tracing::warn!(provider = name, error = %e, "provider failed");
+                tracing::warn!(provider = name, error_class = e.code.wire_name(), "provider failed");
                 None
             }
         }
@@ -856,63 +855,6 @@ fn annotate(name: &'static str) -> impl Fn(Vec<SearchResult>) -> Vec<SearchResul
         }
         results
     }
-}
-
-/// Query parameters that carry campaign/attribution state and never change
-/// which document a URL points at.
-const TRACKING_PARAMS: &[&str] = &[
-    "fbclid", "gclid", "msclkid", "yclid", "igshid", "mc_cid", "mc_eid", "ref", "ref_src",
-    "_hsenc", "_hsmi",
-];
-
-fn is_tracking_param(key: &str) -> bool {
-    let k = key.to_ascii_lowercase();
-    k.starts_with("utm_") || TRACKING_PARAMS.contains(&k.as_str())
-}
-
-/// Canonical form of a URL, for use **as a dedupe key only**.
-///
-/// This must never replace the URL handed back to the caller: the user still
-/// has to get the real, clickable link the provider returned, tracking
-/// parameters and all. Its only job is to stop one document from occupying
-/// several of the caller's five result slots — an exact-string dedupe let
-/// http vs https, `www.` vs not, a trailing slash and a campaign tag through
-/// as four separate "sources", which both starved the budget and read to the
-/// answer layer as independent corroboration.
-///
-/// Unparsable input falls back to the lowercased raw string, so a malformed
-/// URL still dedupes against an identical malformed URL rather than being
-/// silently dropped.
-fn dedupe_key(raw: &str) -> String {
-    let trimmed = raw.trim();
-    let Ok(parsed) = Url::parse(trimmed) else {
-        return trimmed.to_lowercase();
-    };
-    let scheme = match parsed.scheme() {
-        // http and https address the same document; a provider returning the
-        // http variant of a page another provider returned over https is not
-        // a second source.
-        "http" | "https" => "http",
-        other => other,
-    };
-    let host_owned = parsed.host_str().unwrap_or_default().to_lowercase();
-    let host = host_owned.strip_prefix("www.").unwrap_or(&host_owned);
-    let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
-    let path = parsed.path();
-    let path = path.strip_suffix('/').unwrap_or(path);
-    let kept: Vec<String> = parsed
-        .query_pairs()
-        .filter(|(k, _)| !is_tracking_param(k))
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
-    let query = if kept.is_empty() {
-        String::new()
-    } else {
-        format!("?{}", kept.join("&"))
-    };
-    // The fragment is dropped: `…/page#intro` and `…/page` are one document,
-    // and the caller keeps whichever form arrived first.
-    format!("{scheme}://{host}{port}{path}{query}")
 }
 
 /// Weight multiplier for one provider's contributions. Missing = 1.0, so an

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -42,6 +44,10 @@ func TestReconnectProviderContextReplacesDerivedContextButPreservesGuildBinding(
 
 func TestCreateSessionSupportsOAuthProviderCatalog(t *testing.T) {
 	cfg := testOAuthConfig()
+	cfg.AlgoliaMCPOAuthClientFile = filepath.Join(t.TempDir(), "client.json")
+	if err := os.WriteFile(cfg.AlgoliaMCPOAuthClientFile, []byte(`{"version":1,"clientId":"owned-client","redirectUri":"https://integration.test/api/v1/providers/algolia/callback","resource":"https://mcp.algolia.com/mcp"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
 	if err != nil {
 		t.Fatalf("NewVault error: %v", err)
@@ -83,6 +89,59 @@ func TestCreateSessionSupportsOAuthProviderCatalog(t *testing.T) {
 				t.Fatalf("Scopes = empty for %s", provider.Key)
 			}
 		})
+	}
+}
+
+func TestCreateSessionRejectsUntrustedReturnURL(t *testing.T) {
+	cfg := testOAuthConfig()
+	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	service := NewService(cfg, store.NewMemoryRepository(), vault, NewMicrosoftClient(MicrosoftClientConfig{}))
+	service.clients["google"] = &callbackClient{}
+
+	_, err = service.CreateSession(context.Background(), CreateSessionInput{
+		ProviderKey: "google", OrganizationID: "org-1", UserID: "user-1",
+		Bundles: []string{"search_console"}, ReturnURL: "https://evil.example/after-connect",
+	})
+	if !errors.Is(err, ErrInvalidReturnURL) {
+		t.Fatalf("CreateSession error = %v, want untrusted return URL rejection", err)
+	}
+}
+
+func TestCompleteCallbackSurfacesARevokedReturnDestination(t *testing.T) {
+	cfg := testOAuthConfig()
+	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	repo := store.NewMemoryRepository()
+	service := NewService(cfg, repo, vault, NewMicrosoftClient(MicrosoftClientConfig{}))
+	publisher := &capturePublisher{}
+	service.SetEventPublisher(publisher)
+	service.clients["google"] = &callbackClient{profile: ProviderProfile{ID: "verified-google-account"}}
+
+	created, err := service.CreateSession(t.Context(), CreateSessionInput{
+		ProviderKey: "google", OrganizationID: "org-1", UserID: "user-1",
+		Bundles: []string{"search_console"}, ReturnURL: "https://app.test/integrations",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession error: %v", err)
+	}
+
+	// Simulate a deployment that deliberately removes a formerly-approved
+	// frontend origin while a provider authorization is in flight.
+	service.cfg.OAuthAllowedReturnOrigins = nil
+	result, err := service.CompleteCallback(t.Context(), "google", stateFromAuthURL(t, created.AuthorizationURL), "code", "", "")
+	if err != nil || !result.Success {
+		t.Fatalf("CompleteCallback result=%+v err=%v, want completed connection", result, err)
+	}
+	if !result.ReturnURLRejected || result.ReturnURL != "" || result.ReturnOrigin != "" {
+		t.Fatalf("callback result = %+v, want surfaced revoked return destination without a redirect", result)
+	}
+	if len(publisher.events) != 1 || publisher.events[0].Data["returnURLRejected"] != true {
+		t.Fatalf("integration event = %+v, want returnURLRejected telemetry", publisher.events)
 	}
 }
 
@@ -1171,6 +1230,7 @@ func (c *callbackClient) Revoke(context.Context, string, map[string]string) erro
 func testOAuthConfig() config.Config {
 	return config.Config{
 		PublicBaseURL:             "https://integration.test",
+		OAuthAllowedReturnOrigins: []string{"https://app.test"},
 		SessionTTL:                10 * time.Minute,
 		TokenRefreshSkew:          2 * time.Minute,
 		MicrosoftClientID:         "microsoft-client",

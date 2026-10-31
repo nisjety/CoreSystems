@@ -1,0 +1,44 @@
+{
+  "endpoint_name": "project_transactions",
+  "enabled": true,
+  "bigquery_table": "visma_project_transactions",
+  "primary_key": [
+    "module",
+    "refNbr",
+    "_scan_period"
+  ],
+  "source": "erp_rest",
+  "api_method": "get_project_transactions",
+  "api_endpoint": "/v1/projecttransaction",
+  "pagination_profile": "finance_page_number",
+  "required_query": [
+    "fromPeriod",
+    "toPeriod"
+  ],
+  "modified_field": null,
+  "merge_type": "upsert",
+  "sync_pattern": "scoped_wrapper_only",
+  "validation_fields": [
+    "module",
+    "refNbr",
+    "status"
+  ],
+  "datamart": {
+    "ready": false,
+    "pilot_override": false,
+    "query_file": "config/queries/project_transaction.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "erp_rest"
+  },
+  "period_scan": {
+    "first_period": "202301",
+    "query_params": [
+      "fromPeriod",
+      "toPeriod"
+    ],
+    "period_field": "_scan_period"
+  },
+  "notes": "ProjectTransaction requires mandatory fromPeriod/toPeriod. period_scan walks the months from first_period (the pilot tenant has no documents before 202512; v1's own backfill starts 202310) to the current month, one walk per month, on every run: one wide window gets slower with every page until it times out, a current-month window drops all older documents, and the checkpoint holds no usable watermark because the response has no top-level modification timestamp. An explicit --date-from/--date-to window replaces the range. The key includes _scan_period (the month a row was fetched under) because a ModulePM transaction keeps its refNbr month after month, each month's window holding only that month's lines: ModulePM 1400592 of Aquatiq Sense came back with 68, 66 and 66 lines in 202310, 202311 and 202312. Keyed on module + refNbr alone the later months overwrite the earlier ones (v1's key), and the sync rejects the duplicates. Lower first_period if a tenant has older documents; an empty month costs one request."
+}

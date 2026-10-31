@@ -23,6 +23,7 @@ const (
 	BrowserBroker_RevokeGrant_FullMethodName    = "/model_plane.v1.BrowserBroker/RevokeGrant"
 	BrowserBroker_ValidateGrant_FullMethodName  = "/model_plane.v1.BrowserBroker/ValidateGrant"
 	BrowserBroker_DeriveRunGrant_FullMethodName = "/model_plane.v1.BrowserBroker/DeriveRunGrant"
+	BrowserBroker_RenewGrant_FullMethodName     = "/model_plane.v1.BrowserBroker/RenewGrant"
 	BrowserBroker_Health_FullMethodName         = "/model_plane.v1.BrowserBroker/Health"
 )
 
@@ -44,6 +45,10 @@ type BrowserBrokerClient interface {
 	// equal to or below the parent's, ZDR inherited, expiry capped by the
 	// parent's, revoked with it. Idempotent on (parent_grant_id, session_key).
 	DeriveRunGrant(ctx context.Context, in *DeriveRunGrantRequest, opts ...grpc.CallOption) (*DeriveRunGrantResponse, error)
+	// Extend a renewable grant ("session" or "human_browse") by one TTL, never
+	// past its absolute expiry (WS8.C). User principals only: a service cannot
+	// keep a person's browser session alive.
+	RenewGrant(ctx context.Context, in *RenewGrantRequest, opts ...grpc.CallOption) (*RenewGrantResponse, error)
 	// Health check.
 	Health(ctx context.Context, in *BrowserHealthRequest, opts ...grpc.CallOption) (*BrowserHealthResponse, error)
 }
@@ -96,6 +101,16 @@ func (c *browserBrokerClient) DeriveRunGrant(ctx context.Context, in *DeriveRunG
 	return out, nil
 }
 
+func (c *browserBrokerClient) RenewGrant(ctx context.Context, in *RenewGrantRequest, opts ...grpc.CallOption) (*RenewGrantResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RenewGrantResponse)
+	err := c.cc.Invoke(ctx, BrowserBroker_RenewGrant_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *browserBrokerClient) Health(ctx context.Context, in *BrowserHealthRequest, opts ...grpc.CallOption) (*BrowserHealthResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BrowserHealthResponse)
@@ -124,6 +139,10 @@ type BrowserBrokerServer interface {
 	// equal to or below the parent's, ZDR inherited, expiry capped by the
 	// parent's, revoked with it. Idempotent on (parent_grant_id, session_key).
 	DeriveRunGrant(context.Context, *DeriveRunGrantRequest) (*DeriveRunGrantResponse, error)
+	// Extend a renewable grant ("session" or "human_browse") by one TTL, never
+	// past its absolute expiry (WS8.C). User principals only: a service cannot
+	// keep a person's browser session alive.
+	RenewGrant(context.Context, *RenewGrantRequest) (*RenewGrantResponse, error)
 	// Health check.
 	Health(context.Context, *BrowserHealthRequest) (*BrowserHealthResponse, error)
 	mustEmbedUnimplementedBrowserBrokerServer()
@@ -147,6 +166,9 @@ func (UnimplementedBrowserBrokerServer) ValidateGrant(context.Context, *Validate
 }
 func (UnimplementedBrowserBrokerServer) DeriveRunGrant(context.Context, *DeriveRunGrantRequest) (*DeriveRunGrantResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeriveRunGrant not implemented")
+}
+func (UnimplementedBrowserBrokerServer) RenewGrant(context.Context, *RenewGrantRequest) (*RenewGrantResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RenewGrant not implemented")
 }
 func (UnimplementedBrowserBrokerServer) Health(context.Context, *BrowserHealthRequest) (*BrowserHealthResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Health not implemented")
@@ -244,6 +266,24 @@ func _BrowserBroker_DeriveRunGrant_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _BrowserBroker_RenewGrant_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenewGrantRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BrowserBrokerServer).RenewGrant(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BrowserBroker_RenewGrant_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BrowserBrokerServer).RenewGrant(ctx, req.(*RenewGrantRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _BrowserBroker_Health_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(BrowserHealthRequest)
 	if err := dec(in); err != nil {
@@ -284,6 +324,10 @@ var BrowserBroker_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeriveRunGrant",
 			Handler:    _BrowserBroker_DeriveRunGrant_Handler,
+		},
+		{
+			MethodName: "RenewGrant",
+			Handler:    _BrowserBroker_RenewGrant_Handler,
 		},
 		{
 			MethodName: "Health",

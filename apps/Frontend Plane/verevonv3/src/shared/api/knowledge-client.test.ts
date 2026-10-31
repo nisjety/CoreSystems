@@ -57,6 +57,27 @@ describe('streamCrawlRunEvents — crawl 0-pages fix', () => {
     expect(onDone).toHaveBeenCalled()
   })
 
+  it('reads the robots refusals of a run_completed event apart from the other blocked pages', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        `event: run_completed\ndata: ${JSON.stringify({
+          event_id: 'evt_2',
+          type: 'run_completed',
+          run_id: 'run_2',
+          payload: { pages_visited: 4, pages_blocked: 3, pages_blocked_robots: 2 },
+        })}\n\n`,
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const events: CrawlWorkflowEvent[] = []
+    await streamCrawlRunEvents('org_1', 'job_2', { onEvent: (event) => events.push(event) })
+
+    const completed = events.find((event) => event.status === 'completed')
+    expect(completed?.pagesBlocked).toBe(3)
+    expect(completed?.pagesBlockedByRobots).toBe(2)
+  })
+
   it('honors the server-provided event-stream path (job-id keyed)', async () => {
     const fetchMock = vi.fn().mockResolvedValue(sseResponse(['event: done\ndata: done\n\n']))
     vi.stubGlobal('fetch', fetchMock)

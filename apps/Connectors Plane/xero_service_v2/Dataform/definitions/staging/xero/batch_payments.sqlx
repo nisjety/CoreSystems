@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "dw_staging_xero",
+  name: "batch_payments",
+  description: "Current Xero batch-payment headers, populated by etl/xero/batch_payments.py."
+}

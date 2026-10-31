@@ -1,0 +1,42 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_accounts",
+  description: "Bronze: Chart of accounts (GL account master data) from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.str("accountCD")} AS `accountCD`,
+  ${bronze.str("accountClass")} AS `accountClass`,
+  ${bronze.str("accountGroupCD")} AS `accountGroupCD`,
+  ${bronze.int("accountID")} AS `accountID`,
+  ${bronze.bool("active")} AS `active`,
+  ${bronze.bool("allowManualEntry")} AS `allowManualEntry`,
+  ${bronze.bool("cashAccount")} AS `cashAccount`,
+  ${bronze.str("controlAccountModule")} AS `controlAccountModule`,
+  ${bronze.str("currency")} AS `currency`,
+  ${bronze.str("description")} AS `description`,
+  ${bronze.str("lastModifiedDateTime")} AS `lastModifiedDateTime`,
+  ${bronze.str("metadata")} AS `metadata`,
+  ${bronze.str("postOption")} AS `postOption`,
+  ${bronze.str("publicCode1")} AS `publicCode1`,
+  ${bronze.str("taxCategory")} AS `taxCategory`,
+  ${bronze.str("timeStamp")} AS `timeStamp`,
+  ${bronze.str("type")} AS `type`,
+  ${bronze.bool("useDefaultSub")} AS `useDefaultSub`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`  -- v2 does not fetch this field
+FROM ${ref("dw_staging_visma", "accounts")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

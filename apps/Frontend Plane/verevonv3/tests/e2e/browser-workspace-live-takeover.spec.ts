@@ -84,4 +84,48 @@ test.describe('browser workspace: live frame streaming and human takeover', () =
     const restResponseBack = await restControlWaitBack
     expect(restResponseBack !== null || sentControlFrames.length > 0).toBeTruthy()
   })
+
+  /**
+   * WS9.I: the control strip is a compare-and-set on Quarry's control epoch. Take over moves the
+   * epoch to 1, Give back to 2, and a request that still carries the old epoch (0) is refused with
+   * the typed stale-epoch code and changes nothing. Written for the stack with WS2.C deployed; it is
+   * not run in the build.
+   */
+  test('take over and give back move the control epoch, and a stale epoch is refused', async ({ page, request }) => {
+    test.setTimeout(90_000)
+    const origin = new URL(test.info().project.use.baseURL ?? 'http://localhost:5173').origin
+
+    await resetHome(page)
+    sessionId = await submitBrowserUrl(page, EXAMPLE_URL)
+
+    const strip = page.locator('.browser-control-strip')
+    await expect(strip).toHaveAttribute('data-control-mode', 'agent_control')
+    const stripAction = strip.getByRole('button')
+
+    await stripAction.click()
+    await expect(strip).toHaveAttribute('data-control-mode', 'human_takeover')
+
+    const readSession = async () => {
+      const response = await request.get(`/api/v1/browser/sessions/${encodeURIComponent(sessionId ?? '')}`)
+      expect(response.status()).toBe(200)
+      const body = (await response.json()) as { data: { session: { control?: { mode: string; epoch?: number | null } } } }
+      return body.data.session
+    }
+    expect((await readSession()).control?.epoch).toBe(1)
+
+    // Give back with the epoch the strip rendered: the compare-and-set holds and the epoch advances.
+    await stripAction.click()
+    await expect(strip).toHaveAttribute('data-control-mode', 'agent_control')
+    expect((await readSession()).control?.epoch).toBe(2)
+
+    // A stale epoch (0, from before the takeover) is refused and changes nothing.
+    const stale = await request.post(`/api/v1/browser/sessions/${encodeURIComponent(sessionId ?? '')}/control`, {
+      headers: { 'content-type': 'application/json', origin },
+      data: { mode: 'human_takeover', expectedEpoch: 0 },
+    })
+    expect(stale.status()).toBe(409)
+    const staleBody = (await stale.json()) as { error: { code: string } }
+    expect(staleBody.error.code).toBe('browser_control_epoch_stale')
+    expect((await readSession()).control?.mode).toBe('agent_control')
+  })
 })

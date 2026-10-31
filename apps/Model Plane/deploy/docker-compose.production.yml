@@ -113,6 +113,11 @@ services:
   browser-broker:
     <<: *hardened-service
     ports: !reset []
+    environment:
+      # WS8.C: no open-web human_browse grants in production until ADR-3 is
+      # answered and the L2 evidence run exists. Turn it on per environment with
+      # BROWSER_BROKER_HUMAN_BROWSE_ENABLED=1 in the deployment's own env file.
+      BROWSER_BROKER_HUMAN_BROWSE_ENABLED: ${BROWSER_BROKER_HUMAN_BROWSE_ENABLED:-0}
   letta-bridge:
     <<: *hardened-service
     ports: !reset []

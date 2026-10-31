@@ -55,7 +55,7 @@ import { executeAction } from '@/shared/actions/action-client'
 import { ApiError } from '@/shared/api/http'
 import { getCSATScorecard, getTicketCSATOutcome, listTicketMacros, type SupportTicket, type TicketMacro } from '@/shared/api/tickets-client'
 import { cn } from '@/shared/lib/cn'
-import { localeDateTime, useI18n } from '@/shared/i18n'
+import { localeDateTime, useI18n, translateApiError } from '@/shared/i18n'
 import { AiModelPicker } from '@/shared/components/AiModelPicker'
 
 type AsideTab = 'details' | 'verevon' | 'actions' | 'audit'
@@ -1035,7 +1035,7 @@ function CalendarPanel(props: { selectedTicket: ZammadTicket | null }) {
       setEventTitle('')
       setError(null)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : i18n.tr('Oppfølgingen kunne ikke lagres.', 'The follow-up could not be saved.'))
+      setError(translateApiError(reason, i18n.tr, { no: 'Oppfølgingen kunne ikke lagres.', en: 'The follow-up could not be saved.' }))
     } finally {
       setSaving(null)
     }
@@ -1051,7 +1051,7 @@ function CalendarPanel(props: { selectedTicket: ZammadTicket | null }) {
       setNoteText('')
       setError(null)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : i18n.tr('Notatet kunne ikke lagres.', 'The note could not be saved.'))
+      setError(translateApiError(reason, i18n.tr, { no: 'Notatet kunne ikke lagres.', en: 'The note could not be saved.' }))
     } finally {
       setSaving(null)
     }

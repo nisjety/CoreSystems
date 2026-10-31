@@ -1,4 +1,4 @@
-import { ApiError, extractError } from './http'
+import { apiErrorFromResponse } from './http'
 import { gatewayBaseUrl } from './config'
 
 /**
@@ -194,8 +194,7 @@ async function requestEnvelope<T>(path: string, init?: RequestInit): Promise<Env
   })
   const body = (await response.json().catch(() => null)) as Envelope<T> | null
   if (!response.ok) {
-    const { code, message, feature } = extractError(body, response.status)
-    throw new ApiError(message, response.status, code, feature ?? null)
+    throw apiErrorFromResponse(body, response)
   }
   return body ?? {}
 }

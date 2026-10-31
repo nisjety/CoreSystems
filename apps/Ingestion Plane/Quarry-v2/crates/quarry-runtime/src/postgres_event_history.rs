@@ -252,18 +252,11 @@ fn event_id_for(event: &JobHistoryEvent) -> String {
 mod tests {
     use super::*;
 
-    fn database_url() -> Option<String> {
-        std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty())
-    }
-
+    /// A pool on this test's own schema (`crate::postgres_test_support`): no table is
+    /// shared with another test, so these run in parallel. Skips without a
+    /// `DATABASE_URL`; fails instead when `REQUIRE_CONTRACT` is set.
     async fn fresh_pool() -> Option<PgPool> {
-        let url = database_url()?;
-        let pool = PgPool::connect(&url).await.ok()?;
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .expect("migrations must apply");
-        Some(pool)
+        crate::postgres_test_support::isolated_pool("event history store").await
     }
 
     async fn clean(pool: &PgPool) {

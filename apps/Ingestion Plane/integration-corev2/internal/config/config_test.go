@@ -5,6 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -32,6 +35,7 @@ func TestLoadAndValidateRuntimeRequireTrustedProviderWriteAttestationKeys(t *tes
 	}
 	t.Setenv("INTEGRATION_CREDENTIALS_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012")))
 	t.Setenv("INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON", string(rawKeys))
+	t.Setenv("ENVIRONMENT", "test")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
@@ -46,7 +50,7 @@ func TestLoadAndValidateRuntimeRequireTrustedProviderWriteAttestationKeys(t *tes
 	cfg.OrgCoreServiceToken = "org-service-token-at-least-32-bytes"
 	cfg.BillingCoreServiceToken = "billing-service-token-at-least-32-bytes"
 	cfg.AuditCoreServiceToken = "audit-service-token-at-least-32-bytes"
-	cfg.PublicBaseURL = "http://integration-corev2:3026"
+	cfg.PublicBaseURL = "http://localhost:3026"
 	cfg.DatabaseURL = "postgres://integration"
 	if err := cfg.ValidateRuntime(); err != nil {
 		t.Fatalf("ValidateRuntime error: %v", err)
@@ -58,6 +62,96 @@ func TestLoadAndValidateRuntimeRequireTrustedProviderWriteAttestationKeys(t *tes
 			t.Fatalf("ValidateRuntime error = %v for unsafe keys, want provider-write key error", err)
 		}
 	}
+}
+
+func TestLoadDefaultsToDevEnvironment(t *testing.T) {
+	t.Setenv("INTEGRATION_CREDENTIALS_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012")))
+	t.Setenv("ENVIRONMENT", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if cfg.Environment != "dev" {
+		t.Fatalf("Environment = %q, want dev default (production must be set explicitly)", cfg.Environment)
+	}
+}
+
+func TestLoadDefaultsReturnOriginOnlyInLocalDevelopment(t *testing.T) {
+	for _, tc := range []struct {
+		environment string
+		want        []string
+	}{{"", []string{"http://localhost:5173"}}, {"dev", []string{"http://localhost:5173"}}, {"production", []string{}}} {
+		t.Run("env="+tc.environment, func(t *testing.T) {
+			t.Setenv("INTEGRATION_CREDENTIALS_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012")))
+			t.Setenv("ENVIRONMENT", tc.environment)
+			t.Setenv("INTEGRATION_ALLOWED_RETURN_ORIGINS", "")
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load error: %v", err)
+			}
+			if !slices.Equal(cfg.OAuthAllowedReturnOrigins, tc.want) {
+				t.Fatalf("OAuthAllowedReturnOrigins = %#v, want %#v", cfg.OAuthAllowedReturnOrigins, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadResolvesGoogleAndMetaSecretsFromFiles(t *testing.T) {
+	t.Setenv("INTEGRATION_CREDENTIALS_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012")))
+	t.Setenv("GOOGLE_CLIENT_SECRET", "")
+	t.Setenv("META_APP_CLIENT_SECRET", "")
+	t.Setenv("META_CLIENT_SECRET", "")
+	t.Setenv("FACEBOOK_CLIENT_SECRET", "")
+	t.Setenv("INSTAGRAM_CLIENT_SECRET", "")
+
+	secretDir := t.TempDir()
+	googleSecretFile := filepath.Join(secretDir, "google-client-secret")
+	metaSecretFile := filepath.Join(secretDir, "meta-client-secret")
+	if err := os.WriteFile(googleSecretFile, []byte("google-secret-from-file\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile Google secret: %v", err)
+	}
+	if err := os.WriteFile(metaSecretFile, []byte("meta-secret-from-file\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile Meta secret: %v", err)
+	}
+	t.Setenv("GOOGLE_CLIENT_SECRET_FILE", googleSecretFile)
+	t.Setenv("META_APP_CLIENT_SECRET_FILE", metaSecretFile)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if cfg.GoogleClientSecret != "google-secret-from-file" {
+		t.Fatalf("GoogleClientSecret was not resolved from its file")
+	}
+	if cfg.MetaClientSecret != "meta-secret-from-file" {
+		t.Fatalf("MetaClientSecret was not resolved from its file")
+	}
+}
+
+func TestLoadRejectsAmbiguousOrUnreadableSecretFiles(t *testing.T) {
+	t.Setenv("INTEGRATION_CREDENTIALS_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012")))
+	secretFile := filepath.Join(t.TempDir(), "google-client-secret")
+	if err := os.WriteFile(secretFile, []byte("file-secret"), 0o600); err != nil {
+		t.Fatalf("WriteFile secret: %v", err)
+	}
+
+	t.Run("conflicting sources", func(t *testing.T) {
+		t.Setenv("GOOGLE_CLIENT_SECRET", "environment-secret")
+		t.Setenv("GOOGLE_CLIENT_SECRET_FILE", secretFile)
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "GOOGLE_CLIENT_SECRET") {
+			t.Fatalf("Load error = %v, want Google secret source conflict", err)
+		}
+	})
+
+	t.Run("unreadable source", func(t *testing.T) {
+		t.Setenv("GOOGLE_CLIENT_SECRET", "")
+		t.Setenv("GOOGLE_CLIENT_SECRET_FILE", t.TempDir())
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "GOOGLE_CLIENT_SECRET_FILE") {
+			t.Fatalf("Load error = %v, want generic unreadable Google secret source error", err)
+		}
+	})
 }
 
 func TestValidateRuntimeFailsClosedForEveryRequiredBoundary(t *testing.T) {
@@ -72,8 +166,8 @@ func TestValidateRuntimeFailsClosedForEveryRequiredBoundary(t *testing.T) {
 		t.Fatalf("Marshal keys error: %v", err)
 	}
 	valid := Config{
-		InternalAPIKey: "internal", AuthCoreURL: "http://auth-core:3011", AuthCoreInternalAPIKey: "auth-key",
-		OrgCoreURL: "http://org-core:8080", PublicBaseURL: "http://integration-corev2:3026",
+		Environment: "test", InternalAPIKey: "internal", AuthCoreURL: "http://auth-core:3011", AuthCoreInternalAPIKey: "auth-key",
+		OrgCoreURL: "http://org-core:8080", PublicBaseURL: "http://localhost:3026",
 		OrgCoreServiceToken: "org-service-token-at-least-32-bytes", BillingCoreServiceToken: "billing-service-token-at-least-32-bytes",
 		AuditCoreServiceToken: "audit-service-token-at-least-32-bytes",
 		DatabaseURL:           "postgres://integration", EncryptionKey: []byte("12345678901234567890123456789012"),
@@ -115,6 +209,78 @@ func TestValidateRuntimeFailsClosedForEveryRequiredBoundary(t *testing.T) {
 	allowMemory.AllowInMemoryStore = true
 	if err := allowMemory.ValidateRuntime(); err != nil {
 		t.Fatalf("ValidateRuntime in-memory opt-in error: %v", err)
+	}
+}
+
+func TestValidateRuntimeRejectsInsecurePublicBaseOutsideDevelopment(t *testing.T) {
+	valid := Config{
+		Environment: "production", InternalAPIKey: "internal", AuthCoreURL: "https://auth.example",
+		AuthCoreInternalAPIKey: "auth-key", OrgCoreURL: "https://org.example",
+		OrgCoreServiceToken:     "org-service-token-at-least-32-bytes",
+		BillingCoreServiceToken: "billing-service-token-at-least-32-bytes",
+		AuditCoreServiceToken:   "audit-service-token-at-least-32-bytes",
+		PublicBaseURL:           "https://integration.example", DatabaseURL: "postgres://integration",
+		EncryptionKey:                    []byte("12345678901234567890123456789012"),
+		ProviderWriteAttestationKeysJSON: validTrustedAttestationKeys(t),
+	}
+	valid.PublicBaseURL = "http://integration.example"
+	if err := valid.ValidateRuntime(); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("ValidateRuntime error = %v, want HTTPS public URL rejection", err)
+	}
+}
+
+func validTrustedAttestationKeys(t *testing.T) string {
+	t.Helper()
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey error: %v", err)
+	}
+	rawKeys, err := json.Marshal([]map[string]string{{
+		"issuer": "conversation-core", "kid": "conversation-write-test", "public_key": base64.StdEncoding.EncodeToString(publicKey),
+	}})
+	if err != nil {
+		t.Fatalf("Marshal keys error: %v", err)
+	}
+	return string(rawKeys)
+}
+
+func TestNormalizeOAuthReturnURLAllowsOnlyConfiguredSecureOrigins(t *testing.T) {
+	cfg := Config{Environment: "production", OAuthAllowedReturnOrigins: []string{"https://app.example"}}
+	gotURL, gotOrigin, err := cfg.NormalizeOAuthReturnURL("https://app.example/marketing?source=google")
+	if err != nil {
+		t.Fatalf("NormalizeOAuthReturnURL trusted URL: %v", err)
+	}
+	if gotURL != "https://app.example/marketing?source=google" || gotOrigin != "https://app.example" {
+		t.Fatalf("trusted URL/origin = %q/%q", gotURL, gotOrigin)
+	}
+	for _, unsafe := range []string{"http://app.example/marketing", "https://evil.example/marketing", "https://user:password@app.example/marketing", "https://app.example/marketing#fragment"} {
+		if _, _, err := cfg.NormalizeOAuthReturnURL(unsafe); err == nil {
+			t.Errorf("NormalizeOAuthReturnURL(%q) succeeded, want rejection", unsafe)
+		}
+	}
+}
+
+func TestNormalizeOAuthReturnURLAllowsHTTPOnlyForExplicitLocalLoopback(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		environment string
+		origin      string
+		wantErr     bool
+	}{
+		{name: "local localhost", environment: "local", origin: "http://localhost:5173"},
+		{name: "development ipv4 loopback", environment: "development", origin: "http://127.0.0.1:5173"},
+		{name: "test ipv6 loopback", environment: "test", origin: "http://[::1]:5173"},
+		{name: "missing environment fails closed", environment: "", origin: "http://localhost:5173", wantErr: true},
+		{name: "production rejects loopback HTTP", environment: "production", origin: "http://localhost:5173", wantErr: true},
+		{name: "local rejects non-loopback HTTP", environment: "local", origin: "http://integration.example:5173", wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{Environment: tt.environment, OAuthAllowedReturnOrigins: []string{tt.origin}}
+			_, _, err := cfg.NormalizeOAuthReturnURL(tt.origin + "/after-connect")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("NormalizeOAuthReturnURL(%q) error = %v, wantErr %t", tt.origin, err, tt.wantErr)
+			}
+		})
 	}
 }
 

@@ -220,6 +220,7 @@ impl BrowserDriver for DeterministicBrowserDriver {
     async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
         Ok(BrowserSession {
             lease: lease.clone(),
+            tab_pin: None,
             inner: Arc::new(Mutex::new(SessionInner {
                 connected: true,
                 pages_served: 0,

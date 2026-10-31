@@ -23,6 +23,8 @@
 // compiles this module separately.
 #![allow(dead_code)]
 
+pub mod fixture_site;
+
 use std::sync::Arc;
 
 use quarry_core::output::DriverKind;
@@ -46,6 +48,9 @@ pub fn base_state(driver: Arc<dyn Driver>, event_sink: EventSink) -> AppState {
         receipts: Arc::new(quarry_runtime::InMemoryStepReceiptStore::new()),
         grant_validator: Arc::new(quarry_runtime::NoopGrantValidator),
         require_browser_grants: false,
+        zdr_refuse_durable_resources: false,
+        profile_owner_enforce: quarry_edge::profile_guard::OwnerEnforce::Observe,
+        org_erasables: Vec::new(),
         driver,
         drivers,
         http3: None,
@@ -68,11 +73,15 @@ pub fn base_state(driver: Arc<dyn Driver>, event_sink: EventSink) -> AppState {
         page_title_enricher: None,
         service_token_provider: None,
         answer_pipeline: None,
+        model_plane: Default::default(),
         local_index: None,
         usage: Arc::new(quarry_runtime::NoopUsageMeter),
-        policy: quarry_runtime::RunPolicy::default(),
+        limits: Arc::new(quarry_edge::limits::StaticFloor),
+        policy: quarry_edge::policy_baseline::PolicyBaseline::default(),
+        robots: None,
         scheduler: None,
         internal_signer: None,
+        tombstones: None,
         page_renderer: None,
         visual_processor: None,
         #[cfg(feature = "postgres-queue")]

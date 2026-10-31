@@ -105,6 +105,8 @@ import {
 import { speechPlayer } from "@/features/voice/speech-playback";
 import { PendingChatLaunchError, writePendingChatLaunch } from "@/features/chat/lib/pending-chat-launch";
 import { ScheduleDialog } from "@/features/chat/components/ScheduleDialog";
+import { ChatWorkPeriodPicker } from "@/features/chat/components/ChatWorkPeriodPicker";
+import type { ChatWorkPeriod } from "@/shared/actions/chat-work-period";
 import { prepareChatAttachments } from "@/features/chat/lib/prepare-chat-attachments";
 import {
 	effortLevelWithin,
@@ -160,7 +162,7 @@ import {
 	sovereignCatalogNotice,
 	type PrivacyTier,
 } from "@/shared/api/privacy-tier";
-import { translateApiError, useI18n } from "@/shared/i18n";
+import { LocalizedError, translateApiError, useI18n } from "@/shared/i18n";
 import { ApiError } from "@/shared/api/http";
 import { cn } from "@/shared/lib/cn";
 import { getSession } from "@/shared/session/session-store";
@@ -899,6 +901,8 @@ export function DashboardComposer(props: {
      */
     retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope;
     onRetrievalScopeChange?: (value: import('@/shared/actions/chat-source-scope').RetrievalScope) => void;
+	workPeriod?: ChatWorkPeriod;
+	onWorkPeriodChange?: (value: ChatWorkPeriod) => void;
     /**
      * The conversation is bound to a Space. Connected apps are refused in Space rooms (DEC-06),
      * so the context panel says why instead of offering chips (WS23 S6).
@@ -3793,6 +3797,9 @@ export function DashboardComposer(props: {
 								</span>
 							</button>
 							<div class="dashboard-composer-toolbar__divider" />
+							<Show when={props.appearance === "chat" && props.workPeriod && props.onWorkPeriodChange}>
+								<ChatWorkPeriodPicker value={props.workPeriod!} onChange={props.onWorkPeriodChange!} />
+							</Show>
 							<ComposerIconButton
 								active={suggestionsOpen()}
 								label={i18n.tr("Forslag", "Suggestions")}
@@ -5792,12 +5799,10 @@ async function buildComposerFileFromPick(input: {
 		try {
 			extractedText = (await extractChatDocument(name, contentBase64, mimeType)).content;
 		} catch {
-			throw new Error(
-				i18n.tr(
-					`Kunne ikke lese «${name}». Prøv igjen eller velg en annen fil.`,
-					`Could not read "${name}". Try again or choose a different file.`,
-				),
-			);
+			throw new LocalizedError({
+				no: `Kunne ikke lese «${name}». Prøv igjen eller velg en annen fil.`,
+				en: `Could not read "${name}". Try again or choose a different file.`,
+			});
 		}
 	} else if (mimeType.startsWith("text/") || CONNECTOR_TEXT_INGEST_EXTENSIONS.test(name)) {
 		// Already have the bytes — decoding locally is free, no second
@@ -5908,8 +5913,6 @@ function ConnectorAttachPicker(props: {
 						"That item is no longer available. Search again.",
 					),
 				);
-			} else if (err instanceof Error) {
-				setPickError(err.message);
 			} else {
 				setPickError(translateApiError(err, props.i18n.tr));
 			}

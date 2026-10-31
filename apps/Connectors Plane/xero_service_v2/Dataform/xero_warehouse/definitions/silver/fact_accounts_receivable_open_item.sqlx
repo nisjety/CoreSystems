@@ -1,0 +1,147 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero customer receivable open items. Invoice balances are debit items; unapplied customer credit notes and overpayments are retained as negative credit items rather than netted away.",
+  assertions: {
+    nonNull: ["tenant_id", "open_item_key", "source_document_type", "source_document_id", "currency_code", "source_observed_at"],
+    uniqueKey: ["open_item_key"]
+  }
+}
+
+WITH credit_line_sets AS (
+  SELECT
+    tenant_id,
+    credit_note_id,
+    COUNT(*) AS observed_line_count,
+    MAX(observed_net_subtotal) AS observed_net_subtotal,
+    LOGICAL_OR(is_line_set_ambiguous) AS has_ambiguous_lines
+  FROM ${ref("dw_1_silver_xero", "fact_credit_note_line")}
+  GROUP BY tenant_id, credit_note_id
+),
+credits AS (
+  SELECT
+    c.*,
+    c.line_item_count IS DISTINCT FROM COALESCE(s.observed_line_count, 0)
+      OR c.sub_total IS NULL
+      OR ABS(COALESCE(s.observed_net_subtotal, 0) - c.sub_total) > 0.02
+      OR COALESCE(s.has_ambiguous_lines, FALSE) AS is_line_set_ambiguous
+  FROM ${ref("dw_1_silver_xero", "fact_credit_note")} AS c
+  LEFT JOIN credit_line_sets AS s
+    ON c.tenant_id = s.tenant_id
+   AND c.credit_note_id = s.credit_note_id
+),
+overpayment_line_sets AS (
+  SELECT
+    tenant_id,
+    overpayment_id,
+    COUNT(*) AS observed_line_count,
+    MAX(observed_net_subtotal) AS observed_net_subtotal,
+    LOGICAL_OR(is_line_set_ambiguous) AS has_ambiguous_lines
+  FROM ${ref("dw_1_silver_xero", "fact_overpayment_line")}
+  GROUP BY tenant_id, overpayment_id
+),
+overpayments AS (
+  SELECT
+    o.*,
+    o.line_item_count IS DISTINCT FROM COALESCE(s.observed_line_count, 0)
+      OR o.sub_total IS NULL
+      OR ABS(COALESCE(s.observed_net_subtotal, 0) - o.sub_total) > 0.02
+      OR COALESCE(s.has_ambiguous_lines, FALSE) AS is_line_set_ambiguous
+  FROM ${ref("dw_1_silver_xero", "fact_overpayment")} AS o
+  LEFT JOIN overpayment_line_sets AS s
+    ON o.tenant_id = s.tenant_id
+   AND o.overpayment_id = s.overpayment_id
+),
+documents AS (
+  SELECT
+    CONCAT(tenant_id, '|invoice|', invoice_id) AS open_item_key,
+    tenant_id,
+    'invoice' AS source_document_type,
+    invoice_id AS source_document_id,
+    invoice_key AS source_document_key,
+    invoice_number AS reference_number,
+    contact_id,
+    contact_name,
+    invoice_date_local AS document_date,
+    due_date_local AS document_due_date,
+    currency_code,
+    currency_rate AS source_exchange_rate,
+    status,
+    is_deleted,
+    is_voided,
+    is_missing_from_staging,
+    total AS source_amount_in_currency,
+    amount_due AS unsigned_open_balance_in_currency,
+    amount_due AS open_balance_in_currency,
+    'debit' AS open_item_direction,
+    synced_at AS source_observed_at,
+    TRUE AS is_source_document_reconciled
+  FROM ${ref("dw_1_silver_xero", "fact_invoice")}
+  WHERE invoice_type = 'ACCREC'
+
+  UNION ALL
+
+  SELECT
+    CONCAT(tenant_id, '|credit_note|', credit_note_id),
+    tenant_id,
+    'credit_note',
+    credit_note_id,
+    credit_note_key,
+    credit_note_number,
+    contact_id,
+    contact_name,
+    credit_note_date_local,
+    CAST(NULL AS DATE),
+    currency_code,
+    currency_rate,
+    status,
+    is_deleted,
+    is_voided,
+    is_missing_from_staging,
+    total,
+    remaining_credit,
+    -remaining_credit,
+    'credit',
+    synced_at,
+    NOT is_line_set_ambiguous
+  FROM credits
+  WHERE credit_note_type = 'ACCRECCREDIT'
+
+  UNION ALL
+
+  SELECT
+    CONCAT(tenant_id, '|overpayment|', overpayment_id),
+    tenant_id,
+    'overpayment',
+    overpayment_id,
+    overpayment_key,
+    reference,
+    contact_id,
+    contact_name,
+    DATE(overpayment_date),
+    CAST(NULL AS DATE),
+    currency_code,
+    currency_rate,
+    status,
+    is_deleted,
+    is_voided,
+    FALSE,
+    total,
+    remaining_credit,
+    -remaining_credit,
+    'credit',
+    synced_at,
+    NOT is_line_set_ambiguous
+  FROM overpayments
+  WHERE overpayment_type = 'RECEIVE-OVERPAYMENT'
+)
+
+SELECT
+  *,
+  is_source_document_reconciled
+    AND NOT is_deleted
+    AND NOT is_voided
+    AND status IN ('AUTHORISED', 'PAID')
+    AND unsigned_open_balance_in_currency IS NOT NULL
+    AND ABS(unsigned_open_balance_in_currency) > 0 AS is_current_open_balance
+FROM documents

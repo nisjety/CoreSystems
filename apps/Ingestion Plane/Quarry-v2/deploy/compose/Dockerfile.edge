@@ -186,6 +186,13 @@ RUN set -e; \
     chown -R 65532:65532 /var/lib/quarry; \
     echo 'quarry:x:65532:65532::/var/lib/quarry/home:/usr/sbin/nologin' >> /etc/passwd
 
+# Artifact root for QUARRY_EDGE__ARTIFACT_BACKEND=filesystem (the production
+# overlay mounts a named volume here). Docker gives a fresh named volume the
+# ownership of the image directory it covers, so this must exist and belong to
+# the non-root user, or the edge boots (/ready 200) and then answers every
+# artifact write with 500 Permission denied.
+RUN mkdir -p /app/data/artifacts && chown 65532:65532 /app/data/artifacts
+
 COPY --from=build --chown=quarry:quarry \
     /out/quarry-edge-rs /usr/local/bin/quarry-edge-rs
 

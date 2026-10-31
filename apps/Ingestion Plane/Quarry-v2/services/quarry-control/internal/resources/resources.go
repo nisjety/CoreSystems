@@ -21,14 +21,41 @@ import (
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 )
 
-func MountJobs(r chi.Router, db store.DB) {
+// JobsOption customises MountJobs.
+type JobsOption func(*Admission)
+
+// WithAdmission enables the job-admission policy (per-organization caps, a
+// bounded backlog, the claim endpoint). Without it control behaves as before.
+func WithAdmission(a Admission) JobsOption {
+	return func(into *Admission) { *into = a }
+}
+
+func MountJobs(r chi.Router, db store.DB, opts ...JobsOption) {
+	var adm Admission
+	for _, opt := range opts {
+		opt(&adm)
+	}
+	// Dispatcher-only: take leased work instead of reading a window. Mounted
+	// under the same HMAC group as every other /v1 route; 404 while admission is
+	// off so a newer dispatcher falls back to listing.
+	r.Post("/v1/internal/jobs/claim", claimJobs(db, adm))
+	// Job control (WS15.L2): the orchestrator control loop reads the pending
+	// requests, acknowledges them, lists running jobs and finalizes ended ones.
+	r.Get("/v1/internal/jobs/pending-control", pendingControl(db))
+	r.Post("/v1/internal/jobs/{id}/control-ack", controlAck(db))
+	r.Get("/v1/internal/jobs/running", runningJobs(db))
+	r.Post("/v1/internal/jobs/{id}/finalize", finalizeJob(db))
 	r.Route("/v1/jobs", func(r chi.Router) {
 		r.Get("/", listJobs(db))
-		r.Post("/", createJob(db))
+		r.Post("/", createJob(db, adm))
 		r.Get("/{id}", getJob(db))
 		r.Put("/{id}", updateJob(db))
 		r.Get("/{id}/events", jobEvents(db))
 		r.Get("/{id}/history", jobHistory(db))
+		r.Get("/ongoing", jobsOngoing(db))
+		r.Get("/{id}/summary", jobSummary(db))
+		r.Get("/{id}/errors", jobErrors(db))
+		r.Post("/{id}/control", controlJob(db))
 	})
 }
 
@@ -41,147 +68,6 @@ func MountArtifacts(r chi.Router, db store.DB) {
 func MountProfiles(r chi.Router, db store.DB) {
 	mountSimple[store.BrowserProfile](r, "/v1/profiles", db.Profiles())
 }
-func MountSchedules(r chi.Router, db store.DB) {
-	s := db.Schedules()
-	// Schedules use explicit handlers (not mountSimple) because the
-	// list/get responses must carry the DERIVED orchestrator contract
-	// fields (workflow/args/paused) via scheduleWire — the reconciler
-	// reads GET /v1/schedules to learn which Temporal workflow to run.
-	r.Route("/v1/schedules", func(r chi.Router) {
-		r.Get("/", listSchedulesHandler(s))
-		r.Post("/", createScheduleHandler(s))
-		r.Get("/{id}", getScheduleHandler(s))
-		r.Delete("/{id}", deleteScheduleHandler(s))
-	})
-	r.Post("/v1/schedules/{id}/enable", scheduleSetEnabled(s, true))
-	r.Post("/v1/schedules/{id}/disable", scheduleSetEnabled(s, false))
-	r.Get("/v1/schedules/{id}/runs", scheduleRuns(db))
-}
-
-// listSchedulesHandler returns the schedule list projected through
-// scheduleWire so the orchestrator reconciler sees workflow/args/paused.
-func listSchedulesHandler(s store.SchedulesStore) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		if limit <= 0 {
-			limit = 50
-		}
-		items, _ := s.List(limit, r.URL.Query().Get("cursor"))
-		out := make([]scheduleWire, 0, len(items))
-		for _, it := range items {
-			out = append(out, toScheduleWire(it))
-		}
-		httpx.WriteJSON(w, r, http.StatusOK, out)
-	}
-}
-
-func getScheduleHandler(s store.SchedulesStore) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := quarrycontracts.ID(chi.URLParam(r, "id"))
-		v, ok := s.Get(id)
-		if !ok {
-			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
-			return
-		}
-		httpx.WriteJSON(w, r, http.StatusOK, toScheduleWire(v))
-	}
-}
-
-// deleteScheduleHandler soft-removes a schedule. The orchestrator reconciler
-// reaps the matching Temporal schedule on its next pass (the deleted row drops
-// out of desiredSet). Restores the DELETE the generic mountSimple used to
-// provide before MountSchedules moved to explicit wire-shaped handlers.
-func deleteScheduleHandler(s store.SchedulesStore) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := quarrycontracts.ID(chi.URLParam(r, "id"))
-		if err := s.Delete(id); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
-				return
-			}
-			httpx.WriteErr(w, r, quarrycontracts.CodeInternal, err.Error(), nil)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	}
-}
-
-// createScheduleHandler decodes + validates a schedule (mapping the
-// change_monitor preset to a 5-field cron and requiring org_id) and returns
-// the created record in wire shape. org_id is expected to already be stamped
-// from the edge's verified JWT — Validate rejects an empty org_id.
-func createScheduleHandler(s store.SchedulesStore) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var v store.Schedule
-		if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
-			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
-			return
-		}
-		if err := v.Validate(); err != nil {
-			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
-			return
-		}
-		if err := s.Create(v); err != nil {
-			httpx.WriteErr(w, r, quarrycontracts.CodeConflict, err.Error(), nil)
-			return
-		}
-		httpx.WriteJSON(w, r, http.StatusCreated, toScheduleWire(v))
-	}
-}
-
-// scheduleRuns returns the run history (jobs) triggered by a schedule.
-// Contract: GET /v1/schedules/{id}/runs?limit=&cursor=. Scoped to the
-// edge-verified `?org_id`: SchedulesStore has no dedicated GetByOrg (Get +
-// an OrgID equality check is the same guard), and a schedule ID mismatch
-// is reported identically to a genuinely missing one — mirrors the
-// Source/Job GetByOrg pattern.
-func scheduleRuns(db store.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := quarrycontracts.ID(chi.URLParam(r, "id"))
-		if err := id.MustKind(quarrycontracts.KindSchedule); err != nil {
-			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
-			return
-		}
-		org := orgFromQuery(r)
-		if org == "" {
-			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "org_id required", nil)
-			return
-		}
-		sched, ok := db.Schedules().Get(id)
-		if !ok || sched.OrgID != org {
-			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
-			return
-		}
-		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		if limit <= 0 {
-			limit = 50
-		}
-		items, next := db.Jobs().ListBySchedule(id, limit, r.URL.Query().Get("cursor"))
-		if items == nil {
-			items = []store.Job{}
-		}
-		httpx.WriteJSON(w, r, http.StatusOK, map[string]any{
-			"items":       items,
-			"next_cursor": next,
-		})
-	}
-}
-
-func scheduleSetEnabled(s store.SchedulesStore, enabled bool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := quarrycontracts.ID(chi.URLParam(r, "id"))
-		if err := s.UpdateEnabled(id, enabled); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
-				return
-			}
-			httpx.WriteErr(w, r, quarrycontracts.CodeInternal, err.Error(), nil)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	}
-}
-
 func MountEvents(r chi.Router, db store.DB, apiKey string, sink notify.Sink) {
 	// GET /v1/runs/{id}/events backs quarry-edge's list_run_events fallback
 	// (crates/quarry-edge/src/resource_routes.rs), which deserializes every
@@ -237,12 +123,13 @@ func MountEvents(r chi.Router, db store.DB, apiKey string, sink notify.Sink) {
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "empty batch", nil)
 			return
 		}
-		// Pre-fetch the next per-run seq once and assign monotonically
-		// within the batch. Callers do not share one sequence contract:
-		// workflow activities usually emit seq=0, while quarry-edge's
-		// runtime sink emits a process-wide counter. The control plane
-		// owns durable per-run ordering, so never trust caller seq here.
-		nextSeq := db.Events().NextSeq(runID)
+		// Callers do not share one sequence contract: workflow activities
+		// usually emit seq=0, while quarry-edge's runtime sink emits a
+		// process-wide counter. The control plane owns durable per-run
+		// ordering, so never trust caller seq here: each event takes the
+		// run's next seq in the same transaction as its insert (D2-016), so
+		// two batches of one run in flight at once cannot collide on a seq,
+		// and an event is never dropped as a replay because it lost one.
 		for i := range batch {
 			if batch[i].Type == "" {
 				httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "event.type required", map[string]any{"index": i})
@@ -254,11 +141,13 @@ func MountEvents(r chi.Router, db store.DB, apiKey string, sink notify.Sink) {
 			if batch[i].Timestamp.IsZero() {
 				batch[i].Timestamp = time.Now().UTC()
 			}
-			batch[i].Seq = nextSeq
-			nextSeq++
 			rid := runID
 			batch[i].RunID = &rid
-			if err := db.Events().Append(batch[i]); err != nil {
+			seq, err := db.Events().AppendNext(batch[i])
+			if err == nil {
+				batch[i].Seq = seq
+			}
+			if err != nil {
 				if errors.Is(err, store.ErrConflict) {
 					// Idempotent replay: a publisher may retry a batch
 					// after a partial success. Keep accepting the rest
@@ -311,8 +200,46 @@ func markJobTerminalIfNeeded(db store.DB, ev quarrycontracts.Event) {
 	if !exists {
 		return
 	}
+	// A job that ended stays ended: a late event (a resume after a cancel, a
+	// page after a timeout) must not move it back to a live status.
+	if store.IsTerminalJobStatus(job.Status) {
+		return
+	}
 	job.Status = status
+	if store.IsTerminalJobStatus(status) {
+		at := ev.Timestamp
+		if at.IsZero() {
+			at = time.Now()
+		}
+		if job.FinishedAt == nil {
+			ms := at.UnixMilli()
+			job.FinishedAt = &ms
+		}
+		job.TerminalReason = string(ev.Type)
+	}
+	if statistics := terminalStatistics(ev.Payload); statistics != nil {
+		job.Statistics = statistics
+	}
 	_ = db.Jobs().Update(job)
+}
+
+// maxStatisticsBytes bounds what a terminal event may attach to a job. A
+// crawl's statistics are a few dozen counters from closed vocabularies; anything
+// larger is not what the orchestrator sends and is dropped rather than stored.
+const maxStatisticsBytes = 4096
+
+// terminalStatistics returns the "statistics" object of a terminal event's
+// payload, or nil when it is absent, not an object, not encodable or oversize.
+func terminalStatistics(payload map[string]any) map[string]any {
+	statistics, ok := payload["statistics"].(map[string]any)
+	if !ok || len(statistics) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(statistics)
+	if err != nil || len(encoded) > maxStatisticsBytes {
+		return nil
+	}
+	return statistics
 }
 
 func jobStatusForEvent(eventType quarrycontracts.EventType) (string, bool) {
@@ -323,6 +250,14 @@ func jobStatusForEvent(eventType quarrycontracts.EventType) (string, bool) {
 		return "failed", true
 	case quarrycontracts.EvtRunCancelled:
 		return "cancelled", true
+	case quarrycontracts.EvtRunPaused:
+		return "paused", true
+	case quarrycontracts.EvtRunResumed:
+		return "running", true
+	case quarrycontracts.EventType("run_timed_out"):
+		return "timed_out", true
+	case quarrycontracts.EventType("schedule_skipped"):
+		return "skipped", true
 	default:
 		return "", false
 	}
@@ -393,7 +328,7 @@ func listJobs(db store.DB) http.HandlerFunc {
 // `?org_id` query param (never the request body) and stamped onto the
 // job — mirrors createSourceHandler's guard, which rejects an empty org
 // rather than let a job land unattributed to any tenant.
-func createJob(db store.DB) http.HandlerFunc {
+func createJob(db store.DB, adm Admission) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		org := orgFromQuery(r)
 		if org == "" {
@@ -406,6 +341,11 @@ func createJob(db store.DB) http.HandlerFunc {
 			return
 		}
 		policy, err := resolveJobPolicy(in)
+		if err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
+			return
+		}
+		origin, err := resolveJobOrigin(in.Origin)
 		if err != nil {
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
 			return
@@ -427,6 +367,14 @@ func createJob(db store.DB) http.HandlerFunc {
 				return
 			}
 		}
+		// Bound the backlog before anything is stored: a refused submission
+		// leaves no row. Idempotent retries returned above are not affected.
+		if details, full := adm.backlogFull(db, org, in.Kind, in.Params, time.Now()); full {
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSecs))
+			httpx.WriteErr(w, r, quarrycontracts.CodeRateLimited,
+				"this organization has too many jobs waiting", details)
+			return
+		}
 		job := store.Job{
 			ID:        quarrycontracts.NewID(quarrycontracts.KindJob),
 			OrgID:     org,
@@ -435,6 +383,7 @@ func createJob(db store.DB) http.HandlerFunc {
 			Policy:    policy,
 			Params:    in.Params,
 			CreatedAt: time.Now().UnixMilli(),
+			Origin:    origin,
 		}
 		if idemKey != "" {
 			k := idemKey
@@ -462,6 +411,29 @@ type createJobInput struct {
 	Policy *quarrycontracts.RunPolicy `json:"policy"`
 	Preset string                     `json:"preset,omitempty"`
 	Params map[string]any             `json:"params,omitempty"`
+	// Origin says who asked for the job. Set by the edge from the verified
+	// caller; absent means an API client.
+	Origin *store.JobOrigin `json:"origin,omitempty"`
+}
+
+// resolveJobOrigin checks the origin a create request declares against the
+// closed set in store.OriginTypes. An absent origin is "api"; an empty type is
+// "api"; any other unknown type is refused, so a typo never lands as an origin.
+func resolveJobOrigin(in *store.JobOrigin) (store.JobOrigin, error) {
+	if in == nil {
+		return store.JobOrigin{Type: "api"}, nil
+	}
+	t := strings.TrimSpace(in.Type)
+	if t == "" {
+		t = "api"
+	}
+	if !store.OriginTypes[t] {
+		return store.JobOrigin{}, fmt.Errorf("origin.type must be one of user, agent, schedule, webhook, api")
+	}
+	if len(in.Actor) > 256 || len(in.Ref) > 256 || len(in.CreatedBy) > 256 {
+		return store.JobOrigin{}, fmt.Errorf("origin fields are limited to 256 characters")
+	}
+	return store.JobOrigin{Type: t, Actor: in.Actor, Ref: in.Ref, CreatedBy: in.CreatedBy}, nil
 }
 
 // resolveJobPolicy honors the precedence: explicit policy > preset > default.
@@ -519,16 +491,31 @@ func updateJob(db store.DB) http.HandlerFunc {
 			return
 		}
 		var patch struct {
-			Status *string                    `json:"status,omitempty"`
-			RunID  *quarrycontracts.ID        `json:"run_id,omitempty"`
-			Policy *quarrycontracts.RunPolicy `json:"policy,omitempty"`
+			Status     *string                    `json:"status,omitempty"`
+			RunID      *quarrycontracts.ID        `json:"run_id,omitempty"`
+			Policy     *quarrycontracts.RunPolicy `json:"policy,omitempty"`
+			WorkflowID *string                    `json:"workflow_id,omitempty"`
+			DeadlineAt *string                    `json:"deadline_at,omitempty"`
+			// IfStatus makes the write a compare-and-set: it applies only while the
+			// stored status is still IfStatus, and otherwise answers 409.
+			IfStatus *string `json:"if_status,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
 			return
 		}
 		if patch.Status != nil {
+			// A job that ended stays ended: no patch moves it to another status.
+			if store.IsTerminalJobStatus(existing.Status) && *patch.Status != existing.Status {
+				httpx.WriteErr(w, r, quarrycontracts.CodeConflict, "the job has already ended",
+					map[string]any{"id": id, "status": existing.Status})
+				return
+			}
 			existing.Status = *patch.Status
+			if store.IsTerminalJobStatus(existing.Status) && existing.FinishedAt == nil {
+				now := time.Now().UnixMilli()
+				existing.FinishedAt = &now
+			}
 		}
 		if patch.RunID != nil {
 			existing.RunID = patch.RunID
@@ -536,12 +523,34 @@ func updateJob(db store.DB) http.HandlerFunc {
 		if patch.Policy != nil {
 			existing.Policy = *patch.Policy
 		}
-		if err := db.Jobs().Update(existing); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
+		if patch.WorkflowID != nil {
+			existing.WorkflowID = *patch.WorkflowID
+		}
+		if patch.DeadlineAt != nil {
+			t, err := time.Parse(time.RFC3339Nano, *patch.DeadlineAt)
+			if err != nil {
+				httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "deadline_at must be RFC 3339", nil)
 				return
 			}
-			httpx.WriteErr(w, r, quarrycontracts.CodeInternal, err.Error(), nil)
+			ms := t.UnixMilli()
+			existing.DeadlineAt = &ms
+		}
+		var err error
+		if patch.IfStatus != nil {
+			err = db.Jobs().UpdateIfStatus(existing, *patch.IfStatus)
+		} else {
+			err = db.Jobs().Update(existing)
+		}
+		if err != nil {
+			switch {
+			case errors.Is(err, store.ErrNotFound):
+				httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
+			case errors.Is(err, store.ErrConflict):
+				httpx.WriteErr(w, r, quarrycontracts.CodeConflict, "the job changed since it was read",
+					map[string]any{"id": id})
+			default:
+				httpx.WriteErr(w, r, quarrycontracts.CodeInternal, err.Error(), nil)
+			}
 			return
 		}
 		httpx.WriteJSON(w, r, http.StatusOK, existing)

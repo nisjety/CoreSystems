@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
@@ -53,6 +56,53 @@ func encodeCursor(createdAt int64, id string) string {
 
 type jobsStore struct{ pool *pgxpool.Pool }
 
+// jobColumns is the one column list every jobs SELECT uses, in the order
+// scanJob reads it. Adding a column means changing this and scanJob, not seven
+// queries that must agree.
+const jobColumns = `id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key, statistics, origin_type, origin_actor, origin_ref, created_by, desired_state, desired_seq, applied_seq, workflow_id, deadline_at, terminal_reason, finished_at`
+
+type jobScanner interface{ Scan(dest ...any) error }
+
+// scanJob reads one row selected with jobColumns. A row whose JSON columns do
+// not decode keeps the zero value for that field, as the per-site code did.
+func scanJob(row jobScanner) (store.Job, error) {
+	var (
+		j          store.Job
+		policy     []byte
+		params     []byte
+		statistics []byte
+		sid        *string
+		rid        *string
+		idem       *string
+		deadline   *int64
+		finished   *int64
+	)
+	if err := row.Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem, &statistics,
+		&j.Origin.Type, &j.Origin.Actor, &j.Origin.Ref, &j.Origin.CreatedBy,
+		&j.DesiredState, &j.DesiredSeq, &j.AppliedSeq, &j.WorkflowID, &deadline, &j.TerminalReason, &finished); err != nil {
+		return store.Job{}, err
+	}
+	_ = json.Unmarshal(policy, &j.Policy)
+	if len(params) > 0 {
+		_ = json.Unmarshal(params, &j.Params)
+	}
+	if len(statistics) > 0 {
+		_ = json.Unmarshal(statistics, &j.Statistics)
+	}
+	if sid != nil {
+		v := quarrycontracts.ID(*sid)
+		j.ScheduleID = &v
+	}
+	if rid != nil {
+		v := quarrycontracts.ID(*rid)
+		j.RunID = &v
+	}
+	j.IdempotencyKey = idem
+	j.DeadlineAt = deadline
+	j.FinishedAt = finished
+	return j, nil
+}
+
 func (s *jobsStore) Create(j store.Job) error {
 	policy, _ := json.Marshal(j.Policy)
 	params, _ := json.Marshal(j.Params)
@@ -66,10 +116,16 @@ func (s *jobsStore) Create(j store.Job) error {
 		v := string(*j.RunID)
 		rid = &v
 	}
+	originType := j.Origin.Type
+	if originType == "" {
+		originType = "unknown"
+	}
 	_, err := s.pool.Exec(context.Background(),
-		`INSERT INTO jobs(id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		string(j.ID), j.OrgID, j.Kind, j.Status, policy, params, sid, j.CreatedAt, rid, j.IdempotencyKey)
+		`INSERT INTO jobs(id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key,
+		   origin_type, origin_actor, origin_ref, created_by, workflow_id, deadline_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+		string(j.ID), j.OrgID, j.Kind, j.Status, policy, params, sid, j.CreatedAt, rid, j.IdempotencyKey,
+		originType, j.Origin.Actor, j.Origin.Ref, j.Origin.CreatedBy, j.WorkflowID, j.DeadlineAt)
 	return mapPgErr(err)
 }
 
@@ -81,66 +137,20 @@ func (s *jobsStore) FindByIdempotencyKey(orgID, key string) (store.Job, bool) {
 	if key == "" {
 		return store.Job{}, false
 	}
-	var (
-		j      store.Job
-		policy []byte
-		params []byte
-		sid    *string
-		rid    *string
-		idem   *string
-	)
-	err := s.pool.QueryRow(context.Background(),
-		`SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key
-		   FROM jobs WHERE idempotency_key=$1 AND org_id=$2`, key, orgID,
-	).Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem)
+	j, err := scanJob(s.pool.QueryRow(context.Background(),
+		`SELECT `+jobColumns+` FROM jobs WHERE idempotency_key=$1 AND org_id=$2`, key, orgID))
 	if err != nil {
 		return store.Job{}, false
 	}
-	_ = json.Unmarshal(policy, &j.Policy)
-	if len(params) > 0 {
-		_ = json.Unmarshal(params, &j.Params)
-	}
-	if sid != nil {
-		v := quarrycontracts.ID(*sid)
-		j.ScheduleID = &v
-	}
-	if rid != nil {
-		v := quarrycontracts.ID(*rid)
-		j.RunID = &v
-	}
-	j.IdempotencyKey = idem
 	return j, true
 }
 
 func (s *jobsStore) Get(id quarrycontracts.ID) (store.Job, bool) {
-	var (
-		j      store.Job
-		policy []byte
-		params []byte
-		sid    *string
-		rid    *string
-		idem   *string
-	)
-	err := s.pool.QueryRow(context.Background(),
-		`SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key FROM jobs WHERE id=$1`,
-		string(id),
-	).Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem)
+	j, err := scanJob(s.pool.QueryRow(context.Background(),
+		`SELECT `+jobColumns+` FROM jobs WHERE id=$1`, string(id)))
 	if err != nil {
 		return store.Job{}, false
 	}
-	_ = json.Unmarshal(policy, &j.Policy)
-	if len(params) > 0 {
-		_ = json.Unmarshal(params, &j.Params)
-	}
-	if sid != nil {
-		v := quarrycontracts.ID(*sid)
-		j.ScheduleID = &v
-	}
-	if rid != nil {
-		v := quarrycontracts.ID(*rid)
-		j.RunID = &v
-	}
-	j.IdempotencyKey = idem
 	return j, true
 }
 
@@ -148,35 +158,11 @@ func (s *jobsStore) Get(id quarrycontracts.ID) (store.Job, bool) {
 // WHERE-clause guard: a cross-tenant id returns (Job{}, false), never
 // another org's row.
 func (s *jobsStore) GetByOrg(orgID string, id quarrycontracts.ID) (store.Job, bool) {
-	var (
-		j      store.Job
-		policy []byte
-		params []byte
-		sid    *string
-		rid    *string
-		idem   *string
-	)
-	err := s.pool.QueryRow(context.Background(),
-		`SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key
-		   FROM jobs WHERE id=$1 AND org_id=$2`,
-		string(id), orgID,
-	).Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem)
+	j, err := scanJob(s.pool.QueryRow(context.Background(),
+		`SELECT `+jobColumns+` FROM jobs WHERE id=$1 AND org_id=$2`, string(id), orgID))
 	if err != nil {
 		return store.Job{}, false
 	}
-	_ = json.Unmarshal(policy, &j.Policy)
-	if len(params) > 0 {
-		_ = json.Unmarshal(params, &j.Params)
-	}
-	if sid != nil {
-		v := quarrycontracts.ID(*sid)
-		j.ScheduleID = &v
-	}
-	if rid != nil {
-		v := quarrycontracts.ID(*rid)
-		j.RunID = &v
-	}
-	j.IdempotencyKey = idem
 	return j, true
 }
 
@@ -184,51 +170,20 @@ func (s *jobsStore) GetByOrg(orgID string, id quarrycontracts.ID) (store.Job, bo
 // the partial index from 006_jobs_run_id.sql. Unscoped by org — see the
 // store.JobsStore doc comment for why.
 func (s *jobsStore) GetByRunID(runID quarrycontracts.ID) (store.Job, bool) {
-	var (
-		j      store.Job
-		policy []byte
-		params []byte
-		sid    *string
-		rid    *string
-		idem   *string
-	)
-	err := s.pool.QueryRow(context.Background(),
-		`SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key
-		   FROM jobs WHERE run_id=$1`,
-		string(runID),
-	).Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem)
+	j, err := scanJob(s.pool.QueryRow(context.Background(),
+		`SELECT `+jobColumns+` FROM jobs WHERE run_id=$1`, string(runID)))
 	if err != nil {
 		return store.Job{}, false
 	}
-	_ = json.Unmarshal(policy, &j.Policy)
-	if len(params) > 0 {
-		_ = json.Unmarshal(params, &j.Params)
-	}
-	if sid != nil {
-		v := quarrycontracts.ID(*sid)
-		j.ScheduleID = &v
-	}
-	if rid != nil {
-		v := quarrycontracts.ID(*rid)
-		j.RunID = &v
-	}
-	j.IdempotencyKey = idem
 	return j, true
 }
 
-// Update replaces the mutable fields of a job (status + run_id).
-// Other fields are immutable post-creation: kind, params, policy, and
-// schedule_id are set at create-time and shouldn't change. Used by the
-// orchestrator's jobs dispatcher.
+// Update replaces the mutable fields of a job: status, run_id, statistics, the
+// workflow id, the deadline, the terminal reason and the finish time. Kind,
+// params, policy, schedule_id and origin are set at create time and never
+// change. Used by the orchestrator's jobs dispatcher and by terminal events.
 func (s *jobsStore) Update(j store.Job) error {
-	var rid *string
-	if j.RunID != nil {
-		v := string(*j.RunID)
-		rid = &v
-	}
-	tag, err := s.pool.Exec(context.Background(),
-		`UPDATE jobs SET status=$2, run_id=$3 WHERE id=$1`,
-		string(j.ID), j.Status, rid)
+	tag, err := s.pool.Exec(context.Background(), updateJobSQL, jobUpdateArgs(j)...)
 	if err != nil {
 		return mapPgErr(err)
 	}
@@ -238,11 +193,177 @@ func (s *jobsStore) Update(j store.Job) error {
 	return nil
 }
 
+// UpdateIfStatus is Update as a compare-and-set: the write happens only while
+// the stored status is expected. A job in another status is ErrConflict; a
+// missing job is ErrNotFound.
+func (s *jobsStore) UpdateIfStatus(j store.Job, expected string) error {
+	args := append(jobUpdateArgs(j), expected)
+	tag, err := s.pool.Exec(context.Background(), updateJobSQL+` AND status = $9`, args...)
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if tag.RowsAffected() > 0 {
+		return nil
+	}
+	var exists int
+	if err := s.pool.QueryRow(context.Background(), `SELECT 1 FROM jobs WHERE id=$1`, string(j.ID)).Scan(&exists); err != nil {
+		return store.ErrNotFound
+	}
+	return store.ErrConflict
+}
+
+// updateJobSQL writes the mutable job columns of the row with $1 as id. A NULL
+// statistics argument keeps what is stored, so a status-only write does not
+// erase the statistics a terminal event recorded.
+const updateJobSQL = `UPDATE jobs SET status=$2, run_id=$3, statistics=COALESCE($4::jsonb, statistics), workflow_id=$5, deadline_at=$6, terminal_reason=$7, finished_at=$8 WHERE id=$1`
+
+// jobUpdateArgs is the argument list of updateJobSQL for a job.
+func jobUpdateArgs(j store.Job) []any {
+	var rid *string
+	if j.RunID != nil {
+		v := string(*j.RunID)
+		rid = &v
+	}
+	var statistics []byte
+	if len(j.Statistics) > 0 {
+		statistics, _ = json.Marshal(j.Statistics)
+	}
+	return []any{string(j.ID), j.Status, rid, statistics, j.WorkflowID, j.DeadlineAt, j.TerminalReason, j.FinishedAt}
+}
+
+// claimAcceptedSQL leases waiting jobs in one statement. in_use counts what
+// each organization already occupies (running, plus leased and not yet
+// started); ranked orders every waiting job oldest first within its
+// organization; picked keeps those whose rank fits the organization's room,
+// first jobs of every organization before any second job, so one tenant's
+// backlog cannot crowd out another's. A cap that is not a plain number falls
+// back to the default instead of failing the whole claim.
+const claimAcceptedSQL = `
+WITH in_use AS (
+  SELECT org_id, count(*)::int AS n FROM jobs
+   WHERE status = 'running' OR (status = 'accepted' AND claimed_until > $1)
+   GROUP BY org_id
+), ranked AS (
+  SELECT j.id, j.org_id, j.created_at,
+         row_number() OVER (PARTITION BY j.org_id ORDER BY j.created_at, j.id) AS rn,
+         CASE WHEN (j.params->'admission'->>'cap') ~ '^[0-9]{1,6}$' AND (j.params->'admission'->>'cap')::int >= 1
+              THEN (j.params->'admission'->>'cap')::int ELSE $2 END AS cap
+    FROM jobs j
+   WHERE j.status = 'accepted' AND j.kind IN ('scrape', 'crawl', 'batch')
+     AND (j.claimed_until IS NULL OR j.claimed_until <= $1)
+), picked AS (
+  SELECT r.id FROM ranked r LEFT JOIN in_use u ON u.org_id = r.org_id
+   WHERE r.rn <= GREATEST(r.cap - COALESCE(u.n, 0), 0)
+   ORDER BY r.rn, r.created_at, r.id
+   LIMIT $3
+)
+UPDATE jobs SET claimed_until = $1 + make_interval(secs => $4)
+ WHERE id IN (SELECT id FROM picked)
+   AND status = 'accepted' AND (claimed_until IS NULL OR claimed_until <= $1)
+RETURNING ` + jobColumns
+
+// jobClaimLockKey is the transaction-scoped advisory lock that serialises
+// claims. Under READ COMMITTED every statement reads its own snapshot, so two
+// claimers that ran the claim statement at the same time could each count the
+// same jobs in use and each lease up to the cap. Taking the lock first makes
+// the second claimer wait for the first to commit; its statement then starts
+// after those leases are committed and sees them.
+const jobClaimLockKey int64 = 7245110311
+
+// ClaimAccepted implements store.JobsStore.
+func (s *jobsStore) ClaimAccepted(limit int, now time.Time, lease time.Duration, defaultCap int) ([]store.Job, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, mapPgErr(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, jobClaimLockKey); err != nil {
+		return nil, mapPgErr(err)
+	}
+	rows, err := tx.Query(ctx, claimAcceptedSQL, now, defaultCap, limit, lease.Seconds())
+	if err != nil {
+		return nil, mapPgErr(err)
+	}
+	var out []store.Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, mapPgErr(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, mapPgErr(err)
+	}
+	// RETURNING has no order. Hand the jobs back in claim order: each
+	// organization's oldest first, round-robin across organizations. An
+	// organization's claimed jobs are its oldest waiting ones, so the rank of a
+	// job within the returned set is its rank in the claim.
+	sort.SliceStable(out, func(a, b int) bool {
+		if out[a].CreatedAt != out[b].CreatedAt {
+			return out[a].CreatedAt < out[b].CreatedAt
+		}
+		return out[a].ID < out[b].ID
+	})
+	rank := make(map[quarrycontracts.ID]int, len(out))
+	seen := map[string]int{}
+	for _, j := range out {
+		seen[j.OrgID]++
+		rank[j.ID] = seen[j.OrgID]
+	}
+	sort.SliceStable(out, func(a, b int) bool { return rank[out[a].ID] < rank[out[b].ID] })
+	return out, nil
+}
+
+// CountAccepted implements store.JobsStore.
+func (s *jobsStore) CountAccepted(orgID string, now time.Time) int {
+	var n int
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM jobs WHERE org_id = $1 AND status = 'accepted'
+		    AND (claimed_until IS NULL OR claimed_until <= $2)`, orgID, now).Scan(&n)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// FailExpired implements store.JobsStore.
+func (s *jobsStore) FailExpired(createdBefore, now time.Time) ([]store.Job, error) {
+	rows, err := s.pool.Query(context.Background(),
+		`UPDATE jobs SET status = 'failed',
+		        params = COALESCE(params, '{}'::jsonb) || jsonb_build_object('failure_reason', 'backlog_expired')
+		  WHERE status = 'accepted' AND created_at < $1
+		    AND (claimed_until IS NULL OR claimed_until <= $2)
+		RETURNING `+jobColumns, createdBefore.UnixMilli(), now)
+	if err != nil {
+		return nil, mapPgErr(err)
+	}
+	defer rows.Close()
+	var out []store.Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, mapPgErr(rows.Err())
+}
+
 func (s *jobsStore) List(limit int, cur string) ([]store.Job, string) {
 	limit = pageLimit(limit, defaultMaxPage)
 	c, _ := decodeCursor(cur)
 
-	q := `SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key FROM jobs`
+	q := `SELECT ` + jobColumns + ` FROM jobs`
 	args := []any{}
 	if c != nil {
 		q += ` WHERE (created_at, id) < ($1, $2)`
@@ -258,30 +379,10 @@ func (s *jobsStore) List(limit int, cur string) ([]store.Job, string) {
 
 	out := make([]store.Job, 0, limit)
 	for rows.Next() {
-		var (
-			j      store.Job
-			policy []byte
-			params []byte
-			sid    *string
-			rid    *string
-			idem   *string
-		)
-		if err := rows.Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem); err != nil {
+		j, err := scanJob(rows)
+		if err != nil {
 			return nil, ""
 		}
-		_ = json.Unmarshal(policy, &j.Policy)
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &j.Params)
-		}
-		if sid != nil {
-			v := quarrycontracts.ID(*sid)
-			j.ScheduleID = &v
-		}
-		if rid != nil {
-			v := quarrycontracts.ID(*rid)
-			j.RunID = &v
-		}
-		j.IdempotencyKey = idem
 		out = append(out, j)
 	}
 	next := ""
@@ -300,7 +401,7 @@ func (s *jobsStore) ListByOrg(orgID string, limit int, cur string) ([]store.Job,
 	limit = pageLimit(limit, defaultMaxPage)
 	c, _ := decodeCursor(cur)
 
-	q := `SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key FROM jobs WHERE org_id = $1`
+	q := `SELECT ` + jobColumns + ` FROM jobs WHERE org_id = $1`
 	args := []any{orgID}
 	if c != nil {
 		q += ` AND (created_at, id) < ($2, $3)`
@@ -316,30 +417,10 @@ func (s *jobsStore) ListByOrg(orgID string, limit int, cur string) ([]store.Job,
 
 	out := make([]store.Job, 0, limit)
 	for rows.Next() {
-		var (
-			j      store.Job
-			policy []byte
-			params []byte
-			sid    *string
-			rid    *string
-			idem   *string
-		)
-		if err := rows.Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem); err != nil {
+		j, err := scanJob(rows)
+		if err != nil {
 			return nil, ""
 		}
-		_ = json.Unmarshal(policy, &j.Policy)
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &j.Params)
-		}
-		if sid != nil {
-			v := quarrycontracts.ID(*sid)
-			j.ScheduleID = &v
-		}
-		if rid != nil {
-			v := quarrycontracts.ID(*rid)
-			j.RunID = &v
-		}
-		j.IdempotencyKey = idem
 		out = append(out, j)
 	}
 	next := ""
@@ -351,18 +432,28 @@ func (s *jobsStore) ListByOrg(orgID string, limit int, cur string) ([]store.Job,
 	return out, next
 }
 
-// ListByKind returns jobs whose kind matches exactly AND whose org_id
-// matches orgID, newest-first, using the (org_id, kind, created_at) index
-// (migration 010_jobs_org_id.sql) so the WHERE + ORDER BY are index-served.
+// ListByKind returns jobs whose Kind matches exactly AND whose OrgID matches
+// orgID, newest-first, using the (org_id, kind, created_at) index (migration
+// 010_jobs_org_id.sql) so the WHERE + ORDER BY are index-served.
 func (s *jobsStore) ListByKind(orgID, kind string, limit int, cur string) ([]store.Job, string) {
+	return s.ListByKindStatus(orgID, kind, nil, limit, cur)
+}
+
+// ListByKindStatus is ListByKind restricted to the given statuses; an empty list
+// means any status. Backs GET /v1/{kind}/jobs?status=a,b.
+func (s *jobsStore) ListByKindStatus(orgID, kind string, statuses []string, limit int, cur string) ([]store.Job, string) {
 	limit = pageLimit(limit, defaultMaxPage)
 	c, _ := decodeCursor(cur)
 
-	q := `SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key FROM jobs WHERE org_id = $1 AND kind = $2`
+	q := `SELECT ` + jobColumns + ` FROM jobs WHERE org_id = $1 AND kind = $2`
 	args := []any{orgID, kind}
+	if len(statuses) > 0 {
+		args = append(args, statuses)
+		q += fmt.Sprintf(` AND status = ANY($%d)`, len(args))
+	}
 	if c != nil {
-		q += ` AND (created_at, id) < ($3, $4)`
 		args = append(args, c.CreatedAt, c.ID)
+		q += fmt.Sprintf(` AND (created_at, id) < ($%d, $%d)`, len(args)-1, len(args))
 	}
 	q += ` ORDER BY created_at DESC, id DESC LIMIT ` + fmt.Sprint(limit+1)
 
@@ -374,30 +465,10 @@ func (s *jobsStore) ListByKind(orgID, kind string, limit int, cur string) ([]sto
 
 	out := make([]store.Job, 0, limit)
 	for rows.Next() {
-		var (
-			j      store.Job
-			policy []byte
-			params []byte
-			sid    *string
-			rid    *string
-			idem   *string
-		)
-		if err := rows.Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem); err != nil {
+		j, err := scanJob(rows)
+		if err != nil {
 			return nil, ""
 		}
-		_ = json.Unmarshal(policy, &j.Policy)
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &j.Params)
-		}
-		if sid != nil {
-			v := quarrycontracts.ID(*sid)
-			j.ScheduleID = &v
-		}
-		if rid != nil {
-			v := quarrycontracts.ID(*rid)
-			j.RunID = &v
-		}
-		j.IdempotencyKey = idem
 		out = append(out, j)
 	}
 	next := ""
@@ -409,11 +480,34 @@ func (s *jobsStore) ListByKind(orgID, kind string, limit int, cur string) ([]sto
 	return out, next
 }
 
+// ListActiveByOrg returns the organization's jobs that are still in flight
+// (accepted, running, paused), oldest first. Served by idx_jobs_active.
+func (s *jobsStore) ListActiveByOrg(orgID string, limit int) []store.Job {
+	limit = pageLimit(limit, defaultMaxPage)
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT `+jobColumns+` FROM jobs
+		  WHERE org_id = $1 AND status IN ('accepted', 'running', 'paused')
+		  ORDER BY created_at ASC, id ASC LIMIT $2`, orgID, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := make([]store.Job, 0, limit)
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil
+		}
+		out = append(out, j)
+	}
+	return out
+}
+
 func (s *jobsStore) ListBySchedule(scheduleID quarrycontracts.ID, limit int, cur string) ([]store.Job, string) {
 	limit = pageLimit(limit, defaultMaxPage)
 	c, _ := decodeCursor(cur)
 
-	q := `SELECT id, org_id, kind, status, policy, params, schedule_id, created_at FROM jobs WHERE schedule_id = $1`
+	q := `SELECT ` + jobColumns + ` FROM jobs WHERE schedule_id = $1`
 	args := []any{string(scheduleID)}
 	if c != nil {
 		q += ` AND (created_at, id) < ($2, $3)`
@@ -429,22 +523,9 @@ func (s *jobsStore) ListBySchedule(scheduleID quarrycontracts.ID, limit int, cur
 
 	out := make([]store.Job, 0, limit)
 	for rows.Next() {
-		var (
-			j      store.Job
-			policy []byte
-			params []byte
-			sid    *string
-		)
-		if err := rows.Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt); err != nil {
+		j, err := scanJob(rows)
+		if err != nil {
 			return nil, ""
-		}
-		_ = json.Unmarshal(policy, &j.Policy)
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &j.Params)
-		}
-		if sid != nil {
-			v := quarrycontracts.ID(*sid)
-			j.ScheduleID = &v
 		}
 		out = append(out, j)
 	}
@@ -741,34 +822,107 @@ func (s *profilesStore) Delete(id quarrycontracts.ID) error {
 
 type schedulesStore struct{ pool *pgxpool.Pool }
 
+// scheduleCols is the one column list every schedule SELECT uses. scanSchedule
+// reads it back in the same order (WS15.S1, migration 017).
+const scheduleCols = `id, org_id, name, config, cron, target_kind, target_ref, timezone, overlap_policy,
+	catchup_window_s, pause_on_failure, jitter_s, enabled, created_at, updated_at, created_by, zdr,
+	last_run_at, next_run_at, skipped_overlap_count`
+
+// rowScanner is the part of pgx.Row and pgx.Rows that scanSchedule needs.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanSchedule(row rowScanner) (store.Schedule, error) {
+	var (
+		v      store.Schedule
+		config []byte
+	)
+	if err := row.Scan(&v.ID, &v.OrgID, &v.Name, &config, &v.Cron, &v.TargetKind, &v.TargetRef,
+		&v.Timezone, &v.OverlapPolicy, &v.CatchupWindowS, &v.PauseOnFailure, &v.JitterS, &v.Enabled,
+		&v.CreatedAt, &v.UpdatedAt, &v.CreatedBy, &v.Zdr,
+		&v.LastRunAt, &v.NextRunAt, &v.SkippedOverlapCount); err != nil {
+		return store.Schedule{}, err
+	}
+	if len(config) > 0 {
+		if err := json.Unmarshal(config, &v.Config); err != nil {
+			return store.Schedule{}, fmt.Errorf("schedule %s config: %w", v.ID, err)
+		}
+	}
+	return v, nil
+}
+
 func (s *schedulesStore) Create(v store.Schedule) error {
-	_, err := s.pool.Exec(context.Background(),
-		`INSERT INTO schedules(id, org_id, cron, target_kind, target_ref, enabled, created_at, created_by)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-		string(v.ID), v.OrgID, v.Cron, v.TargetKind, v.TargetRef, v.Enabled, v.CreatedAt, v.CreatedBy)
+	v.ApplyDefaults(time.Now().Unix())
+	config, err := json.Marshal(v.Config)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(context.Background(),
+		`INSERT INTO schedules(id, org_id, name, config, cron, target_kind, target_ref, timezone, overlap_policy,
+		   catchup_window_s, pause_on_failure, jitter_s, enabled, created_at, updated_at, created_by, zdr)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+		string(v.ID), v.OrgID, v.Name, string(config), v.Cron, v.TargetKind, v.TargetRef, v.Timezone,
+		v.OverlapPolicy, v.CatchupWindowS, v.PauseOnFailure, v.JitterS, v.Enabled, v.CreatedAt,
+		v.UpdatedAt, v.CreatedBy, v.Zdr)
 	return mapPgErr(err)
 }
 
+// Get is unscoped. Only the orchestrator reconciler and the internal source
+// monitor path reach it; the edge goes through GetByOrg.
 func (s *schedulesStore) Get(id quarrycontracts.ID) (store.Schedule, bool) {
-	var v store.Schedule
-	err := s.pool.QueryRow(context.Background(),
-		`SELECT id, org_id, cron, target_kind, target_ref, enabled, created_at, created_by
-		 FROM schedules WHERE id=$1`, string(id),
-	).Scan(&v.ID, &v.OrgID, &v.Cron, &v.TargetKind, &v.TargetRef, &v.Enabled, &v.CreatedAt, &v.CreatedBy)
+	v, err := scanSchedule(s.pool.QueryRow(context.Background(),
+		`SELECT `+scheduleCols+` FROM schedules WHERE id=$1`, string(id)))
 	if err != nil {
 		return store.Schedule{}, false
 	}
 	return v, true
 }
 
+func (s *schedulesStore) GetByOrg(id quarrycontracts.ID, orgID string) (store.Schedule, bool) {
+	v, err := scanSchedule(s.pool.QueryRow(context.Background(),
+		`SELECT `+scheduleCols+` FROM schedules WHERE id=$1 AND org_id=$2`, string(id), orgID))
+	if err != nil {
+		return store.Schedule{}, false
+	}
+	return v, true
+}
+
+// List is unscoped (the legacy GET /v1/schedules without org_id, and the
+// orchestrator's reconcile read).
 func (s *schedulesStore) List(limit int, cur string) ([]store.Schedule, string) {
+	return s.page(false, "", limit, cur)
+}
+
+func (s *schedulesStore) ListByOrg(orgID string, limit int, cur string) ([]store.Schedule, string) {
+	return s.page(true, orgID, limit, cur)
+}
+
+func (s *schedulesStore) ListDesired(limit int, cur string) ([]store.Schedule, string) {
+	return s.page(false, "", limit, cur)
+}
+
+// page is the keyset page over (created_at, id), newest first. When scoped,
+// the query carries org_id in the WHERE clause, so no row of another org can
+// be returned.
+func (s *schedulesStore) page(scoped bool, orgID string, limit int, cur string) ([]store.Schedule, string) {
 	limit = pageLimit(limit, defaultMaxPage)
 	c, _ := decodeCursor(cur)
-	q := `SELECT id, org_id, cron, target_kind, target_ref, enabled, created_at, created_by FROM schedules`
-	args := []any{}
+	var (
+		args  []any
+		where []string
+	)
+	if scoped {
+		args = append(args, orgID)
+		where = append(where, fmt.Sprintf("org_id = $%d", len(args)))
+	}
 	if c != nil {
-		q += ` WHERE (created_at, id) < ($1, $2)`
 		args = append(args, c.CreatedAt, c.ID)
+		where = append(where, fmt.Sprintf("(created_at, id) < ($%d, $%d)", len(args)-1, len(args)))
+	}
+	q := `SELECT ` + scheduleCols + ` FROM schedules`
+	if len(where) > 0 {
+		q += ` WHERE ` + strings.Join(where, ` AND `)
 	}
 	q += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT %d`, limit+1)
 	rows, err := s.pool.Query(context.Background(), q, args...)
@@ -778,8 +932,8 @@ func (s *schedulesStore) List(limit int, cur string) ([]store.Schedule, string) 
 	defer rows.Close()
 	out := make([]store.Schedule, 0, limit)
 	for rows.Next() {
-		var v store.Schedule
-		if err := rows.Scan(&v.ID, &v.OrgID, &v.Cron, &v.TargetKind, &v.TargetRef, &v.Enabled, &v.CreatedAt, &v.CreatedBy); err != nil {
+		v, err := scanSchedule(rows)
+		if err != nil {
 			return nil, ""
 		}
 		out = append(out, v)
@@ -804,9 +958,50 @@ func (s *schedulesStore) Delete(id quarrycontracts.ID) error {
 	return nil
 }
 
+func (s *schedulesStore) DeleteByOrg(id quarrycontracts.ID, orgID string) error {
+	ct, err := s.pool.Exec(context.Background(),
+		`DELETE FROM schedules WHERE id=$1 AND org_id=$2`, string(id), orgID)
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// UpdateEnabled stamps updated_at. The migration keys on updated_at = 0, so a
+// row someone re-enabled is never disabled again by a re-run of the guard.
 func (s *schedulesStore) UpdateEnabled(id quarrycontracts.ID, enabled bool) error {
 	ct, err := s.pool.Exec(context.Background(),
-		`UPDATE schedules SET enabled=$2 WHERE id=$1`, string(id), enabled)
+		`UPDATE schedules SET enabled=$2, updated_at=$3 WHERE id=$1`,
+		string(id), enabled, time.Now().Unix())
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *schedulesStore) UpdateEnabledByOrg(id quarrycontracts.ID, orgID string, enabled bool) error {
+	ct, err := s.pool.Exec(context.Background(),
+		`UPDATE schedules SET enabled=$2, updated_at=$3 WHERE id=$1 AND org_id=$4`,
+		string(id), enabled, time.Now().Unix(), orgID)
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *schedulesStore) UpdateRuntime(id quarrycontracts.ID, lastRunAt, nextRunAt *int64, skippedOverlap int64) error {
+	ct, err := s.pool.Exec(context.Background(),
+		`UPDATE schedules SET last_run_at=$2, next_run_at=$3, skipped_overlap_count=$4 WHERE id=$1`,
+		string(id), lastRunAt, nextRunAt, skippedOverlap)
 	if err != nil {
 		return mapPgErr(err)
 	}
@@ -969,7 +1164,12 @@ func (s *sourcesStore) SoftDeleteByOrg(orgID string, id quarrycontracts.ID) erro
 
 type eventLog struct{ pool *pgxpool.Pool }
 
-func (l *eventLog) Append(evt quarrycontracts.Event) error {
+// eventExecer is what an insert of an event needs: the pool or a transaction.
+type eventExecer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+func insertEvent(ctx context.Context, x eventExecer, evt quarrycontracts.Event) error {
 	payload, _ := json.Marshal(evt.Payload)
 	var runID, jobID *string
 	if evt.RunID != nil {
@@ -980,7 +1180,7 @@ func (l *eventLog) Append(evt quarrycontracts.Event) error {
 		s := string(*evt.JobID)
 		jobID = &s
 	}
-	_, err := l.pool.Exec(context.Background(),
+	_, err := x.Exec(ctx,
 		`INSERT INTO events(event_id, run_id, job_id, type, ts, seq, payload, idempotency_key)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''))`,
 		string(evt.EventID), runID, jobID, string(evt.Type), evt.Timestamp,
@@ -988,11 +1188,50 @@ func (l *eventLog) Append(evt quarrycontracts.Event) error {
 	return mapPgErr(err)
 }
 
+func (l *eventLog) Append(evt quarrycontracts.Event) error {
+	return insertEvent(context.Background(), l.pool, evt)
+}
+
+// AppendNext takes a transaction-scoped advisory lock on the run, reads the
+// run's max seq, inserts at max+1 and commits (D2-016). Concurrent writers of the
+// same run queue on the lock, so each sees the previous one's committed row and
+// the seqs commit in order. Writers of other runs do not wait: the lock key is
+// the run id. A conflict on the event id or the idempotency key is returned as
+// store.ErrConflict, as Append returns it, and the transaction rolls back.
+func (l *eventLog) AppendNext(evt quarrycontracts.Event) (uint64, error) {
+	ctx := context.Background()
+	if evt.RunID == nil {
+		evt.Seq = 1
+		return evt.Seq, l.Append(evt)
+	}
+	tx, err := l.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	run := string(*evt.RunID)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "quarry-control:events:"+run); err != nil {
+		return 0, err
+	}
+	var maxSeq int64
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(seq), 0) FROM events WHERE run_id = $1`, run).Scan(&maxSeq); err != nil {
+		return 0, err
+	}
+	evt.Seq = uint64(maxSeq) + 1
+	if err := insertEvent(ctx, tx, evt); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return evt.Seq, nil
+}
+
 // NextSeq queries `MAX(seq) + 1` for the given run_id. Returns 1 when
-// no events exist yet. The handler uses this to assign seq server-side
-// when callers don't number their own events, so the unique index on
-// (run_id, seq) doesn't collide on default-zero sequences from
-// activity-driven workflow emits.
+// no events exist yet. It is a read, not a reservation: two writers can read the
+// same value (D2-016). Writers that number server-side use AppendNext, which
+// reads and inserts under one lock; NextSeq stays for readers that only report
+// the next number.
 func (l *eventLog) NextSeq(runID quarrycontracts.ID) uint64 {
 	var n int64
 	err := l.pool.QueryRow(context.Background(),
@@ -1053,6 +1292,114 @@ func (l *eventLog) FindByIdempotencyKey(key string) (quarrycontracts.Event, bool
 		_ = json.Unmarshal(payload, &evt.Payload)
 	}
 	return evt, true
+}
+
+// SummaryForJob counts a job's events by type (one grouped query).
+func (l *eventLog) SummaryForJob(jobID quarrycontracts.ID) map[quarrycontracts.EventType]store.EventTypeSummary {
+	out := map[quarrycontracts.EventType]store.EventTypeSummary{}
+	rows, err := l.pool.Query(context.Background(),
+		`SELECT type, COUNT(*), MAX(seq), MIN(ts), MAX(ts) FROM events WHERE job_id = $1 GROUP BY type`,
+		string(jobID))
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			typ    string
+			sum    store.EventTypeSummary
+			maxSeq int64
+		)
+		if err := rows.Scan(&typ, &sum.Count, &maxSeq, &sum.First, &sum.Last); err != nil {
+			return out
+		}
+		sum.MaxSeq = uint64(maxSeq)
+		out[quarrycontracts.EventType(typ)] = sum
+	}
+	return out
+}
+
+// CountsForJobs counts events by type for each listed job in one grouped query.
+func (l *eventLog) CountsForJobs(jobIDs []quarrycontracts.ID) map[quarrycontracts.ID]map[quarrycontracts.EventType]int64 {
+	out := map[quarrycontracts.ID]map[quarrycontracts.EventType]int64{}
+	if len(jobIDs) == 0 {
+		return out
+	}
+	ids := make([]string, 0, len(jobIDs))
+	for _, id := range jobIDs {
+		ids = append(ids, string(id))
+	}
+	rows, err := l.pool.Query(context.Background(),
+		`SELECT job_id, type, COUNT(*) FROM events WHERE job_id = ANY($1) GROUP BY job_id, type`, ids)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			jobID string
+			typ   string
+			n     int64
+		)
+		if err := rows.Scan(&jobID, &typ, &n); err != nil {
+			return out
+		}
+		id := quarrycontracts.ID(jobID)
+		counts := out[id]
+		if counts == nil {
+			counts = map[quarrycontracts.EventType]int64{}
+			out[id] = counts
+		}
+		counts[quarrycontracts.EventType(typ)] = n
+	}
+	return out
+}
+
+// ForJobTypes is ForJob restricted to the given event types. The type filter is
+// an array match on the events_job_id_idx scan, so a page of a long job stays
+// bounded by limit.
+func (l *eventLog) ForJobTypes(jobID quarrycontracts.ID, types []quarrycontracts.EventType, afterSeq uint64, limit int) []quarrycontracts.Event {
+	limit = pageLimit(limit, defaultMaxPage)
+	names := make([]string, 0, len(types))
+	for _, t := range types {
+		names = append(names, string(t))
+	}
+	rows, err := l.pool.Query(context.Background(),
+		`SELECT event_id, run_id, job_id, type, ts, seq, payload, COALESCE(idempotency_key,'')
+		   FROM events WHERE job_id = $1 AND type = ANY($2) AND seq > $3 ORDER BY seq ASC LIMIT $4`,
+		string(jobID), names, int64(afterSeq), limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := make([]quarrycontracts.Event, 0, limit)
+	for rows.Next() {
+		var (
+			evt     quarrycontracts.Event
+			runID   *string
+			jobRef  *string
+			payload []byte
+			seq     int64
+		)
+		if err := rows.Scan(&evt.EventID, &runID, &jobRef, &evt.Type, &evt.Timestamp,
+			&seq, &payload, &evt.IdempotencyKey); err != nil {
+			return out
+		}
+		evt.Seq = uint64(seq)
+		if runID != nil {
+			id := quarrycontracts.ID(*runID)
+			evt.RunID = &id
+		}
+		if jobRef != nil {
+			id := quarrycontracts.ID(*jobRef)
+			evt.JobID = &id
+		}
+		if len(payload) > 0 {
+			_ = json.Unmarshal(payload, &evt.Payload)
+		}
+		out = append(out, evt)
+	}
+	return out
 }
 
 func (l *eventLog) forField(col, val string, afterSeq uint64, limit int) []quarrycontracts.Event {

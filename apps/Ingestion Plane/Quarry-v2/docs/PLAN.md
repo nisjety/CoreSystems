@@ -356,7 +356,7 @@ Use `/Volumes/Lagring/Triodelab/firecrawl` as the product surface and engine-str
 
 ### Observability
 - OpenTelemetry traces across edge → runtime → control → orchestrator.
-- Prometheus metrics (already wired in edge via `metrics-exporter-prometheus`).
+- Prometheus metrics: the edge installs a recorder and serves `/metrics` on a separate, bearer-authenticated internal listener only when `QUARRY_EDGE__METRICS_ENABLED=1` (off by default; WS6.I, `crates/quarry-edge/src/metrics.rs`, series list in `RUNBOOKS.md`). Before WS6.I the `metrics` dependencies were inert (no recorder, nothing served), so this line used to overstate the state. The usage series and the Control Plane Prometheus scrape job are not built.
 - Trace ID propagation via `X-Request-Id` + W3C Traceparent.
 
 ### Security

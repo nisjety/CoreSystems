@@ -122,7 +122,8 @@ async fn stream_agent_ui(
     // actually scoped this turn to a Space (same rule as native chat).
     let sandbox_token = shared::sandbox_token(&state, &user, &headers, &body).await;
     // The same rule as the sandbox credential, and never on a zero-retention turn (WS21-S2).
-    let zdr = shared::zdr_flag(&headers) || bool_field(&body, "zdr").unwrap_or(false);
+    // `turn_requests_zdr` also marks the request's span ZDR (`crate::zdr_log`).
+    let zdr = turn_requests_zdr(&headers, &body);
     let browser_token = shared::browser_token(&state, &user, &headers, &body, zdr).await;
 
     let token = shared::model_token(&state, &user, &headers).await;
@@ -1040,6 +1041,20 @@ fn ag_ui_event(mut data: Value) -> Event {
 
 fn string_field(payload: &Value, field: &str) -> Option<String> {
     payload.get(field)?.as_str().map(str::to_owned)
+}
+
+/// Whether this turn asks for Zero Data Retention by header or by body flag.
+/// A true answer marks the request's span ZDR (`crate::zdr_log`), so the log
+/// stops carrying URLs, queries and error text for the rest of the request.
+pub(crate) fn turn_requests_zdr(headers: &HeaderMap, body: &Value) -> bool {
+    if shared::zdr_flag(headers) {
+        return true;
+    }
+    let from_body = bool_field(body, "zdr").unwrap_or(false);
+    if from_body {
+        crate::zdr_log::mark_current_span();
+    }
+    from_body
 }
 
 fn bool_field(payload: &Value, field: &str) -> Option<bool> {

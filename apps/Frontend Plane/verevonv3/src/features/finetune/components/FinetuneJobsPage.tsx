@@ -31,7 +31,7 @@ import {
   jobDetail,
   productionHourlyRate,
 } from '@/features/finetune/lib/finetune-model'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError } from '@/shared/i18n'
 
 function modelOptions(models: ModelInfo[]): Array<{ value: string; label: string }> {
   return models.map((model) => ({ value: model.id, label: model.name || model.id }))
@@ -139,7 +139,7 @@ export default function FinetuneJobsPage() {
       setFile(null)
       void refreshJobs()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke opprette fine-tune-jobb.', 'Could not create fine-tune job.'))
+      setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke opprette fine-tune-jobb.', en: 'Could not create fine-tune job.' }))
     } finally {
       setBusy(false)
     }
@@ -172,7 +172,7 @@ export default function FinetuneJobsPage() {
       if (reconciled && latest?.status === 'cancelled') {
         setNotice(i18n.tr('Fine-tune-jobb kansellert.', 'Fine-tune job cancelled.'))
       } else if (reconciled && latest) {
-        setError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke kansellere fine-tune-jobb.', 'Could not cancel fine-tune job.'))
+        setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke kansellere fine-tune-jobb.', en: 'Could not cancel fine-tune job.' }))
       } else {
         setError(i18n.tr(
           'Vi fikk ikke bekreftet om fine-tune-jobben ble kansellert. Vent litt før du prøver på nytt.',
@@ -196,7 +196,7 @@ export default function FinetuneJobsPage() {
       setNotice(i18n.tr('Modell forfremmet til en produksjonsutrulling.', 'Model promoted to a production deployment.'))
       void refreshJobs()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke forfremme fine-tune til produksjon.', 'Could not promote fine-tune to production.'))
+      setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke forfremme fine-tune til produksjon.', en: 'Could not promote fine-tune to production.' }))
     } finally {
       setDeployingId(null)
     }

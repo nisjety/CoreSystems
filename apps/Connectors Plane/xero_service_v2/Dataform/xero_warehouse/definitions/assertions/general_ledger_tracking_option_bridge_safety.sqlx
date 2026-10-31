@@ -1,0 +1,46 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_gl_tracking_option_bridge_safety",
+  description: "Every populated Xero GL tracking slot must retain exactly one bridge row and resolution flags must agree with the candidate count."
+}
+
+WITH source_slots AS (
+  SELECT journal_line_key, 1 AS tracking_position,
+         tracking_category_1_id AS source_tracking_category_id,
+         tracking_option_1_name AS source_tracking_option_name
+  FROM ${ref("xero_gold_finance", "fact_general_ledger")}
+  WHERE tracking_category_1_id IS NOT NULL OR tracking_option_1_name IS NOT NULL
+  UNION ALL
+  SELECT journal_line_key, 2 AS tracking_position,
+         tracking_category_2_id AS source_tracking_category_id,
+         tracking_option_2_name AS source_tracking_option_name
+  FROM ${ref("xero_gold_finance", "fact_general_ledger")}
+  WHERE tracking_category_2_id IS NOT NULL OR tracking_option_2_name IS NOT NULL
+), invalid_bridge AS (
+  SELECT
+    'source_slot_grain' AS violation,
+    CAST(COALESCE(bridge.general_ledger_tracking_option_key, FARM_FINGERPRINT(CONCAT(source_slots.journal_line_key, '|', CAST(source_slots.tracking_position AS STRING)))) AS STRING) AS record_id
+  FROM source_slots
+  FULL OUTER JOIN ${ref("xero_gold_finance", "bridge_general_ledger_tracking_option")} AS bridge
+    ON bridge.journal_line_key = source_slots.journal_line_key
+   AND bridge.tracking_position = source_slots.tracking_position
+  WHERE source_slots.journal_line_key IS NULL
+     OR bridge.journal_line_key IS NULL
+     OR bridge.source_tracking_category_id IS DISTINCT FROM source_slots.source_tracking_category_id
+     OR bridge.source_tracking_option_name IS DISTINCT FROM source_slots.source_tracking_option_name
+     OR bridge.is_financial_measure_additive
+), invalid_resolution AS (
+  SELECT
+    'tracking_option_resolution' AS violation,
+    CAST(general_ledger_tracking_option_key AS STRING) AS record_id
+  FROM ${ref("xero_gold_finance", "bridge_general_ledger_tracking_option")}
+  WHERE is_tracking_option_ambiguous IS DISTINCT FROM (tracking_option_candidate_count > 1)
+     OR is_tracking_option_unresolved IS DISTINCT FROM (tracking_option_candidate_count != 1)
+     OR (tracking_option_candidate_count = 1 AND tracking_option_key IS NULL)
+     OR (tracking_option_candidate_count != 1 AND tracking_option_key IS NOT NULL)
+)
+
+SELECT violation, record_id FROM invalid_bridge
+UNION ALL
+SELECT violation, record_id FROM invalid_resolution

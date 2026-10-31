@@ -144,6 +144,11 @@
       "count": 33
     }
   },
+  "src/features/chat/components/ChatWorkPeriodPicker.tsx": {
+    "no-restricted-syntax": {
+      "count": 4
+    }
+  },
   "src/features/chat/components/chat-artifacts.ts": {
     "no-restricted-syntax": {
       "count": 1
@@ -184,6 +189,11 @@
       "count": 1
     }
   },
+  "src/features/chat/lib/chat-organization.ts": {
+    "no-restricted-syntax": {
+      "count": 2
+    }
+  },
   "src/features/chat/lib/chat-run-watch.ts": {
     "no-restricted-syntax": {
       "count": 12
@@ -197,6 +207,11 @@
   "src/features/chat/lib/prepare-chat-attachments.ts": {
     "no-restricted-syntax": {
       "count": 1
+    }
+  },
+  "src/features/chat/lib/prompt-suggestions.ts": {
+    "no-restricted-syntax": {
+      "count": 3
     }
   },
   "src/features/chat/lib/run-park.ts": {

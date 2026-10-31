@@ -1,0 +1,45 @@
+test(quarry-runtime): browser_egress_boundary makes Chromium itself request loopback and names the layer that refused (U2)
+
+Review finding: chromium_refuses_a_loopback_navigation never sent a request
+to Chromium (ChromiumoxideDriver::goto refuses the URL in Rust before CDP),
+so the lane comment's claim of a real Chromium refused through the real proxy
+did not hold, and the proxy test was refused by the domain grant before the
+SSRF check, so removing that check left both tests green.
+
+- The old test is renamed the_driver_refuses_a_loopback_goto_before_sending_
+  anything_to_chromium and its comments say what it is: the driver's Rust
+  guard, plus the positive control that a real browser answers.
+- New: chromium_page_requests_to_loopback_are_refused_by_the_cdp_boundary_*.
+  A real Chromium behind the real PinnedBrowserEgressProxy loads about:blank;
+  the PAGE adds an <img> and a fetch for a live loopback listener, so Chromium
+  itself emits the requests. The test waits until the driver's receipts show a
+  decision for the listener (fails after 30 s if Chromium never sent one) and
+  requires every such receipt to be Block with the expected policy: once with
+  a grant naming example.com (domain_grant_blocked), once with a grant naming
+  127.0.0.1 so only the SSRF guard can refuse (url_or_dns_blocked).
+- The pinned-proxy transport test is split the same way and reads the proxy's
+  own receipt: domain_grant_blocked, and dns_or_ssrf_blocked with the grant
+  naming 127.0.0.1. Emptiness of the listener log is now backed by a shared
+  positive control (require_witness_records) in every test.
+- The workflow comment no longer claims a navigation through the proxy and no
+  longer says every live test goes through live_gate; it names what each set
+  proves, that test_valid_public_url is deliberately excluded, and that the
+  fail-instead-of-skip branch is unreachable in the lane and pinned by unit
+  tests instead. RUNBOOKS.md gets one appended paragraph with the correction.
+
+Verified: the page-initiated logic was run against the host's real Chrome
+through a throwaway copy that swapped the real proxy for the stub provider
+(crates/quarry-browser/tests, deleted afterwards, not committed): both
+page-request tests passed (3.2 s) with the expected receipt labels. rustfmt
+--check is clean on the three Rust files. The workflow diff touches comments
+only (no non-comment line changed), so the structure that actionlint accepted
+earlier is unchanged; js-yaml/pyyaml were not available to re-parse it.
+
+Not done: browser_egress_boundary.rs itself was NOT compiled or run. It
+needs quarry-runtime, which does not build on the host (no libclang) and the
+quarry-rust-env container was unavailable (Docker not answering). The proxy
+tests and the real-proxy wiring in it are therefore unverified; the lane
+will be the first to compile them. The mutation "remove the SSRF check and
+see both layers' tests fail" was not run. Not run on GitHub Actions.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>

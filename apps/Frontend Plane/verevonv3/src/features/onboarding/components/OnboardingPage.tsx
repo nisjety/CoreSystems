@@ -71,7 +71,7 @@ import {
   recommendationText,
   withRecommendationTranslation,
 } from '@/features/onboarding/lib/plan-recommendation'
-import { translateApiError, useI18n } from '@/shared/i18n'
+import { LocalizedError, translateApiError, useI18n } from '@/shared/i18n'
 import { ContactSalesModal } from '@/features/onboarding/components/ContactSalesModal'
 import { LeaveOnboardingDialog } from '@/features/onboarding/components/LeaveOnboardingDialog'
 import { AssemblyStepContent, AssemblyStepVisual } from '@/features/onboarding/components/steps/AssemblyStep'
@@ -203,7 +203,7 @@ export default function OnboardingPage() {
     listDrives: (siteId: string) => listSharePointDrives(state.organization.id ?? '', siteId),
     register: async (connectionId: string, selection: SharePointSourceRegistration) => {
       const orgId = state.organization.id
-      if (!orgId) throw new Error(i18n.tr('Opprett organisasjonen først.', 'Create the organization first.'))
+      if (!orgId) throw new LocalizedError({ no: 'Opprett organisasjonen først.', en: 'Create the organization first.' })
       await registerSharePointSource(orgId, selection)
       setLibrariesNeeded((current) => {
         const next = new Set(current)
@@ -606,13 +606,19 @@ export default function OnboardingPage() {
           setState((s) => { s.website.branding = payload })
         },
         onWarning: (payload) => {
-          setState((s) => { s.website.warning = payload.message || payload.code })
+          // The warning's own text is English operator wording (or a client note about a
+          // packet it ignored), so the person gets the copy for its code instead.
+          setState((s) => {
+            s.website.warning = translateApiError({ code: payload.code }, i18n.tr, {
+              no: 'Forhåndsvisningen av nettsiden hadde et problem. Du kan prøve på nytt eller fortsette uten.',
+              en: 'The website preview ran into a problem. You can try again or continue without it.',
+            })
+          })
         },
         onDone: (payload) => {
           flush(() => {
-            setState((s) => { s.website.status = payload.status === 'failed' ? 'failed' : 'completed' })
-            setState((s) => { s.website.pages = payload.pages || state.website.pages })
-            setState((s) => { s.website.elements = payload.elements || state.website.elements })
+            const measured = payload.status === 'completed' && (payload.pages ?? 0) > 0 && state.website.snippets.length > 0
+            setState((s) => { s.website.status = measured ? 'completed' : 'failed'; s.website.pages = payload.pages ?? s.website.pages; s.website.elements = payload.elements ?? s.website.elements })
           })
         },
       },
@@ -663,7 +669,7 @@ export default function OnboardingPage() {
 
     try {
       const websiteUrl = state.website.url.trim()
-      const created = await actions.createOrganization({
+      const created = state.organization.id ? { id: state.organization.id, name: state.organization.name } : await actions.createOrganization({
         name: state.organization.name,
         plan: 'trial',
         orgNumber: state.organization.orgNumber,
@@ -690,6 +696,8 @@ export default function OnboardingPage() {
       setState((s) => { s.organization.name = created.name || state.organization.name })
 
       if (websiteUrl) {
+        await actions.recordOrganizationWebsite(created.id, websiteUrl)
+        await actions.registerMarketingWebsite(websiteUrl)
         await actions.startWebsiteIngest({
           orgId: created.id,
           url: websiteUrl,
@@ -705,7 +713,7 @@ export default function OnboardingPage() {
     }
   }
 
-  async function connectSource(option: Pick<ConnectorOption, 'id' | 'label' | 'provider' | 'sources'>) {
+  async function connectSource(option: Pick<ConnectorOption, 'id' | 'label' | 'provider' | 'sources' | 'bundles'>) {
     if (!state.organization.id) {
       setError(i18n.tr('Opprett organisasjonen før du kobler til kilder.', 'Create the organization before connecting sources.'))
       return
@@ -728,7 +736,7 @@ export default function OnboardingPage() {
       if (option.provider === 'shipping') {
         const carriers = await getShippingCarriers()
         if (carriers.length === 0) {
-          throw new Error('Fraktaggregatoren svarte uten transportører. Sjekk shipping-core.')
+          throw new LocalizedError({ no: 'Fraktjenesten har ingen transportører tilgjengelig akkurat nå. Prøv igjen senere.', en: 'The shipping service has no carriers available right now. Try again later.' })
         }
         setState((s) => { s.connectors = ((current) => [
           ...current.filter((item) => item.id !== option.id),
@@ -746,6 +754,7 @@ export default function OnboardingPage() {
         orgId,
         provider: option.provider,
         selectedSources: option.sources,
+        bundles: option.bundles,
       })
 
       await runDirectOauthWindow({
@@ -895,7 +904,7 @@ export default function OnboardingPage() {
           window.location.assign(checkout.url!)
           return
         default:
-          throw new Error('Payment checkout is not configured.')
+          throw new LocalizedError({ no: 'Betaling er ikke satt opp for denne planen ennå. Kontakt support.', en: 'Payment is not set up for this plan yet. Contact support.' })
       }
     } catch (reason) {
       setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke lagre den valgte planen.', en: 'Could not save the selected plan.' }))
@@ -1023,6 +1032,13 @@ export default function OnboardingPage() {
           orgId = createdOrg.id
         }
 
+        // Also covers a resumed onboarding whose workspace was created before
+        // website preparation was wired in. Add is idempotent for the site.
+        if (completionSnapshot.website.url && !completionSnapshot.websiteSkipped) {
+          await actions.recordOrganizationWebsite(orgId, completionSnapshot.website.url)
+          await actions.registerMarketingWebsite(completionSnapshot.website.url)
+        }
+
         const result = await actions.completeOnboarding({
           orgId,
           plan: selectedPlan,
@@ -1127,7 +1143,9 @@ export default function OnboardingPage() {
         return (
           <WebsiteStepContent
             website={state.website}
-            onUrlInput={(value) => setState((s) => { s.website.url = value })}
+            onUrlInput={(value) => flush(() => {
+              setState((s) => { s.website.url = value; s.website.status = 'idle'; s.website.snippets = []; s.website.pages = 0; s.website.elements = 0; s.website.branding = undefined; s.website.crawlJobId = undefined; s.website.warning = undefined })
+            })}
             onBriefInput={(value) => setState((s) => { s.website.brief = value })}
             onRunPreview={runWebsitePreview}
             onContinue={() => setState((s) => { s.step = 'organization' })}

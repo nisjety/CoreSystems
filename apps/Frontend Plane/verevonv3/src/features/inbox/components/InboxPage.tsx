@@ -49,7 +49,7 @@ import { executeTicketCreate, executeTicketPatch, executeTicketResourceLink } fr
 import { getSession } from '@/shared/session/session-store'
 import { ApiError } from '@/shared/api/http'
 import { connectBundlesForSources } from '@/shared/integrations/connect-bundles'
-import { translateApiError, useI18n } from '@/shared/i18n'
+import { LocalizedError, translateApiError, useI18n } from '@/shared/i18n'
 
 function mergeConversationPages(preferred: LiveTicket[], existing: LiveTicket[]): LiveTicket[] {
   const seen = new Set<string>()
@@ -307,7 +307,7 @@ export default function InboxPage() {
       const session = await startConnectSession(id, provider, { bundles: connectBundlesForSources(provider) })
       const connectUrl = session.connectUrl || session.redirectUrl
       const sessionToken = session.sessionToken || session.id
-      if (!connectUrl || !sessionToken) throw new Error(i18n.tr('Tilkoblingen kunne ikke startes.', 'The connection could not be started.'))
+      if (!connectUrl || !sessionToken) throw new LocalizedError({ no: 'Tilkoblingen kunne ikke startes.', en: 'The connection could not be started.' })
       await runDirectOauthWindow({ connectUrl, sessionToken })
       await Promise.all([refetchInboxConnections(), refetchTickets()])
       setNotice(i18n.tr(

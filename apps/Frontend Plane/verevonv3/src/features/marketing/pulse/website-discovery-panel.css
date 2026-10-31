@@ -1,0 +1,20 @@
+.website-discovery-panel { width: min(1280px, 100%); margin: 24px auto; border: 1px solid var(--pulse-line, #e9e9e9); border-radius: 20px; overflow: hidden; background: #fff; color: var(--pulse-ink, #1b1c1f); }
+.website-discovery-panel > header { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; padding: 28px 30px 12px; }
+.website-discovery-panel__eyebrow { color: var(--pulse-muted, #7c7d81); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; font-weight: 650; }
+.website-discovery-panel h2 { margin: 8px 0; font-size: 22px; font-weight: 580; letter-spacing: -.04em; }
+.website-discovery-panel p { margin: 0; font-size: 11px; line-height: 1.7; color: var(--pulse-muted, #7c7d81); }
+.website-discovery-panel__actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.website-discovery-panel button { border: 1px solid var(--pulse-line, #e9e9e9); border-radius: 9px; padding: 8px 12px; background: #fff; color: inherit; font: inherit; font-size: 11px; cursor: pointer; white-space: nowrap; }
+.website-discovery-panel__actions > button:last-child { background: #262628; color: #fff; border-color: #262628; }
+.website-discovery-panel button:disabled { opacity: .4; cursor: default; }
+.website-discovery-panel button:focus-visible, .website-discovery-panel a:focus-visible { outline: 2px solid #6c6c70; outline-offset: 3px; }
+.website-discovery-panel__state { padding: 12px 30px 20px; }
+.website-discovery-panel__pages { list-style: none; padding: 0; margin: 0 30px 20px; border-top: 1px solid var(--pulse-line, #e9e9e9); }
+.website-discovery-panel__pages li { padding: 14px 0; border-bottom: 1px solid var(--pulse-line, #e9e9e9); font-size: 12px; }
+.website-discovery-panel__pages a { display: grid; gap: 6px; color: inherit; text-decoration: none; overflow-wrap: anywhere; }
+.website-discovery-panel__pages a:hover { text-decoration: underline; }
+.website-discovery-panel__pages strong { font-weight: 550; }
+.website-discovery-panel__pages span { color: var(--pulse-muted, #7c7d81); font-size: 11px; }
+.website-discovery-panel .website-discovery-panel__receipt { padding: 0 30px 20px; }
+.website-discovery-panel footer { padding: 18px 30px; font-size: 10px; line-height: 1.7; color: var(--pulse-muted, #7c7d81); background: #fbfbfa; border-top: 1px solid var(--pulse-line, #e9e9e9); }
+@media (max-width: 700px) { .website-discovery-panel > header { flex-direction: column; padding: 22px 18px 10px; } .website-discovery-panel__state, .website-discovery-panel footer, .website-discovery-panel .website-discovery-panel__receipt { padding-inline: 18px; } .website-discovery-panel__pages { margin-inline: 18px; } }

@@ -1,4 +1,9 @@
-import type { ScrapePreviewResult, ScrapeResult } from '@/shared/api/knowledge-client'
+import {
+  readScrapeCaptures,
+  type ScrapeCaptureView,
+  type ScrapePreviewResult,
+  type ScrapeResult,
+} from '@/shared/api/knowledge-client'
 import type { BrowserSessionResponse } from '@/shared/api/browser-client'
 
 export type ScrapeBlock = { heading: boolean; raw: string; text: string }
@@ -13,6 +18,8 @@ export type ScrapePreview = {
   source: ScrapePreviewResult['source'] | 'legacy'
   title: string
   url: string
+  /** WS13.7: the screenshot and PDF, when the result carries them. */
+  captures?: ScrapeCaptureView
 }
 
 type JsonRecord = Record<string, unknown>
@@ -123,7 +130,10 @@ export function toScrapePreview(url: string, result: ScrapeResult | ScrapePrevie
     ['metadata', 'description'],
   ])?.trim() ?? ''
 
+  const captures = readScrapeCaptures(result)
+
   return {
+    ...(captures ? { captures } : {}),
     blocks: splitMarkdownBlocks(markdown),
     charCount: markdown.length,
     description,
@@ -147,8 +157,10 @@ function markdownFromResult(value: unknown): string {
 
   const html = firstNestedString(value, [
     ['html'],
+    ['raw_html'],
     ['rawHtml'],
     ['data', 'html'],
+    ['data', 'raw_html'],
     ['data', 'rawHtml'],
   ])
   return html ? htmlToReadableText(html) : ''

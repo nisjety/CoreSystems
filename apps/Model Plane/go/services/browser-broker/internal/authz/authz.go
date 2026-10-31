@@ -54,6 +54,8 @@ func Authorize(principal authctx.Principal, method string, request any) error {
 		requestOrg = typed.GetOrgId()
 	case *mpv1.DeriveRunGrantRequest:
 		requestOrg = typed.GetOrgId()
+	case *mpv1.RenewGrantRequest:
+		requestOrg = typed.GetOrgId()
 	}
 	if orgID := strings.TrimSpace(requestOrg); orgID != "" && orgID != principal.OrganizationID {
 		return errors.New("request organization does not match token")
@@ -62,7 +64,11 @@ func Authorize(principal authctx.Principal, method string, request any) error {
 	switch method {
 	case "/model_plane.v1.BrowserBroker/AcquireGrant",
 		"/model_plane.v1.BrowserBroker/RevokeGrant",
-		"/model_plane.v1.BrowserBroker/DeriveRunGrant":
+		"/model_plane.v1.BrowserBroker/DeriveRunGrant",
+		"/model_plane.v1.BrowserBroker/RenewGrant":
+		// RenewGrant (WS8.C) is write-scoped for a service, and no service holds
+		// browser:write, so only a user can renew (the handler also refuses a
+		// non-user principal).
 		required = ScopeWrite
 	case "/model_plane.v1.BrowserBroker/ValidateGrant", "/model_plane.v1.BrowserBroker/Health":
 	default:

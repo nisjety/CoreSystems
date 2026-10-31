@@ -1,0 +1,116 @@
+<!doctype html>
+<!--
+  Source of faktura-20471.png (scene 03 browser evidence). Fictional content
+  only: Fjordform AS, Nordlys Handel AS, invoice 20471, order 4821. Rendered
+  with Playwright Chromium: viewport 1245x660, deviceScaleFactor 1,
+  page.screenshot after document.fonts.ready. 1245x660 matches the 415x220
+  CSS px frame the compact BrowserChrome shows in the 1280x800 live rail, so
+  nothing is cropped.
+
+  Round 5 (2026-10-11): replaces the export log of the earlier story. The
+  highlighted cell is the unit price the agent compares against the agreement
+  and the order (1 240,00 agreed, 1 380,00 invoiced).
+-->
+<html lang="nb">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=block" />
+<style>
+  :root {
+    --ink: #1d1f22;
+    --muted: #6b6f76;
+    --faint: #9a9ea5;
+    --line: #e6e6e3;
+    --paper: #fbfbfa;
+    --card: #ffffff;
+    --hit-bg: #fdeccb;
+    --hit-ink: #8a5300;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1245px; height: 660px; overflow: hidden; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Geist", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    font-variant-numeric: tabular-nums;
+  }
+  .bar {
+    height: 92px;
+    display: flex;
+    align-items: center;
+    gap: 22px;
+    padding: 0 52px;
+    border-bottom: 2px solid var(--line);
+    background: var(--card);
+    font-size: 34px;
+    color: var(--muted);
+  }
+  .bar strong { color: var(--ink); font-weight: 600; }
+  .bar .env {
+    margin-left: auto;
+    font-size: 30px;
+    padding: 6px 20px;
+    border-radius: 999px;
+    border: 2px solid var(--line);
+    color: var(--muted);
+  }
+  main { padding: 34px 52px 0; }
+  h1 {
+    font-size: 58px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: center;
+    gap: 22px;
+  }
+  .pill {
+    font-size: 30px;
+    font-weight: 500;
+    padding: 6px 20px;
+    border-radius: 999px;
+    background: #eeeeec;
+    color: var(--muted);
+  }
+  .tbl {
+    margin-top: 30px;
+    background: var(--card);
+    border: 2px solid var(--line);
+    border-radius: 18px;
+    overflow: hidden;
+    font-size: 38px;
+  }
+  .row {
+    display: grid;
+    grid-template-columns: 1fr 190px 250px 280px;
+    align-items: center;
+    gap: 12px;
+    padding: 22px 28px;
+    border-top: 2px solid var(--line);
+  }
+  .row:first-child { border-top: 0; }
+  .row span:nth-child(n+2) { text-align: right; }
+  .row.head { font-size: 30px; color: var(--faint); font-weight: 500; padding-top: 18px; padding-bottom: 18px; }
+  .row.total { font-weight: 600; }
+  .hit {
+    justify-self: end;
+    background: var(--hit-bg);
+    color: var(--hit-ink);
+    font-weight: 600;
+    padding: 4px 16px;
+    border-radius: 12px;
+  }
+</style>
+</head>
+<body>
+  <div class="bar"><strong>Fjordform Regnskap</strong><span>Salg</span><span>›</span><span>Fakturaer</span><span class="env">Sendt</span></div>
+  <main>
+    <h1>Faktura 20471 <span class="pill">Nordlys Handel AS</span></h1>
+    <div class="tbl">
+      <div class="row head"><span>Beskrivelse</span><span>Antall</span><span>Pris</span><span>Sum</span></div>
+      <div class="row"><span>Pendel Fjord 40</span><span>120 stk</span><span class="hit">1 380,00</span><span>165 600,00</span></div>
+      <div class="row total"><span>Sum eks. mva</span><span></span><span></span><span>165 600,00</span></div>
+    </div>
+  </main>
+</body>
+</html>

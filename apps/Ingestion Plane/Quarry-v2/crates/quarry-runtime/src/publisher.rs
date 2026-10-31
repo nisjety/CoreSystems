@@ -36,7 +36,14 @@ pub struct EventPublisher {
     client: reqwest::Client,
     base_url: String,
     api_key: String,
+    signer: Option<RequestSigner>,
 }
+
+/// Produces the extra headers (an HMAC signature, its timestamp and nonce) for one
+/// outgoing request: `(method, path, body)` in, header name and value pairs out.
+/// It runs on every attempt, because a nonce must not be reused when a batch is
+/// retried. The runtime crate does not know the scheme; the edge supplies it.
+pub type RequestSigner = std::sync::Arc<dyn Fn(&str, &str, &[u8]) -> Vec<(&'static str, String)> + Send + Sync>;
 
 impl EventPublisher {
     /// Create a new publisher.
@@ -57,7 +64,15 @@ impl EventPublisher {
             client,
             base_url: base_url.into(),
             api_key: api_key.into(),
+            signer: None,
         }
+    }
+
+    /// Sign every request (control rejects an unsigned one once
+    /// `QUARRY_INTERNAL_HMAC_REQUIRED=1`).
+    pub fn with_signer(mut self, signer: RequestSigner) -> Self {
+        self.signer = Some(signer);
+        self
     }
 
     /// Runs until the sender side of the channel is dropped *and* every
@@ -100,6 +115,7 @@ impl EventPublisher {
         }
     }
 
+    // zdr-log-ok-begin: the event publisher is a long-lived background task with no request span; `url` is the operator's control-plane origin plus a run id, and the error texts are transport errors for that endpoint, never an event's content
     /// POST `events` to `url` with exponential back-off until success.
     async fn post_with_backoff(&self, url: &str, events: Vec<Event>) {
         let body = match serde_json::to_vec(&events) {
@@ -114,14 +130,24 @@ impl EventPublisher {
         let mut failures: u32 = 0;
 
         loop {
-            let result = self
+            let mut request = self
                 .client
                 .post(url)
                 .bearer_auth(&self.api_key)
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(body.clone())
-                .send()
-                .await;
+                .body(body.clone());
+            if let Some(signer) = &self.signer {
+                if let Ok(parsed) = reqwest::Url::parse(url) {
+                    let path_q = match parsed.query() {
+                        Some(query) => format!("{}?{}", parsed.path(), query),
+                        None => parsed.path().to_string(),
+                    };
+                    for (name, value) in signer("POST", &path_q, &body) {
+                        request = request.header(name, value);
+                    }
+                }
+            }
+            let result = request.send().await;
 
             match result {
                 Ok(resp) if resp.status().is_success() => {
@@ -156,6 +182,7 @@ impl EventPublisher {
             backoff = (backoff * 2).min(MAX_BACKOFF);
         }
     }
+    // zdr-log-ok-end
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +229,38 @@ mod tests {
             payload: serde_json::json!({}),
             idempotency_key: uuid::Uuid::new_v4().to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn a_signer_adds_its_headers_over_the_path_and_body_actually_sent() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let run = RunKind::new();
+        let (tx, rx) = mpsc::channel(8);
+        tx.send(make_event(&run)).await.unwrap();
+        drop(tx);
+        let signer: RequestSigner = std::sync::Arc::new(|method, path, body| {
+            vec![("x-test-sig", format!("{method} {path} {}", body.len()))]
+        });
+        let publisher =
+            EventPublisher::new(rx, reqwest::Client::new(), server.uri(), "key").with_signer(signer);
+        tokio::time::timeout(std::time::Duration::from_secs(10), publisher.run())
+            .await
+            .expect("publisher drains and exits");
+
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1);
+        let header = received[0].headers.get("x-test-sig").unwrap().to_str().unwrap();
+        assert_eq!(
+            header,
+            format!("POST /v1/runs/{run}/events {}", received[0].body.len())
+        );
     }
 
     #[test]

@@ -8,6 +8,17 @@ Name | Type
 ------------ | -------------
 `url` | string
 `maxPages` | number
+`maxDepth` | number
+`allowSubdomains` | boolean
+`allowExternalLinks` | boolean
+`includePaths` | Array&lt;string&gt;
+`excludePaths` | Array&lt;string&gt;
+`denyExtensions` | Array&lt;string&gt;
+`crawlEntireDomain` | boolean
+`sitemap` | string
+`ignoreQueryParameters` | boolean
+`scrapeOptions` | object
+`ignoreRobotsTxt` | boolean
 
 ## Example
 
@@ -18,6 +29,17 @@ import type { CrawlRequest } from '@quarry/client'
 const example = {
   "url": null,
   "maxPages": null,
+  "maxDepth": null,
+  "allowSubdomains": null,
+  "allowExternalLinks": null,
+  "includePaths": null,
+  "excludePaths": null,
+  "denyExtensions": null,
+  "crawlEntireDomain": null,
+  "sitemap": null,
+  "ignoreQueryParameters": null,
+  "scrapeOptions": null,
+  "ignoreRobotsTxt": null,
 } satisfies CrawlRequest
 
 console.log(example)
