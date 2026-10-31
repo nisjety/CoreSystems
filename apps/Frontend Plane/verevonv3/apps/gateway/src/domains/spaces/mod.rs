@@ -275,6 +275,9 @@ pub(crate) async fn inject_personal_thread_context(
         None,
     )
     .await;
+    // A personal Space's issuer sends its refusals as 503; a refusal is a decline here, not an
+    // outage (D1-214), so a retrieval entitlement that is off still degrades the turn.
+    let retrieval_status = denial::refusal_status(retrieval_status, &retrieval_response);
     let retrieval_token = if retrieval_status == StatusCode::FORBIDDEN {
         String::new()
     } else if !retrieval_status.is_success() {
@@ -675,6 +678,24 @@ fn unix_nanos() -> u128 {
         .unwrap_or_default()
 }
 
+/// Control's membership fact URL for a Space (WS04-S7). `readable` is sent only by the read
+/// handlers (threads, activity, knowledge, work, context and the membership fact itself): it asks
+/// Control to also resolve an ARCHIVED room, whose body then carries `state` and `archived_at`.
+/// A write or presence handler passes `false`, so an archived room keeps failing closed there.
+/// An older Control ignores the parameter. Never an authorization input: Control decides.
+fn control_membership_url(state: &AppState, space_ref: &str, readable: bool) -> String {
+    let base = format!(
+        "{}/api/v1/internal/spaces/{}/membership",
+        state.user_core_url,
+        urlencoding::encode(space_ref)
+    );
+    if readable {
+        format!("{base}?readable=1")
+    } else {
+        base
+    }
+}
+
 fn required_or_generated(
     object: &mut Map<String, Value>,
     field: &str,
@@ -758,6 +779,14 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/spaces/{space_ref}/members/{member_id}",
             delete(remove_space_member).patch(room_admin::change_member_role_route),
+        )
+        .route(
+            "/api/v1/spaces/{space_ref}/archive",
+            post(room_admin::archive_room_route),
+        )
+        .route(
+            "/api/v1/spaces/{space_ref}/unarchive",
+            post(room_admin::unarchive_room_route),
         )
         .route(
             "/api/v1/spaces/{space_ref}/instructions",
@@ -1233,11 +1262,7 @@ async fn list_space_threads(
         user_name: user.user_name.clone(),
         user_role: user.auth_role.clone().unwrap_or_default(),
     };
-    let membership_url = format!(
-        "{}/api/v1/internal/spaces/{}/membership",
-        state.user_core_url,
-        urlencoding::encode(space_ref)
-    );
+    let membership_url = control_membership_url(&state, space_ref, true);
     let (membership_status, Json(membership)) = proxy_json(
         &state,
         Method::GET,
@@ -1421,6 +1446,7 @@ async fn shared_thread_read_decision_for_typed(
         None,
     )
     .await;
+    let status = denial::refusal_status(status, &response);
     if status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND {
         return Ok(Decision::Declined(SpaceDenial::from_response(
             state, status, &response,
@@ -1541,11 +1567,7 @@ async fn space_activity(
         user_name: user.user_name.clone(),
         user_role: user.auth_role.clone().unwrap_or_default(),
     };
-    let membership_url = format!(
-        "{}/api/v1/internal/spaces/{}/membership",
-        state.user_core_url,
-        urlencoding::encode(space_ref)
-    );
+    let membership_url = control_membership_url(&state, space_ref, true);
     let (membership_status, Json(membership)) = proxy_json(
         &state,
         Method::GET,
@@ -1818,6 +1840,7 @@ async fn space_retrieval_decision_typed(
         None,
     )
     .await;
+    let status = denial::refusal_status(status, &response);
     if status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND {
         return Ok(Decision::Declined(SpaceDenial::from_response(
             state, status, &response,
@@ -1926,11 +1949,7 @@ async fn space_knowledge(
         user_name: user.user_name.clone(),
         user_role: user.auth_role.clone().unwrap_or_default(),
     };
-    let membership_url = format!(
-        "{}/api/v1/internal/spaces/{}/membership",
-        state.user_core_url,
-        urlencoding::encode(space_ref)
-    );
+    let membership_url = control_membership_url(&state, space_ref, true);
     let (membership_status, Json(membership)) = proxy_json(
         &state,
         Method::GET,
@@ -2534,11 +2553,7 @@ async fn space_work(
         user_name: user.user_name.clone(),
         user_role: user.auth_role.clone().unwrap_or_default(),
     };
-    let membership_url = format!(
-        "{}/api/v1/internal/spaces/{}/membership",
-        state.user_core_url,
-        urlencoding::encode(space_ref)
-    );
+    let membership_url = control_membership_url(&state, space_ref, true);
     let (membership_status, Json(membership)) = proxy_json(
         &state,
         Method::GET,
@@ -5019,11 +5034,7 @@ async fn space_context(
         user_name: user.user_name,
         user_role: user.auth_role.unwrap_or_default(),
     };
-    let url = format!(
-        "{}/api/v1/internal/spaces/{}/membership",
-        state.user_core_url,
-        urlencoding::encode(space_ref)
-    );
+    let url = control_membership_url(&state, space_ref, true);
     let (status, Json(response)) = proxy_json(
         &state,
         Method::GET,
@@ -5037,12 +5048,18 @@ async fn space_context(
     if !status.is_success() {
         return (status, Json(response));
     }
+    let membership = crate::envelope::unwrap_data(&response);
+    // Control owns the archive state (it rides the readable membership fact); the Application
+    // lifecycle stays `active` for an archived room. The SPA shows the banner and the read-only
+    // composer from this flag. Never an authorization input: Control refuses the writes.
+    let archived = membership.get("state").and_then(Value::as_str) == Some("archived");
     (
         StatusCode::OK,
         Json(
             json!({"data": {
                 "space": public_space(&space),
-                "membership": crate::envelope::unwrap_data(&response),
+                "membership": membership,
+                "archived": archived,
                 // Server rollout flags the SPA reads to show or hide a control. Never an
                 // authorization input: Control and Session Core decide who may do anything.
                 "features": {
@@ -5052,6 +5069,7 @@ async fn space_context(
                     "connectivity_banner": state.space_features.connectivity_banner_ui,
                     "room_details": state.space_features.room_details_ui,
                     "people_search": state.space_features.people_search_api,
+                    "room_archive": state.space_features.room_archive_api,
                     "room_artifacts": state.space_features.room_artifacts,
                 },
                 "limits": { "post_max_chars": human_posts::POST_MAX_CHARS },
@@ -5084,11 +5102,7 @@ async fn current_membership(
         );
     }
 
-    let url = format!(
-        "{}/api/v1/internal/spaces/{}/membership",
-        state.user_core_url,
-        urlencoding::encode(space_ref),
-    );
+    let url = control_membership_url(&state, space_ref, true);
     let actor = ActionActor {
         user_id: user.user_id,
         user_email: user.user_email,
@@ -8035,7 +8049,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "thread_id": "thread-1",
                 "messages": [
-                    {"role":"user","content":"Når kommer leveransen?","author_subject_id":"user-2"},
+                    {"role":"user","content":"Når kommer leveransen?","author_subject_id":"user-2","created_at":"2026-10-31T09:30:15.250+00:00"},
                     {"role":"assistant","content":"I morgen.","agent_name":"Driftsassistent"}
                 ]
             })))
@@ -8093,6 +8107,10 @@ mod tests {
             turns[0]["author_subject_id"], "user-2",
             "another member's turn must carry that member's subject, not the reader's"
         );
+        // The time a turn was stored travels with it untouched: the room shows it beside the
+        // message, and a turn Model Gateway sent no time for carries none.
+        assert_eq!(turns[0]["created_at"], "2026-10-31T09:30:15.250+00:00");
+        assert!(turns[1].get("created_at").is_none());
 
         // The signed decision must actually reach Model Plane; without it
         // session-core stays owner-bound and the read silently narrows.

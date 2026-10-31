@@ -148,6 +148,21 @@ fn error_response(status: StatusCode, code: &'static str, message: &'static str)
     (status, Json(error_with_details(code, message, json!({})))).into_response()
 }
 
+/// `error_response` that also carries Control's typed reason when the mint was declined with one
+/// (D1-184): `details = {reason, resolvable_by, ...allowlisted}`, built by the WS03-S5 mapper, so
+/// the SPA can tell "not entitled" from "removed" without parsing the message. The code and the
+/// words stay the fixed ones in `ERROR_CODES`; without a reason (flag off, older Control, an
+/// untyped body) `details` is `{}` as before.
+fn error_with_denial(
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+    denial: Option<&super::denial::SpaceDenial>,
+) -> Response {
+    let details = denial.map_or_else(|| json!({}), super::denial::SpaceDenial::details_value);
+    (status, Json(error_with_details(code, message, details))).into_response()
+}
+
 fn retry_response(
     status: StatusCode,
     code: &'static str,
@@ -269,20 +284,26 @@ async fn mint_stream_decision(
         None,
     )
     .await;
+    // A refusal Control sent as 503 is a refusal (see `refusal_status`): it must not read as an
+    // outage the SPA would keep retrying.
+    let status = super::denial::refusal_status(status, &response);
+    let denial = super::denial::SpaceDenial::from_response(state, status, &response);
     // Control declines (not a member, not entitled, personal Space of someone else) or an older
     // Control without the audience. Both mean this caller may not stream.
     if status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND {
-        return Err(error_response(
+        return Err(error_with_denial(
             StatusCode::FORBIDDEN,
             "space_stream_forbidden",
             "The Space event stream is not permitted for this account.",
+            denial.as_ref(),
         ));
     }
     if !status.is_success() {
-        return Err(error_response(
+        return Err(error_with_denial(
             StatusCode::SERVICE_UNAVAILABLE,
             "space_stream_unavailable",
             "The Space event stream is temporarily unavailable.",
+            denial.as_ref(),
         ));
     }
     let data = crate::envelope::unwrap_data(&response);
@@ -1307,6 +1328,93 @@ mod tests {
         assert_eq!(status, 503);
         assert!(body.contains("space_stream_unavailable"), "{body}");
         assert!(upstream_requests(&fx).await.is_empty());
+    }
+
+    /// D1-184: a typed refusal from Control reaches the browser as `details.reason` (and the rest
+    /// of the allowlisted details) under the unchanged code and words; flag off, an untyped body
+    /// and an injected key carry nothing.
+    #[tokio::test]
+    async fn a_typed_control_refusal_is_carried_in_the_403_details() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let typed = json!({
+            "error": "current Space authority required",
+            "code": "space_entitlement_off",
+            "resolvable_by": "org_admin",
+            "details": {"entitlement": "space_realtime", "token": "tttt-secret", "org_id": "org-9"},
+        });
+        let mut fx = fixture(
+            org_posture(false),
+            ResponseTemplate::new(403).set_body_json(typed.clone()),
+            sse(&connected_block()),
+        )
+        .await;
+        fx.state.space_features.denials_typed = true;
+        let (status, body) = text(get(&app(&fx.state), None).await).await;
+        assert_eq!(status, 403, "{body}");
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["error"]["code"], "space_stream_forbidden");
+        assert_eq!(
+            parsed["error"]["message"],
+            "The Space event stream is not permitted for this account."
+        );
+        assert_eq!(parsed["error"]["details"]["reason"], "space_entitlement_off");
+        assert_eq!(parsed["error"]["details"]["resolvable_by"], "org_admin");
+        assert_eq!(parsed["error"]["details"]["entitlement"], "space_realtime");
+        assert!(!body.contains("tttt-secret") && !body.contains("org-9"), "{body}");
+        assert!(upstream_requests(&fx).await.is_empty());
+
+        // Flag off: the fixed envelope with empty details, exactly as before.
+        let fx_off = fixture(
+            org_posture(false),
+            ResponseTemplate::new(403).set_body_json(typed),
+            sse(&connected_block()),
+        )
+        .await;
+        let (status, body) = text(get(&app(&fx_off.state), None).await).await;
+        assert_eq!(status, 403);
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["error"]["code"], "space_stream_forbidden");
+        assert_eq!(parsed["error"]["details"], json!({}));
+
+        // A refusal that Control sent as 503 is a 403 too, not an outage; a real outage stays 503
+        // and names its retryable reason.
+        let mut refusal = fixture(
+            org_posture(false),
+            ResponseTemplate::new(503).set_body_json(json!({
+                "error": "personal Space authority unavailable",
+                "code": "space_kind_unsupported",
+                "resolvable_by": "none",
+                "details": {"kind": "room"},
+            })),
+            sse(&connected_block()),
+        )
+        .await;
+        refusal.state.space_features.denials_typed = true;
+        let (status, body) = text(get(&app(&refusal.state), None).await).await;
+        assert_eq!(status, 403, "{body}");
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["error"]["code"], "space_stream_forbidden");
+        assert_eq!(parsed["error"]["details"]["reason"], "space_kind_unsupported");
+        assert_eq!(parsed["error"]["details"]["kind"], "room");
+
+        let mut outage = fixture(
+            org_posture(false),
+            ResponseTemplate::new(503).set_body_json(json!({
+                "error": "authority unavailable",
+                "code": "space_authority_unavailable",
+                "resolvable_by": "retry",
+            })),
+            sse(&connected_block()),
+        )
+        .await;
+        outage.state.space_features.denials_typed = true;
+        let (status, body) = text(get(&app(&outage.state), None).await).await;
+        assert_eq!(status, 503, "{body}");
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["error"]["code"], "space_stream_unavailable");
+        assert_eq!(parsed["error"]["details"]["reason"], "space_authority_unavailable");
+        assert_eq!(parsed["error"]["details"]["resolvable_by"], "retry");
+        assert!(upstream_requests(&outage).await.is_empty());
     }
 
     #[tokio::test]

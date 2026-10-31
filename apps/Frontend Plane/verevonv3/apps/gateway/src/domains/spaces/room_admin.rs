@@ -15,8 +15,21 @@
 //! reconcile cron heals the last case. Flag off keeps the legacy Convex-then-declare path in the
 //! parent module unchanged. No message, topic or other content moves here, so there is nothing
 //! for Zero Data Retention to refuse and no model is called.
+//!
+//! WS04-S7 adds `POST /api/v1/spaces/{space_ref}/archive` and `/unarchive` behind
+//! `SpaceFeatureFlags::room_archive_api`, on the same footing: Control's actor-carrying routes own
+//! the state and the role rule (manager or owner), the gateway forwards the session's identity and
+//! the optional idempotency key, and Control's typed refusal passes through with its status. An
+//! archived room reads and refuses writes; that is Control's registration state, not this flag.
+//!
+//! Every Control failure on these routes is relayed through [`relay_control_error`]: a typed body
+//! keeps its status and only `code`, `message` and scalar `details`; anything else is a 503.
+//! Adding, re-roling, removing and archiving share one per-user ceiling of 30 operations a minute.
+
+use std::sync::OnceLock;
 
 use axum::{
+    body::Bytes,
     extract::{Extension, Path, State},
     http::StatusCode,
     Json,
@@ -30,6 +43,7 @@ use crate::{
     contracts::ActionActor,
     envelope::{error, error_with_details, unwrap_data},
     middleware::AuthenticatedUser,
+    rate_limit::RateLimiter,
     upstream::proxy_json,
 };
 
@@ -37,6 +51,101 @@ type Reply = (StatusCode, Json<Value>);
 
 const ROOM_ROLES: [&str; 4] = ["viewer", "editor", "manager", "owner"];
 const MAX_IDEMPOTENCY_KEY_LEN: usize = 128;
+/// Member administration and archive calls per user per minute (plan: 30/min). A test run shares
+/// one process-wide limiter and one user, so the ceiling is lifted there; the limiter itself is
+/// tested directly with its own small bucket.
+const MEMBER_OPS_PER_MINUTE: f64 = if cfg!(test) { 100_000.0 } else { 30.0 };
+const MAX_RELAYED_MESSAGE_CHARS: usize = 300;
+const MAX_RELAYED_DETAILS: usize = 16;
+const MAX_ARCHIVE_BODY_BYTES: usize = 4096;
+
+/// Process-wide limiter, built on first use from the gateway's Dragonfly connection (in-process
+/// fallback when the cache is off). Not an `AppState` field, like the directory limiter, so no
+/// test state literal changes.
+static MEMBER_OPS_LIMITER: OnceLock<RateLimiter> = OnceLock::new();
+
+/// One member-operation token for the caller, or the typed 429. The Retry-After seconds travel in
+/// `details.retry_after_seconds` because these functions answer a bare `(status, json)`.
+async fn member_ops_allowed(
+    state: &AppState,
+    org_id: &str,
+    user: &AuthenticatedUser,
+) -> Result<(), Reply> {
+    let limiter = MEMBER_OPS_LIMITER
+        .get_or_init(|| RateLimiter::from_cache_with_rpm(&state.cache, MEMBER_OPS_PER_MINUTE));
+    check_member_ops(limiter, org_id, &user.user_id).await
+}
+
+async fn check_member_ops(limiter: &RateLimiter, org_id: &str, user_id: &str) -> Result<(), Reply> {
+    match limiter
+        .try_acquire(&format!("space-member-ops:{}:{user_id}", org_id.trim()))
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(retry_after) => Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(error_with_details(
+                "rate_limited",
+                "Too many room changes. Retry shortly.",
+                json!({ "retry_after_seconds": retry_after.max(1) }),
+            )),
+        )),
+    }
+}
+
+/// True for a short lowercase token, the shape of every Control error code.
+fn is_error_code(code: &str) -> bool {
+    !code.is_empty()
+        && code.len() <= 64
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// Control's failure answer as the browser envelope. A typed body (`{error:{code,message,details}}`,
+/// what every WS04 route answers) keeps its status and is rebuilt from `code`, a bounded `message`
+/// and the scalar entries of `details` only, so nothing else an upstream puts in a body (extra
+/// keys, text of another service) reaches the browser. A body without a well-formed code, and a
+/// typed 401 (which the SPA would read as an expired session), become a 503 that says nothing was
+/// changed: an outage is never reported as a refusal and never as success.
+fn relay_control_error(status: StatusCode, body: Value) -> Reply {
+    let typed = body
+        .get("error")
+        .and_then(Value::as_object)
+        .and_then(|error| {
+            let code = error.get("code")?.as_str().filter(|code| is_error_code(code))?;
+            let message: String = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .chars()
+                .take(MAX_RELAYED_MESSAGE_CHARS)
+                .collect();
+            let mut out = Map::new();
+            out.insert("code".to_owned(), json!(code));
+            out.insert("message".to_owned(), json!(message));
+            if let Some(details) = error.get("details").and_then(Value::as_object) {
+                let scalars: Map<String, Value> = details
+                    .iter()
+                    .filter(|(_, value)| !value.is_array() && !value.is_object())
+                    .take(MAX_RELAYED_DETAILS)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                out.insert("details".to_owned(), Value::Object(scalars));
+            }
+            Some(Value::Object(out))
+        });
+    match typed {
+        Some(error) if status != StatusCode::UNAUTHORIZED => (status, Json(json!({ "error": error }))),
+        _ => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "room_admin_unavailable",
+                "The room could not be changed. Nothing was changed.",
+            )),
+        ),
+    }
+}
 
 /// True when the Control member writer is the path for this gateway.
 pub(super) fn writer_enabled(state: &AppState) -> bool {
@@ -220,6 +329,9 @@ pub(crate) async fn add_member(
     if let Some(key) = key {
         payload.insert("idempotency_key".to_owned(), json!(key));
     }
+    if let Err(reply) = member_ops_allowed(state, &org_id, user).await {
+        return reply;
+    }
     let (status, Json(control)) = proxy_json(
         state,
         Method::POST,
@@ -231,7 +343,7 @@ pub(crate) async fn add_member(
     )
     .await;
     if !status.is_success() {
-        return (status, Json(control));
+        return relay_control_error(status, control);
     }
     let data = unwrap_data(&control);
     let audience = reconcile_audience(state, &org_id, &space_ref).await;
@@ -297,6 +409,9 @@ pub(crate) async fn change_member_role(
     if let Some(key) = key {
         payload.insert("idempotency_key".to_owned(), json!(key));
     }
+    if let Err(reply) = member_ops_allowed(state, &org_id, user).await {
+        return reply;
+    }
     let (status, Json(control)) = proxy_json(
         state,
         Method::PATCH,
@@ -308,7 +423,7 @@ pub(crate) async fn change_member_role(
     )
     .await;
     if !status.is_success() {
-        return (status, Json(control));
+        return relay_control_error(status, control);
     }
     let data = unwrap_data(&control);
     (
@@ -346,6 +461,9 @@ pub(crate) async fn remove_member(
             )
         }
     };
+    if let Err(reply) = member_ops_allowed(state, &org_id, user).await {
+        return reply;
+    }
     let (status, Json(control)) = proxy_json(
         state,
         Method::DELETE,
@@ -357,7 +475,7 @@ pub(crate) async fn remove_member(
     )
     .await;
     if !status.is_success() {
-        return (status, Json(control));
+        return relay_control_error(status, control);
     }
     let data = unwrap_data(&control);
     let audience = reconcile_audience(state, &org_id, &space_ref).await;
@@ -391,6 +509,124 @@ pub(super) async fn change_member_role_route(
     Json(body): Json<Value>,
 ) -> Reply {
     change_member_role(&state, &user, &space_ref, &member_id, &body).await
+}
+
+// ---------------------------------------------------------------------------------------------
+// WS04-S7: archive and restore (`POST /api/v1/spaces/{space_ref}/archive|unarchive`).
+// ---------------------------------------------------------------------------------------------
+
+fn archive_feature_disabled() -> Reply {
+    (
+        StatusCode::NOT_FOUND,
+        Json(error("feature_disabled", "Room archive is not enabled.")),
+    )
+}
+
+/// The optional JSON body of an archive call: absent or blank is `{}`; anything but an object, an
+/// unreadable body or an oversized one is a 400 before any upstream call.
+fn parse_optional_body(raw: &Bytes) -> Result<Value, Reply> {
+    if raw.len() > MAX_ARCHIVE_BODY_BYTES {
+        return Err(invalid("body", "The request body is too large."));
+    }
+    if raw.iter().all(u8::is_ascii_whitespace) {
+        return Ok(json!({}));
+    }
+    match serde_json::from_slice::<Value>(raw) {
+        Ok(body) if body.is_object() => Ok(body),
+        _ => Err(invalid("body", "The request body must be a JSON object.")),
+    }
+}
+
+fn archive_url(state: &AppState, space_ref: &str, archive: bool) -> String {
+    format!(
+        "{}/api/v1/internal/spaces/{}/{}",
+        state.user_core_url,
+        urlencoding::encode(space_ref),
+        if archive { "archive" } else { "unarchive" }
+    )
+}
+
+/// Archives (`archive`) or restores a named room on Control. Control applies the role rule
+/// (manager or owner), refuses the organization room (`room_not_archivable`) and a personal Space,
+/// and answers `{data:{state,changed,replayed,archived_at,authority_revision}}`; the browser gets
+/// `{data:{state,changed,archived_at}}`. Org and actor come from the session, never the body. The
+/// call is idempotent set-to-state, so a repeat answers `changed:false`. Nothing here reads or
+/// stores conversation content and no model is called, so a Zero Data Retention organization
+/// behaves the same.
+pub(crate) async fn set_room_archived(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    space_ref: &str,
+    body: &Value,
+    archive: bool,
+) -> Reply {
+    if !state.space_features.room_archive_api {
+        return archive_feature_disabled();
+    }
+    let (org_id, space_ref) = match scope(state, user, space_ref).await {
+        Ok(scope) => scope,
+        Err(reply) => return reply,
+    };
+    let key = match optional_idempotency_key(body) {
+        Ok(key) => key,
+        Err(reply) => return reply,
+    };
+    let mut payload = Map::new();
+    if let Some(key) = key {
+        payload.insert("idempotency_key".to_owned(), json!(key));
+    }
+    if let Err(reply) = member_ops_allowed(state, &org_id, user).await {
+        return reply;
+    }
+    let (status, Json(control)) = proxy_json(
+        state,
+        Method::POST,
+        &archive_url(state, &space_ref, archive),
+        Some(Value::Object(payload)),
+        Some(&org_id),
+        Some(&actor_of(user)),
+        None,
+    )
+    .await;
+    if !status.is_success() {
+        return relay_control_error(status, control);
+    }
+    let data = unwrap_data(&control);
+    let expected = if archive { "archived" } else { "active" };
+    (
+        StatusCode::OK,
+        Json(json!({"data": {
+            "state": data.get("state").and_then(Value::as_str).unwrap_or(expected),
+            "changed": data.get("changed").and_then(Value::as_bool).unwrap_or(false),
+            "archived_at": data.get("archived_at").cloned().filter(Value::is_string),
+        }})),
+    )
+}
+
+/// Axum handler for `POST /api/v1/spaces/{space_ref}/archive`. The body is optional.
+pub(super) async fn archive_room_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(space_ref): Path<String>,
+    raw: Bytes,
+) -> Reply {
+    match parse_optional_body(&raw) {
+        Ok(body) => set_room_archived(&state, &user, &space_ref, &body, true).await,
+        Err(reply) => reply,
+    }
+}
+
+/// Axum handler for `POST /api/v1/spaces/{space_ref}/unarchive`. The body is optional.
+pub(super) async fn unarchive_room_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(space_ref): Path<String>,
+    raw: Bytes,
+) -> Reply {
+    match parse_optional_body(&raw) {
+        Ok(body) => set_room_archived(&state, &user, &space_ref, &body, false).await,
+        Err(reply) => reply,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -606,6 +842,7 @@ pub(super) async fn update_room_details_route(
 mod tests {
     use super::{audience_state, invalid_details_from, map_details_failure};
     use crate::config::AppState;
+    use crate::rate_limit::RateLimiter;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use serde_json::{json, Value};
@@ -1268,6 +1505,341 @@ mod tests {
         let sent_body: Value = serde_json::from_slice(&sent.body).unwrap();
         assert_eq!(sent_body, json!({"role": "manager", "expected_revision": 3, "idempotency_key": "key-2"}));
         assert!(convex_requests(&fx).await.is_empty(), "the recipient set is unchanged by a role change");
+    }
+
+    // ---- WS04-S7: archive and restore ------------------------------------------------------
+
+    const CONTROL_ARCHIVE: &str = "/api/v1/internal/spaces/space-room/archive";
+    const CONTROL_UNARCHIVE: &str = "/api/v1/internal/spaces/space-room/unarchive";
+
+    async fn fx_archive(role: &str) -> Fx {
+        let mut fx = fx(role).await;
+        fx.state.space_features.room_archive_api = true;
+        fx
+    }
+
+    #[tokio::test]
+    async fn flag_off_the_archive_routes_answer_404_feature_disabled_and_call_nothing() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx("owner").await;
+        for verb in ["archive", "unarchive"] {
+            let (status, body) = call(&fx, "POST", &format!("{ROOM}/{verb}"), None, &[]).await;
+            assert_eq!(status, 404, "{verb}");
+            assert_eq!(body["error"]["code"], "feature_disabled", "{verb}");
+        }
+        assert!(control_calls(&fx).await.is_empty());
+        assert!(convex_requests(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn archive_and_unarchive_forward_the_session_identity_and_answer_state_changed_archived_at() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx_archive("owner").await;
+        mount_control(
+            &fx,
+            "POST",
+            CONTROL_ARCHIVE,
+            control_ok(json!({"state": "archived", "changed": true, "replayed": false,
+                "archived_at": "2026-10-31T10:00:00Z", "authority_revision": 7})),
+        )
+        .await;
+        mount_control(
+            &fx,
+            "POST",
+            CONTROL_UNARCHIVE,
+            control_ok(json!({"state": "active", "changed": false, "archived_at": null})),
+        )
+        .await;
+        // No body at all is fine.
+        let (status, body) = call(&fx, "POST", &format!("{ROOM}/archive"), None, &[]).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            json!({"data": {"state": "archived", "changed": true, "archived_at": "2026-10-31T10:00:00Z"}})
+        );
+        // A key travels; a forged org or actor never does.
+        let (status, body) = call(
+            &fx,
+            "POST",
+            &format!("{ROOM}/unarchive"),
+            Some(json!({"idempotency_key": " key-1 ", "org_id": "forged", "actor_id": "forged"})),
+            &[],
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            json!({"data": {"state": "active", "changed": false, "archived_at": null}})
+        );
+        let sent = fx.user_core.received_requests().await.unwrap();
+        let find = |path: &str| {
+            sent.iter()
+                .find(|request| request.url.path() == path)
+                .unwrap_or_else(|| panic!("no Control request to {path}"))
+        };
+        let archive: Value = serde_json::from_slice(&find(CONTROL_ARCHIVE).body).unwrap();
+        assert_eq!(archive, json!({}));
+        let unarchive_request = find(CONTROL_UNARCHIVE);
+        let unarchive: Value = serde_json::from_slice(&unarchive_request.body).unwrap();
+        assert_eq!(unarchive, json!({"idempotency_key": "key-1"}));
+        assert!(unarchive_request.headers.get("x-delegation-signature").is_some());
+        assert_eq!(
+            unarchive_request.headers.get("x-org-id").and_then(|v| v.to_str().ok()),
+            Some("org-1")
+        );
+        assert!(convex_requests(&fx).await.is_empty(), "archive is Control's state alone");
+    }
+
+    #[tokio::test]
+    async fn bad_archive_bodies_are_refused_before_control_is_called() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx_archive("owner").await;
+        let uri = format!("{ROOM}/archive");
+        for body in [
+            json!({"idempotency_key": " "}),
+            json!({"idempotency_key": 7}),
+            json!({"idempotency_key": "k".repeat(129)}),
+            json!([1]),
+            json!("text"),
+        ] {
+            let (status, got) = call(&fx, "POST", &uri, Some(body.clone()), &[]).await;
+            assert_eq!(status, 400, "{body}");
+            assert_eq!(got["error"]["code"], "invalid_request", "{body}");
+        }
+        assert!(control_calls(&fx).await.is_empty());
+        use axum::body::Bytes;
+        assert_eq!(super::parse_optional_body(&Bytes::new()).unwrap(), json!({}));
+        assert_eq!(super::parse_optional_body(&Bytes::from_static(b" \n ")).unwrap(), json!({}));
+        assert!(super::parse_optional_body(&Bytes::from_static(b"{not json")).is_err());
+        assert!(super::parse_optional_body(&Bytes::from(vec![b' '; 5000].into_iter().chain(*b"{}").collect::<Vec<u8>>())).is_err());
+    }
+
+    #[tokio::test]
+    async fn control_refusals_keep_their_status_and_code_and_nothing_else() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (control_status, code) in [
+            (409_u16, "room_archived"),
+            (403, "room_role_forbidden"),
+            (409, "room_not_archivable"),
+            (409, "room_state_conflict"),
+            (404, "room_not_found"),
+            (503, "space_authority_unavailable"),
+        ] {
+            let fx = fx_archive("owner").await;
+            mount_control(
+                &fx,
+                "POST",
+                CONTROL_ARCHIVE,
+                ResponseTemplate::new(control_status).set_body_json(json!({
+                    "error": {"code": code, "message": "msg",
+                        "details": {"state": "archived", "n": 3, "nested": {"a": 1}, "list": [1]},
+                        "stack": "internal trace", "token": "secret"},
+                    "debug": "x"
+                })),
+            )
+            .await;
+            let (status, got) = call(&fx, "POST", &format!("{ROOM}/archive"), None, &[]).await;
+            assert_eq!(status, control_status, "{code}");
+            assert_eq!(
+                got,
+                json!({"error": {"code": code, "message": "msg", "details": {"state": "archived", "n": 3}}}),
+                "{code}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_untyped_or_session_looking_control_failure_is_a_503_that_says_nothing_changed() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let cases = [
+            ResponseTemplate::new(500).set_body_json(json!({"error": "boom-internal"})),
+            ResponseTemplate::new(403).set_body_json(json!({"error": "boom-internal"})),
+            ResponseTemplate::new(401).set_body_json(
+                json!({"error": {"code": "unauthorized", "message": "boom-internal"}}),
+            ),
+            ResponseTemplate::new(409).set_body_json(
+                json!({"error": {"code": "Bad Code!", "message": "boom-internal"}}),
+            ),
+        ];
+        for template in cases {
+            let fx = fx_archive("owner").await;
+            mount_control(&fx, "POST", CONTROL_ARCHIVE, template).await;
+            let (status, got) = call(&fx, "POST", &format!("{ROOM}/archive"), None, &[]).await;
+            assert_eq!(status, 503, "{got}");
+            assert_eq!(got["error"]["code"], "room_admin_unavailable");
+            assert!(!got.to_string().contains("boom-internal"), "{got}");
+        }
+        // A body that is not JSON never reaches this module as text: the upstream layer already
+        // reduces it to its own fixed `upstream_error` words, which pass with their status.
+        let fx = fx_archive("owner").await;
+        mount_control(
+            &fx,
+            "POST",
+            CONTROL_ARCHIVE,
+            ResponseTemplate::new(502).set_body_string("<html>boom-internal</html>"),
+        )
+        .await;
+        let (status, got) = call(&fx, "POST", &format!("{ROOM}/archive"), None, &[]).await;
+        assert_eq!(status, 502, "{got}");
+        assert_eq!(got["error"]["code"], "upstream_error");
+        assert!(!got.to_string().contains("boom-internal"), "{got}");
+    }
+
+    #[tokio::test]
+    async fn the_member_writer_failures_are_filtered_the_same_way() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx_writer("owner").await;
+        mount_control(
+            &fx,
+            "POST",
+            CONTROL_MEMBERS,
+            ResponseTemplate::new(500).set_body_json(json!({"error": "upstream stack trace"})),
+        )
+        .await;
+        mount_convex(&fx, "/api/action", reconcile("noop")).await;
+        let (status, got) =
+            call(&fx, "POST", &format!("{ROOM}/members"), Some(json!({"member_id": "user-2"})), &[]).await;
+        assert_eq!(status, 503);
+        assert_eq!(got["error"]["code"], "room_admin_unavailable");
+        assert!(!got.to_string().contains("stack trace"));
+        assert!(convex_requests(&fx).await.is_empty(), "a failed write is never reconciled");
+    }
+
+    #[tokio::test]
+    async fn the_member_ops_ceiling_is_per_user_and_per_org_and_answers_a_typed_429() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let state = AppState::for_tests();
+        let limiter = RateLimiter::from_cache_with_rpm(&state.cache, 2.0);
+        assert!(super::check_member_ops(&limiter, "org-1", "user-1").await.is_ok());
+        assert!(super::check_member_ops(&limiter, "org-1", "user-1").await.is_ok());
+        let (status, axum::Json(body)) = super::check_member_ops(&limiter, "org-1", "user-1")
+            .await
+            .expect_err("the third call in the minute is refused");
+        assert_eq!(status.as_u16(), 429);
+        assert_eq!(body["error"]["code"], "rate_limited");
+        assert!(body["error"]["details"]["retry_after_seconds"].as_u64().unwrap() >= 1);
+        // Another user, and the same user in another organization, have their own bucket.
+        assert!(super::check_member_ops(&limiter, "org-1", "user-2").await.is_ok());
+        assert!(super::check_member_ops(&limiter, "org-2", "user-1").await.is_ok());
+    }
+
+    #[test]
+    fn relay_control_error_bounds_the_message_and_the_details() {
+        let long = "m".repeat(1000);
+        let details: serde_json::Map<String, Value> =
+            (0..40).map(|i| (format!("k{i:02}"), json!(i))).collect();
+        let (status, axum::Json(body)) = super::relay_control_error(
+            axum::http::StatusCode::CONFLICT,
+            json!({"error": {"code": "room_member_changed", "message": long, "details": details}}),
+        );
+        assert_eq!(status.as_u16(), 409);
+        assert_eq!(body["error"]["message"].as_str().unwrap().chars().count(), 300);
+        assert_eq!(body["error"]["details"].as_object().unwrap().len(), 16);
+        // No details key in, none out.
+        let (_, axum::Json(body)) = super::relay_control_error(
+            axum::http::StatusCode::FORBIDDEN,
+            json!({"error": {"code": "room_role_forbidden", "message": "no"}}),
+        );
+        assert!(body["error"].get("details").is_none());
+    }
+
+    /// The read handlers ask Control for the readable membership (an archived room resolves and
+    /// reports its state); a write path keeps the strict one. The context reports `archived` and
+    /// the `room_archive` feature flag.
+    #[tokio::test]
+    async fn the_read_handlers_ask_for_the_readable_membership_and_context_reports_archived() {
+        use wiremock::matchers::query_param;
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = fx_archive("viewer").await;
+        fx.state.space_features.room_details_ui = true;
+        // Only a readable request sees the archived state; the strict one gets the plain fact.
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .and(query_param("readable", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": "viewer",
+                    "state": "archived", "archived_at": "2026-10-31T10:00:00Z"}
+            })))
+            .with_priority(1)
+            .mount(&fx.user_core)
+            .await;
+        mount_convex(
+            &fx,
+            "/api/query",
+            ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef": "space-room", "name": "Leveranse", "kind": "room", "lifecycle": "active"}
+            ]})),
+        )
+        .await;
+        let (status, body) = call(&fx, "GET", &format!("{ROOM}/context"), None, &[]).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["archived"], true);
+        assert_eq!(body["data"]["membership"]["state"], "archived");
+        assert_eq!(body["data"]["membership"]["archived_at"], "2026-10-31T10:00:00Z");
+        assert_eq!(body["data"]["features"]["room_archive"], true);
+        assert_eq!(body["data"]["space"]["lifecycle"], "active", "Application's lifecycle is untouched");
+        let (status, body) = call(&fx, "GET", &format!("{ROOM}/membership"), None, &[]).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["state"], "archived");
+
+        // A write handler's role read does not ask for the readable state.
+        let (status, _) = call(&fx, "PATCH", ROOM, Some(json!({"name": "Nytt navn"})), &[]).await;
+        assert_eq!(status, 403, "a viewer cannot rename");
+        let queries: Vec<Option<String>> = fx
+            .user_core
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path().ends_with("/membership"))
+            .map(|request| request.url.query().map(str::to_owned))
+            .collect();
+        assert_eq!(
+            queries,
+            vec![
+                Some("readable=1".to_owned()),
+                Some("readable=1".to_owned()),
+                None
+            ],
+            "context and the membership route are read handlers; the rename role check is not"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_active_room_is_not_archived_and_the_feature_flag_follows_the_gateway() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for flag in [true, false] {
+            let mut fx = fx("owner").await;
+            fx.state.space_features.room_archive_api = flag;
+            mount_convex(
+                &fx,
+                "/api/query",
+                ResponseTemplate::new(200).set_body_json(json!({"value": [
+                    {"spaceRef": "space-room", "name": "Leveranse", "kind": "room", "lifecycle": "active"}
+                ]})),
+            )
+            .await;
+            let (status, body) = call(&fx, "GET", &format!("{ROOM}/context"), None, &[]).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["data"]["archived"], false);
+            assert_eq!(body["data"]["features"]["room_archive"], flag);
+        }
+    }
+
+    #[tokio::test]
+    async fn zdr_org_archive_never_calls_the_model_plane() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx_archive("owner").await;
+        mount_control(
+            &fx,
+            "POST",
+            CONTROL_ARCHIVE,
+            control_ok(json!({"state": "archived", "changed": true, "archived_at": "2026-10-31T10:00:00Z"})),
+        )
+        .await;
+        let (status, body) = call(&fx, "POST", &format!("{ROOM}/archive"), None, &[("x-zdr", "true")]).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(fx.model_gateway.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]

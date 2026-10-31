@@ -194,6 +194,13 @@ pub(crate) struct SpaceFeatureFlags {
     /// authorization input: Control's directory read (signed delegation, scope
     /// `directory:read:self`) decides what the caller may see.
     pub(crate) people_search_api: bool,
+    /// `SPACE_ROOM_ARCHIVE_API` (WS04-S7): `POST /api/v1/spaces/{space_ref}/archive` and
+    /// `/unarchive` (Control's archive state) and `features.room_archive`. Off answers 404
+    /// `feature_disabled`; an archived room still reads and still refuses writes, because that is
+    /// Control's state, not this flag. A rollout control, never an authorization input: Control's
+    /// live role (owner or manager) decides who may archive. No content moves, so Zero Data
+    /// Retention organizations are unaffected.
+    pub(crate) room_archive_api: bool,
     /// `SPACE_ROOM_ARTIFACTS_API` (WS07-S9): `GET /api/v1/spaces/{space_ref}/artifacts`, the room
     /// artifact aggregate, and `features.room_artifacts`. Off answers 404
     /// `space_room_artifacts_disabled` and the SPA hides the chips and the tab. A rollout control,
@@ -222,6 +229,7 @@ impl SpaceFeatureFlags {
             realtime_stream: space_flag("SPACE_REALTIME_STREAM"),
             room_details_ui: space_flag("SPACE_ROOM_DETAILS_UI"),
             people_search_api: space_flag("SPACE_PEOPLE_SEARCH_API"),
+            room_archive_api: space_flag("SPACE_ROOM_ARCHIVE_API"),
             room_artifacts: space_flag("SPACE_ROOM_ARTIFACTS_API"),
             send_idempotency_api: space_flag("SPACE_SEND_IDEMPOTENCY_API"),
             thread_pane_ui: space_flag("SPACE_THREAD_PANE_UI"),
@@ -871,6 +879,7 @@ mod tests {
         assert!(!flags.realtime_stream);
         assert!(!flags.room_details_ui);
         assert!(!flags.people_search_api);
+        assert!(!flags.room_archive_api);
         assert!(!flags.room_artifacts);
         assert!(!flags.send_idempotency_api);
         assert!(!flags.thread_pane_ui);
@@ -979,6 +988,7 @@ mod tests {
             "SPACE_ROOM_DETAILS_UI",
             "SPACE_PEOPLE_SEARCH_API",
             "SPACE_MEMBERSHIP_WRITER_API",
+            "SPACE_ROOM_ARCHIVE_API",
         ];
         let vars = |app_env: &'static str, value: Option<&'static str>| {
             let mut vars = vec![("APP_ENV", Some(app_env))];
@@ -991,6 +1001,7 @@ mod tests {
             assert!(!flags.room_details_ui);
             assert!(!flags.people_search_api);
             assert!(!flags.membership_writer_api);
+            assert!(!flags.room_archive_api);
         });
         with_env(&vars("development", None), || {
             let flags = super::SpaceFeatureFlags::from_env();
@@ -998,6 +1009,7 @@ mod tests {
             assert!(flags.room_details_ui);
             assert!(flags.people_search_api);
             assert!(flags.membership_writer_api);
+            assert!(flags.room_archive_api);
         });
         with_env(&vars("production", Some("true")), || {
             let flags = super::SpaceFeatureFlags::from_env();
@@ -1005,6 +1017,7 @@ mod tests {
             assert!(flags.room_details_ui);
             assert!(flags.people_search_api);
             assert!(flags.membership_writer_api);
+            assert!(flags.room_archive_api);
         });
         with_env(&vars("development", Some("false")), || {
             let flags = super::SpaceFeatureFlags::from_env();
@@ -1012,6 +1025,7 @@ mod tests {
             assert!(!flags.room_details_ui);
             assert!(!flags.people_search_api);
             assert!(!flags.membership_writer_api);
+            assert!(!flags.room_archive_api);
         });
     }
 }

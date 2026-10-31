@@ -13,6 +13,13 @@
 //! the `space_denials_typed` flag is off. The flag is a rollout control, never
 //! an authorization input: the status code and the refusal itself are the same
 //! with it on or off.
+//!
+//! One status correction applies with the flag on or off ([`refusal_status`]):
+//! Control's catalogue answers every refusal 403 and only
+//! `space_authority_unavailable` 503, but five personal-Space issuers pass 503 as
+//! the status of every non-membership refusal. A well-formed refusal that arrives
+//! as 503 is therefore reported as 403, so a retry loop never spins on a refusal
+//! and a declined retrieval degrades the turn instead of failing it.
 
 use axum::{http::StatusCode, Json};
 use serde_json::{json, Map, Value};
@@ -33,6 +40,9 @@ pub(crate) const OP_READ: &str = "space_read_not_authorized";
 /// compromised upstream) puts in `details` is dropped.
 const DETAIL_ALLOWLIST: &[&str] = &["entitlement", "required_roles", "state", "kind", "effect"];
 const RESOLVABLE_BY: &[&str] = &["none", "org_admin", "space_manager", "retry", "operator"];
+/// The one catalogue reason that is a real outage (Control answers it 503, retryable). Every
+/// other well-formed reason is a refusal.
+const REASON_UNAVAILABLE: &str = "space_authority_unavailable";
 const DEFAULT_MESSAGE: &str = "This Space action is not authorized.";
 const MAX_MESSAGE_CHARS: usize = 200;
 const MAX_DETAIL_TOKEN: usize = 64;
@@ -156,14 +166,32 @@ pub(crate) fn map_control_denial(
     ))
 }
 
+/// The status a Control decision answer is reported with. A 503 whose body carries a
+/// well-formed refusal reason other than `space_authority_unavailable` is a refusal that Control
+/// sent with the wrong status (the personal-Space issuers pass 503 for every non-membership
+/// refusal), so it is 403, as the catalogue says. Everything else keeps its status: a real
+/// outage, a 503 without a reason (older Control) and every other code. Independent of
+/// `space_denials_typed`, and never widens anything: it only turns an error into a clearer error.
+pub(crate) fn refusal_status(status: StatusCode, body: &Value) -> StatusCode {
+    if status != StatusCode::SERVICE_UNAVAILABLE {
+        return status;
+    }
+    match SpaceDenial::parse(body) {
+        Some(denial) if denial.reason != REASON_UNAVAILABLE => StatusCode::FORBIDDEN,
+        _ => status,
+    }
+}
+
 /// A Control response, typed when `space_denials_typed` is on and the body has a
-/// reason, otherwise exactly the response Control gave. The status never changes.
+/// reason, otherwise exactly the response Control gave. The status changes only through
+/// [`refusal_status`]: a refusal sent as 503 is reported as 403.
 pub(crate) fn typed_response(
     state: &AppState,
     status: StatusCode,
     body: Value,
     operation_code: &'static str,
 ) -> (StatusCode, Json<Value>) {
+    let status = refusal_status(status, &body);
     if state.space_features.denials_typed {
         if let Some(mapped) = map_control_denial(status, &body, operation_code) {
             return (status, Json(mapped));
@@ -416,6 +444,75 @@ mod tests {
         let untyped = json!({"error": "forbidden"});
         let (status, Json(out)) = typed_response(&state, StatusCode::FORBIDDEN, untyped.clone(), OP_POST);
         assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(out, untyped);
+    }
+
+    /// D1-214: a refusal that Control sent as 503 is 403; an outage and an untyped 503 stay 503.
+    #[test]
+    fn a_refusal_sent_as_503_is_reported_as_403_and_an_outage_stays_503() {
+        let unavailable = StatusCode::SERVICE_UNAVAILABLE;
+        for reason in [
+            "space_membership_required",
+            "space_not_active",
+            "space_kind_unsupported",
+            "space_policy_not_provisioned",
+            "space_entitlement_off",
+            "space_role_below_floor",
+            "space_zdr_forbids_effect",
+            "space_audience_not_current",
+            "space_authority_incomplete",
+        ] {
+            assert_eq!(refusal_status(unavailable, &denial_body(reason)), StatusCode::FORBIDDEN, "{reason}");
+        }
+        assert_eq!(
+            refusal_status(unavailable, &denial_body("space_authority_unavailable")),
+            unavailable
+        );
+        // No reason, a malformed reason and a non-object body are not refusals.
+        assert_eq!(refusal_status(unavailable, &json!({"error": "down"})), unavailable);
+        assert_eq!(refusal_status(unavailable, &denial_body("unavailable")), unavailable);
+        assert_eq!(refusal_status(unavailable, &json!("text")), unavailable);
+        // Only a 503 is corrected: every other status is the caller's already.
+        for status in [
+            StatusCode::OK,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+            StatusCode::CONFLICT,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+        ] {
+            assert_eq!(refusal_status(status, &denial_body("space_entitlement_off")), status);
+        }
+    }
+
+    #[test]
+    fn typed_response_reports_a_503_refusal_as_403_with_the_flag_off_and_on() {
+        let mut state = AppState::for_tests();
+        let body = denial_body("space_entitlement_off");
+        let (status, Json(out)) =
+            typed_response(&state, StatusCode::SERVICE_UNAVAILABLE, body.clone(), OP_RETRIEVAL);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(out, body, "flag off: only the status is corrected, the body is Control's");
+        state.space_features.denials_typed = true;
+        let (status, Json(out)) =
+            typed_response(&state, StatusCode::SERVICE_UNAVAILABLE, body, OP_RETRIEVAL);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(out["error"]["code"], OP_RETRIEVAL);
+        assert_eq!(out["error"]["details"]["reason"], "space_entitlement_off");
+        // A real outage keeps 503 and its typed reason.
+        let (status, Json(out)) = typed_response(
+            &state,
+            StatusCode::SERVICE_UNAVAILABLE,
+            denial_body("space_authority_unavailable"),
+            OP_RETRIEVAL,
+        );
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(out["error"]["details"]["reason"], "space_authority_unavailable");
+        // An untyped 503 is passed through as Control sent it.
+        let untyped = json!({"error": "down"});
+        let (status, Json(out)) =
+            typed_response(&state, StatusCode::SERVICE_UNAVAILABLE, untyped.clone(), OP_RETRIEVAL);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(out, untyped);
     }
 

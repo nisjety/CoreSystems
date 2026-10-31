@@ -556,6 +556,24 @@
       "reason": "Personal-agent admission (configuration, ids only, K4-14)."
     },
     {
+      "id": "bff:POST:/api/v1/spaces/{space_ref}/archive",
+      "kind": "route",
+      "plane": "frontend",
+      "service": "verevonv3-gateway",
+      "method": "POST",
+      "path": "/api/v1/spaces/{space_ref}/archive",
+      "handler": "domains/spaces/room_admin.rs::archive_room_route",
+      "route_class": "Config",
+      "decision_type": "membership",
+      "min_role": "manager",
+      "zdr_class": "n/a",
+      "basis": "registry",
+      "idempotency": "idempotency_key",
+      "flag": "room_archive_api",
+      "payload_allow_list": [],
+      "reason": "Room archive state: ids and a timestamp only, allowed under ZDR like room details (K4-14). Control applies the manager-or-owner rule and refuses the organization room; the room admin tests pin that no Model Plane call is made. An archived room still reads and refuses writes."
+    },
+    {
       "id": "bff:POST:/api/v1/spaces/{space_ref}/conversations/{conversation_id}/agent-action-grants",
       "kind": "route",
       "plane": "frontend",
@@ -680,6 +698,24 @@
       "flag": "human_posts_api",
       "payload_allow_list": [],
       "reason": "A member's reply is stored free text under their name: refused for a ZDR org before any Control or model call (typed 412)."
+    },
+    {
+      "id": "bff:POST:/api/v1/spaces/{space_ref}/unarchive",
+      "kind": "route",
+      "plane": "frontend",
+      "service": "verevonv3-gateway",
+      "method": "POST",
+      "path": "/api/v1/spaces/{space_ref}/unarchive",
+      "handler": "domains/spaces/room_admin.rs::unarchive_room_route",
+      "route_class": "Config",
+      "decision_type": "membership",
+      "min_role": "manager",
+      "zdr_class": "n/a",
+      "basis": "registry",
+      "idempotency": "idempotency_key",
+      "flag": "room_archive_api",
+      "payload_allow_list": [],
+      "reason": "Restores an archived room: ids and a timestamp only, allowed under ZDR (K4-14). Control applies the manager-or-owner rule; a lifecycle replay never unarchives."
     },
     {
       "id": "mg:DELETE:/v1/browser/grants/:grant_id",
