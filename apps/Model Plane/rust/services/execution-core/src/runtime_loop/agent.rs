@@ -3997,6 +3997,29 @@ async fn run_rounds(
                     } else {
                         None
                     };
+                    // The thread-scope workspace (WS22-S2): a non-Space run's `code_interpreter` keeps its
+                    // files in the run's thread. The bearer is present only when grpc.rs admitted that thread,
+                    // so the same decision is taken again here, on the same inputs.
+                    let thread = if call.name == "code_interpreter" && sandbox.is_none() {
+                        crate::sandbox_lease::workspace_sync::thread_for_step(
+                            crate::sandbox_lease::workspace_sync::switched_on(),
+                            zdr || ctx.route.is_waived(),
+                            &ctx.req.space_id,
+                            &ctx.req.thread_id,
+                        )
+                        .zip(ctx.sandbox_bearer)
+                        .map(|(thread_id, bearer)| {
+                            crate::sandbox_lease::workspace_sync::ThreadScope {
+                                thread_id,
+                                bearer,
+                                backend_id: ctx.backend_id,
+                                sandbox_manager_client: ctx.sandbox_manager_client,
+                                cas_client: ctx.cas_client,
+                            }
+                        })
+                    } else {
+                        None
+                    };
                     // Effect ledger (build plan WS03 S5): an effectful call is reserved
                     // before it can run and finalized after, so a loop that dies in
                     // between leaves a row that says the effect may have happened. A
@@ -4178,6 +4201,7 @@ async fn run_rounds(
                             ctx.capability_policy,
                             Some(dispatch),
                             sandbox.as_ref(),
+                            thread.as_ref(),
                             // Only the resume segment holds a release, and it
                             // covers exactly one call.
                             ctx.release.as_ref(),

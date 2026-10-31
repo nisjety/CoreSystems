@@ -1161,6 +1161,27 @@ fn enforce_persistence_free_execution(
     Ok(())
 }
 
+/// The thread a step's `code_interpreter` workspace is kept in, when the step takes the thread path
+/// (WS22-S2). Only such a step demands the user-bound sandbox bearer, so with the switch off no step
+/// does, and each request is handled as it was before the switch existed.
+fn thread_workspace_thread<'a>(
+    switched_on: bool,
+    tool_name: &str,
+    space_id: &str,
+    thread_id: &'a str,
+    persistence_free: bool,
+) -> Option<&'a str> {
+    if tool_name != "code_interpreter" {
+        return None;
+    }
+    crate::sandbox_lease::workspace_sync::thread_for_step(
+        switched_on,
+        persistence_free,
+        space_id,
+        thread_id,
+    )
+}
+
 #[allow(clippy::result_large_err)]
 fn validate_granted_approval(
     approval: Option<&pb::Approval>,
@@ -1374,9 +1395,21 @@ impl ExecutionCore for ExecutionService {
         // decision to the CALLING principal, so a service-level credential
         // could never pass it; this is the one delegated bearer that must be
         // user-bound (S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md §3.5 B.2).
-        let sandbox_bearer = if (request.get_ref().tool_name == "code_interpreter"
+        // A thread-scope code_interpreter (WS22-S2) demands the same user-bound bearer, for its
+        // thread's own lease. Only with the switch on, and only for a step that is neither
+        // Space-scoped nor persistence-free, does that path apply.
+        let thread_scope_id = thread_workspace_thread(
+            crate::sandbox_lease::workspace_sync::switched_on(),
+            &request.get_ref().tool_name,
+            &request.get_ref().space_id,
+            &request.get_ref().thread_id,
+            request.get_ref().zdr || caller.zdr || caller.zdr_waiver.is_some(),
+        )
+        .map(str::to_owned);
+        let sandbox_bearer = if ((request.get_ref().tool_name == "code_interpreter"
             || crate::workspace_tools::is_workspace_tool(&request.get_ref().tool_name))
-            && !request.get_ref().space_id.is_empty()
+            && !request.get_ref().space_id.is_empty())
+            || thread_scope_id.is_some()
         {
             Some(
                 self.auth
@@ -1443,7 +1476,10 @@ impl ExecutionCore for ExecutionService {
         )
         .with_verified_bearer(session_bearer.as_str());
 
-        let sandbox = sandbox_bearer.as_ref().map(|sandbox_bearer| {
+        let sandbox = sandbox_bearer
+            .as_ref()
+            .filter(|_| !req.space_id.is_empty())
+            .map(|sandbox_bearer| {
             crate::sandbox_lease::SandboxLeaseContext {
                 space_id: &req.space_id,
                 sandbox_bearer: sandbox_bearer.as_str(),
@@ -1456,6 +1492,20 @@ impl ExecutionCore for ExecutionService {
             }
         });
 
+        // The thread a code_interpreter call keeps its files in (WS22-S2). Present only for a step that
+        // took the thread path: a Space step never does, so `sandbox` stays its only context.
+        let thread = match (thread_scope_id.as_deref(), sandbox_bearer.as_ref()) {
+            (Some(thread_id), Some(bearer)) if req.space_id.is_empty() => {
+                Some(crate::sandbox_lease::workspace_sync::ThreadScope {
+                    thread_id,
+                    bearer: bearer.as_str(),
+                    backend_id: &self.backend_id,
+                    sandbox_manager_client: &self.sandbox_manager_client,
+                    cas_client: self.cas_client.as_ref(),
+                })
+            }
+            _ => None,
+        };
         let outcome = runtime_loop::execute_step_with_browser_grant(
             &req.tool_name,
             &req.tool_input,
@@ -1489,6 +1539,7 @@ impl ExecutionCore for ExecutionService {
             self.capability_policy.as_ref(),
             browser_grant.as_ref(),
             sandbox.as_ref(),
+            thread.as_ref(),
         )
         .await;
 
@@ -1770,7 +1821,17 @@ impl ExecutionCore for ExecutionService {
         // on a per-tool basis. Mirrors the mandatory data-plane/inference
         // bearers above, which every ExecuteStep call already requires
         // unconditionally for the identical reason.
-        let sandbox_bearer = if request.get_ref().space_id.is_empty() {
+        // A run whose thread keeps a workspace (WS22-S2) demands the same user-bound bearer, which its
+        // code_interpreter calls use for the thread's own lease. With the switch off, or for a run that
+        // is persistence-free, nothing changes.
+        let thread_workspace = crate::sandbox_lease::workspace_sync::thread_for_step(
+            crate::sandbox_lease::workspace_sync::switched_on(),
+            request.get_ref().zdr || caller.zdr || caller.zdr_waiver.is_some(),
+            &request.get_ref().space_id,
+            &request.get_ref().thread_id,
+        )
+        .is_some();
+        let sandbox_bearer = if request.get_ref().space_id.is_empty() && !thread_workspace {
             None
         } else {
             Some(
@@ -1906,6 +1967,10 @@ pub async fn serve(
     auth: JwtVerifier,
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind("0.0.0.0:9093").await?;
+    info!(
+        thread_workspace = crate::sandbox_lease::workspace_sync::switched_on(),
+        "execution-core thread workspace switch read at startup"
+    );
     let session_url = std::env::var("SESSION_CORE_URL")
         .or_else(|_| std::env::var("SESSION_CORE_ADDR"))
         .unwrap_or_else(|_| "http://localhost:9091".to_owned());
@@ -3147,5 +3212,71 @@ mod run_attachment_tests {
             assert_eq!(refused.code(), tonic::Code::InvalidArgument, "{token}");
             assert_eq!(refused.message(), token);
         }
+    }
+
+    #[test]
+    fn thread_scope_demands_the_sandbox_bearer_only_when_enabled() {
+        // With the switch off no step takes the thread path, so none demands the bearer, and each
+        // request is handled as it was before the switch existed.
+        assert_eq!(
+            super::thread_workspace_thread(false, "code_interpreter", "", "thread_01", false),
+            None
+        );
+        assert_eq!(
+            super::thread_workspace_thread(true, "code_interpreter", "", "thread_01", false),
+            Some("thread_01")
+        );
+        // Only the code interpreter takes the thread path, and only a step that names a thread.
+        assert_eq!(
+            super::thread_workspace_thread(true, "web_search", "", "thread_01", false),
+            None
+        );
+        assert_eq!(
+            super::thread_workspace_thread(true, "code_interpreter", "", "", false),
+            None
+        );
+    }
+
+    #[test]
+    fn space_scope_never_takes_the_thread_path() {
+        assert_eq!(
+            super::thread_workspace_thread(true, "code_interpreter", "space_01", "thread_01", false),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_workspace_refused_under_zdr() {
+        // A zero-retention or waived step never takes the thread path, whatever the switch says.
+        assert_eq!(
+            super::thread_workspace_thread(true, "code_interpreter", "", "thread_01", true),
+            None
+        );
+        // The lease guard refuses it with the typed token before any RPC. The endpoint is
+        // unroutable, so reaching the wire would fail with a different status.
+        let state = crate::state::StateStore::new();
+        let client = crate::sandbox_manager_client::SandboxManagerClient::new(
+            tonic::transport::Endpoint::from_shared("http://127.0.0.1:1")
+                .expect("valid endpoint")
+                .connect_lazy(),
+        );
+        let status = crate::sandbox_lease::ensure_thread_lease(
+            &client,
+            "bearer",
+            &state,
+            "run_01",
+            "org_01",
+            "thread_01",
+            true,
+        )
+        .await
+        .expect_err("a zero-retention thread lease is refused");
+        let refusal = mp_contracts::zdr_refusal::Refusal::from_status(&status)
+            .expect("the refusal carries its catalogue kind");
+        assert_eq!(
+            refusal.code(),
+            mp_contracts::zdr_refusal::code::FEATURE_NOT_SUPPORTED
+        );
+        assert_eq!(refusal.feature(), Some("sandbox_workspace"));
     }
 }

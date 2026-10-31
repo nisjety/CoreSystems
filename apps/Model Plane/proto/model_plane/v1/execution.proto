@@ -501,6 +501,12 @@ message ExecuteStepRequest {
   // zero-retention step refuses a non-empty list at the boundary.
   repeated RunAttachment attachments = 12;
 
+  // The thread this step's run belongs to, read only to find the thread's
+  // workspace (WS22-S2, DEC-23). Memory tools never receive it: the direct
+  // ExecuteStep RPC still passes them an empty thread context, and a Space step
+  // and a zero-retention step ignore it.
+  string thread_id = 13;
+
   // Bundles of the skills this turn matched that have one, mounted read-only at
   // /skills/<name> for this call (WS19-S8). The gateway derives them from the turn's
   // own matches, never from the model's arguments; at most three. Field 13 is

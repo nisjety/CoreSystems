@@ -79,19 +79,19 @@ pub const PYTHON_PROGRAM: &str = "python3";
 /// Workspace subdirectory for the program's temporary files (`TMPDIR`). Inside
 /// the workspace because the sandbox's `/tmp` is read-only; a SUBDIRECTORY so
 /// stray tempfiles are not mistaken for program output.
-const TEMP_SUBDIR: &str = ".tmp";
+pub(crate) const TEMP_SUBDIR: &str = ".tmp";
 
 /// Workspace subdirectory for `matplotlib`'s config + font cache
 /// (`MPLCONFIGDIR`). `matplotlib` refuses to start without a writable config
 /// directory, and its `fontlist-*.json` must not land next to the real output.
-const MPL_CONFIG_SUBDIR: &str = ".mplconfig";
+pub(crate) const MPL_CONFIG_SUBDIR: &str = ".mplconfig";
 
 /// Used only when execution-core itself has no usable `PATH`; without one the
 /// interpreter cannot be found at all.
 const FALLBACK_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// Per-file ceiling on returned content (8 `MiB`).
-const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Ceiling on the total content returned by one call (16 `MiB`).
 const MAX_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
@@ -144,7 +144,7 @@ impl Language {
     }
 
     /// Name of the generated program file staged in the workspace.
-    const fn program_file(self) -> &'static str {
+    pub(crate) const fn program_file(self) -> &'static str {
         match self {
             Self::Python => "_verevon_main.py",
             Self::Sh => "_verevon_main.sh",

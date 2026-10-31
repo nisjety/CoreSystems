@@ -341,6 +341,10 @@ pub const FEATURES: &[Feature] = &[
         key: "message_versions",
         label: "message versions",
     },
+    Feature {
+        key: "sandbox_workspace",
+        label: "files kept between calls in a thread workspace",
+    },
 ];
 
 /// The catalogue entry for `code`, if it is a catalogue code.

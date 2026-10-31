@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use dashmap::{mapref::entry::Entry, DashMap};
 
@@ -108,12 +109,22 @@ pub struct WithheldEffect {
     pub args_sha256: String,
 }
 
+/// How long a cached thread lease is reused. It is shorter than sandbox-manager's lease TTL
+/// (`sandbox_lease::LEASE_TTL`, one hour, slid by every acquire), so a lease this process still
+/// reuses is one the server has not let expire.
+const THREAD_LEASE_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+
 #[derive(Debug, Clone, Default)]
 pub struct StateStore {
     runs: Arc<DashMap<String, RunSnapshot>>,
     owners: Arc<DashMap<String, RunOwner>>,
     leases: Arc<DashMap<String, SandboxLease>>,
     workspaces: Arc<DashMap<String, HydratedWorkspace>>,
+    /// The thread leases this process acquired, keyed by run and thread. The thread is part of the key so
+    /// a run that names a second thread never reuses the first thread's lease.
+    thread_leases: Arc<DashMap<(String, String), (SandboxLease, Instant)>>,
+    /// One lock per thread with a call in flight here. A call holds it from hydrate to save.
+    thread_locks: Arc<DashMap<String, WorkspaceLock>>,
     /// One lock per run with a workspace, shared by its file tools and dropped with the workspace.
     workspace_locks: Arc<DashMap<String, WorkspaceLock>>,
     /// Scheduled Do runs with no one attached to answer an approval. Each run's
@@ -322,6 +333,40 @@ impl StateStore {
     /// The lock that serialises this run's workspace file tools: reads share it,
     /// edits and puts take it exclusively. Created on first use. It sits beside the
     /// workspace rather than on `HydratedWorkspace`, which `sandbox_lease` builds by literal.
+    /// This run's cached lease on `thread_id`, while it is still fresh.
+    #[must_use]
+    pub fn thread_lease(&self, run_id: &str, thread_id: &str) -> Option<SandboxLease> {
+        let entry = self
+            .thread_leases
+            .get(&(run_id.to_owned(), thread_id.to_owned()))?;
+        let (lease, cached_at) = entry.value();
+        (cached_at.elapsed() < THREAD_LEASE_CACHE_TTL).then(|| lease.clone())
+    }
+
+    /// Caches the lease this run acquired on `thread_id`. Entries past the cache TTL are dropped on each
+    /// insert, so a long-lived process keeps none for the runs it stopped serving.
+    pub fn cache_thread_lease(&self, run_id: &str, thread_id: &str, lease: SandboxLease) {
+        self.thread_leases
+            .retain(|_, entry| entry.1.elapsed() < THREAD_LEASE_CACHE_TTL);
+        self.thread_leases.insert(
+            (run_id.to_owned(), thread_id.to_owned()),
+            (lease, Instant::now()),
+        );
+    }
+
+    /// The lock that serialises one thread's workspace calls in this process. Locks no call holds
+    /// any longer are dropped when the next one is made.
+    #[must_use]
+    pub fn thread_lock(&self, org_id: &str, thread_id: &str) -> WorkspaceLock {
+        self.thread_locks
+            .retain(|_, lock| Arc::strong_count(lock) > 1);
+        self.thread_locks
+            .entry(format!("{org_id}/{thread_id}"))
+            .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(())))
+            .value()
+            .clone()
+    }
+
     #[must_use]
     pub fn workspace_lock(&self, run_id: &str) -> WorkspaceLock {
         self.workspace_locks
@@ -335,6 +380,38 @@ impl StateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_thread_lease_is_never_reused_for_another_thread_of_the_same_run() {
+        let store = StateStore::new();
+        store.cache_thread_lease(
+            "run-1",
+            "thread-a",
+            SandboxLease {
+                lease_id: "lease-a".to_owned(),
+                backend_id: "backend-1".to_owned(),
+                processes_permitted: false,
+            },
+        );
+        assert_eq!(
+            store
+                .thread_lease("run-1", "thread-a")
+                .map(|lease| lease.lease_id),
+            Some("lease-a".to_owned())
+        );
+        assert!(store.thread_lease("run-1", "thread-b").is_none());
+        assert!(store.thread_lease("run-2", "thread-a").is_none());
+    }
+
+    #[test]
+    fn one_thread_shares_one_lock_and_another_thread_does_not() {
+        let store = StateStore::new();
+        let first = store.thread_lock("org-1", "thread-a");
+        let again = store.thread_lock("org-1", "thread-a");
+        let other = store.thread_lock("org-1", "thread-b");
+        assert!(Arc::ptr_eq(&first, &again));
+        assert!(!Arc::ptr_eq(&first, &other));
+    }
 
     #[test]
     fn new_run_defaults_to_running() {

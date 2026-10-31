@@ -561,6 +561,7 @@ pub async fn execute_step(
         sandbox,
         None,
         None,
+        None,
         true,
         &[],
         // The compatibility entry point has no run, so no Space retrieval was authorised for it.
@@ -605,6 +606,7 @@ pub(crate) async fn execute_step_with_browser_grant(
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     browser_grant: Option<&tool_bridge::ValidatedBrowserGrant>,
     sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+    thread_scope: Option<&crate::sandbox_lease::workspace_sync::ThreadScope<'_>>,
 ) -> StepOutcome {
     execute_step_inner(
         tool_name,
@@ -629,6 +631,7 @@ pub(crate) async fn execute_step_with_browser_grant(
         browser_grant,
         None,
         sandbox,
+        thread_scope,
         None,
         None,
         true,
@@ -703,6 +706,7 @@ pub(crate) async fn execute_step_with_subagent(
         capability_policy,
         subagent_dispatch,
         sandbox,
+        None,
         release,
         None,
         true,
@@ -751,6 +755,7 @@ pub(crate) async fn execute_step_with_result_handles(
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     subagent_dispatch: Option<&dyn subagent::SubagentDispatch>,
     sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+    thread_scope: Option<&crate::sandbox_lease::workspace_sync::ThreadScope<'_>>,
     release: Option<&resume::ApprovedRelease>,
     result_store: Option<&result_handles::ResultHandles>,
     // Whether the step may read the files its run attached (`run_inputs`). Only the root loop
@@ -786,6 +791,7 @@ pub(crate) async fn execute_step_with_result_handles(
         None,
         subagent_dispatch,
         sandbox,
+        thread_scope,
         release,
         result_store,
         read_run_inputs,
@@ -844,6 +850,10 @@ async fn execute_step_inner(
     // `sandbox_lease::SandboxLeaseContext`'s own doc. Read by exactly one
     // dispatch arm, `code_interpreter`, below.
     sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+    // The thread a thread-scope `code_interpreter` keeps its files in (WS22-S2). Present only for a
+    // step `workspace_sync::thread_for_step` admitted, which is never a Space step. The memory tools
+    // never read it; they keep the `thread_id` above, which the direct RPC leaves empty.
+    thread_scope: Option<&crate::sandbox_lease::workspace_sync::ThreadScope<'_>>,
     // The one call a continuation segment may release after an approval (build
     // plan WS03 S3). `None` everywhere but the resume boundary. It lifts only the
     // three `ask` gates below, for exactly this step, tool and arguments; it
@@ -1204,25 +1214,47 @@ async fn execute_step_inner(
         } else {
             None
         };
-        // A Space run's code may write the Space tree, so it holds the run's workspace exclusively
-        // for the call: no workspace read or edit of this run interleaves with it (WS24-S4). The call
-        // can run to its timeout, and the exclusion is as long as that. A run with no Space has no tree.
-        let workspace_lock = sandbox.and(state).map(|state| state.workspace_lock(run_id));
-        let _exclusive = match &workspace_lock {
-            Some(lock) => Some(lock.write().await),
-            None => None,
-        };
-        execute_code_interpreter(
-            tool_input,
-            run_id,
-            step_id,
-            workspace_root.as_deref(),
-            ro_inputs,
-            skill_tree
-                .as_deref()
-                .map(crate::skill_mounts::SkillTree::path),
-        )
-        .await
+        // A thread-scope call (WS22-S2) holds its thread's workspace. Its lock is taken inside
+        // `execute_thread_code_interpreter`, from hydrate to save.
+        if let (Some(thread), None) = (thread_scope, sandbox) {
+            let Some(state) = state else {
+                return StepOutcome::failed("thread workspace requires run state tracking");
+            };
+            execute_thread_code_interpreter(
+                *thread,
+                state,
+                zdr || waived,
+                org_id,
+                run_id,
+                step_id,
+                tool_input,
+                ro_inputs,
+                skill_tree
+                    .as_deref()
+                    .map(crate::skill_mounts::SkillTree::path),
+            )
+            .await
+        } else {
+            // A Space run's code may write the Space tree, so it holds the run's workspace exclusively
+            // for the call: no workspace read or edit of this run interleaves with it (WS24-S4). The call
+            // can run to its timeout, and the exclusion is as long as that. A run with no Space has no tree.
+            let workspace_lock = sandbox.and(state).map(|state| state.workspace_lock(run_id));
+            let _exclusive = match &workspace_lock {
+                Some(lock) => Some(lock.write().await),
+                None => None,
+            };
+            execute_code_interpreter(
+                tool_input,
+                run_id,
+                step_id,
+                workspace_root.as_deref(),
+                ro_inputs,
+                skill_tree
+                    .as_deref()
+                    .map(crate::skill_mounts::SkillTree::path),
+            )
+            .await
+        }
     } else if crate::process_tools::is_process_tool(tool_name) {
         execute_process_tool(
             tool_name, tool_input, org_id, user_id, run_id, step_id, state, sandbox,
@@ -1573,6 +1605,68 @@ async fn execute_code_interpreter(
         },
         Err(error) => tool_error(error),
     }
+}
+
+/// Run a thread-scope `code_interpreter` call (WS22-S2). The thread's files are hydrated into a fresh
+/// directory for the call, and what the call changed is saved after it, whatever the program did. The
+/// thread's lock is held from hydrate to save, so two calls of one thread never interleave.
+///
+/// A workspace that cannot be opened fails the call: it never runs without the files the thread holds.
+#[allow(clippy::too_many_arguments)]
+async fn execute_thread_code_interpreter(
+    thread: crate::sandbox_lease::workspace_sync::ThreadScope<'_>,
+    state: &crate::state::StateStore,
+    persistence_free: bool,
+    org_id: &str,
+    run_id: &str,
+    step_id: &str,
+    tool_input: &str,
+    ro_inputs: Option<std::sync::Arc<crate::run_inputs::InputSet>>,
+    skills: Option<&Path>,
+) -> tool_bridge::ToolExecution {
+    let lock = state.thread_lock(org_id, thread.thread_id);
+    let _exclusive = lock.write().await;
+    let lease = match crate::sandbox_lease::ensure_thread_lease(
+        thread.sandbox_manager_client,
+        thread.bearer,
+        state,
+        run_id,
+        org_id,
+        thread.thread_id,
+        persistence_free,
+    )
+    .await
+    {
+        Ok(lease) => lease,
+        Err(status) => return tool_error(status.message().to_owned()),
+    };
+    let workspace = match crate::sandbox_lease::workspace_sync::open(
+        thread,
+        &lease,
+        org_id,
+        persistence_free,
+    )
+    .await
+    {
+        Ok(workspace) => workspace,
+        Err(failure) => {
+            return tool_error(format!("thread workspace unavailable: {}", failure.message))
+        }
+    };
+    let execution = execute_code_interpreter(
+        tool_input,
+        run_id,
+        step_id,
+        Some(workspace.path()),
+        ro_inputs,
+        skills,
+    )
+    .await;
+    let report = match workspace.commit().await {
+        Ok(report) => report.to_json(),
+        Err(failure) => failure.to_json(),
+    };
+    crate::sandbox_lease::workspace_sync::attach_workspace(execution, report)
 }
 
 /// The S4.2 `process_*` family ([`crate::process_tools`]). Space-scoped by
@@ -2896,6 +2990,7 @@ mod connector_tool_tests {
                     tool, input, "ask", "", "org-1", "user-1", "run-1", "step-1", "", None, None,
                     None, zdr, waived, 0, None, None, None, &NoPolicy, None, None, None, None,
                     None,
+                    None,
                     true,
                     &[],
                     crate::knowledge_tools::SpaceRetrieval::Organisation,
@@ -2943,7 +3038,7 @@ mod connector_tool_tests {
         let out = execute_step_inner(
             EXECUTE_PROVIDER_ACTION_TOOL, input, "ask", "", "org-1", "user-1", "run-1", "step-1", "",
             None, None, None, false, false, 0, None, None, None, &NoPolicy, None, None, None, None,
-            None, true, &selected, crate::knowledge_tools::SpaceRetrieval::Organisation,
+            None, None, true, &selected, crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await;
         assert_eq!(out.status, "failed");
@@ -3910,6 +4005,7 @@ mod tests {
             policy,
             grant,
             None,
+            None,
         )
         .await
     }
@@ -4029,6 +4125,7 @@ mod tests {
             None,
             &policy,
             Some(&grant),
+            None,
             None,
         )
         .await;

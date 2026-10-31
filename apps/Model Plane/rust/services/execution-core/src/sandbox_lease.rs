@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use mp_contracts::model_plane::v1::WorkspaceChangedFile;
+use mp_contracts::zdr_refusal::Refusal;
 use tonic::Status;
 use tracing::warn;
 
@@ -41,6 +42,11 @@ use crate::sandbox_manager_client::{LeaseRequest, SandboxManagerClient};
 use crate::state::{HydratedWorkspace, SandboxLease, StateStore};
 use crate::workspace_cas::CasClient;
 use crate::workspace_hydrate::WorkspaceFileEntry;
+
+/// The thread workspace (WS22-S2). It is declared here rather than in `lib.rs`, so the slice stays
+/// in the files it owns: the source sits beside the others, and the module is a child of this one.
+#[path = "workspace_sync.rs"]
+pub mod workspace_sync;
 
 /// One hour: generous for a single agent run's `code_interpreter` calls,
 /// bounded so a lease neither `CancelRun` nor `RunAgent`'s own `finalize()`
@@ -160,6 +166,56 @@ pub async fn ensure_sandbox_lease(
         processes_permitted: response.processes_permitted,
     };
     state.cache_sandbox_lease(run_id, lease.clone());
+    Ok(lease)
+}
+
+/// Returns this run's lease on the workspace of `thread_id`, acquiring it if this process holds
+/// none (WS22-S2). The lease is the thread's own row in sandbox-manager, get-or-create by owner and
+/// thread: a second run of the thread gets the same lease, and so the same files.
+///
+/// # Errors
+/// Refused before any RPC when `persistence_free` (zero retention or a waiver): nothing is
+/// acquired, hydrated or written. Otherwise sandbox-manager's own status, unchanged.
+pub async fn ensure_thread_lease(
+    client: &SandboxManagerClient,
+    bearer: &str,
+    state: &StateStore,
+    run_id: &str,
+    org_id: &str,
+    thread_id: &str,
+    persistence_free: bool,
+) -> Result<SandboxLease, Status> {
+    // The thread workspace zdr guard: a persistence-free call never reaches sandbox-manager.
+    if persistence_free {
+        return Err(Refusal::feature_not_supported("sandbox_workspace")
+            .grpc_status(tonic::Code::FailedPrecondition));
+    }
+    if let Some(existing) = state.thread_lease(run_id, thread_id) {
+        return Ok(existing);
+    }
+    let response = client
+        .acquire_lease(
+            bearer,
+            &LeaseRequest {
+                scope_id: thread_id,
+                scope_type: "thread",
+                ttl: LEASE_TTL,
+                org_id,
+                space_id: "",
+                capability_decision: "",
+                capability_claims_json: "",
+            },
+        )
+        .await
+        .inspect_err(|status| {
+            warn!(code = ?status.code(), "sandbox-manager AcquireLease for a thread failed");
+        })?;
+    let lease = SandboxLease {
+        lease_id: response.lease_id,
+        backend_id: response.backend_id,
+        processes_permitted: response.processes_permitted,
+    };
+    state.cache_thread_lease(run_id, thread_id, lease.clone());
     Ok(lease)
 }
 
