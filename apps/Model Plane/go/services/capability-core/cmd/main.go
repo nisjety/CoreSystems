@@ -631,7 +631,14 @@ func startRunWatchConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpool.Poo
 		slog.Info("run-watch notify consumer disabled (NOTIFICATION_CORE_URL/NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN not set)")
 		return
 	}
-	notifier, err := runwatch.NewNotifier(runwatch.NewPostgresSubscriptionStore(pool), notifyClient)
+	// WS16-S4: the RUN_ATTENTION path is off unless the switch is the literal "true".
+	var options []runwatch.NotifierOption
+	if os.Getenv("CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED") == "true" {
+		coalesce := runwatch.ParseAttentionCoalesce(os.Getenv("ATTENTION_NOTIFY_COALESCE_SECONDS"))
+		options = append(options, runwatch.WithAttentionNotify(coalesce))
+		slog.Info("run-watch attention notifications enabled", "coalesce", coalesce)
+	}
+	notifier, err := runwatch.NewNotifier(runwatch.NewPostgresSubscriptionStore(pool), notifyClient, options...)
 	if err != nil {
 		slog.Error("run-watch notifier unavailable", "error", err)
 		return

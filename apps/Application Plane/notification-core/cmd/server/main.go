@@ -179,7 +179,14 @@ func main() {
 	if cfg.DeliveryWorkerEnabled {
 		notificationOptions = append(notificationOptions, notification.WithDeliveryQueue(repository))
 	}
-	notificationService := notification.NewService(repository, runtime, publisher, notificationOptions...)
+	// The native in-app path is a second dispatcher behind the same service: native types go to it and
+	// everything else to the provider, and the service stores native types under the native provider.
+	var dispatcher notification.RuntimeClient = runtime
+	if cfg.NativeTypesEnabled {
+		dispatcher = runtimeclient.NewComposite(runtime, runtimeclient.NewNativeAdapter())
+		notificationOptions = append(notificationOptions, notification.WithNativeDelivery())
+	}
+	notificationService := notification.NewService(repository, dispatcher, publisher, notificationOptions...)
 
 	handler := httpserver.NewHandler(cfg, httpserver.HandlerDeps{
 		Notifications:      notificationService,
@@ -210,7 +217,7 @@ func main() {
 		deliveryWorker := notification.NewDeliveryWorker(
 			repository,
 			repository,
-			runtime,
+			dispatcher,
 			recipientResolver,
 			notification.WithDeliveryWorkerLease(cfg.DeliveryWorkerLease),
 		)

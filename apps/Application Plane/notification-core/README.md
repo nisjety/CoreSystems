@@ -68,6 +68,21 @@ Do not enable ZDR content delivery until that downstream contract is established
 Standard mode persists payload/feed content according to the normal product
 contract.
 
+Attention notifications (`modelplane.needs_approval`, `modelplane.needs_input`,
+`modelplane.plan_ready`, WS16-S4) are the one class delivered without a provider.
+With `NOTIFICATION_NATIVE_TYPES_ENABLED=true` (default `false`, literal `true`
+only) they go to the native adapter in `internal/runtime/native.go`, which writes
+the in-app feed row from the same dispatch and makes no outbound call. This works
+with `NOTIFICATION_DELIVERY_MODE=disabled`. The adapter accepts only these types,
+refuses zero-retention requests, and refuses any payload field outside the
+content-free set (fixed copy, a deep link and opaque ids), so the native path
+persists no run content. Every other type keeps the provider path. For these
+types the preference gate reads the in-app channel alone: an email or push opt-out
+does not suppress the in-app row, and an in-app opt-out suppresses the request,
+because native delivery is the only channel they have in this build. Readiness
+counts native delivery as available, so `/ready` is 200 with native types on
+even while the provider is disabled.
+
 ## Production blockers
 
 This source is not deployed. The running July 13 image predates these changes.

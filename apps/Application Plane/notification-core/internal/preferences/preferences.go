@@ -128,14 +128,23 @@ func (s *Service) IsEnabled(ctx context.Context, organizationID, userID, eventTy
 	if s == nil {
 		return fallback, errors.New("preferences service not configured")
 	}
-	pref, err := s.repo.Get(ctx, organizationID, userID, eventType, channel)
-	if errors.Is(err, ErrNotFound) {
-		return fallback, nil
-	}
+	rows, err := s.repo.ListForUser(ctx, organizationID, userID)
 	if err != nil {
 		return fallback, err
 	}
-	return pref.Enabled, nil
+	return channelEnabled(rows, eventType, channel, fallback), nil
+}
+
+// channelEnabled reads the one (eventType, channel) row out of a recipient's rows. Only that row
+// decides: a row for another channel or another event type leaves the fallback in force, so an
+// opt-out on one channel cannot answer for another.
+func channelEnabled(rows []Preference, eventType, channel string, fallback bool) bool {
+	for _, row := range rows {
+		if row.EventType == eventType && row.Channel == channel {
+			return row.Enabled
+		}
+	}
+	return fallback
 }
 
 // IsNotificationEnabled is a conservative local dispatch gate. Any explicit

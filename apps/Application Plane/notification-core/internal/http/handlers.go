@@ -104,7 +104,7 @@ func (h *Handler) ReconcileNotificationDeliveryCallback(c *gin.Context) {
 
 func (h *Handler) Health(c *gin.Context) {
 	deliveryStatus := "ready"
-	if h.cfg.DeliveryMode == "disabled" {
+	if !h.deliveryAvailable() {
 		deliveryStatus = "disabled"
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -116,13 +116,20 @@ func (h *Handler) Health(c *gin.Context) {
 }
 
 func (h *Handler) Ready(c *gin.Context) {
-	if h.cfg.DeliveryMode == "disabled" {
+	if !h.deliveryAvailable() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"status": "degraded", "delivery_status": "disabled",
 		})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ready", "delivery_status": "ready"})
+}
+
+// deliveryAvailable reports whether this process can deliver anything. The native in-app path needs no
+// provider, so it counts on its own: with native types on, the process is ready while the provider is
+// disabled, and the requests that need the provider still fail as they did before.
+func (h *Handler) deliveryAvailable() bool {
+	return h.cfg.DeliveryMode != "disabled" || h.cfg.NativeTypesEnabled
 }
 
 // ── Dispatch (legacy / V0) ────────────────────────────────────────────────
@@ -209,8 +216,11 @@ func isNotificationTypeAuthorized(serviceID, notificationType string) bool {
 			"sla.breach":      {},
 		},
 		"capability-core": {
-			"modelplane.run_completed": {},
-			"modelplane.run_failed":    {},
+			"modelplane.run_completed":  {},
+			"modelplane.run_failed":     {},
+			"modelplane.needs_approval": {},
+			"modelplane.needs_input":    {},
+			"modelplane.plan_ready":     {},
 		},
 	}
 	_, ok := allowed[serviceID][notificationType]

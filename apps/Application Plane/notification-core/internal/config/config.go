@@ -21,6 +21,9 @@ type Config struct {
 	NovuSecretKey  string // optional — activates real Novu delivery when set
 	NovuBaseURL    string // optional — override for EU region
 	DeliveryMode   string // "novu" or explicit fail-closed "disabled"
+	// NativeTypesEnabled routes the content-free attention types to the native in-app adapter. It is
+	// false by default and needs no provider, so it works with DeliveryMode=disabled.
+	NativeTypesEnabled bool
 	// DeliveryWorkerEnabled opts the durable provider-attempt worker into the
 	// server process. It is deliberately false by default; enabling it requires
 	// an explicit provider mode and callback verifier so an operator cannot
@@ -60,6 +63,7 @@ func Load() (*Config, error) {
 		NovuSecretKey:              strings.TrimSpace(getEnv("NOVU_SECRET_KEY", "")),
 		NovuBaseURL:                strings.TrimSpace(getEnv("NOVU_BASE_URL", "")),
 		DeliveryMode:               strings.ToLower(strings.TrimSpace(getEnv("NOTIFICATION_DELIVERY_MODE", "disabled"))),
+		NativeTypesEnabled:         os.Getenv("NOTIFICATION_NATIVE_TYPES_ENABLED") == "true",
 		DeliveryWorkerEnabled:      getEnvBool("NOTIFICATION_DELIVERY_WORKER_ENABLED", false),
 		DeliveryWorkerPollInterval: getEnvDuration("NOTIFICATION_DELIVERY_WORKER_POLL_INTERVAL", 5*time.Second),
 		DeliveryWorkerLease:        getEnvDuration("NOTIFICATION_DELIVERY_WORKER_LEASE", 30*time.Second),

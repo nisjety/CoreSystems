@@ -135,9 +135,10 @@ const (
 // Notifier subscribes to run-lifecycle events and, for each terminal event,
 // notifies every pending watcher of that run.
 type Notifier struct {
-	store  SubscriptionStore
-	notify NotifyClient
-	now    func() time.Time
+	store     SubscriptionStore
+	notify    NotifyClient
+	now       func() time.Time
+	attention *attentionNotify
 }
 
 // NewNotifier constructs a Notifier. Both dependencies are required: without
@@ -146,14 +147,18 @@ type Notifier struct {
 // why) rather than run a Notifier that can only ever fail — this mirrors
 // startLearningConsumer/startTaskCompletionConsumer's "absent config -> not
 // started" wiring in cmd/main.go.
-func NewNotifier(store SubscriptionStore, notify NotifyClient) (*Notifier, error) {
+func NewNotifier(store SubscriptionStore, notify NotifyClient, opts ...NotifierOption) (*Notifier, error) {
 	if store == nil {
 		return nil, errors.New("runwatch: subscription store is required")
 	}
 	if notify == nil {
 		return nil, errors.New("runwatch: notify client is required")
 	}
-	return &Notifier{store: store, notify: notify, now: time.Now}, nil
+	n := &Notifier{store: store, notify: notify, now: time.Now}
+	for _, opt := range opts {
+		opt(n)
+	}
+	return n, nil
 }
 
 // Run binds the durable JetStream consumer with manual ack and blocks until
@@ -198,6 +203,16 @@ func (n *Notifier) process(ctx context.Context, data []byte) outcome {
 		// bytes that will never parse.
 		slog.Warn("runwatch: decode run envelope failed", "error", err)
 		return outcomeAck
+	}
+	if env.IsZDR() {
+		// A run that declares zero retention is never announced, whatever the event.
+		return outcomeAck
+	}
+	if env.EventType == runAttentionEventType {
+		if n.attention == nil {
+			return outcomeAck
+		}
+		return n.processAttention(ctx, &env)
 	}
 	notifyType, ok := terminalNotificationType(env.EventType)
 	if !ok {

@@ -251,16 +251,18 @@ func TestReadyEndpointReflectsDeliveryMode(t *testing.T) {
 	tests := []struct {
 		name       string
 		mode       string
+		native     bool
 		wantStatus int
 		wantState  string
 	}{
 		{name: "disabled", mode: "disabled", wantStatus: stdhttp.StatusServiceUnavailable, wantState: "disabled"},
 		{name: "novu", mode: "novu", wantStatus: stdhttp.StatusOK, wantState: "ready"},
+		{name: "disabled with native types", mode: "disabled", native: true, wantStatus: stdhttp.StatusOK, wantState: "ready"},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			handler := NewHandler(&config.Config{ServiceName: "notification-core", DeliveryMode: test.mode}, HandlerDeps{Notifications: newTestNotificationService(nil)})
+			handler := NewHandler(&config.Config{ServiceName: "notification-core", DeliveryMode: test.mode, NativeTypesEnabled: test.native}, HandlerDeps{Notifications: newTestNotificationService(nil)})
 			server := httptest.NewServer(newRouter(handler, newTestVerifier(t)))
 			defer server.Close()
 
@@ -522,6 +524,9 @@ func TestServicePrincipalsHaveExplicitNotificationTypeAllowlists(t *testing.T) {
 	for _, notificationType := range []string{
 		"modelplane.run_completed",
 		"modelplane.run_failed",
+		"modelplane.needs_approval",
+		"modelplane.needs_input",
+		"modelplane.plan_ready",
 	} {
 		if !isNotificationTypeAuthorized("capability-core", notificationType) {
 			t.Fatalf("capability-core type %q rejected, want authorized", notificationType)
@@ -584,6 +589,36 @@ func TestCreateNotificationRequestAcceptsCapabilityCoreRunNotification(t *testin
 	}
 	if payload.Status != notification.StatusSubmitted {
 		t.Fatalf("status = %q, want %q", payload.Status, notification.StatusSubmitted)
+	}
+}
+
+func TestCreateNotificationRequestAcceptsCapabilityCoreAttentionNotification(t *testing.T) {
+	handler := NewHandler(&config.Config{ServiceName: "notification-core"}, HandlerDeps{Notifications: newTestNotificationService(nil)})
+	server := httptest.NewServer(newRouter(handler, newTestVerifierWithCapabilityCore(t)))
+	defer server.Close()
+
+	requestBody := []byte(`{
+		"organization_id":"org_123",
+		"recipient":{"kind":"user","id":"user_456"},
+		"type":"modelplane.needs_approval",
+		"retention_mode":"standard",
+		"payload":{"title":"Approval needed","body":"A run in one of your chats is waiting for your approval.","thread_id":"thread_9","run_id":"run_789","kind":"needs_approval"}
+	}`)
+	request, err := stdhttp.NewRequest(stdhttp.MethodPost, server.URL+"/api/v1/notification-requests", bytes.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("NewRequest error = %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	signTestRequestAs(t, request, requestBody, "capability-core", testCapabilityCoreDelegationSecret, "", "org_123", "")
+
+	response, err := stdhttp.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST /api/v1/notification-requests error = %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != stdhttp.StatusAccepted {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("POST /api/v1/notification-requests status = %d, want %d, body = %s", response.StatusCode, stdhttp.StatusAccepted, body)
 	}
 }
 

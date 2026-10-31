@@ -21,6 +21,7 @@ const (
 
 	ProviderNovu          = "novu"
 	ProviderLocalPolicy   = "local_policy"
+	ProviderNative        = "native"
 	RecipientKindUser     = "user"
 	RetentionModeStandard = "standard"
 	RetentionModeZDR      = "zdr"
@@ -64,6 +65,29 @@ type EventPublisher interface {
 
 type PreferenceGate interface {
 	IsNotificationEnabled(ctx context.Context, organizationID, recipientID, eventType string) (bool, error)
+}
+
+// ChannelPreferenceGate is the channel-aware form of PreferenceGate. IsEnabled answers for one channel
+// of one event type, and fallback applies when the recipient has no explicit row for that channel.
+type ChannelPreferenceGate interface {
+	IsEnabled(ctx context.Context, organizationID, recipientID, eventType, channel string, fallback bool) (bool, error)
+}
+
+// inAppChannel is the channel native delivery writes to, so it is the one a native type's gate reads.
+const inAppChannel = "in_app"
+
+// nativeTypes are the content-free attention types. Native delivery is their only channel in this
+// build, so their preference gate reads the in-app channel alone.
+var nativeTypes = map[string]struct{}{
+	"modelplane.needs_approval": {},
+	"modelplane.needs_input":    {},
+	"modelplane.plan_ready":     {},
+}
+
+// IsNativeType reports whether a notification type is delivered by the native in-app adapter.
+func IsNativeType(notificationType string) bool {
+	_, ok := nativeTypes[notificationType]
+	return ok
 }
 
 type Recipient struct {
@@ -194,6 +218,7 @@ type Service struct {
 	feedSink          FeedSinkFn // U5-2: post-dispatch hook for feed cache
 	recipientResolver RecipientResolver
 	preferenceGate    PreferenceGate
+	nativeDelivery    bool
 }
 
 // FeedSinkParams is the input to the feed-sink hook. Plain struct so
@@ -258,6 +283,12 @@ func WithPreferenceGate(gate PreferenceGate) Option {
 	return func(s *Service) { s.preferenceGate = gate }
 }
 
+// WithNativeDelivery records that the runtime routes the native types to the native adapter, so Accept
+// stores them under the native provider. It must match the runtime the service is built with.
+func WithNativeDelivery() Option {
+	return func(s *Service) { s.nativeDelivery = true }
+}
+
 // WithDeliveryQueue enables the durable outbox path. It is intentionally an
 // opt-in wiring change so old synchronous test/compatibility callers do not
 // silently change delivery semantics before the worker and callback contract
@@ -289,6 +320,11 @@ func (s *Service) Accept(ctx context.Context, request Request) (*AcceptedRequest
 	validatedRequest, err := validateRequest(request)
 	if err != nil {
 		return nil, err
+	}
+	if s.nativeDelivery && IsNativeType(validatedRequest.Type) && validatedRequest.RetentionMode == RetentionModeZDR {
+		// The native path writes no zero-retention feed row, so accepting one would report a delivery the
+		// user never sees.
+		return nil, ValidationError("native notification types cannot use zero-data-retention")
 	}
 	if s.repository == nil {
 		return nil, errors.New("notification repository is not configured")
@@ -329,6 +365,9 @@ func (s *Service) Accept(ctx context.Context, request Request) (*AcceptedRequest
 	occurredAt := s.now().UTC()
 	status := StatusAccepted
 	provider := ProviderNovu
+	if s.nativeDelivery && IsNativeType(validatedRequest.Type) {
+		provider = ProviderNative
+	}
 	if !enabled {
 		status = StatusSuppressed
 		provider = ProviderLocalPolicy
@@ -446,6 +485,20 @@ func (s *Service) enqueueDeliveryAttempt(ctx context.Context, storedRequest *Sto
 func (s *Service) isNotificationEnabled(ctx context.Context, request Request) (bool, error) {
 	if s.preferenceGate == nil {
 		return true, nil
+	}
+	if IsNativeType(request.Type) {
+		// Only the in-app channel decides for these types. An email or push opt-out therefore cannot
+		// suppress the in-app row, and an in-app opt-out suppresses the request, since nothing else
+		// delivers it in this build.
+		gate, ok := s.preferenceGate.(ChannelPreferenceGate)
+		if !ok {
+			return false, errors.New("channel preference gate is not configured")
+		}
+		enabled, err := gate.IsEnabled(ctx, request.OrganizationID, request.Recipient.ID, request.Type, inAppChannel, true)
+		if err != nil {
+			return false, fmt.Errorf("check local in-app preference: %w", err)
+		}
+		return enabled, nil
 	}
 	enabled, err := s.preferenceGate.IsNotificationEnabled(
 		ctx,
