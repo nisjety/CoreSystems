@@ -9,8 +9,9 @@
 //! (the other `process_*` tools reuse an existing lease), and
 //! `release_sandbox_lease_if_any` reaches `diff_and_upload` when the run ends:
 //! from `CancelRun` or the `RunAgent` finalise. A run driven only by
-//! `ExecuteStep` calls has no run-end signal, so its edits are not uploaded
-//! (see the module doc of `sandbox_lease.rs`).
+//! `ExecuteStep` calls has no run-end signal; its edits reach the Space's
+//! overlay after each step only while the Space write-through is on (WS22-S4),
+//! and are not uploaded otherwise (see the module doc of `sandbox_lease.rs`).
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -105,6 +106,31 @@ pub async fn diff_and_upload(
     target_dir: &Path,
     baseline: &HashMap<String, String>,
 ) -> Result<Vec<ChangedFile>, String> {
+    diff_and_upload_where(cas, target_dir, baseline, |_, _| true).await
+}
+
+/// [`diff_and_upload`] with the thread's filter applied to a Space's overlay (WS22-S4): a file
+/// [`is_syncable`] rejects is neither uploaded nor reported, so the staged program, the scratch
+/// directories, the attachments mount and oversized files never reach the Space.
+///
+/// # Errors
+/// As [`diff_and_upload`].
+pub async fn diff_and_upload_syncable(
+    cas: &CasClient,
+    target_dir: &Path,
+    baseline: &HashMap<String, String>,
+) -> Result<Vec<ChangedFile>, String> {
+    diff_and_upload_where(cas, target_dir, baseline, is_syncable).await
+}
+
+/// The walk both diffs share. `keep` sees each file's path and size once it is read, and before
+/// anything is hashed or uploaded.
+async fn diff_and_upload_where(
+    cas: &CasClient,
+    target_dir: &Path,
+    baseline: &HashMap<String, String>,
+    keep: impl Fn(&str, u64) -> bool,
+) -> Result<Vec<ChangedFile>, String> {
     let mut relative_paths = Vec::new();
     collect_relative_paths(target_dir, target_dir, &mut relative_paths)?;
 
@@ -114,6 +140,9 @@ pub async fn diff_and_upload(
         let absolute = target_dir.join(&relative);
         let raw = std::fs::read(&absolute)
             .map_err(|error| format!("diff: could not read '{}': {error}", absolute.display()))?;
+        if !keep(&path_str, raw.len() as u64) {
+            continue;
+        }
         let redacted = redact(&raw);
         let content_hash = sha256_digest(&redacted);
 

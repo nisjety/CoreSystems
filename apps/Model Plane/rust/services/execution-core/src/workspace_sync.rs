@@ -1,4 +1,5 @@
-//! Thread-scope workspace sync for `code_interpreter` (WS22-S2, DEC-23).
+//! Thread-scope workspace sync for `code_interpreter` (WS22-S2, DEC-23), and the
+//! Space overlay write-through beside it (WS22-S4).
 //!
 //! A thread's files outlive the run that wrote them. [`open`] hydrates the
 //! thread's files from sandbox-manager into a fresh directory for one call, and
@@ -7,8 +8,12 @@
 //! overwritten. The directory is removed when the workspace drops, on every path.
 //!
 //! Off unless `EXECUTION_CORE_THREAD_WORKSPACE` is the literal `true`. With it
-//! off, and for every Space step, zero-retention step and waived step, nothing
-//! here runs and `code_interpreter` keeps its per-call directory.
+//! off, and for every Space step, zero-retention step and waived step, the thread
+//! path never runs and `code_interpreter` keeps its per-call directory.
+//!
+//! [`record_space_step`] is the Space side: after an inline Space step it records
+//! that step's changes as the run's overlay. It runs only when
+//! `EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH` is the literal `enabled`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,8 +23,9 @@ use mp_contracts::model_plane::v1::{ThreadDeletedPath, WorkspaceChangedFile};
 use serde_json::{json, Value};
 use tracing::warn;
 
+use super::{record_workspace_overlay, settle_workspace_outcome, WorkspaceUploadOutcome};
 use crate::sandbox_manager_client::SandboxManagerClient;
-use crate::state::SandboxLease;
+use crate::state::{HydratedWorkspace, SandboxLease};
 use crate::tool_bridge::ToolExecution;
 use crate::workspace_cas::{self, CasClient};
 use crate::workspace_hydrate::{self, WorkspaceFileEntry};
@@ -456,6 +462,87 @@ pub fn attach_workspace(mut execution: ToolExecution, workspace: Value) -> ToolE
     execution
 }
 
+/// Whether an inline Space step records its workspace overlay as it runs (WS22-S4). Read once per
+/// process. Only the literal `enabled` turns it on, so an unset, empty or misspelled value keeps the
+/// Space path as it was before the write-through existed.
+#[must_use]
+pub fn space_write_through_switched_on() -> bool {
+    static SWITCH: OnceLock<bool> = OnceLock::new();
+    *SWITCH.get_or_init(|| {
+        space_write_through_from(
+            std::env::var("EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+/// The pure half of [`space_write_through_switched_on`], so the parsing is tested without the
+/// environment.
+fn space_write_through_from(value: Option<&str>) -> bool {
+    value == Some("enabled")
+}
+
+/// Whether the write-through runs for one step: the switch is on and the step keeps content. A
+/// zero-retention or waived step keeps none, so it records nothing.
+#[must_use]
+pub fn write_through_applies(switched_on: bool, persistence_free: bool) -> bool {
+    switched_on && !persistence_free
+}
+
+/// Records what one inline Space step changed as the run's overlay, before the step's result
+/// returns (WS22-S4). Every file the run has changed goes out with the base hash the run hydrated,
+/// so each record repeats the whole overlay and the rows converge on the run's last content.
+///
+/// With `token` absent the service credential could not be minted: nothing is recorded, and the
+/// result's workspace part says `refused`.
+pub async fn record_space_step(
+    sandbox_manager_client: &SandboxManagerClient,
+    cas_client: Option<&CasClient>,
+    token: Option<&str>,
+    lease: &SandboxLease,
+    workspace: &HydratedWorkspace,
+    execution: ToolExecution,
+) -> ToolExecution {
+    let outcome = match token {
+        Some(token) => {
+            record_workspace_overlay(
+                sandbox_manager_client,
+                cas_client,
+                token,
+                lease,
+                workspace,
+                true,
+            )
+            .await
+        }
+        None => settle_workspace_outcome(
+            WorkspaceUploadOutcome {
+                error: Some("sandbox-manager service credential unavailable".to_owned()),
+                ..WorkspaceUploadOutcome::default()
+            },
+            &lease.lease_id,
+        ),
+    };
+    attach_workspace(execution, space_part(&outcome))
+}
+
+/// The workspace part of a Space step's result: `synced` with the durability the run has, or
+/// `refused` with its cause. A Space overlay lives for its run only (DEC-24), so the durability is
+/// always `run_overlay`.
+fn space_part(outcome: &WorkspaceUploadOutcome) -> Value {
+    if outcome.uploaded {
+        json!({
+            "scope": "space",
+            "state": "synced",
+            "durability": "run_overlay",
+            "changed": outcome.changed,
+        })
+    } else {
+        json!({ "scope": "space", "state": "refused", "cause": Cause::CommitFailed.as_str() })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, HashMap};
@@ -502,13 +589,19 @@ mod tests {
 
     /// A sandbox-manager whose two thread RPCs follow the contract the real one
     /// implements: compare-and-swap per path on `base_hash`, a conflict is reported
-    /// and never applied. Every other RPC is unused by these tests.
+    /// and never applied. It keeps every `SnapshotSandbox` it serves (WS22-S4). Every
+    /// other RPC is unused by these tests.
     #[derive(Clone, Default)]
     struct FakeSandboxManager {
         rows: Arc<Mutex<ThreadRows>>,
+        snapshots: Arc<Mutex<Vec<Vec<WorkspaceChangedFile>>>>,
     }
 
     impl FakeSandboxManager {
+        fn snapshots(&self) -> Vec<Vec<WorkspaceChangedFile>> {
+            self.snapshots.lock().expect("fake snapshots").clone()
+        }
+
         fn insert(&self, path: &str, hash: &str, size: i64) {
             self.rows
                 .lock()
@@ -556,9 +649,17 @@ mod tests {
 
         async fn snapshot_sandbox(
             &self,
-            _: Request<SnapshotRequest>,
+            request: Request<SnapshotRequest>,
         ) -> Result<Response<SnapshotResponse>, Status> {
-            unused()
+            let request = request.into_inner();
+            if request.lease_id != LEASE_ID {
+                return Err(Status::not_found("unknown lease"));
+            }
+            self.snapshots
+                .lock()
+                .expect("fake snapshots")
+                .push(request.changed_files);
+            Ok(Response::new(SnapshotResponse::default()))
         }
 
         async fn activate_lease(
@@ -1069,5 +1170,133 @@ mod tests {
         );
         assert!(failed.output.is_empty());
         assert_eq!(failed.error.as_deref(), Some("the program could not start"));
+    }
+
+    /// The Space's files as one run hydrated them: its root and the base hashes it held.
+    fn space_workspace(root: &Path, baseline: &[(&str, &str)]) -> HydratedWorkspace {
+        HydratedWorkspace {
+            path: root.to_path_buf(),
+            baseline: baseline
+                .iter()
+                .map(|(path, hash)| ((*path).to_owned(), (*hash).to_owned()))
+                .collect(),
+        }
+    }
+
+    fn step_output() -> ToolExecution {
+        ToolExecution {
+            output: "{\"exit_code\":0}".to_owned(),
+            error: None,
+        }
+    }
+
+    fn changed<'a>(snapshot: &'a [WorkspaceChangedFile], path: &str) -> &'a WorkspaceChangedFile {
+        snapshot
+            .iter()
+            .find(|file| file.path == path)
+            .unwrap_or_else(|| panic!("{path} is not in the overlay record"))
+    }
+
+    fn sorted_paths(snapshot: &[WorkspaceChangedFile]) -> Vec<&str> {
+        let mut paths: Vec<&str> = snapshot.iter().map(|file| file.path.as_str()).collect();
+        paths.sort_unstable();
+        paths
+    }
+
+    #[tokio::test]
+    async fn space_overlay_is_recorded_after_each_inline_step() {
+        let rig = rig().await;
+        let root = fresh_root("space-overlay");
+        std::fs::create_dir_all(&root).expect("the Space's directory");
+        let workspace = space_workspace(&root, &[("notes.txt", "sha256:hydrated")]);
+
+        // The first step edits a file the Space holds and leaves the staged program beside it.
+        std::fs::write(root.join("notes.txt"), b"first").expect("the step edits");
+        std::fs::write(root.join("_verevon_main.py"), b"print(1)").expect("the step stages");
+        let first = record_space_step(
+            &rig.client,
+            Some(&rig.cas_client),
+            Some("token"),
+            &lease(),
+            &workspace,
+            step_output(),
+        )
+        .await;
+
+        // The second step creates a file, and the first one is still on disk.
+        std::fs::write(root.join("report.csv"), b"a,b").expect("the step creates");
+        let second = record_space_step(
+            &rig.client,
+            Some(&rig.cas_client),
+            Some("token"),
+            &lease(),
+            &workspace,
+            step_output(),
+        )
+        .await;
+
+        let snapshots = rig.fake.snapshots();
+        assert_eq!(snapshots.len(), 2, "each inline step records its overlay once");
+        assert_eq!(
+            sorted_paths(&snapshots[0]),
+            vec!["notes.txt"],
+            "the staged program is not recorded"
+        );
+        assert_eq!(changed(&snapshots[0], "notes.txt").base_hash, "sha256:hydrated");
+        // The baseline never moves, so the second record repeats the first file.
+        assert_eq!(sorted_paths(&snapshots[1]), vec!["notes.txt", "report.csv"]);
+        assert_eq!(changed(&snapshots[1], "notes.txt").base_hash, "sha256:hydrated");
+        assert_eq!(changed(&snapshots[1], "report.csv").base_hash, "");
+
+        for result in [first, second] {
+            let value: Value = serde_json::from_str(&result.output).expect("the output stays JSON");
+            assert_eq!(value["workspace"]["scope"], "space");
+            assert_eq!(value["workspace"]["state"], "synced");
+            assert_eq!(value["workspace"]["durability"], "run_overlay");
+        }
+        assert!(root.exists(), "a step leaves the Space's directory to the run's release");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_space_step_without_a_credential_records_nothing_and_says_so() {
+        let rig = rig().await;
+        let root = fresh_root("space-no-credential");
+        std::fs::create_dir_all(&root).expect("the Space's directory");
+        std::fs::write(root.join("notes.txt"), b"edit").expect("the step edits");
+        let workspace = space_workspace(&root, &[]);
+
+        let result = record_space_step(
+            &rig.client,
+            Some(&rig.cas_client),
+            None,
+            &lease(),
+            &workspace,
+            step_output(),
+        )
+        .await;
+
+        assert!(rig.fake.snapshots().is_empty(), "nothing is recorded without a credential");
+        let value: Value = serde_json::from_str(&result.output).expect("the output stays JSON");
+        assert_eq!(value["workspace"]["state"], "refused");
+        assert_eq!(value["workspace"]["cause"], "commit_failed");
+        assert!(value["workspace"]["durability"].is_null());
+        assert!(root.exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_write_through_switch_is_on_only_for_the_literal_enabled() {
+        assert!(space_write_through_from(Some("enabled")));
+        for value in [None, Some(""), Some("true"), Some("Enabled"), Some(" enabled"), Some("on")] {
+            assert!(!space_write_through_from(value), "{value:?} must not switch it on");
+        }
+    }
+
+    #[test]
+    fn a_persistence_free_step_never_writes_through() {
+        assert!(write_through_applies(true, false));
+        assert!(!write_through_applies(true, true), "zero retention and waivers keep no content");
+        assert!(!write_through_applies(false, false), "the default leaves the Space path as it was");
     }
 }

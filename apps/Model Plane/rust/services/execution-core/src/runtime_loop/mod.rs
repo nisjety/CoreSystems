@@ -1243,7 +1243,7 @@ async fn execute_step_inner(
                 Some(lock) => Some(lock.write().await),
                 None => None,
             };
-            execute_code_interpreter(
+            let execution = execute_code_interpreter(
                 tool_input,
                 run_id,
                 step_id,
@@ -1253,7 +1253,16 @@ async fn execute_step_inner(
                     .as_deref()
                     .map(crate::skill_mounts::SkillTree::path),
             )
-            .await
+            .await;
+            // The step's changes are recorded before the lock is released, so the record holds
+            // exactly what this call wrote (WS22-S4).
+            match (sandbox, state) {
+                (Some(sandbox), Some(state)) => {
+                    record_space_overlay(sandbox, state, run_id, org_id, zdr || waived, execution)
+                        .await
+                }
+                _ => execution,
+            }
         }
     } else if crate::process_tools::is_process_tool(tool_name) {
         execute_process_tool(
@@ -1790,6 +1799,48 @@ async fn ensure_space_workspace(
     crate::sandbox_lease::ensure_hydrated_workspace(sandbox, state, run_id, org_id, &lease)
         .await
         .map_err(|status| status.message().to_owned())
+}
+
+/// Records one inline Space step's changes as this run's overlay before the step returns (WS22-S4).
+/// Nothing runs unless `EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH` is `enabled` and the step keeps
+/// content. The service credential is minted only when the write-through applies, so a switched-off
+/// deployment makes no extra call.
+async fn record_space_overlay(
+    sandbox: &crate::sandbox_lease::SandboxLeaseContext<'_>,
+    state: &crate::state::StateStore,
+    run_id: &str,
+    org_id: &str,
+    persistence_free: bool,
+    execution: tool_bridge::ToolExecution,
+) -> tool_bridge::ToolExecution {
+    let write_through = crate::sandbox_lease::workspace_sync::write_through_applies(
+        crate::sandbox_lease::workspace_sync::space_write_through_switched_on(),
+        persistence_free,
+    );
+    if !write_through {
+        return execution;
+    }
+    let (Some(lease), Some(workspace)) =
+        (state.sandbox_lease(run_id), state.hydrated_workspace(run_id))
+    else {
+        return execution;
+    };
+    let token = match sandbox.sandbox_tokens.token(org_id).await {
+        Ok(token) => Some(token),
+        Err(error) => {
+            tracing::warn!(%error, "Space step overlay not recorded: service credential unavailable");
+            None
+        }
+    };
+    crate::sandbox_lease::workspace_sync::record_space_step(
+        sandbox.sandbox_manager_client,
+        sandbox.cas_client,
+        token.as_deref(),
+        &lease,
+        &workspace,
+        execution,
+    )
+    .await
 }
 
 /// Runs a workspace read tool (WS24-S3) against the Space's hydrated tree. A run with no Space has
@@ -5211,5 +5262,64 @@ mod standing_grant_gate_tests {
                 "zdr={zdr} waived={waived}: eligible and switched on, yet no release is asked"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod space_overlay_tests {
+    use super::*;
+
+    /// With the write-through off, which is every process that does not set
+    /// `EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH=enabled`, an inline Space step's result is the
+    /// result the step returned, byte for byte, and no service credential is minted for it.
+    #[tokio::test]
+    async fn space_path_flag_off_is_byte_identical() {
+        // Nothing listens on the token endpoint: a credential request would fail and the result would
+        // carry a refused workspace part, so the equality below would catch the request.
+        let client = crate::sandbox_manager_client::SandboxManagerClient::new(
+            tonic::transport::Endpoint::from_shared("http://127.0.0.1:1")
+                .expect("valid endpoint")
+                .connect_lazy(),
+        );
+        let tokens = crate::sandbox_lease::SandboxManagerTokenProvider::new_for_test(
+            "http://127.0.0.1:1",
+            "execution-core",
+            "test-credential",
+        );
+        let sandbox = crate::sandbox_lease::SandboxLeaseContext {
+            space_id: "space-1",
+            sandbox_bearer: "bearer",
+            capability_client: None,
+            sandbox_manager_client: &client,
+            backend_id: "backend-1",
+            cas_client: None,
+            sandbox_tokens: &tokens,
+            process_host: None,
+        };
+        let state = crate::state::StateStore::new();
+        state.cache_sandbox_lease(
+            "run-1",
+            crate::state::SandboxLease {
+                lease_id: "lease-1".to_owned(),
+                backend_id: "backend-1".to_owned(),
+                processes_permitted: false,
+            },
+        );
+        state.cache_hydrated_workspace(
+            "run-1",
+            crate::state::HydratedWorkspace {
+                path: std::env::temp_dir().join("execution-core-space-flag-off"),
+                baseline: std::collections::HashMap::new(),
+            },
+        );
+        let execution = tool_bridge::ToolExecution {
+            output: "{\"exit_code\":0}".to_owned(),
+            error: None,
+        };
+
+        let recorded =
+            record_space_overlay(&sandbox, &state, "run-1", "org-1", false, execution.clone()).await;
+
+        assert_eq!(recorded, execution);
     }
 }

@@ -18,15 +18,17 @@
 //! two points execution-core can observe a run's actual end: `CancelRun`,
 //! and a governed `RunAgent`'s own `finalize()`. A run driven purely by
 //! repeated direct `ExecuteStep` calls (the inline chat `code_interpreter`
-//! path) has no such signal at all — confirmed by tracing the call graph,
-//! not assumed — so that lease's only backstop is [`LEASE_TTL`] expiring
-//! server-side, and any hydrated workspace such a run creates is never
-//! uploaded OR deleted by this module at all — its edits are lost, and its
-//! local directory persists until the container itself restarts. This is a
-//! known gap, sharing the same root cause and same existing "inline
-//! ExecuteStep chat path has no run-ended signal" limitation the B.2 release
-//! design already documented — not a new one this phase introduced, and not
-//! an oversight.
+//! path) has no such signal, so that lease's only backstop is [`LEASE_TTL`]
+//! expiring server-side. Nothing in this module removes its hydrated
+//! workspace, and with the default settings its edits are never uploaded.
+//!
+//! `EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH=enabled` (WS22-S4) closes that
+//! loss: each inline Space step records its changes through `SnapshotSandbox`
+//! before the step returns ([`workspace_sync::record_space_step`]), and the
+//! run's release records what is left the same way. The directory is still
+//! removed only at release, so an inline run's directory outlives its steps
+//! until the container restarts. Nothing promotes the overlay into the Space
+//! yet, so it is visible only to its own lease (DEC-24).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -586,11 +588,48 @@ async fn upload_and_discard_workspace(
     lease: &SandboxLease,
     workspace: &HydratedWorkspace,
 ) -> WorkspaceUploadOutcome {
+    let outcome = record_workspace_overlay(
+        sandbox_manager_client,
+        cas_client,
+        token,
+        lease,
+        workspace,
+        workspace_sync::space_write_through_switched_on(),
+    )
+    .await;
+    cleanup_workspace_dir(&workspace.path);
+    outcome
+}
+
+/// Diffs `workspace` against its baseline, uploads what changed, records it as `lease`'s overlay
+/// through `SnapshotSandbox`, and settles the outcome. The directory is left in place: the caller
+/// decides when it goes. With `syncable_only` the diff keeps only what the thread keeps
+/// ([`crate::workspace_hydrate::is_syncable`]), so the staged program, the scratch directories, the
+/// attachments mount and oversized files never reach the overlay. The baseline is never moved: a
+/// changed file's `base_hash` stays the hash this run hydrated, which the promote compare-and-swap
+/// relies on.
+async fn record_workspace_overlay(
+    sandbox_manager_client: &SandboxManagerClient,
+    cas_client: Option<&CasClient>,
+    token: &str,
+    lease: &SandboxLease,
+    workspace: &HydratedWorkspace,
+    syncable_only: bool,
+) -> WorkspaceUploadOutcome {
     let mut outcome = WorkspaceUploadOutcome::default();
     if let Some(cas) = cas_client {
-        match crate::workspace_hydrate::diff_and_upload(cas, &workspace.path, &workspace.baseline)
+        let diffed = if syncable_only {
+            crate::workspace_hydrate::diff_and_upload_syncable(
+                cas,
+                &workspace.path,
+                &workspace.baseline,
+            )
             .await
-        {
+        } else {
+            crate::workspace_hydrate::diff_and_upload(cas, &workspace.path, &workspace.baseline)
+                .await
+        };
+        match diffed {
             Ok(changed) if changed.is_empty() => outcome.uploaded = true,
             Ok(changed) => {
                 outcome.changed = changed.len();
@@ -629,7 +668,6 @@ async fn upload_and_discard_workspace(
         outcome.error = Some("CAS is not configured".to_owned());
     }
 
-    cleanup_workspace_dir(&workspace.path);
     settle_workspace_outcome(outcome, &lease.lease_id)
 }
 
